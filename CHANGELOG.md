@@ -12,6 +12,13 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="0.1.1"></a>
+## [0.1.1](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.1.1) (2026-05-16)
+
+### Bug Fixes
+
+* **native:** make LayerMount.Native usable from vcxproj consumers ([e7b4553](https://www.github.com/midnite8177/LayerMount/commit/e7b4553945268b28ca23e2d9fe81f5729598c87f))
+
 <a name="0.1.0"></a>
 ## [0.1.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.1.0) (2026-05-16)
 
