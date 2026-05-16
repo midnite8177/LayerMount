@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    Empty props stub. NuGet auto-imports build/native/<id>.props into
+    vcxproj consumers before the platform toolset, but LayerMount.Native
+    has no early settings to inject. The companion file with the actual
+    integration is LayerMount.Native.targets in this same directory.
+
+    The stub exists because some NuGet/MSBuild versions warn or behave
+    oddly when only one of the .props/.targets pair is present under
+    build/native/. Keeping both keeps the import contract symmetric.
+  -->
+
+</Project>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    LayerMount.Native consumer integration for native C/C++ (vcxproj)
+    projects. NuGet auto-imports this into vcxproj consumers based on
+    the build/native/ path convention; .NET SDK-style projects get
+    runtime assets through runtimes/<rid>/native/ and ignore this file.
+
+    What this wires up for a vcxproj that adds
+    <PackageReference Include="LayerMount.Native" Version="..." />:
+
+      * AdditionalIncludeDirectories  -> build/native/include   (LayerMount.h)
+      * AdditionalLibraryDirectories  -> build/native/lib/<arch> (LayerMount.lib)
+      * AdditionalDependencies        -> LayerMount.lib
+      * Post-build copy               -> LayerMount.dll next to the output
+
+    Arch resolution uses $(Platform.ToLowerInvariant()) to match the
+    runtimes/win-x64 and runtimes/win-arm64 layout the package ships.
+    Unsupported platforms (e.g. Win32) hit no Exists() match and the
+    linker reports a missing LayerMount.lib with the usual diagnostic.
+  -->
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(MSBuildThisFileDirectory)lib\$(Platform.ToLowerInvariant());%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>LayerMount.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <Target Name="_CopyLayerMountNativeDll"
+          AfterTargets="Build"
+          Condition=" '$(OS)' == 'Windows_NT' ">
+    <PropertyGroup>
+      <_LayerMountNativeDll>$(MSBuildThisFileDirectory)..\..\runtimes\win-$(Platform.ToLowerInvariant())\native\LayerMount.dll</_LayerMountNativeDll>
+    </PropertyGroup>
+    <Copy SourceFiles="$(_LayerMountNativeDll)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_LayerMountNativeDll)')" />
+  </Target>
+
+</Project>
