@@ -12,6 +12,13 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="0.1.2"></a>
+## [0.1.2](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.1.2) (2026-05-16)
+
+### Bug Fixes
+
+* **native:** drop duplicate buildTransitive targets that shadowed vcxproj asset ([1aa404d](https://www.github.com/midnite8177/LayerMount/commit/1aa404d5883674c4e8540a0da15eb0d3e9c5c3f3))
+
 <a name="0.1.1"></a>
 ## [0.1.1](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.1.1) (2026-05-16)
 

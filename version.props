@@ -16,7 +16,7 @@
   <PropertyGroup Label="LayerMountVersion">
     <LayerMountVersionMajor>0</LayerMountVersionMajor>
     <LayerMountVersionMinor>1</LayerMountVersionMinor>
-    <LayerMountVersionPatch>1</LayerMountVersionPatch>
+    <LayerMountVersionPatch>2</LayerMountVersionPatch>
     <LayerMountVersionSuffix></LayerMountVersionSuffix>
     <LayerMountVersion>$(LayerMountVersionMajor).$(LayerMountVersionMinor).$(LayerMountVersionPatch)</LayerMountVersion>
     <LayerMountVersionFull Condition="'$(LayerMountVersionSuffix)'==''">$(LayerMountVersion)</LayerMountVersionFull>
