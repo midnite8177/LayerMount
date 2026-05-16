@@ -68,13 +68,18 @@
           PackagePath="build\native\lib\arm64\LayerMount.lib"
           Condition="Exists('..\..\arm64\$(Configuration)\LayerMount.lib')" />
 
-    <!-- Consumer-side MSBuild integration for .NET SDK / legacy .NET. -->
+    <!-- Consumer-side MSBuild integration for .NET SDK / legacy .NET.
+
+         No buildTransitive/ slot: NuGet asset selection for vcxproj
+         consumers picks the buildTransitive/ targets over build/native/,
+         which shadows the C/C++ wiring (include dirs, lib dirs,
+         _CopyLayerMountNativeDll). Direct PackageReference consumers of
+         LayerMount.Native still get this targets file. .NET SDK consumers
+         of the managed LayerMount package resolve runtimes\<rid>\native\
+         automatically via <RuntimeIdentifier>. -->
     <None Include="build\LayerMount.Native.targets"
           Pack="true"
           PackagePath="build\LayerMount.Native.targets" />
-    <None Include="buildTransitive\LayerMount.Native.targets"
-          Pack="true"
-          PackagePath="buildTransitive\LayerMount.Native.targets" />
 
     <!-- Consumer-side MSBuild integration for native C/C++ (vcxproj):
          NuGet auto-imports build/native/<id>.props|.targets only into
