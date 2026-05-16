@@ -1,5 +1,5 @@
 // LayerMount.ProcessTracker -- managed facade for the process-tracking
-// subsystem (FR-32). Obtained via <see cref="LayerMount.ProcessTracker"/>.
+// subsystem. Obtained via <see cref="LayerMount.ProcessTracker"/>.
 
 using System;
 using LayerMount.Interop;

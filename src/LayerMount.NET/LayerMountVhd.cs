@@ -1,5 +1,5 @@
-// LayerMount.Vhd -- managed facade for VHD/VHDX primitives (FR-23..FR-25,
-// FR-35). Obtained via <see cref="LayerMount.Vhd"/>.
+// LayerMount.Vhd -- managed facade for VHD/VHDX primitives.
+// Obtained via <see cref="LayerMount.Vhd"/>.
 
 using System;
 using System.Collections.Generic;

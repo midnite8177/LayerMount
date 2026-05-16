@@ -61,7 +61,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <!-- Unit tests link the static LayerMount-static.lib flavor (FR-43) so they
+      <!-- Unit tests link the static LayerMount-static.lib flavor so they
            keep internal-header access to C++ classes (Cache, CopyUp, PathResolver,
            WhiteoutManager, MetadataADS, etc.). The static lib is a collection of
            .obj files only, so transitive Win32 deps (virtdisk/vssapi/bcrypt/ole32)

@@ -1,6 +1,5 @@
 // ErrorTls.h -- Internal header. Thread-local storage for the most recent
-// failure message on the calling thread. Backs LayerMountGetLastErrorMessage
-// (FR-10).
+// failure message on the calling thread. Backs LayerMountGetLastErrorMessage.
 //
 // NOT installed. DLL consumers access this only indirectly through the
 // public header.

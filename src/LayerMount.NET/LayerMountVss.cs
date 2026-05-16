@@ -1,4 +1,4 @@
-// LayerMount.Vss -- managed facade for VSS snapshot primitives (FR-26, FR-27).
+// LayerMount.Vss -- managed facade for VSS snapshot primitives.
 // Obtained via <see cref="LayerMount.Vss"/>. All entry points open a native
 // ComScope internally; callers never have to CoInitializeEx.
 

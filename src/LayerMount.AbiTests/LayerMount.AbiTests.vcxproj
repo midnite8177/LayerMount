@@ -51,7 +51,7 @@
   <!-- AbiTests links LayerMount.dll through its import lib only
        (LayerMount.lib). No impl/ include paths, no transitive engine deps:
        this project observes the DLL as an external consumer, proving the
-       public C ABI is self-sufficient (FR-45). -->
+       public C ABI is self-sufficient. -->
   <ItemDefinitionGroup>
     <ClCompile>
       <AdditionalIncludeDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\include;$(VendorDir);..\LayerMount.dll\public;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>

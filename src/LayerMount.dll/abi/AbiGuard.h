@@ -1,6 +1,6 @@
 // AbiGuard.h -- Internal header. Wraps every ABI export body in a
 // try/catch that translates C++ exceptions to HRESULT and records a
-// human-readable message via ErrorTls (FR-9, FR-10).
+// human-readable message via ErrorTls.
 //
 // Usage:
 //

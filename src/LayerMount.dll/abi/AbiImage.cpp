@@ -1,4 +1,4 @@
-// AbiImage.cpp -- Layer-image ABI entry points (FR-28).
+// AbiImage.cpp -- Layer-image ABI entry points.
 // LayerMountImagePack / Unpack / Validate / GetManifest / GetMetadata /
 // Close. All shims route to the engine's lazily-constructed
 // LayerImageManager (accessed via LayerMount::Images()).
@@ -96,9 +96,9 @@ inline bool FillCallerWString(const std::wstring& src,
 namespace {
 
 // Fold the caller's LM_IMAGE_PACK_OPTIONS (nullable) into the
-// engine-side LayerMetadata seed. structSize gate is forward-compat
-// per FR-6 -- older callers pass a smaller struct, newer fields stay
-// at their default values.
+// engine-side LayerMetadata seed. structSize gate is forward-compat:
+// older callers pass a smaller struct, newer fields stay at their
+// default values.
 void ApplyPackOptions(const LM_IMAGE_PACK_OPTIONS* options,
                       ::LayerMount::LayerImage::LayerMetadata& metadata) {
     if (options == nullptr) return;
@@ -320,9 +320,9 @@ LM_API HRESULT LM_CALL LayerMountImageGetManifest(LM_HANDLE          mount,
 
     // Despite the parameter name, the ABI's `imagePath` here is the path
     // to a LayerManifest JSON file (LayerImageManager::LoadManifest). The
-    // PRD parameter naming predates the separation between per-image
-    // metadata (LayerMountImageGetMetadata) and multi-image manifests
-    // (this function).
+    // parameter name predates the separation between per-image metadata
+    // (LayerMountImageGetMetadata) and multi-image manifests (this
+    // function).
     ::LayerMount::LayerImage::LayerManifest loaded;
     const DWORD dw =
         ::LayerMount::LayerImage::LayerImageManager::LoadManifest(imagePath, loaded);

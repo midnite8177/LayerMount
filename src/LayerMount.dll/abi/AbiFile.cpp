@@ -1,4 +1,4 @@
-// AbiFile.cpp -- File-primitive ABI entry points (FR-18, FR-19, FR-20):
+// AbiFile.cpp -- File-primitive ABI entry points:
 // LayerMountOpenFile, LayerMountCreateFile, LayerMountCloseFile, plus Read / Write /
 // GetInfo / SetInfo / Delete / Rename / Security / MergeDirectory / Reparse.
 
@@ -39,7 +39,7 @@ inline void ToPublicFileInfo(const ::LayerMount::InternalFileInfo& src,
 }
 
 // HRESULT_FROM_NT for the NTSTATUS values the engine returns. The C ABI
-// uniformly returns HRESULT (FR-4); map success to S_OK, everything else
+// uniformly returns HRESULT; map success to S_OK, everything else
 // through the standard HRESULT-from-NTSTATUS encoding (facility = NT,
 // severity from the high bit of the NTSTATUS).
 inline HRESULT HresultFromNtStatus(NTSTATUS status) {
@@ -205,9 +205,8 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
     // path discarded securityDescriptorBytes entirely and trusted the
     // descriptor to be self-describing -- a malformed Owner/Group/Dacl/
     // Sacl offset could then cause downstream Win32 wrappers to read
-    // past the caller's buffer. SD here is optional (CreateFile is the
-    // FR-19 entry point, which may receive a NULL SD); only validate
-    // when one was supplied.
+    // past the caller's buffer. SD here is optional (CreateFile may
+    // receive a NULL SD); only validate when one was supplied.
     if (securityDescriptor != nullptr && securityDescriptorBytes > 0) {
         if (!IsValidBoundedSecurityDescriptor(securityDescriptor,
                                               securityDescriptorBytes)) {

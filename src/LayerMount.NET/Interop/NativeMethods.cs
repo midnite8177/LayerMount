@@ -2,8 +2,8 @@
 //
 // Every entry mirrors a prototype in src/LayerMount.dll/public/LayerMount.h and
 // a symbol in public/LayerMount.def. Declared with [LibraryImport] so the
-// marshalling code is source-generated at compile time (AOT / trim safe;
-// FR-41). Calling convention is __stdcall (LM_CALL), applied via
+// marshalling code is source-generated at compile time (AOT / trim
+// safe). Calling convention is __stdcall (LM_CALL), applied via
 // [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])].
 //
 // Convention:

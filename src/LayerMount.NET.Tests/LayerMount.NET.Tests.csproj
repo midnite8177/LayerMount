@@ -17,9 +17,8 @@
     <GenerateProgramFile>true</GenerateProgramFile>
   </PropertyGroup>
 
-  <!-- PRD 0004 task 7.0 (2026-04-20): migrated from MSTest 3.6.1 to xUnit
-       2.9.2 + Xunit.SkippableFact 1.4.13 so consumer C# test projects
-       share a single framework. -->
+  <!-- Migrated from MSTest 3.6.1 to xUnit 2.9.2 + Xunit.SkippableFact
+       1.4.13 so consumer C# test projects share a single framework. -->
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
@@ -36,13 +35,13 @@
          managed wrapper is all we need for the native library. -->
     <ProjectReference Include="..\LayerMount.NET\LayerMount.NET.csproj" />
 
-    <!-- PRD 0004 sub-task 6.4: EndToEndMountTests consumes the handshake +
-         control-pipe helpers and the TempLayerEnvironment fixture from
-         LayerMount.TestShared. TestShared is plain net8.0 with no test-
-         framework reference of its own; both test projects now run on
-         xUnit, but TestShared stays framework-agnostic so future
-         consumers (benchmarks, tooling, third-party test projects) can
-         still pick their own framework. -->
+    <!-- EndToEndMountTests consumes the handshake + control-pipe helpers
+         and the TempLayerEnvironment fixture from LayerMount.TestShared.
+         TestShared is plain net8.0 with no test-framework reference of
+         its own; both test projects now run on xUnit, but TestShared
+         stays framework-agnostic so future consumers (benchmarks,
+         tooling, third-party test projects) can still pick their own
+         framework. -->
     <ProjectReference Include="..\LayerMount.TestShared\LayerMount.TestShared.csproj" />
   </ItemGroup>
 

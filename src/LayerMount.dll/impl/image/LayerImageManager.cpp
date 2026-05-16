@@ -182,7 +182,7 @@ static DWORD ComputeSHA256Stream(const std::wstring& filePath,
     return NtStatusToDword(status);
 }
 
-// Stream write + hash in a single pass (FR-84).
+// Stream write + hash in a single pass.
 static DWORD WriteDataWithHash(std::ofstream& output,
                                const uint8_t* data, size_t size,
                                uint8_t outHash[32]) {

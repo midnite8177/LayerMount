@@ -68,7 +68,7 @@ bool CreateDirectoryJunction(const std::wstring& junction,
 
 } // namespace
 
-// Capability-degradation paths (FR-47).
+// Capability-degradation paths.
 TEST_CLASS(AbiCapabilityDegradationTests) {
 public:
     TEST_METHOD(ClearAds_CopyUp_WritesMetadataToSidecarJson) {

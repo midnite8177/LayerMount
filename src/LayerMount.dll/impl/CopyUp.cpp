@@ -1330,7 +1330,7 @@ NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
         // the overlay. Just copy the reparse entry, drop any prior upper
         // shadow at the old path, and create the whiteout.
         //
-        // Capability gate (FR-16): an upper layer that
+        // Capability gate: an upper layer that
         // doesn't support reparse points cannot HOLD a junction/symlink at
         // all. Skip the short-circuit and fall through to the recursive
         // CopyTreePreservingMetadata branch -- that copies the link's
@@ -1378,7 +1378,7 @@ NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
         // If the source is a reparse point but the host's upper layer
         // doesn't support reparse points, we just fell through here from
         // the gated short-circuit above. Surface the degradation so
-        // hosts can log/audit it (FR-16).
+        // hosts can log/audit it.
         if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
             !capabilities_.HasReparsePoints() && events_ != nullptr) {
             events_->Emit(LM_EVT_WARNING, S_OK, oldNorm.c_str(),

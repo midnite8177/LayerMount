@@ -1,5 +1,5 @@
 // Event marshalling from the native LM_EVENT_CALLBACK to managed
-// EventHandler<LayerMountEventArgs> (FR-31, FR-41).
+// EventHandler<LayerMountEventArgs>.
 //
 // The native engine calls LM_EVENT_CALLBACK on arbitrary internal threads.
 // To stay AOT-safe (no Marshal.GetFunctionPointerForDelegate), we register

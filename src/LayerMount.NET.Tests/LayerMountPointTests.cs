@@ -1,6 +1,6 @@
-// Round-trip tests for the LayerMount.MountPoint.* managed wrappers added in
-// PRD 0004 sub-task 1.5. Mirrors the assertions in the native AbiTests
-// suite (src/LayerMount.AbiTests/AbiHostMountPointTests.cpp), proving the
+// Round-trip tests for the LayerMount.MountPoint.* managed wrappers.
+// Mirrors the assertions in the native AbiTests suite
+// (src/LayerMount.AbiTests/AbiHostMountPointTests.cpp), proving the
 // .NET wrappers reach LayerMount.dll without losing layout or semantics.
 //
 // Lifecycle the native helpers model:

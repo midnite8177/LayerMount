@@ -1,4 +1,4 @@
-// AbiPath.cpp -- Path / volume ABI entry points (FR-18, FR-21, FR-22).
+// AbiPath.cpp -- Path / volume ABI entry points.
 // LayerMountResolvePath, LayerMountGetVolumeInfo, LayerMountEnsureInUpperLayer.
 
 #include "../public/LayerMount.h"

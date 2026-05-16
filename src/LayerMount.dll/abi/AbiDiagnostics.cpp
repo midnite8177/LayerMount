@@ -1,5 +1,5 @@
 // AbiDiagnostics.cpp -- Diagnostics, eventing, and process-tracker ABI
-// entry points (FR-30, FR-31, FR-32).
+// entry points.
 //
 // LayerMountGetStats              snapshot the engine's LayerMountStats atomics
 //                              into a POD LM_STATS.

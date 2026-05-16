@@ -59,9 +59,9 @@ constexpr std::uint16_t kMagicImage        = 0xFE05;
 // LM_HANDLE -> LayerMountHolder, which binds the core engine instance to
 // the host-attached flag a host adapter toggles around its mount
 // lifetime. Wrapping the core in a holder keeps host-specific lifecycle
-// state out of the engine class (impl/ stays host-agnostic per FR-2).
+// state out of the engine class (impl/ stays host-agnostic).
 // `hostAttached` is updated by LayerMountSetHostAttached and
-// observed by LayerMountDestroy (FR-13). `childCount` tracks live child
+// observed by LayerMountDestroy. `childCount` tracks live child
 // file handles opened through LayerMountOpenFile / LayerMountCreateFile;
 // LayerMountDestroy refuses to release the instance while any child is
 // still outstanding (backstops the lifecycle contract against caller

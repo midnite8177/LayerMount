@@ -62,8 +62,7 @@
     <!-- DLL-only: ABI shims that emit LM_API-decorated exports. The
          static-lib flavor doesn't define LAYERMOUNT_EXPORTS, so LM_API
          resolves to __declspec(dllimport) there; definitions of such
-         functions belong only in the DLL project. AbiStubs.cpp retired
-         with Task 4.x since every export now has a real shim. -->
+         functions belong only in the DLL project. -->
     <ClCompile Include="abi\AbiCore.cpp" />
     <ClCompile Include="abi\AbiDiagnostics.cpp" />
     <ClCompile Include="abi\AbiFile.cpp" />

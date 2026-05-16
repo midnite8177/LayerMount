@@ -3,7 +3,7 @@
 // Sidecar JSON metadata store -- the !LM_CAP_ADS fallback for overlay
 // per-file metadata (opaque marker, metacopy state, redirect target,
 // copy-up timestamp) on filesystems that don't support NTFS Alternate
-// Data Streams (FR-15).
+// Data Streams.
 //
 // Layout under the upper layer:
 //

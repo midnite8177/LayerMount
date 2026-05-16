@@ -1,5 +1,5 @@
-// LayerMount.Images -- managed facade for layer-image (.lmnt) primitives
-// (FR-28, FR-35). Obtained via <see cref="LayerMount.Images"/>.
+// LayerMount.Images -- managed facade for layer-image (.lmnt) primitives.
+// Obtained via <see cref="LayerMount.Images"/>.
 
 using System;
 using System.Collections.Generic;

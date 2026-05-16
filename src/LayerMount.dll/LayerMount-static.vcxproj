@@ -4,7 +4,7 @@
   <!--
     Static-library flavor of the LayerMount engine. Shares sources with
     LayerMount.dll.vcxproj via LayerMount.sources.props. Consumed by
-    LayerMount.Tests so unit tests keep internal-header access (FR-43).
+    LayerMount.Tests so unit tests keep internal-header access.
     Consumers of this .lib must link the same system libraries the
     shared DLL links (virtdisk, vssapi, ole32, oleaut32, bcrypt,
     rpcrt4).

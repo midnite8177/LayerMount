@@ -1,7 +1,7 @@
 // Unit tests for WhiteoutManager. Test the class in isolation — do NOT mount
-// an overlay, do NOT invoke host-adapter callbacks. The PRD's "directory
-// listing excludes .wh.* files" (merged view) is covered by
-// LayerMount::MergeDirectoryEntries integration tests in 10.0 — this file
+// an overlay, do NOT invoke host-adapter callbacks. The "directory listing
+// excludes .wh.* files" merged-view behavior is covered by
+// LayerMount::MergeDirectoryEntries integration tests — this file
 // covers the primitives used there.
 
 #include "pch.h"

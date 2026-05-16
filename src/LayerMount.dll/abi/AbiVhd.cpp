@@ -1,4 +1,4 @@
-// AbiVhd.cpp -- VHD-primitive ABI entry points (FR-23, FR-24).
+// AbiVhd.cpp -- VHD-primitive ABI entry points.
 // LayerMountVhdCreate / Open / Attach / Detach / Merge / Import / Export /
 // Close. Every shim is a thin translator on top of
 // impl/vhd/VHDLayerManager::{CreateVHD, CreateDifferencingVHD, AttachVHD,
@@ -413,7 +413,7 @@ LM_API HRESULT LM_CALL LayerMountVhdClose(LM_VHD_HANDLE vhd)
 }
 
 // ---------------------------------------------------------------------------
-// VHD volume-GUID + manifest primitives (FR-35).
+// VHD volume-GUID + manifest primitives.
 // ---------------------------------------------------------------------------
 
 LM_API HRESULT LM_CALL LayerMountVhdGetVolumeGuid(LM_VHD_HANDLE vhd,

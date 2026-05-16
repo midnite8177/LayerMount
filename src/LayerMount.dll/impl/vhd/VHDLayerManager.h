@@ -1,6 +1,6 @@
 #pragma once
 
-// FR-25: <virtdisk.h> ships only inside LayerMount.dll.
+// <virtdisk.h> ships only inside LayerMount.dll.
 // External consumers reach VHD functionality via the C ABI (LayerMountVhd*
 // exports in <LayerMount.h>); they must not see this header. The DLL and
 // its static-lib flavor define LAYERMOUNT_INTERNAL via the shared sources

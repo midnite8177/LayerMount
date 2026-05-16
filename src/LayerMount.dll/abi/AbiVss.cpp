@@ -1,4 +1,4 @@
-// AbiVss.cpp -- VSS-primitive ABI entry points (FR-26, FR-27).
+// AbiVss.cpp -- VSS-primitive ABI entry points.
 // LayerMountVssCreateSnapshot / DeleteSnapshot / ListSnapshots /
 // CleanupSnapshots. Each shim opens a ComScope on entry so consumers do
 // not need to CoInitializeEx the thread they call from; nested ComScopes

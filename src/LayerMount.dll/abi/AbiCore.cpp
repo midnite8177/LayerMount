@@ -1,4 +1,4 @@
-// AbiCore.cpp -- Lifecycle ABI entry points (FR-7, FR-10, FR-11, FR-13):
+// AbiCore.cpp -- Lifecycle ABI entry points:
 // LayerMountCreate, LayerMountDestroy, LayerMountGetVersion, LayerMountGetLastErrorMessage.
 
 #include "../public/LayerMount.h"

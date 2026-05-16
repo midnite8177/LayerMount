@@ -9,7 +9,7 @@ namespace LayerMount {
 //   * NTFS Alternate Data Streams (`:overlay`, `:overlay.opaque`) when
 //     the host advertises LM_CAP_ADS (the optimized path).
 //   * SidecarMetadata JSON files under `<upper>\.overlay\` when ADS is
-//     unavailable (the !LM_CAP_ADS fallback, FR-15).
+//     unavailable (the !LM_CAP_ADS fallback).
 //
 // Each method takes an optional `const LayerConfig*`. When nullptr, the
 // methods behave as ADS-only -- this preserves the test surface and any

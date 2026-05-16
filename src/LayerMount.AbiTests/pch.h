@@ -3,7 +3,7 @@
 // AbiTests consumes LayerMount.dll purely through its public C ABI. The test
 // DLL does not reach into impl/ headers, does not link any host-adapter
 // SDK, and does not spawn a subprocess — every assertion is in-process,
-// against the shipped DLL's exports (FR-45).
+// against the shipped DLL's exports.
 #include <windows.h>
 
 #include <CppUnitTest.h>

@@ -1,5 +1,5 @@
-// Round-trip tests for LayerMount.CreateTransient added in PRD 0004 sub-task
-// 2.0.1. A short-lived LM_HANDLE rooted at a single workDir, usable by
+// Round-trip tests for LayerMount.CreateTransient. A short-lived
+// LM_HANDLE rooted at a single workDir, usable by
 // vhd/vss/layer CLI subcommands to reach LayerMountVhd* / LayerMountVss* /
 // LayerMountImage* primitives without mounting a filesystem.
 //

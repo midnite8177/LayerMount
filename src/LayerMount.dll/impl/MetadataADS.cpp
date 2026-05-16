@@ -273,7 +273,7 @@ bool RemoveOpaqueAdsOnly(const std::wstring& directoryPath) {
 
 // ---------------------------------------------------------------------------
 // Public dispatcher API. Each routes between ADS and SidecarMetadata
-// based on the optional LayerConfig (FR-15).
+// based on the optional LayerConfig.
 // ---------------------------------------------------------------------------
 
 LayerMountMetadata MetadataADS::ReadLayerMountMetadata(const std::wstring& filePath,

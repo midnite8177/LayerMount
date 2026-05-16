@@ -820,7 +820,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
                     srcSize.HighPart = static_cast<LONG>(fad.nFileSizeHigh);
                 }
             }
-            // Capability gate (FR-17): metacopy stages
+            // Capability gate: metacopy stages
             // a sparse skeleton in upper. When the host's upper layer
             // doesn't support sparse files, the FSCTL_SET_SPARSE inside
             // CopyUpMetadataOnly fails and the file ends up as a dense
@@ -1864,7 +1864,7 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
         }
     }
 
-    // Capability gate (FR-17): when the upper layer
+    // Capability gate: when the upper layer
     // doesn't carry NTFS ACLs (FAT32, exFAT, network shares with no
     // permissions plumbing), there's no SD to read. Return a synthetic
     // world-readable descriptor (Owner=World, Group=World, DACL grants
@@ -1929,7 +1929,7 @@ NTSTATUS LayerMount::SetSecurity(const std::wstring& relativePath,
         }
     }
 
-    // Capability gate (FR-17): no NTFS ACLs => no
+    // Capability gate: no NTFS ACLs => no
     // descriptor to update. Silently no-op rather than error so callers
     // that always set security after create (the default behavior of
     // CreateFile + InitializeSecurityDescriptor) keep working.

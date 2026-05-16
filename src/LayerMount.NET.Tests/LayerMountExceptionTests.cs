@@ -6,7 +6,7 @@ namespace LayerMount.Tests;
 
 /// <summary>
 /// Drives each HRESULT category through the managed wrapper and asserts
-/// the mapped exception subclass (FR-40).
+/// the mapped exception subclass.
 /// </summary>
 public sealed class LayerMountExceptionTests
 {

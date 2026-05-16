@@ -6,7 +6,7 @@
  *   under abi/ and impl/ are not installed and must never be included by
  *   DLL consumers.
  *
- * THREAD-SAFETY (FR-8)
+ * THREAD-SAFETY
  *   Every function declared in this header is safe to call from any
  *   thread on any handle at any time. Internal synchronization is the
  *   DLL's responsibility. Callers need not serialize calls. Two callers
@@ -16,19 +16,18 @@
  *   arbitrary DLL-internal threads, and must not re-enter the DLL
  *   synchronously on the same handle.
  *
- * ERROR MODEL (FR-4, FR-9)
+ * ERROR MODEL
  *   Every function returns HRESULT. S_OK on success; any failure HRESULT
  *   on failure. Out-parameters are undefined on failure unless this
  *   header states otherwise. C++ exceptions never cross the ABI
  *   boundary. A human-readable message for the most recent failure on
- *   the calling thread is available via LayerMountGetLastErrorMessage
- *   (FR-10).
+ *   the calling thread is available via LayerMountGetLastErrorMessage.
  *
  *   Reserved HRESULT range for overlay-specific failure codes:
  *     FACILITY_ITF with codes 0xB000..0xBFFF. Hosts must not emit codes
  *     in this range from their own layers.
  *
- * STRING ENCODING (FR-6)
+ * STRING ENCODING
  *   All wide strings are null-terminated UTF-16LE. Input strings
  *   (PCWSTR) are caller-owned and need only remain valid for the
  *   duration of the call -- the DLL copies them into internal storage
@@ -39,7 +38,7 @@
  *   buffer was too small; *requiredChars is always written on that
  *   path.
  *
- * HANDLES (FR-5)
+ * HANDLES
  *   LM_HANDLE, LM_FILE_HANDLE, LM_VHD_HANDLE,
  *   LM_VSS_SNAPSHOT_HANDLE, and LM_IMAGE_HANDLE are opaque. A handle
  *   is valid only between its creating function and its matching
@@ -58,7 +57,7 @@
  *
  * PLATFORM
  *   Windows user-mode only. Requires <windows.h>. The DLL itself has
- *   no dependency on any virtual filesystem host (FR-2).
+ *   no dependency on any virtual filesystem host.
  */
 
 #ifndef LAYERMOUNT_H
@@ -90,7 +89,7 @@ extern "C" {
 #define LM_CALL __stdcall
 
 /* -------------------------------------------------------------------------
- * Version constants (FR-7)
+ * Version constants
  *
  * LM_ABI_VERSION is the only gate callers should check against.
  * Bumping it requires re-linking. LM_VER_{MAJOR,MINOR,PATCH} follow
@@ -106,7 +105,7 @@ extern "C" {
 #include "LayerMountVersion.h"
 
 /* -------------------------------------------------------------------------
- * Opaque handle typedefs (FR-5)
+ * Opaque handle typedefs
  *
  * Every handle is a pointer to an incomplete sentinel struct. The struct
  * is never defined in this header; the DLL encodes type/generation/slot
@@ -127,9 +126,9 @@ typedef struct LM_IMAGE_HANDLE__*        LM_IMAGE_HANDLE;
  * numeric constant directly; do not rely on the C++ enum type name.
  * ------------------------------------------------------------------------- */
 
-/* Host-declared capabilities (FR-14). Bitfield -- combine with |.
- * Clearing a bit activates the documented capability fallback (FR-15..FR-17
- * and the ACL / streams rows of the PRD degradation table). */
+/* Host-declared capabilities. Bitfield -- combine with |.
+ * Clearing a bit activates the documented capability fallback (see the
+ * per-capability documentation below). */
 typedef enum LM_HOST_CAPABILITIES {
     LM_CAP_NONE             = 0x00000000u,
     LM_CAP_ADS              = 0x00000001u,
@@ -148,7 +147,7 @@ typedef enum LM_LAYER_SOURCE {
     LM_LAYER_LOWER = 2
 } LM_LAYER_SOURCE;
 
-/* Event categories emitted through LM_EVENT_CALLBACK (FR-31). */
+/* Event categories emitted through LM_EVENT_CALLBACK. */
 typedef enum LM_EVENT_TYPE {
     LM_EVT_WARNING           = 0,
     LM_EVT_COPY_UP           = 1,
@@ -156,7 +155,7 @@ typedef enum LM_EVENT_TYPE {
     LM_EVT_ACCESS_DENIED     = 3
 } LM_EVENT_TYPE;
 
-/* VHD backing kind for LayerMountVhdCreate / LayerMountVhdOpen (FR-23, FR-24). */
+/* VHD backing kind for LayerMountVhdCreate / LayerMountVhdOpen. */
 typedef enum LM_VHD_KIND {
     LM_VHD_KIND_FIXED        = 0,
     LM_VHD_KIND_DYNAMIC      = 1,
@@ -196,7 +195,7 @@ typedef enum LM_OPERATION_TYPE {
 } LM_OPERATION_TYPE;
 
 /* -------------------------------------------------------------------------
- * LM_CONFIG (FR-12)
+ * LM_CONFIG
  *
  * LayerMount construction parameters. Forward-extensible via structSize:
  * callers set structSize = sizeof(LM_CONFIG) at their compile time, the
@@ -223,7 +222,7 @@ typedef struct LM_CONFIG {
 } LM_CONFIG;
 
 /* -------------------------------------------------------------------------
- * LM_FILE_INFO (FR-18, FR-20)
+ * LM_FILE_INFO
  *
  * Flattened Win32 file metadata exposed across the C ABI. Timestamps are
  * 100ns units since 1601 (FILETIME packed as UINT64).
@@ -245,7 +244,7 @@ typedef struct LM_FILE_INFO {
 } LM_FILE_INFO;
 
 /* -------------------------------------------------------------------------
- * LM_RESOLVED_PATH (FR-22)
+ * LM_RESOLVED_PATH
  *
  * Output of LayerMountResolvePath. Uses the two-call buffer pattern for
  * absolutePath: pass absolutePath = NULL, absolutePathChars = 0 on the
@@ -262,7 +261,7 @@ typedef struct LM_RESOLVED_PATH {
 } LM_RESOLVED_PATH;
 
 /* -------------------------------------------------------------------------
- * LM_VOLUME_INFO (FR-21)
+ * LM_VOLUME_INFO
  *
  * Volume metadata exposed across the C ABI. volumeLabelLength is in
  * BYTES, not chars.
@@ -275,7 +274,7 @@ typedef struct LM_VOLUME_INFO {
 } LM_VOLUME_INFO;
 
 /* -------------------------------------------------------------------------
- * LM_STATS (FR-30)
+ * LM_STATS
  *
  * Snapshot of internal counters. Values are plain UINT64 -- the DLL loads
  * the underlying std::atomic values with relaxed ordering and copies them
@@ -294,7 +293,7 @@ typedef struct LM_STATS {
 } LM_STATS;
 
 /* -------------------------------------------------------------------------
- * LM_EVENT (FR-31)
+ * LM_EVENT
  *
  * Payload for LM_EVENT_CALLBACK. All pointers are valid only for the
  * duration of the callback; consumers that retain data must copy it.
@@ -309,7 +308,7 @@ typedef struct LM_EVENT {
 } LM_EVENT;
 
 /* -------------------------------------------------------------------------
- * LM_VHD_CONFIG (FR-23, FR-24)
+ * LM_VHD_CONFIG
  *
  * Consolidated parameter block for VHD create / open / attach operations.
  * Forward-extensible via structSize.
@@ -327,7 +326,7 @@ typedef struct LM_VHD_CONFIG {
 } LM_VHD_CONFIG;
 
 /* -------------------------------------------------------------------------
- * LM_VHD_LAYER_TYPE / LM_VHD_LAYER_INFO (FR-35)
+ * LM_VHD_LAYER_TYPE / LM_VHD_LAYER_INFO
  *
  * Storage-backend type + scalar metadata returned per-entry from
  * LayerMountVhdListLayers. Per-string fields use the two-call buffer pattern.
@@ -359,7 +358,7 @@ typedef struct LM_VHD_LAYER_INFO {
 } LM_VHD_LAYER_INFO;
 
 /* -------------------------------------------------------------------------
- * LM_VSS_SNAPSHOT_INFO (FR-26)
+ * LM_VSS_SNAPSHOT_INFO
  *
  * Returned in arrays from LayerMountVssListSnapshots via the two-call buffer
  * pattern. String fields use the same pattern per-entry.
@@ -378,7 +377,7 @@ typedef struct LM_VSS_SNAPSHOT_INFO {
 } LM_VSS_SNAPSHOT_INFO;
 
 /* -------------------------------------------------------------------------
- * LM_IMAGE_MANIFEST_ENTRY / LM_IMAGE_MANIFEST (FR-28)
+ * LM_IMAGE_MANIFEST_ENTRY / LM_IMAGE_MANIFEST
  *
  * Layer-image manifest returned by LayerMountImageGetManifest. Arrays use
  * the two-call pattern; per-entry strings use caller-provided buffers.
@@ -398,7 +397,7 @@ typedef struct LM_IMAGE_MANIFEST {
 } LM_IMAGE_MANIFEST;
 
 /* -------------------------------------------------------------------------
- * LM_IMAGE_PACK_OPTIONS (FR-35)
+ * LM_IMAGE_PACK_OPTIONS
  *
  * Optional metadata stamps for LayerMountImagePack / LayerMountImagePackDifferential.
  * NULL fields are treated as empty strings. Forward-extensible via structSize.
@@ -411,7 +410,7 @@ typedef struct LM_IMAGE_PACK_OPTIONS {
 } LM_IMAGE_PACK_OPTIONS;
 
 /* -------------------------------------------------------------------------
- * LM_IMAGE_METADATA (FR-28)
+ * LM_IMAGE_METADATA
  *
  * Scalar metadata fields for a single layer image. Tag and whiteout
  * arrays are exposed through dedicated enumeration APIs (see
@@ -448,13 +447,13 @@ typedef struct LM_IMAGE_METADATA {
  * Callbacks must not re-enter the DLL synchronously.
  * ------------------------------------------------------------------------- */
 
-/* Per-entry merged-directory enumeration (FR-20). Return non-S_OK to abort. */
+/* Per-entry merged-directory enumeration. Return non-S_OK to abort. */
 typedef HRESULT (LM_CALL *LM_DIR_ENUM_CALLBACK)(
     PCWSTR                name,
     const LM_FILE_INFO*  info,
     void*                 userContext);
 
-/* LayerMount event fan-out (FR-31). */
+/* LayerMount event fan-out. */
 typedef void (LM_CALL *LM_EVENT_CALLBACK)(
     const LM_EVENT* evt,
     void*            userContext);
@@ -469,7 +468,7 @@ typedef void (LM_CALL *LM_EVENT_CALLBACK)(
  * short). Parameter order is: handle -> inputs -> outputs.
  * ========================================================================= */
 
-/* ---- Lifecycle / diagnostics-lite (FR-7, FR-10, FR-11, FR-13, FR-31) ---- */
+/* ---- Lifecycle / diagnostics-lite ---- */
 
 LM_API HRESULT LM_CALL LayerMountGetVersion(
     UINT32* major, UINT32* minor, UINT32* patch, UINT32* abiVersion);
@@ -497,7 +496,7 @@ LM_API HRESULT LM_CALL LayerMountDestroy(LM_HANDLE handle);
 LM_API HRESULT LM_CALL LayerMountSetEventCallback(
     LM_HANDLE handle, LM_EVENT_CALLBACK callback, void* userContext);
 
-/* ---- Host adapter integration (FR-13) ----------------------------------
+/* ---- Host adapter integration ----------------------------------
  *
  * LayerMountSetHostAttached is called by a host adapter to mark an overlay
  * as "currently mounted by a host". While the flag is TRUE,
@@ -615,7 +614,7 @@ LM_API HRESULT LM_CALL LayerMountPointCaptureIdentity(
 LM_API HRESULT LM_CALL LayerMountPointReleaseIfSafe(
     PCWSTR mountPoint, const LM_MOUNT_POINT_PREP* prep);
 
-/* ---- Path / volume (FR-18, FR-21, FR-22) ---- */
+/* ---- Path / volume ---- */
 
 LM_API HRESULT LM_CALL LayerMountResolvePath(
     LM_HANDLE handle, PCWSTR relativePath, LM_RESOLVED_PATH* outResolved);
@@ -626,13 +625,13 @@ LM_API HRESULT LM_CALL LayerMountGetVolumeInfo(
 LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
     LM_HANDLE handle, PCWSTR relativePath);
 
-/* ---- File primitives (FR-18, FR-19, FR-20) ---- */
+/* ---- File primitives ---- */
 
 /*
  * File primitives that can be invoked inside a host-adapter callback
  * accept an `originatorPid`. A host adapter is expected to read the
  * originating process ID from its kernel/dispatch surface and thread it
- * through so process-tracker rules (FR-32) match the actual requester
+ * through so process-tracker rules match the actual requester
  * rather than the dispatcher-thread PID. Pass 0 when the calling code is
  * its own originator (unmounted CLI / tests / direct P/Invoke); the DLL
  * will fall back to GetCurrentProcessId().
@@ -799,7 +798,7 @@ LM_API HRESULT LM_CALL LayerMountDeleteReparsePoint(
     const BYTE* buffer,
     SIZE_T      bufferBytes);
 
-/* ---- VHD primitives (FR-23, FR-24) ---- */
+/* ---- VHD primitives ---- */
 
 LM_API HRESULT LM_CALL LayerMountVhdCreate(
     LM_HANDLE            mount,
@@ -890,7 +889,7 @@ LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(
     SIZE_T     bufferChars,
     SIZE_T*    requiredChars);
 
-/* ---- VSS primitives (FR-26, FR-27) ---- */
+/* ---- VSS primitives ---- */
 
 /*
  * Caller buffer requirements for LayerMountVssCreateSnapshot. Snapshot IDs
@@ -946,7 +945,7 @@ LM_API HRESULT LM_CALL LayerMountVssCleanupSnapshots(LM_HANDLE mount);
  */
 LM_API HRESULT LM_CALL LayerMountVssCloseSnapshot(LM_VSS_SNAPSHOT_HANDLE snapshot);
 
-/* ---- Layer image primitives (FR-28) ---- */
+/* ---- Layer image primitives ---- */
 
 LM_API HRESULT LM_CALL LayerMountImagePack(
     LM_HANDLE                    mount,
@@ -1003,7 +1002,7 @@ LM_API HRESULT LM_CALL LayerMountImageGetMetadata(
 
 LM_API HRESULT LM_CALL LayerMountImageClose(LM_IMAGE_HANDLE image);
 
-/* ---- Diagnostics, eventing, process tracker (FR-30, FR-31, FR-32) ---- */
+/* ---- Diagnostics, eventing, process tracker ---- */
 
 LM_API HRESULT LM_CALL LayerMountGetStats(
     LM_HANDLE handle, LM_STATS* outStats);

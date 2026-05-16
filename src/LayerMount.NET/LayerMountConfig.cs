@@ -1,6 +1,6 @@
 // LayerMountConfig -- managed construction parameters for an LayerMount.
 //
-// Mirrors the native LM_CONFIG field set (FR-12) while projecting
+// Mirrors the native LM_CONFIG field set while projecting
 // pointer-based fields into idiomatic managed types. Forward-compatible
 // through the native structSize mechanism; new fields added here project
 // to new fields in the native struct without breaking compilers that
@@ -25,7 +25,7 @@ public sealed record LayerMountConfig
     /// <summary>
     /// Host capability bitfield. Default covers every optimized path
     /// (ADS, reparse points, sparse files, multiple streams, NTFS ACLs).
-    /// Clear a bit to trigger the matching fallback (FR-15..FR-17).
+    /// Clear a bit to trigger the matching fallback.
     /// </summary>
     public HostCapabilities Capabilities { get; init; }
         = HostCapabilities.Ads

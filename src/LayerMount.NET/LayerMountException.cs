@@ -1,4 +1,4 @@
-// HRESULT -> .NET exception translation layer (FR-40).
+// HRESULT -> .NET exception translation layer.
 //
 // Every non-success HRESULT returned by the native ABI is funnelled through
 // HResultGuard.ThrowIfFailed, which:
@@ -11,7 +11,7 @@
 // Subclass choice is deliberately narrow -- one per category that .NET
 // callers already have a conventional catch for (NotFound, AccessDenied,
 // InvalidHandle) plus a capability-missing bucket for the overlay-specific
-// FR-15..FR-17 degradation paths.
+// degradation paths.
 
 using System;
 using LayerMount.Interop;
@@ -76,7 +76,7 @@ public sealed class LayerMountInvalidHandleException : LayerMountException
 
 /// <summary>
 /// An operation was refused because the host cleared the required
-/// capability bit and the degradation path rejected the request (FR-15..17).
+/// capability bit and the degradation path rejected the request.
 /// Identified via E_NOTIMPL plus an explanatory message mentioning
 /// "capability" from LayerMountGetLastErrorMessage.
 /// </summary>

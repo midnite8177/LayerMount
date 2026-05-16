@@ -17,7 +17,7 @@
            headers under impl/* and abi/*). External consumers of
            LayerMount.dll get only public/LayerMount.h and MUST NOT set
            this. Headers that pull in virtdisk.h or other DLL-private
-           dependencies gate their includes on it (FR-25). -->
+           dependencies gate their includes on it. -->
       <PreprocessorDefinitions>LAYERMOUNT_INTERNAL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>

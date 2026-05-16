@@ -40,22 +40,22 @@ public sealed partial class LayerMount : IDisposable
 
     /// <summary>
     /// Fires when the native engine emits a warning, copy-up, whiteout, or
-    /// access-denied event (FR-31). Delivered on an arbitrary DLL-internal
+    /// access-denied event. Delivered on an arbitrary DLL-internal
     /// thread; handlers must not throw or call back into the DLL
     /// synchronously on the same overlay.
     /// </summary>
     public event EventHandler<LayerMountEventArgs>? Event;
 
-    /// <summary>Process-tracking subsystem (FR-32).</summary>
+    /// <summary>Process-tracking subsystem.</summary>
     public ProcessTrackerApi ProcessTracker { get; }
 
-    /// <summary>VHD/VHDX primitives (FR-23..FR-25, FR-35).</summary>
+    /// <summary>VHD/VHDX primitives.</summary>
     public VhdApi Vhd { get; }
 
-    /// <summary>VSS snapshot primitives (FR-26, FR-27).</summary>
+    /// <summary>VSS snapshot primitives.</summary>
     public VssApi Vss { get; }
 
-    /// <summary>Layer image (.lmnt) primitives (FR-28, FR-35).</summary>
+    /// <summary>Layer image (.lmnt) primitives.</summary>
     public ImagesApi Images { get; }
 
     private unsafe LayerMount(LayerMountHandle handle)
@@ -332,7 +332,7 @@ public sealed partial class LayerMount : IDisposable
     }
 
     /// <summary>
-    /// Mark this overlay as "attached" to a host adapter (FR-13). While
+    /// Mark this overlay as "attached" to a host adapter. While
     /// the flag is TRUE, <see cref="Dispose"/> refuses to release the
     /// instance and throws <see cref="LayerMountException"/>. General
     /// consumers should leave this untouched; host adapters toggle it
@@ -375,7 +375,7 @@ public sealed partial class LayerMount : IDisposable
     ///
     /// <para>
     /// If a host adapter is still attached when <c>Dispose</c> runs, the
-    /// native release fails with <c>E_ILLEGAL_METHOD_CALL</c> (FR-13) and
+    /// native release fails with <c>E_ILLEGAL_METHOD_CALL</c> and
     /// the SafeHandle's <c>ReleaseHandle</c> diagnostics surface the leak.
     /// The wrapper does not silently force-clear the host-attached flag;
     /// host adapters must run their unmount sequence (which clears the
@@ -455,8 +455,8 @@ public sealed partial class LayerMount : IDisposable
         }
 
         // The host-attached flag is intentionally NOT force-cleared here.
-        // FR-13 makes the flag a hard invariant: while a host adapter is
-        // attached, LayerMountDestroy must refuse the release. Silently
+        // The flag is a hard invariant: while a host adapter is attached,
+        // LayerMountDestroy must refuse the release. Silently
         // clearing the flag from generic disposal would let a caller (or
         // a using-block unwind) tear down an overlay that is still serving
         // live host-adapter callbacks, which is exactly the use-after-free

@@ -6,7 +6,7 @@ using System.Threading;
 namespace LayerMount.TestShared;
 
 /// <summary>
-/// Parent-side reader for the FR-42 mount handshake JSON line emitted by
+/// Parent-side reader for the mount handshake JSON line emitted by
 /// a host-adapter child process started under <c>--handshake-child</c>.
 /// Shared across consumer test projects so they all deserialize the
 /// schema through one code path.
@@ -109,7 +109,7 @@ public static class HandshakeClient
 
 /// <summary>
 /// Classification of a parsed handshake line, derived from the
-/// <c>status</c> field of the FR-42 schema.
+/// <c>status</c> field of the handshake schema.
 /// </summary>
 public enum HandshakeKind
 {
@@ -122,7 +122,7 @@ public enum HandshakeKind
 }
 
 /// <summary>
-/// Parsed FR-42 handshake payload. Any host adapter's emission is
+/// Parsed handshake payload. Any host adapter's emission is
 /// assertable via this single shape.
 ///
 /// <see cref="Host"/> carries the opaque adapter-supplied identifier
