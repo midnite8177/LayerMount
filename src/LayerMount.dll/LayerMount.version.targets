@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    Generates src\LayerMount.dll\public\LayerMountVersion.h from the
+    committed template LayerMountVersion.h.in, substituting placeholders
+    from version.props (imported via Directory.Build.props).
+
+    The generated header sits next to LayerMount.h in the public include
+    folder so every project that already includes LayerMount.h picks up
+    the version macros transitively (no extra AdditionalIncludeDirectories
+    needed for test projects).
+
+    The generated file is .gitignored. Both LayerMount.dll.vcxproj and
+    LayerMount-static.vcxproj run this target; WriteOnlyWhenDifferent
+    keeps incremental builds clean and makes concurrent writes idempotent
+    (both projects produce byte-identical output for the same version).
+  -->
+
+  <PropertyGroup>
+    <_LMVersionTemplate>$(MSBuildThisFileDirectory)public\LayerMountVersion.h.in</_LMVersionTemplate>
+    <_LMVersionGenerated>$(MSBuildThisFileDirectory)public\LayerMountVersion.h</_LMVersionGenerated>
+  </PropertyGroup>
+
+  <Target Name="GenerateLayerMountVersionHeader"
+          BeforeTargets="ClCompile"
+          Inputs="$(_LMVersionTemplate);$(MSBuildThisFileFullPath);$(MSBuildProjectDirectory)\..\..\version.props"
+          Outputs="$(_LMVersionGenerated)">
+    <PropertyGroup>
+      <_LMVersionHeaderText>$([System.IO.File]::ReadAllText('$(_LMVersionTemplate)').Replace('@LM_VER_MAJOR@','$(LayerMountVersionMajor)').Replace('@LM_VER_MINOR@','$(LayerMountVersionMinor)').Replace('@LM_VER_PATCH@','$(LayerMountVersionPatch)').Replace('@LM_VER_STRING@','$(LayerMountVersionFull)').Replace('@LM_ABI_VERSION@','$(LayerMountAbiVersion)'))</_LMVersionHeaderText>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_LMVersionGenerated)"
+                      Lines="$(_LMVersionHeaderText)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <Message Importance="low" Text="LayerMountVersion.h generated (version $(LayerMountVersionFull), ABI $(LayerMountAbiVersion))" />
+  </Target>
+
+</Project>

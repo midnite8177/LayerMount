@@ -1,0 +1,13 @@
+/* AUTO-GENERATED from LayerMountVersion.h.in by MSBuild
+ * (see LayerMount.version.targets). Do not edit the generated copy by
+ * hand; edit version.props at the repo root instead. */
+#ifndef LAYERMOUNT_VERSION_H
+#define LAYERMOUNT_VERSION_H
+
+#define LM_VER_MAJOR   @LM_VER_MAJOR@u
+#define LM_VER_MINOR   @LM_VER_MINOR@u
+#define LM_VER_PATCH   @LM_VER_PATCH@u
+#define LM_VER_STRING  "@LM_VER_STRING@"
+#define LM_ABI_VERSION @LM_ABI_VERSION@u
+
+#endif /* LAYERMOUNT_VERSION_H */

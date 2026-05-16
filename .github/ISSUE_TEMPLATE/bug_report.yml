@@ -1,0 +1,88 @@
+name: Bug report
+description: Report a defect in the LayerMount engine or the .NET wrapper.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug.
+
+        For security-sensitive defects, please use [Private Security Advisories](../security/advisories/new)
+        instead — see `SECURITY.md`.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One- or two-sentence description of the defect.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimum steps that show the problem. Include code/CLI snippets if relevant.
+      placeholder: |
+        1. Mount overlay with `<adapter> mount -m X: -u C:\upper -l C:\lower`
+        2. Write to `X:\foo.txt`
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages, return codes, and any log lines (sanitized).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LayerMount version
+      description: From `LM_VER_MAJOR.LM_VER_MINOR.LM_VER_PATCH` in `LayerMount.h`, or `LayerMount.GetVersion()` from the managed wrapper.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: surface
+    attributes:
+      label: Surface
+      description: Which API did you hit — native C ABI, managed `LayerMount.NET`, or both?
+      placeholder: managed (LayerMount.NET)
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host adapter
+      description: Which adapter is on top of the engine (if any) and which userspace-filesystem driver does it target (WinFsp / ProjFS / CBFS Connect / none)?
+      placeholder: my-adapter (WinFsp)
+  - type: input
+    id: windows
+    attributes:
+      label: Windows build
+      description: `winver` output, including build number.
+      placeholder: Windows 11 24H2 (26100.x)
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - x64
+        - arm64
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / handshake / control-pipe output
+      description: Any JSON handshake, control-pipe response, or relevant stderr lines.
+      render: text

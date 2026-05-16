@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build (${{ matrix.platform }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, ARM64]
+    env:
+      CI: 'true'
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+      # Opt JavaScript actions into Node 24 ahead of GitHub's forced
+      # switchover (2026-06-02). Lets us drop this once every action we
+      # use ships a Node-24-native version.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/packages.lock.json', '.config/dotnet-tools.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore (managed)
+        run: dotnet restore LayerMount.sln /p:Platform=${{ matrix.platform }}
+
+      - name: Build solution (${{ matrix.platform }})
+        run: msbuild LayerMount.sln /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:ContinuousIntegrationBuild=true /m /v:minimal
+
+      # Tests only run on the architecture the runner can execute.
+      # Native MSTest C++ adapter is bundled with VS test runner, not the
+      # standalone dotnet vstest tool. Locate vstest.console.exe via vswhere
+      # so this works under any VS edition installed on the runner.
+      - name: Locate vstest.console.exe
+        if: matrix.platform == 'x64'
+        id: vstest
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsRoot  = & $vswhere -latest -prerelease -products * -requires Microsoft.Component.MSBuild -property installationPath
+          $exe     = Join-Path $vsRoot 'Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe'
+          if (-not (Test-Path $exe)) { throw "vstest.console.exe not found under $vsRoot" }
+          "path=$exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Native engine tests (x64)
+        if: matrix.platform == 'x64'
+        run: '& "${{ steps.vstest.outputs.path }}" x64\Release\LayerMount.Tests.dll /Platform:x64 /logger:trx /ResultsDirectory:TestResults'
+        shell: pwsh
+
+      - name: Native ABI tests (x64)
+        if: matrix.platform == 'x64'
+        run: '& "${{ steps.vstest.outputs.path }}" x64\Release\LayerMount.AbiTests.dll /Platform:x64 /logger:trx /ResultsDirectory:TestResults'
+        shell: pwsh
+
+      - name: Managed wrapper tests (x64)
+        if: matrix.platform == 'x64'
+        # -p:Platform=x64 so --no-build finds the solution-built binary
+        # under bin/x64/Release/ (msbuild puts it there when the solution
+        # is built with /p:Platform=x64, not the SDK default bin/Release/).
+        run: dotnet test src/LayerMount.NET.Tests -c Release -p:Platform=x64 --no-build --logger trx --results-directory TestResults
+
+      - name: Upload test results
+        if: always() && matrix.platform == 'x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-x64
+          path: |
+            TestResults/**/*.trx
+          if-no-files-found: warn
+
+      - name: Upload arm64 native artifacts
+        if: matrix.platform == 'ARM64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: layermount-native-arm64
+          path: |
+            ARM64/Release/LayerMount.dll
+            ARM64/Release/LayerMount.lib
+            ARM64/Release/LayerMount.pdb
+          if-no-files-found: error

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    Single source of truth for the LayerMount version.
+
+    Versionize edits <Version> in build/LayerMount.Version.csproj (the
+    version anchor). build/sync-version.ps1 then parses that and writes
+    the integer/suffix parts back into this file. Both the managed
+    projects (via Directory.Build.props -> Import) and the native
+    projects (via LayerMount.version.targets) read from here.
+
+    LM_ABI_VERSION (LayerMountAbiVersion) is independent of LM_VER_*
+    and only ticks on binary-breaking changes to the public C ABI.
+    Bump it by hand in this file when needed.
+  -->
+
+  <PropertyGroup Label="LayerMountVersion">
+    <LayerMountVersionMajor>0</LayerMountVersionMajor>
+    <LayerMountVersionMinor>1</LayerMountVersionMinor>
+    <LayerMountVersionPatch>0</LayerMountVersionPatch>
+    <LayerMountVersionSuffix></LayerMountVersionSuffix>
+
+    <LayerMountVersion>$(LayerMountVersionMajor).$(LayerMountVersionMinor).$(LayerMountVersionPatch)</LayerMountVersion>
+    <LayerMountVersionFull Condition="'$(LayerMountVersionSuffix)'==''">$(LayerMountVersion)</LayerMountVersionFull>
+    <LayerMountVersionFull Condition="'$(LayerMountVersionSuffix)'!=''">$(LayerMountVersion)-$(LayerMountVersionSuffix)</LayerMountVersionFull>
+
+    <Version>$(LayerMountVersionFull)</Version>
+    <AssemblyVersion>$(LayerMountVersionMajor).0.0.0</AssemblyVersion>
+    <FileVersion>$(LayerMountVersion).0</FileVersion>
+    <InformationalVersion>$(LayerMountVersionFull)</InformationalVersion>
+
+    <LayerMountAbiVersion>1</LayerMountAbiVersion>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,211 @@
+name: release
+
+# Manually-triggered release. Runs Versionize over conventional commits
+# since the last tag, syncs version.props, builds and packs both NuGet
+# packages for win-x64 and win-arm64, pushes to nuget.org, and creates a
+# GitHub Release with the .nupkg / .snupkg files attached.
+#
+# Versionize is configured (.versionize.json) with skipCommit/skipTag so
+# this workflow owns the commit + tag, avoiding any --force-push amend
+# step and keeping branch protection clean.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-as:
+        description: 'Force a specific version (e.g. 0.2.0). Leave blank for auto.'
+        required: false
+        type: string
+      dry-run:
+        description: 'Build and pack but do not commit, tag, push, or publish.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    env:
+      CI: 'true'
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      # Opt JavaScript actions into Node 24 ahead of GitHub's forced
+      # switchover (2026-06-02). Lets us drop this once every action we
+      # use ships a Node-24-native version.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Configure git
+        shell: pwsh
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Restore tools
+        run: dotnet tool restore
+
+      - name: Bump version (Versionize)
+        id: bump
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Snapshot the version before Versionize so we can detect a
+          # no-op bump after it runs.
+          $previousVersion = (Select-Xml -Path build/LayerMount.Version.csproj -XPath '//Version').Node.InnerText.Trim()
+
+          # Initial-release detection: Versionize uses the project's
+          # current <Version> as-is when no prior release tag exists,
+          # which looks like a no-op bump but is legitimate.
+          $priorTag = (git tag --list 'v*' --sort=-v:refname | Select-Object -First 1)
+          $isInitialRelease = [string]::IsNullOrEmpty($priorTag)
+
+          $extra = @()
+          if ('${{ inputs.release-as }}' -ne '') {
+            $extra += '--release-as'
+            $extra += '${{ inputs.release-as }}'
+          }
+
+          # --skip-commit/--skip-tag MUST be CLI flags. Versionize 2.3.0
+          # silently ignores the JSON-config equivalents, and this
+          # workflow owns the commit + tag below — letting Versionize
+          # tag here causes a collision when the workflow re-tags.
+          dotnet versionize --skip-commit --skip-tag @extra
+          if ($LASTEXITCODE -ne 0) { throw "Versionize failed (exit $LASTEXITCODE)" }
+
+          # Read the resolved version from the Versionize anchor csproj
+          # (a plain literal like "0.1.0"), NOT from version.props's
+          # <LayerMountVersion>, which is a computed MSBuild expression
+          # that Select-Xml would return unevaluated.
+          $version = (Select-Xml -Path build/LayerMount.Version.csproj -XPath '//Version').Node.InnerText.Trim()
+
+          # Abort if Versionize produced no change (no qualifying
+          # conventional commits since the previous release) — otherwise
+          # we'd publish a same-version "release" with empty changelog.
+          # Exceptions: the initial release (no prior tag) and an
+          # explicit release-as override both legitimately keep the
+          # current version.
+          if ($version -eq $previousVersion) {
+            if ($isInitialRelease) {
+              Write-Host "No prior release tag found; treating as the initial release at v$version."
+            } elseif ('${{ inputs.release-as }}' -ne '') {
+              Write-Host "release-as was provided; accepting same-version release at v$version."
+            } else {
+              throw "Versionize produced no version change (still $version). No qualifying conventional commits since the last release; aborting."
+            }
+          }
+
+          # Propagate the bumped <Version> from the anchor csproj into
+          # version.props so the native macros + managed packaging see it.
+          pwsh build/sync-version.ps1
+          if ($LASTEXITCODE -ne 0) { throw "sync-version.ps1 failed (exit $LASTEXITCODE)" }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved version: $version (bumped from $previousVersion)"
+
+      - name: Restore solution
+        run: dotnet restore LayerMount.sln
+
+      - name: Build x64
+        run: msbuild LayerMount.sln /p:Configuration=Release /p:Platform=x64 /p:ContinuousIntegrationBuild=true /m /v:minimal
+
+      - name: Build ARM64 (native engine only)
+        run: msbuild LayerMount.sln /p:Configuration=Release /p:Platform=ARM64 /p:ContinuousIntegrationBuild=true /m /v:minimal
+
+      - name: Pack LayerMount.Native
+        run: dotnet pack src/LayerMount.Native.Package -c Release --no-build -o artifacts
+
+      - name: Pack LayerMount (managed)
+        run: dotnet pack src/LayerMount.NET -c Release --no-build -o artifacts
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs-${{ steps.bump.outputs.version }}
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+
+      - name: Commit + tag version bump
+        if: ${{ !inputs.dry-run }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.bump.outputs.version }}'
+
+          git add version.props build/LayerMount.Version.csproj CHANGELOG.md
+          if ($LASTEXITCODE -ne 0) { throw "git add failed (exit $LASTEXITCODE)" }
+
+          git commit -m "chore(release): v$version"
+          if ($LASTEXITCODE -ne 0) { throw "git commit failed (exit $LASTEXITCODE)" }
+
+          git tag "v$version"
+          if ($LASTEXITCODE -ne 0) { throw "git tag failed (exit $LASTEXITCODE) — does v$version already exist?" }
+
+          git push origin HEAD:${{ github.ref_name }}
+          if ($LASTEXITCODE -ne 0) { throw "git push (branch) failed (exit $LASTEXITCODE)" }
+
+          git push origin "v$version"
+          if ($LASTEXITCODE -ne 0) { throw "git push (tag) failed (exit $LASTEXITCODE)" }
+
+      - name: Publish to nuget.org
+        if: ${{ !inputs.dry-run }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:NUGET_API_KEY) { throw 'NUGET_API_KEY secret is not set.' }
+
+          # Enumerate explicitly: passing a glob string straight to
+          # `dotnet nuget push` is unreliable across versions/platforms
+          # and silently fails as "File does not exist (artifacts/*.nupkg)"
+          # when more than one match exists. Push files one-by-one.
+          $nupkgs  = @(Get-ChildItem -Path 'artifacts/*.nupkg')
+          $snupkgs = @(Get-ChildItem -Path 'artifacts/*.snupkg')
+          if ($nupkgs.Count -eq 0) { throw 'No .nupkg files found under artifacts/.' }
+
+          foreach ($pkg in $nupkgs) {
+            dotnet nuget push $pkg.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+            if ($LASTEXITCODE -ne 0) { throw "nuget push failed for $($pkg.Name) (exit $LASTEXITCODE)" }
+          }
+          foreach ($pkg in $snupkgs) {
+            dotnet nuget push $pkg.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+            if ($LASTEXITCODE -ne 0) { throw "nuget push (symbols) failed for $($pkg.Name) (exit $LASTEXITCODE)" }
+          }
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry-run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: v${{ steps.bump.outputs.version }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg

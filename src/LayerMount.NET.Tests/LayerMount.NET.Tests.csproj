@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+
+    <RootNamespace>LayerMount.Tests</RootNamespace>
+    <AssemblyName>LayerMount.NET.Tests</AssemblyName>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <GenerateProgramFile>true</GenerateProgramFile>
+  </PropertyGroup>
+
+  <!-- PRD 0004 task 7.0 (2026-04-20): migrated from MSTest 3.6.1 to xUnit
+       2.9.2 + Xunit.SkippableFact 1.4.13 so consumer C# test projects
+       share a single framework. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- LayerMount.NET.props flows LayerMount.dll into our bin\ via
+         ReferenceCopyLocalPaths, so taking a ProjectReference on the
+         managed wrapper is all we need for the native library. -->
+    <ProjectReference Include="..\LayerMount.NET\LayerMount.NET.csproj" />
+
+    <!-- PRD 0004 sub-task 6.4: EndToEndMountTests consumes the handshake +
+         control-pipe helpers and the TempLayerEnvironment fixture from
+         LayerMount.TestShared. TestShared is plain net8.0 with no test-
+         framework reference of its own; both test projects now run on
+         xUnit, but TestShared stays framework-agnostic so future
+         consumers (benchmarks, tooling, third-party test projects) can
+         still pick their own framework. -->
+    <ProjectReference Include="..\LayerMount.TestShared\LayerMount.TestShared.csproj" />
+  </ItemGroup>
+
+</Project>

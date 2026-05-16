@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- Test projects are x64-only. The native MSTest framework
+       (CppUnitTestFramework.lib) is x64; tests cannot execute on a
+       cross-built arm64 binary anyway. The solution skips this project
+       on ARM64 builds. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{C1E8A6D2-3A94-4F5E-9DD0-7B4E8C1F2A33}</ProjectGuid>
+    <RootNamespace>LayerMountAbiTests</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <LayerMount_DisableWX>true</LayerMount_DisableWX>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Pin OutDir/IntDir to repo-level x64\<Config>\ via
+         $(MSBuildThisFileDirectory) so single-project builds
+         (msbuild <file>.vcxproj) and solution builds produce the
+         same artifacts. Without this, $(SolutionDir) is undefined
+         under single-project builds and OutDir falls back to
+         $(ProjectDir)x64\<Config>\ — the solution-level copy goes
+         stale and test fixtures spawn the wrong binary. -->
+    <OutDir>$(MSBuildThisFileDirectory)..\..\x64\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\x64\$(Configuration)\LayerMount.AbiTests.obj\</IntDir>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <!-- AbiTests links LayerMount.dll through its import lib only
+       (LayerMount.lib). No impl/ include paths, no transitive engine deps:
+       this project observes the DLL as an external consumer, proving the
+       public C ABI is self-sufficient (FR-45). -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\include;$(VendorDir);..\LayerMount.dll\public;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Microsoft.VisualStudio.TestTools.CppUnitTestFramework.lib;Rpcrt4.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AbiTestMain.cpp" />
+    <ClCompile Include="AbiShapeTests.cpp" />
+    <ClCompile Include="AbiLifecycleTests.cpp" />
+    <ClCompile Include="AbiFileOpsTests.cpp" />
+    <ClCompile Include="AbiPathTests.cpp" />
+    <ClCompile Include="AbiVhdTests.cpp" />
+    <ClCompile Include="AbiVssTests.cpp" />
+    <ClCompile Include="AbiImageTests.cpp" />
+    <ClCompile Include="AbiDiagnosticsTests.cpp" />
+    <ClCompile Include="AbiEventsTests.cpp" />
+    <ClCompile Include="AbiCapabilityDegradationTests.cpp" />
+    <ClCompile Include="AbiHResultToNtStatusTests.cpp" />
+    <ClCompile Include="AbiCanDeleteOpenFileTests.cpp" />
+    <ClCompile Include="AbiDeleteOpenFileTests.cpp" />
+    <ClCompile Include="AbiHostMountPointTests.cpp" />
+    <ClCompile Include="AbiTransientLayerMountTests.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="AbiTestFixture.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LayerMount.dll\LayerMount.dll.vcxproj">
+      <Project>{6df4ab1a-9e0c-4a0f-8e3c-d5b7c79f2aa1}</Project>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+</Project>

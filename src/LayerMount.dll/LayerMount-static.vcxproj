@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--
+    Static-library flavor of the LayerMount engine. Shares sources with
+    LayerMount.dll.vcxproj via LayerMount.sources.props. Consumed by
+    LayerMount.Tests so unit tests keep internal-header access (FR-43).
+    Consumers of this .lib must link the same system libraries the
+    shared DLL links (virtdisk, vssapi, ole32, oleaut32, bcrypt,
+    rpcrt4).
+  -->
+
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{3B8F9E2C-4D1A-4B7E-90B3-E6C2A4F8D133}</ProjectGuid>
+    <RootNamespace>LayerMount</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <TargetName>LayerMount-static</TargetName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Pin OutDir/IntDir to repo-level x64\<Config>\ via
+         $(MSBuildThisFileDirectory) so single-project builds
+         (msbuild <file>.vcxproj) and solution builds produce the
+         same artifacts. Without this, $(SolutionDir) is undefined
+         under single-project builds and OutDir falls back to
+         $(ProjectDir)x64\<Config>\ — the solution-level copy goes
+         stale and test fixtures spawn the wrong binary.
+         Each project under src/LayerMount.dll/ needs its own IntDir
+         so identical source files (zstd.c, shared impl/*) don't
+         collide on .obj filenames during parallel builds. -->
+    <OutDir>$(MSBuildThisFileDirectory)..\..\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\$(Platform)\$(Configuration)\LayerMount-static\</IntDir>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <Import Project="LayerMount.sources.props" />
+  <Import Project="LayerMount.version.targets" />
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+</Project>

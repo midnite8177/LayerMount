@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--
+    Shared source list and include paths for LayerMount.dll.vcxproj
+    (DynamicLibrary) and LayerMount-static.vcxproj (StaticLibrary).
+    Both projects consume the same source set; they differ only in
+    ConfigurationType, LAYERMOUNT_EXPORTS define, ModuleDefinitionFile,
+    TargetName, and link libraries (DLL only).
+  -->
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)public;$(MSBuildThisFileDirectory)abi;$(MSBuildThisFileDirectory)impl;$(MSBuildThisFileDirectory)impl\vhd;$(MSBuildThisFileDirectory)impl\vss;$(MSBuildThisFileDirectory)impl\image;$(VendorDir);$(VendorDir)zstd;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- LAYERMOUNT_INTERNAL marks a translation unit as part of the DLL
+           or its static-lib flavor (allowed to see the engine's internal
+           headers under impl/* and abi/*). External consumers of
+           LayerMount.dll get only public/LayerMount.h and MUST NOT set
+           this. Headers that pull in virtdisk.h or other DLL-private
+           dependencies gate their includes on it (FR-25). -->
+      <PreprocessorDefinitions>LAYERMOUNT_INTERNAL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <!-- Public header + module-definition file. .def is consumed by the
+       DynamicLibrary flavor via <ModuleDefinitionFile>; listing it here
+       with <ExcludedFromBuild>true</ExcludedFromBuild> keeps it visible
+       in Solution Explorer without asking the compiler to process it. -->
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)public\LayerMount.h" />
+    <None Include="$(MSBuildThisFileDirectory)public\LayerMount.def" />
+  </ItemGroup>
+
+  <!-- ABI boundary layer. -->
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)abi\AbiGuard.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)abi\CapabilityGate.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)abi\EventEmitter.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)abi\ErrorTls.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)abi\HandleTable.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)abi\HandleTypes.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)abi\ErrorTls.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)abi\HandleTable.cpp" />
+    <!-- abi/AbiStubs.cpp is DLL-only (it defines the `.def` exports as
+         LM_API-stubs). Added directly in LayerMount.dll.vcxproj so the
+         static-lib flavor, which has no LAYERMOUNT_EXPORTS define, is
+         not asked to compile `__declspec(dllimport)` definitions. -->
+  </ItemGroup>
+
+  <!-- Core engine. NtStatusUtil.{h,cpp} lets the engine map Win32 errors
+       to NTSTATUS internally, without taking on any host-adapter
+       dependency. -->
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\NtStatusUtil.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\NtStatusUtil.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\Cache.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\CopyUp.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\MetadataADS.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerMount.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\SidecarMetadata.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\PathResolver.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\ProcessTracker.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\Cache.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\CopyUp.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\MetadataADS.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\LayerMount.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\SidecarMetadata.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\PathResolver.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\ProcessTracker.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.cpp" />
+  </ItemGroup>
+
+  <!-- Host helpers. Pure Win32 mount-point plumbing exposed via the
+       LayerMountPoint* C ABI; consumed by host adapters. No host-
+       adapter dependency. -->
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\host\WindowsMountPoint.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\host\WindowsMountPoint.cpp" />
+  </ItemGroup>
+
+  <!-- VHD layer management. -->
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\vhd\Manifest.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\vhd\VHDLayerManager.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\vhd\VolumeGuid.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\vhd\Manifest.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\vhd\VHDLayerManager.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\vhd\VolumeGuid.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\vhd\VhdGuidInit.cpp" />
+  </ItemGroup>
+
+  <!-- VSS snapshot support, plus the per-thread COM scope so VSS shims
+       don't force callers to CoInitializeEx before calling the DLL. -->
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\ComScope.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\vss\VSSManager.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\ComScope.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\vss\VSSManager.cpp" />
+  </ItemGroup>
+
+  <!-- Layer image packing. zstd.c stays vendored under vendor/zstd/; it
+       compiles as C with warnings suppressed. -->
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\image\LayerImageFormat.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\image\LayerImageManager.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\image\LayerImageManager.cpp" />
+    <ClCompile Include="$(VendorDir)zstd\zstd.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+  </ItemGroup>
+
+</Project>
