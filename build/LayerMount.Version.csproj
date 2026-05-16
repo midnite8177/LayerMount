@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Version anchor for Versionize.
+
+    Versionize reads/writes <Version> in this csproj. After Versionize
+    updates it, build/sync-version.ps1 parses the new value and
+    propagates the integer/suffix parts into the repo-level
+    version.props so the rest of the build (native macro codegen,
+    managed assemblies, NuGet packages) sees the bump.
+
+    Not built, not packed. The TargetFramework is required by the SDK
+    but no source files exist in this folder so nothing is produced.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+    <NoWarn>$(NoWarn);CS2008</NoWarn>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+</Project>

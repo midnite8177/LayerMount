@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest a new capability for the LayerMount engine or managed wrapper.
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, or what's harder than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed surface
+      description: Sketch of the API / CLI / behavior you'd want. Include signatures or example invocations.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, or other shapes the API could take.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Native C ABI (LayerMount.dll)
+        - Managed wrapper (LayerMount.NET)
+        - Both
+        - Other / unsure
+    validations:
+      required: true
+  - type: checkboxes
+    id: breaking
+    attributes:
+      label: ABI impact
+      description: Tick all that apply. Engine ABI changes require bumping `LM_ABI_VERSION`.
+      options:
+        - label: This is a purely additive change (new exports / new managed members).
+        - label: This breaks existing exports or managed signatures.
+        - label: Not sure.

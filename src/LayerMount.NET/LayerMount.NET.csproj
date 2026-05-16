@@ -1,0 +1,99 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Packaged managed wrapper is AnyCPU so the same assembly runs on
+         both x64 and arm64. The correct native LayerMount.dll is selected
+         by RID from the LayerMount.Native package. -->
+    <Platforms>AnyCPU</Platforms>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+
+    <RootNamespace>LayerMount</RootNamespace>
+    <AssemblyName>LayerMount.NET</AssemblyName>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1591: 'missing XML comment for publicly visible member'. The
+         wrapper has partial XML documentation; do not block builds on
+         the gaps. Existing comments still flow into the generated .xml. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- NuGet packaging metadata. The LayerMount package (managed wrapper)
+       depends on LayerMount.Native, which carries the per-RID DLL. -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>LayerMount</PackageId>
+    <Title>LayerMount managed wrapper for .NET</Title>
+    <Description>Linux-style overlay filesystems for Windows. Managed .NET 8 wrapper around the native LayerMount engine; AOT-compatible. Transitively pulls the native engine via the LayerMount.Native package.</Description>
+    <Authors>Jeff Slutter</Authors>
+    <Copyright>Copyright (c) 2026 Jeff Slutter</Copyright>
+    <PackageTags>windows overlay filesystem projfs layer union union-mount copy-on-write vhd vhdx vss dotnet net8 aot layermount</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/midnite8177/LayerMount</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/midnite8177/LayerMount</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <DebugType>portable</DebugType>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="README.md" />
+    <None Include="..\..\THIRD_PARTY_NOTICES.md" Pack="true" PackagePath="THIRD_PARTY_NOTICES.md" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- ProjectReference to the packable LayerMount.Native.Package becomes
+       a NuGet <dependency> on LayerMount.Native at pack time (matching
+       $(Version) since both projects inherit it from version.props).
+       The Native package produces no managed assembly; ExcludeAssets
+       prevents the SDK from trying to consume one at build-time while
+       keeping the dependency declaration in the produced .nuspec. -->
+  <ItemGroup>
+    <ProjectReference Include="..\LayerMount.Native.Package\LayerMount.Native.Package.csproj">
+      <ExcludeAssets>compile;runtime</ExcludeAssets>
+      <PrivateAssets>none</PrivateAssets>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Import Project="LayerMount.NET.props" />
+
+  <!-- Enforce native-DLL-first build ordering. Without this, msbuild
+       builds the managed and native projects in parallel, and if the
+       managed project's ResolveAssemblyReferences runs before
+       LayerMount.dll.vcxproj finishes, the props file's Exists() check
+       returns false and LayerMount.dll silently fails to land next to
+       the managed assembly.
+
+       ReferenceOutputAssembly=false because this is a native DLL, not
+       a managed reference — the props file handles the actual copy via
+       ReferenceCopyLocalPaths.
+
+       MSBuildRuntimeType=Full restricts this reference to MSBuild.exe
+       (and Visual Studio). dotnet CLI ("Core") can't follow vcxproj
+       references (no VC targets), so under `dotnet build`/`dotnet test`
+       the native DLL is expected to already exist at the solution-level
+       location — rebuild it via the .sln or the .vcxproj directly first.
+       -->
+  <ItemGroup Condition="'$(MSBuildRuntimeType)'=='Full'">
+    <ProjectReference Include="..\LayerMount.dll\LayerMount.dll.vcxproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+      <UndefineProperties>TargetFramework</UndefineProperties>
+    </ProjectReference>
+  </ItemGroup>
+
+</Project>

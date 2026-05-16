@@ -1,0 +1,64 @@
+<Project>
+
+  <!--
+    LayerMount.NET.props : imported by LayerMount.NET.csproj.
+
+    Registers the native LayerMount.dll (built by src/LayerMount.dll/
+    LayerMount.dll.vcxproj into $(SolutionDir)$(Platform)\$(Configuration)\)
+    as a ReferenceCopyLocalPaths item. MSBuild uses this list to copy
+    runtime dependencies into $(OutDir) both for this project AND for
+    downstream projects that take a ProjectReference on LayerMount.NET,
+    so the native DLL follows the managed assembly through the dependency
+    graph.
+
+    The managed wrapper itself is AnyCPU; the per-RID native asset is
+    chosen by override property $(LayerMountNativeArch) which defaults to
+    x64 (the local-dev common case, also what the test projects use).
+    Consumers building an arm64 host adapter via ProjectReference can set
+    $(LayerMountNativeArch)=ARM64 in their own props to pick up the arm64
+    DLL instead. For published consumers, the LayerMount.Native NuGet
+    package handles RID resolution automatically and this props is not in
+    play.
+
+    Resolution order for the source path:
+      1. $(SolutionDir) if set AND the DLL actually lives there (normal
+         msbuild on this engine repo's .sln).
+      2. ..\..\ from this file's folder (standalone `dotnet build` in
+         src/LayerMount.NET/, and also the path that resolves when a sibling
+         host repo's solution builds LayerMount.NET as a project ref).
+
+    Guarded with Exists() so a managed-only build (before the native DLL
+    exists) does not fail; it simply emits a build warning.
+  -->
+
+  <PropertyGroup>
+    <LayerMountNativeArch Condition="'$(LayerMountNativeArch)' == ''">x64</LayerMountNativeArch>
+    <_NativeLayerMountRoot Condition="'$(SolutionDir)' != '' and '$(SolutionDir)' != '*Undefined*' and Exists('$(SolutionDir)$(LayerMountNativeArch)\$(Configuration)\LayerMount.dll')">$(SolutionDir)</_NativeLayerMountRoot>
+    <_NativeLayerMountRoot Condition="'$(_NativeLayerMountRoot)' == ''">$(MSBuildThisFileDirectory)..\..\</_NativeLayerMountRoot>
+    <_NativeLayerMountDllPath>$(_NativeLayerMountRoot)$(LayerMountNativeArch)\$(Configuration)\LayerMount.dll</_NativeLayerMountDllPath>
+  </PropertyGroup>
+
+  <Target Name="RegisterNativeLayerMountDll"
+          BeforeTargets="ResolveAssemblyReferences;GetCopyToOutputDirectoryItems"
+          Condition="Exists('$(_NativeLayerMountDllPath)')">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Include="$(_NativeLayerMountDllPath)">
+        <TargetPath>LayerMount.dll</TargetPath>
+      </ReferenceCopyLocalPaths>
+      <None Include="$(_NativeLayerMountDllPath)">
+        <Link>LayerMount.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Pack>false</Pack>
+        <Visible>false</Visible>
+      </None>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="WarnMissingNativeLayerMountDll"
+          AfterTargets="Build"
+          Condition="!Exists('$(_NativeLayerMountDllPath)')">
+    <Warning Text="LayerMount.dll not found at '$(_NativeLayerMountDllPath)'. Build src/LayerMount.dll/LayerMount.dll.vcxproj first, then rebuild this project to get the native DLL side-by-side."
+             Code="OVL-NET-001" />
+  </Target>
+
+</Project>

@@ -1,0 +1,45 @@
+# Default to LF for text. Per-extension overrides below.
+* text=auto eol=lf
+
+# Windows tooling formats that require CRLF
+*.sln       text eol=crlf
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+*.ps1       text eol=crlf working-tree-encoding=UTF-8
+*.psm1      text eol=crlf working-tree-encoding=UTF-8
+*.psd1      text eol=crlf working-tree-encoding=UTF-8
+
+# MSBuild / project files: LF
+*.csproj    text eol=lf
+*.vcxproj   text eol=lf
+*.vcxproj.filters text eol=lf
+*.props     text eol=lf
+*.targets   text eol=lf
+*.def       text eol=lf
+
+# Config / docs
+*.editorconfig text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+
+# Binary blobs that must not be normalized
+*.dll       binary
+*.lib       binary
+*.exp       binary
+*.pdb       binary
+*.exe       binary
+*.nupkg     binary
+*.snupkg    binary
+*.vhdx      binary
+*.vhd       binary
+*.lmnt      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+
+# Linguist hints — keep vendored deps out of language stats
+vendor/**   linguist-vendored

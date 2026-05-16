@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    LayerMount.Native consumer integration.
+
+    .NET SDK-style projects automatically resolve runtimes/<rid>/native/
+    assets from this package, so you usually do not need this target.
+
+    For legacy / non-SDK projects (and AnyCPU console apps that do not
+    publish with a RID), this target copies the native DLL alongside
+    the output assembly during build, picking the RID from
+    $(PlatformTarget). If $(PlatformTarget) is empty or AnyCPU the
+    copy is skipped. Such projects must publish with -r to get the
+    native DLL.
+  -->
+
+  <Target Name="_CopyLayerMountNative"
+          AfterTargets="ResolveAssemblyReferences"
+          Condition=" '$(OS)' == 'Windows_NT' and '$(PlatformTarget)' != '' and '$(PlatformTarget)' != 'AnyCPU' ">
+
+    <PropertyGroup>
+      <_LayerMountNativeRid>win-$(PlatformTarget.ToLowerInvariant())</_LayerMountNativeRid>
+      <_LayerMountNativeDll>$(MSBuildThisFileDirectory)..\runtimes\$(_LayerMountNativeRid)\native\LayerMount.dll</_LayerMountNativeDll>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(_LayerMountNativeDll)')">
+      <None Include="$(_LayerMountNativeDll)">
+        <Link>LayerMount.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
+        <Pack>false</Pack>
+      </None>
+    </ItemGroup>
+
+  </Target>
+
+</Project>

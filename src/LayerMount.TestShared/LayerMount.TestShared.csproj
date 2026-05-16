@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Shared test-harness helpers consumed by any test project across
+       the engine and the host adapters. Holds framework-agnostic
+       building blocks:
+         * TempLayerEnvironment  - upper/work/lowerN temp tree
+         * HandshakeClient       - parses the FR-42 mount handshake
+         * ControlPipeClient     - talks to the per-instance control pipe
+
+       Deliberately targets net8.0 (not net8.0-windows) so consumers
+       targeting either TFM can reference it. Windows-only APIs
+       (NamedPipeClientStream at runtime) are fine to call from net8.0
+       on Windows; we just don't advertise the Windows target-framework
+       moniker. Consumers remain in charge of their own platform target.
+
+       NO test-framework package reference here. MSTest / xUnit / etc.
+       are the consumer's concern; keeping this library framework-clean
+       means any test project can pick a framework without dragging the
+       others along. -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+
+    <RootNamespace>LayerMount.TestShared</RootNamespace>
+    <AssemblyName>LayerMount.TestShared</AssemblyName>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- TempLayerEnvironment builds an LayerMountConfig, so the managed
+         wrapper must be reachable. Pulled in by ProjectReference rather
+         than PackageReference to match the rest of the solution. -->
+    <ProjectReference Include="..\LayerMount.NET\LayerMount.NET.csproj" />
+  </ItemGroup>
+
+</Project>

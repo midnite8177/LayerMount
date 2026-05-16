@@ -1,0 +1,70 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Xx]64/
+[Xx]86/
+[Aa]rm64/
+Debug/
+Release/
+TestResults/
+artifacts/
+*.binlog
+
+# Do not let *.dll / *.lib / *.exe ignore the source-tree project folders
+# that are named after the final binary (e.g. src/LayerMount.dll/).
+!src/LayerMount.dll/
+!src/LayerMount.dll/**
+
+# ...but the un-ignore above is greedy and would otherwise unhide the
+# per-project build output directories and per-user VS settings. Re-ignore
+# them explicitly.
+src/LayerMount.dll/x64/
+src/LayerMount.dll/arm64/
+src/LayerMount.dll/**/x64/
+src/LayerMount.dll/**/arm64/
+src/LayerMount.dll/**/*.user
+
+# Visual Studio / Rider / IDE caches
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.sln.docstates
+*.ncb
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+ipch/
+
+# Compiler output
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.tlog/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# Local tools (dotnet tool install --tool-path)
+.tools/
+
+# OS metadata
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Generated version header (codegen from public/LayerMountVersion.h.in by
+# LayerMount.version.targets; do not edit by hand)
+src/LayerMount.dll/public/LayerMountVersion.h
+
+# Local Claude Code config
+.claude/

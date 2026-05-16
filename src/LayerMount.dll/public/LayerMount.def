@@ -1,0 +1,92 @@
+; LayerMount.def -- Single source of truth for the DLL's exported symbols.
+;
+; Every entry must match an extern "C" LM_API prototype in
+; public/LayerMount.h. No C++ mangled names, no STL instantiations, no
+; implementation-detail symbols. `dumpbin /exports` verifies the match
+; post-build.
+
+LIBRARY LayerMount
+
+EXPORTS
+    ; Lifecycle / diagnostics-lite
+    LayerMountGetVersion
+    LayerMountGetLastErrorMessage
+    LayerMountCreate
+    LayerMountCreateTransient
+    LayerMountDestroy
+    LayerMountSetEventCallback
+    LayerMountSetHostAttached
+    LayerMountHResultToNtStatus
+    LayerMountPointIsDriveLetter
+    LayerMountPointPrepareDirectory
+    LayerMountPointCaptureIdentity
+    LayerMountPointReleaseIfSafe
+
+    ; Path / volume
+    LayerMountResolvePath
+    LayerMountGetVolumeInfo
+    LayerMountEnsureInUpperLayer
+
+    ; File primitives
+    LayerMountOpenFile
+    LayerMountCreateFile
+    LayerMountCloseFile
+    LayerMountReadFile
+    LayerMountWriteFile
+    LayerMountOverwriteFile
+    LayerMountFlushFile
+    LayerMountGetFileInfo
+    LayerMountSetFileInfo
+    LayerMountDeleteFile
+    LayerMountCanDeleteFile
+    LayerMountCanDeleteOpenFile
+    LayerMountDeleteOpenFile
+    LayerMountRenameFile
+    LayerMountRenameOpenFile
+    LayerMountUpdateOpenFilePath
+    LayerMountGetSecurity
+    LayerMountSetSecurity
+    LayerMountMergeDirectory
+    LayerMountCreateWhiteout
+    LayerMountSetOpaque
+    LayerMountGetReparsePoint
+    LayerMountSetReparsePoint
+    LayerMountDeleteReparsePoint
+
+    ; VHD primitives
+    LayerMountVhdCreate
+    LayerMountVhdOpen
+    LayerMountVhdAttach
+    LayerMountVhdDetach
+    LayerMountVhdMerge
+    LayerMountVhdImport
+    LayerMountVhdExport
+    LayerMountVhdClose
+    LayerMountVhdGetVolumeGuid
+    LayerMountVhdListLayers
+    LayerMountVhdUnregisterLayer
+    LayerMountVhdGetLayerMetadataJson
+
+    ; VSS primitives
+    LayerMountVssCreateSnapshot
+    LayerMountVssDeleteSnapshot
+    LayerMountVssListSnapshots
+    LayerMountVssCleanupSnapshots
+    LayerMountVssCloseSnapshot
+
+    ; Layer image primitives
+    LayerMountImagePack
+    LayerMountImagePackDifferential
+    LayerMountImageCreateManifest
+    LayerMountImageUnpack
+    LayerMountImageValidate
+    LayerMountImageGetManifest
+    LayerMountImageGetMetadata
+    LayerMountImageClose
+
+    ; Diagnostics, eventing, process tracker
+    LayerMountGetStats
+    LayerMountProcessTrackerEnable
+    LayerMountProcessTrackerSetRules
+    LayerMountProcessTrackerExportJson
+    LayerMountProcessTrackerExportCsv

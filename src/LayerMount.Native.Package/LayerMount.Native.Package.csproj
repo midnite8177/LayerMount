@@ -1,0 +1,86 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Native NuGet package for LayerMount.
+
+    Carries LayerMount.dll for win-x64 and win-arm64 under
+    runtimes/<rid>/native/ following the .NET native-asset
+    convention, plus the public C header (LayerMount.h) and the
+    .def file under build/native/ for native C/C++ consumers.
+
+    No managed assembly is produced. NU5128 (no lib/ folder) is
+    silenced because that is intentional for an RID-asset package.
+
+    Build prerequisite: LayerMount.dll must already exist in
+    ../../x64/Release/ and/or ../../arm64/Release/ before packing.
+    `dotnet pack -c Release` is the entry point; NoBuild=true keeps
+    the SDK from invoking ClCompile from this csproj.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <!-- NoBuild is set on the dotnet pack command line ('no-build' flag)
+         in the release workflow rather than here, so a plain solution
+         build can still target this project (it just produces nothing). -->
+    <IsPackable>true</IsPackable>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+    <PackageId>LayerMount.Native</PackageId>
+    <Title>LayerMount native engine (win-x64, win-arm64)</Title>
+    <Description>Native overlay-filesystem engine for Windows. Ships LayerMount.dll for win-x64 and win-arm64 alongside the public C header. The managed wrapper is in the LayerMount package, which takes a dependency on this one.</Description>
+    <Authors>Jeff Slutter</Authors>
+    <Copyright>Copyright (c) 2026 Jeff Slutter</Copyright>
+    <PackageTags>windows overlay filesystem projfs layer union union-mount copy-on-write vhd vhdx vss native layermount</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/midnite8177/LayerMount</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/midnite8177/LayerMount</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Native runtime assets per RID. Conditional Include so a single-arch
+         build still packs the arch it has (e.g. local dev pack on x64-only). -->
+    <None Include="..\..\x64\$(Configuration)\LayerMount.dll"
+          Pack="true"
+          PackagePath="runtimes\win-x64\native\LayerMount.dll"
+          Condition="Exists('..\..\x64\$(Configuration)\LayerMount.dll')" />
+    <None Include="..\..\arm64\$(Configuration)\LayerMount.dll"
+          Pack="true"
+          PackagePath="runtimes\win-arm64\native\LayerMount.dll"
+          Condition="Exists('..\..\arm64\$(Configuration)\LayerMount.dll')" />
+
+    <!-- Consumer-side MSBuild integration: copy the right native DLL next
+         to a non-.NET-SDK consumer's output (the SDK handles runtimes/
+         resolution automatically for SDK-style projects). -->
+    <None Include="build\LayerMount.Native.targets"
+          Pack="true"
+          PackagePath="build\LayerMount.Native.targets" />
+    <None Include="buildTransitive\LayerMount.Native.targets"
+          Pack="true"
+          PackagePath="buildTransitive\LayerMount.Native.targets" />
+
+    <!-- Public C header + .def for native C/C++ consumers. -->
+    <None Include="..\LayerMount.dll\public\LayerMount.h"
+          Pack="true"
+          PackagePath="build\native\include\LayerMount.h" />
+    <None Include="..\LayerMount.dll\public\LayerMount.def"
+          Pack="true"
+          PackagePath="build\native\LayerMount.def" />
+
+    <!-- README + third-party notices. -->
+    <None Include="..\..\README.md"
+          Pack="true"
+          PackagePath="README.md" />
+    <None Include="..\..\THIRD_PARTY_NOTICES.md"
+          Pack="true"
+          PackagePath="THIRD_PARTY_NOTICES.md" />
+  </ItemGroup>
+
+</Project>

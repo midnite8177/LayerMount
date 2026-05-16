@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- Test projects are x64-only. The native MSTest framework
+       (CppUnitTestFramework.lib) is x64; tests cannot execute on a
+       cross-built arm64 binary anyway. The solution skips this project
+       on ARM64 builds. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{4D603A55-1035-4667-9859-AEEC9419AEAB}</ProjectGuid>
+    <RootNamespace>LayerMountTests</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <LayerMount_DisableWX>true</LayerMount_DisableWX>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Pin OutDir/IntDir to repo-level x64\<Config>\ via
+         $(MSBuildThisFileDirectory) so single-project builds
+         (msbuild <file>.vcxproj) and solution builds produce the
+         same artifacts. Without this, $(SolutionDir) is undefined
+         under single-project builds and OutDir falls back to
+         $(ProjectDir)x64\<Config>\ — the solution-level copy goes
+         stale and test fixtures spawn the wrong binary. -->
+    <OutDir>$(MSBuildThisFileDirectory)..\..\x64\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\x64\$(Configuration)\LayerMount.Tests.obj\</IntDir>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\include;$(VendorDir);..\LayerMount.dll\impl;..\LayerMount.dll\impl\vhd;..\LayerMount.dll\impl\vss;..\LayerMount.dll\impl\image;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- LAYERMOUNT_INTERNAL opens the #error guards in impl headers. The
+           unit-test project is a legitimate internal consumer since it
+           links LayerMount-static.lib and tests the engine's C++ classes
+           directly. -->
+      <PreprocessorDefinitions>LAYERMOUNT_INTERNAL=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- Unit tests link the static LayerMount-static.lib flavor (FR-43) so they
+           keep internal-header access to C++ classes (Cache, CopyUp, PathResolver,
+           WhiteoutManager, MetadataADS, etc.). The static lib is a collection of
+           .obj files only, so transitive Win32 deps (virtdisk/vssapi/bcrypt/ole32)
+           must be named here by the consumer. -->
+      <AdditionalDependencies>Microsoft.VisualStudio.TestTools.CppUnitTestFramework.lib;Rpcrt4.lib;virtdisk.lib;vssapi.lib;bcrypt.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="CacheTests.cpp" />
+    <ClCompile Include="CompressionEncryptionTests.cpp" />
+    <ClCompile Include="CopyUpFailureTests.cpp" />
+    <ClCompile Include="CopyUpPreservationTests.cpp" />
+    <ClCompile Include="CopyUpTests.cpp" />
+    <ClCompile Include="CreateOverWhiteoutTests.cpp" />
+    <ClCompile Include="DeleteTests.cpp" />
+    <ClCompile Include="LazyMetacopyFidelityTests.cpp" />
+    <ClCompile Include="MetadataADSTests.cpp" />
+    <ClCompile Include="PathResolverTests.cpp" />
+    <ClCompile Include="PathTraversalTests.cpp" />
+    <ClCompile Include="RenameMoveTests.cpp" />
+    <ClCompile Include="SecurityAdvancedTests.cpp" />
+    <ClCompile Include="TestMain.cpp" />
+    <ClCompile Include="VHDLayerTests.cpp" />
+    <ClCompile Include="VSSSnapshotTests.cpp" />
+    <ClCompile Include="WhiteoutTests.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="TestFixture.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LayerMount.dll\LayerMount-static.vcxproj">
+      <Project>{3B8F9E2C-4D1A-4B7E-90B3-E6C2A4F8D133}</Project>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+</Project>
