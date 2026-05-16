@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
-
   <!--
     Single source of truth for the LayerMount version.
 
@@ -14,23 +13,18 @@
     and only ticks on binary-breaking changes to the public C ABI.
     Bump it by hand in this file when needed.
   -->
-
   <PropertyGroup Label="LayerMountVersion">
     <LayerMountVersionMajor>0</LayerMountVersionMajor>
     <LayerMountVersionMinor>1</LayerMountVersionMinor>
     <LayerMountVersionPatch>0</LayerMountVersionPatch>
     <LayerMountVersionSuffix></LayerMountVersionSuffix>
-
     <LayerMountVersion>$(LayerMountVersionMajor).$(LayerMountVersionMinor).$(LayerMountVersionPatch)</LayerMountVersion>
     <LayerMountVersionFull Condition="'$(LayerMountVersionSuffix)'==''">$(LayerMountVersion)</LayerMountVersionFull>
     <LayerMountVersionFull Condition="'$(LayerMountVersionSuffix)'!=''">$(LayerMountVersion)-$(LayerMountVersionSuffix)</LayerMountVersionFull>
-
     <Version>$(LayerMountVersionFull)</Version>
     <AssemblyVersion>$(LayerMountVersionMajor).0.0.0</AssemblyVersion>
     <FileVersion>$(LayerMountVersion).0</FileVersion>
     <InformationalVersion>$(LayerMountVersionFull)</InformationalVersion>
-
     <LayerMountAbiVersion>1</LayerMountAbiVersion>
   </PropertyGroup>
-
 </Project>

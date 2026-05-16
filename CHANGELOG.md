@@ -10,3 +10,12 @@ from [Conventional Commits](https://www.conventionalcommits.org/); the
 versioned heading at release time.
 
 ## [Unreleased]
+
+
+<a name="0.1.0"></a>
+## [0.1.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.1.0) (2026-05-16)
+
+### Features
+
+* initial commit ([8efa8c8](https://www.github.com/midnite8177/LayerMount/commit/8efa8c8c0129f75617689e5b5168a2ee355ae051))
+
