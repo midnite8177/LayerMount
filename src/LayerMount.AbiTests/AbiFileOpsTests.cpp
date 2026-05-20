@@ -291,6 +291,146 @@ public:
 
         ::LayerMountCloseFile(fhDel);
     }
+
+    // -----------------------------------------------------------------
+    // Stream enumeration (LayerMountEnumerateStreams)
+    // -----------------------------------------------------------------
+
+    TEST_METHOD(EnumerateStreams_FileWithNoAds_ReturnsEmpty) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        LM_FILE_HANDLE fh = nullptr;
+        LM_FILE_INFO   info{};
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCreateFile(mount.Get(), L"\\plain.txt", 0u,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+
+        UINT32 count = 0xDEADBEEF;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnumerateStreams(mount.Get(), L"\\plain.txt",
+                nullptr, 0, &count));
+        Assert::AreEqual<UINT32>(0u, count,
+            L"A file with only ::$DATA should report zero user-visible streams");
+    }
+
+    TEST_METHOD(EnumerateStreams_NonexistentFile_ReturnsNotFound) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        UINT32 count = 0;
+        HRESULT hr = ::LayerMountEnumerateStreams(
+            mount.Get(), L"\\nope.txt", nullptr, 0, &count);
+        Assert::IsTrue(IsFileNotFoundHr(hr),
+            L"Enumerate on a missing file should surface as NOT_FOUND");
+        Assert::AreEqual<UINT32>(0u, count);
+    }
+
+    TEST_METHOD(EnumerateStreams_FileWithAds_ReturnsAdsEntries) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        // Create the host file via the engine.
+        LM_FILE_HANDLE fh = nullptr;
+        LM_FILE_INFO   info{};
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCreateFile(mount.Get(), L"\\host.txt", 0u,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+
+        // Write two ADS via raw Win32 directly to the upper layer.
+        // Stream syntax is `<path>:<streamName>`.
+        const std::wstring upper = env.Upper() + L"\\host.txt";
+        auto writeStream = [](const std::wstring& path, const char* data, DWORD len) {
+            HANDLE h = ::CreateFileW(path.c_str(),
+                GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            Assert::IsTrue(h != INVALID_HANDLE_VALUE, L"open ADS for write");
+            DWORD written = 0;
+            BOOL ok = ::WriteFile(h, data, len, &written, nullptr);
+            ::CloseHandle(h);
+            Assert::IsTrue(ok != FALSE,        L"WriteFile to ADS succeeded");
+            Assert::AreEqual<DWORD>(len, written, L"WriteFile wrote full payload");
+        };
+        writeStream(upper + L":secret",  "hush",   4);
+        writeStream(upper + L":payload", "abcdef", 6);
+
+        // Size probe.
+        UINT32 required = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnumerateStreams(mount.Get(), L"\\host.txt",
+                nullptr, 0, &required));
+        Assert::AreEqual<UINT32>(2u, required,
+            L"two user-visible ADS expected (::$DATA filtered)");
+
+        // Fill.
+        std::vector<LM_STREAM_INFO> buf(required);
+        UINT32 written = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnumerateStreams(mount.Get(), L"\\host.txt",
+                buf.data(), required, &written));
+        Assert::AreEqual<UINT32>(2u, written);
+
+        bool sawSecret = false;
+        bool sawPayload = false;
+        for (UINT32 i = 0; i < written; ++i) {
+            std::wstring name = buf[i].streamName;
+            // FindFirstStreamW returns names in the `:name:$DATA` form.
+            if (name == L":secret:$DATA") {
+                sawSecret = true;
+                Assert::AreEqual<UINT64>(4u, buf[i].streamSize);
+            } else if (name == L":payload:$DATA") {
+                sawPayload = true;
+                Assert::AreEqual<UINT64>(6u, buf[i].streamSize);
+            } else if (::_wcsicmp(name.c_str(), L"::$DATA") == 0) {
+                Assert::Fail(L"main ::$DATA stream must be filtered out");
+            } else if (::_wcsicmp(name.c_str(), L":overlay:$DATA") == 0 ||
+                       ::_wcsicmp(name.c_str(), L":overlay.opaque:$DATA") == 0) {
+                Assert::Fail(L"reserved LayerMount streams must be filtered");
+            }
+        }
+        Assert::IsTrue(sawSecret,  L":secret stream missing from results");
+        Assert::IsTrue(sawPayload, L":payload stream missing from results");
+    }
+
+    TEST_METHOD(EnumerateStreams_BufferTooSmall_ReturnsMoreData) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        LM_FILE_HANDLE fh = nullptr;
+        LM_FILE_INFO   info{};
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCreateFile(mount.Get(), L"\\multi.txt", 0u,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+
+        const std::wstring upper = env.Upper() + L"\\multi.txt";
+        for (const wchar_t* s : { L":a", L":b", L":c" }) {
+            HANDLE h = ::CreateFileW((upper + s).c_str(),
+                GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL, nullptr);
+            Assert::IsTrue(h != INVALID_HANDLE_VALUE, L"open ADS for write");
+            DWORD written = 0;
+            BOOL ok = ::WriteFile(h, "x", 1, &written, nullptr);
+            ::CloseHandle(h);
+            Assert::IsTrue(ok != FALSE,        L"WriteFile to ADS succeeded");
+            Assert::AreEqual<DWORD>(1u, written, L"WriteFile wrote single byte");
+        }
+
+        // Buffer of size 1 against required 3 -> ERROR_MORE_DATA, but
+        // outCount still reports the required size so the caller can
+        // resize and retry.
+        LM_STREAM_INFO oneSlot{};
+        UINT32 count = 0;
+        HRESULT hr = ::LayerMountEnumerateStreams(
+            mount.Get(), L"\\multi.txt", &oneSlot, 1, &count);
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_WIN32(ERROR_MORE_DATA), hr);
+        Assert::AreEqual<UINT32>(3u, count);
+    }
 };
 
 } // namespace LayerMountAbiTests

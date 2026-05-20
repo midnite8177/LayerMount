@@ -62,6 +62,19 @@ internal struct LM_FILE_INFO
     public uint  eaSize;
 }
 
+// Stream-name buffer is sized to fit any NTFS stream name (255 chars) plus
+// the ":$DATA" suffix FindFirstStreamW reports + a NUL terminator. Must
+// mirror LM_STREAM_NAME_MAX in src/LayerMount.dll/public/LayerMount.h.
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct LM_STREAM_INFO
+{
+    internal const int LM_STREAM_NAME_MAX = 296;
+
+    public fixed char streamName[LM_STREAM_NAME_MAX];
+    public ulong      streamSize;
+    public ulong      allocationSize;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct LM_RESOLVED_PATH
 {

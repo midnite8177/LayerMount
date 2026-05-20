@@ -286,6 +286,15 @@ internal static unsafe partial class NativeMethods
         byte*  buffer,
         nuint  bufferBytes);
 
+    [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf16)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial int LayerMountEnumerateStreams(
+        IntPtr           handle,
+        string           relativePath,
+        LM_STREAM_INFO* outBuffer,
+        uint             bufferCapacity,
+        uint*            outCount);
+
     // --------------------------------------------------------------------
     // VHD primitives
     // --------------------------------------------------------------------

@@ -241,6 +241,15 @@ struct InternalFileInfo {
     UINT32 EaSize;
 };
 
+// Single named-data-stream entry as observed against the resolved
+// physical path of a file. Engine-internal; translated to LM_STREAM_INFO
+// at the ABI boundary. Names carry NTFS's native form (e.g. ":mystream:$DATA").
+struct InternalStreamInfo {
+    std::wstring name;
+    UINT64 streamSize;
+    UINT64 allocationSize;
+};
+
 // ---------------------------------------------------------------------------
 // LayerMount class — main overlay filesystem engine
 // ---------------------------------------------------------------------------
@@ -490,6 +499,18 @@ public:
                                 const void* buffer,
                                 SIZE_T bufferBytes,
                                 DWORD callerPid);
+
+    // Enumerate the named data streams of the file at `relativePath`.
+    // Resolves the path through the overlay; reads streams from the
+    // resolved physical layer via ::FindFirstStreamW. Filters the main
+    // unnamed stream (`::$DATA`) — that's the file's own content, not
+    // a separate "stream" in the ADS sense — and LayerMount's reserved
+    // metadata streams (`:overlay:$DATA`, `:overlay.opaque:$DATA`).
+    // Returns STATUS_OBJECT_NAME_NOT_FOUND when the file is absent in
+    // every layer. Returns STATUS_SUCCESS with an empty `out` when the
+    // file exists but carries no user-visible streams.
+    NTSTATUS EnumerateStreams(const std::wstring& relativePath,
+                              std::vector<InternalStreamInfo>& out);
 
     // --- Accessors for callbacks ---
     PathResolver& Resolver() { return *pathResolver_; }

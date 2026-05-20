@@ -52,6 +52,7 @@ EXPORTS
     LayerMountGetReparsePoint
     LayerMountSetReparsePoint
     LayerMountDeleteReparsePoint
+    LayerMountEnumerateStreams
 
     ; VHD primitives
     LayerMountVhdCreate

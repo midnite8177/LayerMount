@@ -592,6 +592,71 @@ LM_API HRESULT LM_CALL LayerMountDeleteReparsePoint(LM_HANDLE  handle,
     LM_ABI_END();
 }
 
+LM_API HRESULT LM_CALL LayerMountEnumerateStreams(LM_HANDLE        handle,
+                                                  PCWSTR           relativePath,
+                                                  LM_STREAM_INFO* outBuffer,
+                                                  UINT32           bufferCapacity,
+                                                  UINT32*          outCount)
+{
+    using namespace ::LayerMount::abi;
+
+    if (handle       == nullptr) return E_HANDLE;
+    if (relativePath == nullptr) return E_INVALIDARG;
+    if (outCount     == nullptr) return E_POINTER;
+
+    LM_ABI_BEGIN();
+
+    const std::uint64_t encoded =
+        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(handle));
+    auto mountHolder = Handles().mount.Resolve(encoded);
+    if (mountHolder == nullptr) {
+        return E_HANDLE;
+    }
+
+    std::vector<::LayerMount::InternalStreamInfo> streams;
+    NTSTATUS status = mountHolder->core->EnumerateStreams(relativePath, streams);
+    if (!NT_SUCCESS(status)) {
+        *outCount = 0;
+        return HresultFromNtStatus(status);
+    }
+
+    const UINT32 required = static_cast<UINT32>(streams.size());
+    *outCount = required;
+
+    // Size-probe call: caller passed null buffer to learn how big to make
+    // their allocation. Hand back the count and return S_OK regardless.
+    if (outBuffer == nullptr) {
+        return S_OK;
+    }
+
+    if (bufferCapacity < required) {
+        return HRESULT_FROM_WIN32(ERROR_MORE_DATA);
+    }
+
+    // Fill the caller's buffer. streamName is a fixed-size LM_STREAM_NAME_MAX
+    // wchar buffer; any remaining entry is bounded by NTFS's 255-char
+    // stream-name limit (well under LM_STREAM_NAME_MAX - 1).
+    for (UINT32 i = 0; i < required; ++i) {
+        LM_STREAM_INFO& dst = outBuffer[i];
+        const ::LayerMount::InternalStreamInfo& src = streams[i];
+
+        std::memset(dst.streamName, 0, sizeof(dst.streamName));
+        const size_t capacity   = LM_STREAM_NAME_MAX - 1;
+        const size_t copyChars  = src.name.size() < capacity
+                                      ? src.name.size()
+                                      : capacity;
+        std::memcpy(dst.streamName, src.name.data(),
+                    copyChars * sizeof(WCHAR));
+        dst.streamName[copyChars] = L'\0';
+        dst.streamSize      = src.streamSize;
+        dst.allocationSize  = src.allocationSize;
+    }
+
+    return S_OK;
+
+    LM_ABI_END();
+}
+
 LM_API HRESULT LM_CALL LayerMountMergeDirectory(LM_HANDLE             handle,
                                                PCWSTR                 dirRelativePath,
                                                LM_DIR_ENUM_CALLBACK  callback,

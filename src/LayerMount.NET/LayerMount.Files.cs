@@ -238,6 +238,88 @@ public sealed partial class LayerMount
         }
     }
 
+    /// <summary>
+    /// Returns the named data streams attached to the file or directory
+    /// at <paramref name="relativePath"/>. The main unnamed stream
+    /// (<c>::$DATA</c>) and LayerMount's reserved metadata streams are
+    /// filtered out — callers see only user-visible ADS in NTFS's
+    /// native <c>:name:$DATA</c> form.
+    /// </summary>
+    /// <returns>
+    /// An empty array if the path exists but carries no user-visible
+    /// streams.
+    /// </returns>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT
+    /// (most commonly file-not-found). Concurrent stream additions
+    /// between the size probe and the fill call are retried up to
+    /// <see cref="MaxStreamRetries"/> times before surfacing
+    /// <c>ERROR_MORE_DATA</c>.
+    /// </exception>
+    public unsafe StreamInfo[] EnumerateStreams(string relativePath)
+    {
+        ArgumentNullException.ThrowIfNull(relativePath);
+        using var lease = new SafeHandleLease(_handle);
+
+        // Probe-then-fill against a possibly-changing stream set. A new
+        // stream added between the probe and the fill makes the native
+        // side return ERROR_MORE_DATA -- treat that as transient and
+        // re-probe instead of throwing. Bounded so pathological churn
+        // surfaces as a real failure rather than spinning forever.
+        for (int attempt = 0; attempt < MaxStreamRetries; attempt++)
+        {
+            uint required = 0;
+            int hrProbe = NativeMethods.LayerMountEnumerateStreams(
+                lease.Handle, relativePath, null, 0, &required);
+            HResultGuard.ThrowIfFailed(hrProbe, nameof(NativeMethods.LayerMountEnumerateStreams));
+
+            if (required == 0)
+            {
+                return [];
+            }
+
+            LM_STREAM_INFO[] buffer = new LM_STREAM_INFO[required];
+            uint written = 0;
+            int hrFill;
+            fixed (LM_STREAM_INFO* p = buffer)
+            {
+                hrFill = NativeMethods.LayerMountEnumerateStreams(
+                    lease.Handle, relativePath, p, required, &written);
+            }
+
+            if (hrFill == HRESULT_E_MORE_DATA && attempt < MaxStreamRetries - 1)
+            {
+                // A stream was added between probe and fill. Re-probe.
+                continue;
+            }
+            HResultGuard.ThrowIfFailed(hrFill, nameof(NativeMethods.LayerMountEnumerateStreams));
+
+            StreamInfo[] result = new StreamInfo[written];
+            for (uint i = 0; i < written; i++)
+            {
+                fixed (char* namePtr = buffer[i].streamName)
+                {
+                    string name = new(namePtr);
+                    result[i] = new StreamInfo(
+                        name,
+                        buffer[i].streamSize,
+                        buffer[i].allocationSize);
+                }
+            }
+            return result;
+        }
+
+        // Exhausted retries: streams keep being added faster than we can
+        // probe + allocate. Surface as a real ERROR_MORE_DATA.
+        HResultGuard.ThrowIfFailed(HRESULT_E_MORE_DATA, nameof(NativeMethods.LayerMountEnumerateStreams));
+        return [];
+    }
+
+    // Match BufferHelpers.MaxFillRetries and HRESULT_E_MORE_DATA so the
+    // race-handling shape is uniform across the wrapper.
+    private const int MaxStreamRetries = 5;
+    private const int HRESULT_E_MORE_DATA = unchecked((int)0x800700EA);
+
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static unsafe int MergeDirectoryTrampoline(
         char* name, LM_FILE_INFO* info, void* userContext)

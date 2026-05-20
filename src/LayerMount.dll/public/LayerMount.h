@@ -244,6 +244,30 @@ typedef struct LM_FILE_INFO {
 } LM_FILE_INFO;
 
 /* -------------------------------------------------------------------------
+ * LM_STREAM_INFO
+ *
+ * Single named-data-stream entry returned from LayerMountEnumerateStreams.
+ * Stream names carry NTFS's native form (e.g. ":mystream:$DATA"). The
+ * main unnamed stream (`::$DATA`) and LayerMount's reserved metadata
+ * streams (`:overlay:$DATA`, `:overlay.opaque:$DATA`) are filtered out
+ * before this struct is populated, so callers never see them.
+ *
+ * `streamName` is a fixed-size buffer sized to fit any NTFS stream name
+ * (NTFS caps stream names at 255 WCHARs, plus the `:$DATA` suffix and a
+ * NUL terminator). The buffer is always NUL-terminated.
+ *
+ * LM_STREAM_NAME_MAX is mirrored on the managed side
+ * (LayerMount.NET/Interop/NativeStructs.cs); the two must stay in sync.
+ * ------------------------------------------------------------------------- */
+#define LM_STREAM_NAME_MAX 296
+
+typedef struct LM_STREAM_INFO {
+    WCHAR  streamName[LM_STREAM_NAME_MAX];  /* 295 chars + NUL — fits any NTFS stream name */
+    UINT64 streamSize;                      /* logical end-of-file in bytes */
+    UINT64 allocationSize;                  /* on-disk allocation in bytes */
+} LM_STREAM_INFO;
+
+/* -------------------------------------------------------------------------
  * LM_RESOLVED_PATH
  *
  * Output of LayerMountResolvePath. Uses the two-call buffer pattern for
@@ -797,6 +821,31 @@ LM_API HRESULT LM_CALL LayerMountDeleteReparsePoint(
     PCWSTR      relativePath,
     const BYTE* buffer,
     SIZE_T      bufferBytes);
+
+/*
+ * Enumerates the named data streams of the file or directory at
+ * `relativePath`. NTFS permits alternate data streams on directories
+ * too, and this call handles both transparently. The main unnamed
+ * stream (`::$DATA`) and LayerMount's reserved metadata streams are
+ * filtered out — callers see only user-visible named streams.
+ *
+ * Size-probe pattern:
+ *   outBuffer == NULL: *outCount is filled with the required count, S_OK.
+ *   outBuffer != NULL && bufferCapacity < required: *outCount is filled
+ *     with the required count, HRESULT_FROM_WIN32(ERROR_MORE_DATA).
+ *   otherwise: outBuffer is filled with up to bufferCapacity entries,
+ *     *outCount with the actual number written, S_OK.
+ *
+ * Returns HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND) when the path
+ * does not exist in any layer. Returns S_OK with *outCount == 0 when
+ * the path exists but carries no user-visible streams.
+ */
+LM_API HRESULT LM_CALL LayerMountEnumerateStreams(
+    LM_HANDLE        handle,
+    PCWSTR           relativePath,
+    LM_STREAM_INFO* outBuffer,
+    UINT32           bufferCapacity,
+    UINT32*          outCount);
 
 /* ---- VHD primitives ---- */
 

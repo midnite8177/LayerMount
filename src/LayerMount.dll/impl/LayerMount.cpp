@@ -2366,4 +2366,85 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
     return STATUS_SUCCESS;
 }
 
+namespace {
+// Stream names FindFirstStreamW returns are NTFS-native forms such as
+// "::$DATA" (the main unnamed stream — file content), ":foo:$DATA" (a
+// user-defined ADS named "foo"), and ":overlay:$DATA" /
+// ":overlay.opaque:$DATA" (LayerMount's reserved metadata streams).
+// EnumerateStreams hides these from callers so the result list is the
+// user-facing surface: named data streams only, no implementation
+// detail and no main-content alias.
+//
+// The reserved-name comparison strings are derived from the same
+// kLayerMountADSStream / kOpaqueADSStream constants the metadata
+// writers use (see MetadataADS.cpp). Adding a new internal stream by
+// extending those constants automatically extends this filter.
+bool IsReservedStreamName(const wchar_t* name) noexcept {
+    if (name == nullptr) return false;
+    static const std::wstring kMainData      = L"::$DATA";
+    static const std::wstring kOverlayData   =
+        std::wstring(kLayerMountADSStream) + L":$DATA";
+    static const std::wstring kOpaqueData    =
+        std::wstring(kOpaqueADSStream)     + L":$DATA";
+    return ::_wcsicmp(name, kMainData.c_str())    == 0
+        || ::_wcsicmp(name, kOverlayData.c_str()) == 0
+        || ::_wcsicmp(name, kOpaqueData.c_str())  == 0;
+}
+} // namespace
+
+NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
+                                      std::vector<InternalStreamInfo>& out) {
+    out.clear();
+
+    std::wstring normalized = NormalizePath(relativePath);
+    ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
+    if (!resolved.Found()) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    WIN32_FIND_STREAM_DATA findData{};
+    HANDLE h = ::FindFirstStreamW(
+        resolved.absolutePath.c_str(),
+        FindStreamInfoStandard,
+        &findData,
+        0);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD err = ::GetLastError();
+        // ERROR_HANDLE_EOF means the file has no streams at all (rare —
+        // every NTFS file has at least ::$DATA, but the API documents
+        // this as a valid empty-result code).
+        if (err == ERROR_HANDLE_EOF) {
+            return STATUS_SUCCESS;
+        }
+        return NtStatusFromWin32(err);
+    }
+
+    // info.name assignment and out.push_back below can throw std::bad_alloc;
+    // the unique_ptr guarantees FindClose runs on exception unwind.
+    std::unique_ptr<void, decltype(&::FindClose)> findGuard(h, &::FindClose);
+
+    do {
+        if (IsReservedStreamName(findData.cStreamName)) {
+            continue;
+        }
+        InternalStreamInfo info;
+        info.name = findData.cStreamName;
+        info.streamSize = static_cast<UINT64>(findData.StreamSize.QuadPart);
+        // WIN32_FIND_STREAM_DATA exposes only the logical size; the
+        // physical on-disk allocation is not reported by this query
+        // form. Treat the two as identical at this layer — callers that
+        // need precise allocation accounting should open the stream and
+        // query via NtQueryInformationFile(FILE_STANDARD_INFORMATION).
+        info.allocationSize = info.streamSize;
+        out.push_back(std::move(info));
+    } while (::FindNextStreamW(h, &findData));
+
+    DWORD lastErr = ::GetLastError();
+    if (lastErr != ERROR_HANDLE_EOF && lastErr != ERROR_SUCCESS) {
+        // FindNextStreamW failed mid-iteration with a real error.
+        return NtStatusFromWin32(lastErr);
+    }
+    return STATUS_SUCCESS;
+}
+
 } // namespace LayerMount
