@@ -1614,15 +1614,20 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
     // Mirror the SetInfo robustness: the kernel routes IRP_MJ_SET_INFORMATION
     // through whichever handle exists, so an Overwrite arriving via a handle
     // that lacks FILE_WRITE_DATA fails the direct SetFileInformationByHandle
-    // call with ERROR_ACCESS_DENIED. On that one error, open a transient
-    // FILE_WRITE_DATA handle to the upper-layer file and retry.
+    // call with ERROR_ACCESS_DENIED. Additionally, CopyUp's internal handles
+    // (workdir commit, metadata-ADS write, basic-info reapply) can leave the
+    // kernel briefly tracking the upper-layer file object after RAII close,
+    // and a FileEndOfFileInfo set landing in that window sees
+    // ERROR_SHARING_VIOLATION even though ctx->handle has full share modes.
+    // Retry through a fresh transient FILE_WRITE_DATA handle in either case.
     auto setSizeInfoRobust = [&](FILE_INFO_BY_HANDLE_CLASS cls,
                                  LPVOID buf, DWORD bufSize) -> NTSTATUS {
         if (::SetFileInformationByHandle(ctx->handle, cls, buf, bufSize)) {
             return STATUS_SUCCESS;
         }
         DWORD firstErr = ::GetLastError();
-        if (firstErr != ERROR_ACCESS_DENIED) {
+        if (firstErr != ERROR_ACCESS_DENIED &&
+            firstErr != ERROR_SHARING_VIOLATION) {
             return NtStatusFromWin32(firstErr);
         }
         ScopedHandle transient = OpenTransientWritableHandle(
@@ -2704,7 +2709,13 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
 
     // Sizes need a handle with write-data semantics. As with timestamps
     // above, fall back to a transient FILE_WRITE_DATA / FILE_WRITE_ATTRIBUTES
-    // handle if ctx->handle was opened with insufficient access.
+    // handle if ctx->handle was opened with insufficient access
+    // (ERROR_ACCESS_DENIED). Also retry on ERROR_SHARING_VIOLATION: CopyUp's
+    // internal handles (workdir commit, metadata-ADS write, basic-info
+    // reapply) can leave the kernel briefly tracking the upper-layer file
+    // object after RAII close, and a FileEndOfFileInfo set landing in that
+    // window sees a sharing conflict even though ctx->handle has full share
+    // modes.
     auto setInfoByHandleRobust = [&](FILE_INFO_BY_HANDLE_CLASS cls,
                                      LPVOID buf, DWORD bufSize,
                                      DWORD transientAccess) -> NTSTATUS {
@@ -2712,7 +2723,8 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
             return STATUS_SUCCESS;
         }
         DWORD firstErr = ::GetLastError();
-        if (firstErr != ERROR_ACCESS_DENIED) {
+        if (firstErr != ERROR_ACCESS_DENIED &&
+            firstErr != ERROR_SHARING_VIOLATION) {
             return NtStatusFromWin32(firstErr);
         }
         ScopedHandle transient = OpenTransientWritableHandle(
