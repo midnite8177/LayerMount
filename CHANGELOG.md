@@ -12,6 +12,19 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="0.2.0"></a>
+## [0.2.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.2.0) (2026-05-22)
+
+### Features
+
+* Add LayerMountEnumerateStreams: list named data streams of a file ([6e39d41](https://www.github.com/midnite8177/LayerMount/commit/6e39d41475d8840be5dc24c780ae644c823ee3e3))
+* write-path ADS support (Create/Open/Overwrite/Delete) ([4edf0d8](https://www.github.com/midnite8177/LayerMount/commit/4edf0d877c3959b5c38194b677c4e1ce52bab29e))
+
+### Bug Fixes
+
+* defensive: transient-handle fallback in Overwrite; broaden SetInfo retry trigger ([f272c77](https://www.github.com/midnite8177/LayerMount/commit/f272c7773655819cb631f505b69ed4ae64270064))
+* SetInfo / Overwrite robustness against NT handle-routing quirks ([f9d5207](https://www.github.com/midnite8177/LayerMount/commit/f9d52079884c11b681e99ad0bbbdecd432ceef0a))
+
 <a name="0.1.2"></a>
 ## [0.1.2](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.1.2) (2026-05-16)
 
