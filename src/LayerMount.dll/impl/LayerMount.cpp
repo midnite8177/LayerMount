@@ -202,6 +202,98 @@ bool IsSafeRelativePath(const std::wstring& normalized) {
 }
 
 // ---------------------------------------------------------------------------
+// IsReservedStreamName / TryParseStreamPath
+// ---------------------------------------------------------------------------
+//
+// Stream-aware parsing for the subset of write-side entry points that
+// legitimately accept Alternate Data Streams (Create, Open, Delete,
+// UpdateContextPath). The rest of the engine still calls `IsSafeRelativePath`
+// directly and rejects any `:` in the input.
+
+bool IsReservedStreamName(const std::wstring& streamName) noexcept {
+    return ::_wcsicmp(streamName.c_str(), L"overlay") == 0
+        || ::_wcsicmp(streamName.c_str(), L"overlay.opaque") == 0;
+}
+
+bool TryParseStreamPath(const std::wstring& normalized,
+                        std::wstring& outHostNorm,
+                        std::wstring& outStreamSuffix) {
+    outHostNorm.clear();
+    outStreamSuffix.clear();
+
+    if (normalized.empty()) {
+        return false;
+    }
+
+    const size_t firstColon = normalized.find(L':');
+    if (firstColon == std::wstring::npos) {
+        // No stream qualifier. Host-only validation.
+        if (!IsSafeRelativePath(normalized)) {
+            return false;
+        }
+        outHostNorm = normalized;
+        return true;
+    }
+
+    // Host is everything before the first colon. Must be a valid relative
+    // path on its own (catches empty host like `:rogue`, drive-qualified
+    // forms by way of the empty-host check, and `..` traversal).
+    std::wstring host = normalized.substr(0, firstColon);
+    if (!IsSafeRelativePath(host)) {
+        return false;
+    }
+
+    // Stream name spans from the character after the first colon up to the
+    // next colon (the optional `$TYPE` separator) or end-of-string.
+    const size_t streamStart = firstColon + 1;
+    const size_t secondColon = normalized.find(L':', streamStart);
+    const size_t streamEnd =
+        (secondColon == std::wstring::npos) ? normalized.size() : secondColon;
+    const std::wstring streamName =
+        normalized.substr(streamStart, streamEnd - streamStart);
+
+    if (streamName.empty()) {
+        return false;  // `host:` with nothing after the colon.
+    }
+    // Stream names cannot embed path separators; that would be a smuggled
+    // relative path inside the stream suffix.
+    if (streamName.find(L'\\') != std::wstring::npos) {
+        return false;
+    }
+    if (IsReservedStreamName(streamName)) {
+        return false;
+    }
+
+    std::wstring streamType;
+    if (secondColon != std::wstring::npos) {
+        // Type suffix is everything after the second colon. NTFS spells it
+        // with a leading dollar sign (e.g. `$DATA`). Reject empty, additional
+        // colons, and any type other than `$DATA`.
+        streamType = normalized.substr(secondColon + 1);
+        if (streamType.empty()) {
+            return false;  // `host:stream:` -- empty type.
+        }
+        if (streamType.find(L':') != std::wstring::npos) {
+            return false;  // Third colon anywhere -- `host:stream:$DATA:extra`.
+        }
+        if (::_wcsicmp(streamType.c_str(), L"$DATA") != 0) {
+            return false;  // Other NTFS types are off-limits at this surface.
+        }
+    }
+
+    outHostNorm = std::move(host);
+    outStreamSuffix.reserve(1 + streamName.size() +
+                            (streamType.empty() ? 0 : 1 + streamType.size()));
+    outStreamSuffix.push_back(L':');
+    outStreamSuffix.append(streamName);
+    if (!streamType.empty()) {
+        outStreamSuffix.push_back(L':');
+        outStreamSuffix.append(streamType);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // IsReservedRelativePath
 // ---------------------------------------------------------------------------
 //
@@ -366,9 +458,13 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
     // Already in upper layer — nothing to do
     std::wstring normalized = NormalizePath(relativePath);
     if (pathResolver_->ExistsInUpper(normalized)) {
-        // Update context to point to upper path if it wasn't already
-        if (ctx->actualPath != pathResolver_->GetUpperPath(normalized)) {
-            ctx->actualPath = pathResolver_->GetUpperPath(normalized);
+        // Update context to point to upper path if it wasn't already.
+        // Append the stream suffix so a stream context whose handle is
+        // about to be reopened lands on the stream, not the main file.
+        const std::wstring upperHostPath = pathResolver_->GetUpperPath(normalized);
+        const std::wstring upperFullPath = upperHostPath + ctx->streamSuffix;
+        if (ctx->actualPath != upperFullPath) {
+            ctx->actualPath = upperFullPath;
             ctx->writable = true;
             NTSTATUS reopenStatus = ReopenContextHandle(ctx);
             if (!NT_SUCCESS(reopenStatus)) {
@@ -390,7 +486,7 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
         return status;
     }
 
-    ctx->actualPath = pathResolver_->GetUpperPath(normalized);
+    ctx->actualPath = pathResolver_->GetUpperPath(normalized) + ctx->streamSuffix;
     ctx->writable = true;
     NTSTATUS reopenStatus = ReopenContextHandle(ctx);
     if (!NT_SUCCESS(reopenStatus)) {
@@ -790,10 +886,23 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
 
     std::wstring normalized = NormalizePath(relativePath);
 
+    // Stream-aware validation. The empty-path root-open below is the one
+    // legitimate case where `normalized` is empty -- handle that first, then
+    // parse for everything else.
+    std::wstring hostNorm;
+    std::wstring streamSuffix;
+    if (!normalized.empty()) {
+        if (!TryParseStreamPath(normalized, hostNorm, streamSuffix)) {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+    }
+
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
         OperationType openOp = HasWriteAccess(grantedAccess)
             ? OperationType::Write : OperationType::Open;
-        if (!tracker->CheckAccess(callerPid, normalized, openOp)) {
+        // Tracker is host-keyed: stream operations inherit the host's
+        // access decision.
+        if (!tracker->CheckAccess(callerPid, hostNorm, openOp)) {
             return STATUS_ACCESS_DENIED;
         }
     }
@@ -829,13 +938,23 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         return STATUS_SUCCESS;
     }
 
-    ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
+    ResolvedPath resolved = pathResolver_->ResolvePath(hostNorm);
     if (!resolved.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    ctx->relativePath = normalized;
-    ctx->isDirectory = (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    const bool hostIsDirectory =
+        (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (!streamSuffix.empty() && hostIsDirectory) {
+        // Directory + stream qualifier is rejected at the open surface
+        // mirroring Create's stance: streams on directories are out of
+        // scope for this overlay.
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
+
+    ctx->relativePath = hostNorm;
+    ctx->streamSuffix = streamSuffix;
+    ctx->isDirectory = hostIsDirectory;
     ctx->ownerPid = callerPid;
     ctx->grantedAccess = grantedAccess;
     ctx->createOptions = createOptions;
@@ -844,7 +963,14 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     if (resolved.source == LayerSource::Lower && HasWriteAccess(grantedAccess)) {
         NTSTATUS status;
         if (ctx->isDirectory) {
-            status = copyUp_->CopyUpDirectory(normalized);
+            status = copyUp_->CopyUpDirectory(hostNorm);
+        } else if (!streamSuffix.empty()) {
+            // Stream opens against a lower-only host MUST force a full
+            // data + ADS copy-up. The metacopy optimization defers data
+            // replication until a main-stream read/write triggers
+            // CompleteLazyCopyUp, which a stream-only handle may never
+            // touch -- existing lower-layer ADS would be silently dropped.
+            status = copyUp_->CopyUpFile(hostNorm);
         } else {
             // Large-file optimization: stage a metacopy shell (sparse file +
             // :overlay metadata) and defer full data copy until the first
@@ -868,25 +994,52 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
             // copy when sparse is unavailable.
             if (srcSize.QuadPart > kMetacopyThresholdBytes &&
                 capabilities_.HasSparseFiles()) {
-                status = copyUp_->CopyUpMetadataOnly(normalized);
+                status = copyUp_->CopyUpMetadataOnly(hostNorm);
                 if (NT_SUCCESS(status)) {
                     ctx->isMetacopyOnly = true;
                 }
             } else {
-                status = copyUp_->CopyUpFile(normalized);
+                status = copyUp_->CopyUpFile(hostNorm);
             }
         }
         if (!NT_SUCCESS(status)) {
             return status;
         }
-        ctx->actualPath = pathResolver_->GetUpperPath(normalized);
+        ctx->actualPath = pathResolver_->GetUpperPath(hostNorm) + streamSuffix;
+        ctx->writable = true;
+    } else if (resolved.source == LayerSource::Upper &&
+               HasWriteAccess(grantedAccess) &&
+               !streamSuffix.empty()) {
+        // Writable stream Open against an upper host that's still a
+        // metacopy shell: finalize the metacopy now so a later main-stream
+        // read/write doesn't trigger CompleteLazyCopyUp and clobber the
+        // stream we're about to open (lower's ADS would be copied onto
+        // upper, overwriting any same-named stream). The lower-only Open
+        // arm above already handles the no-upper-yet case via CopyUpFile.
+        const std::wstring upperHostPath = pathResolver_->GetUpperPath(hostNorm);
+        const LayerMountMetadata metadata =
+            MetadataADS::ReadLayerMountMetadata(upperHostPath, &config_);
+        if (metadata.metacopy) {
+            NTSTATUS cpStatus = copyUp_->CompleteLazyCopyUp(hostNorm);
+            if (!NT_SUCCESS(cpStatus)) {
+                return cpStatus;
+            }
+        }
+        ctx->actualPath = upperHostPath + streamSuffix;
         ctx->writable = true;
     } else {
-        ctx->actualPath = resolved.absolutePath;
+        // Read-only opens (and writable opens on a host that already lives
+        // in upper) target the resolved layer's physical path directly;
+        // for streams we append the suffix so the kernel sees
+        // `<layer>\host:stream`.
+        ctx->actualPath = resolved.absolutePath + streamSuffix;
         ctx->writable = (resolved.source == LayerSource::Upper);
     }
 
-    if (resolved.source == LayerSource::Upper) {
+    if (resolved.source == LayerSource::Upper && streamSuffix.empty()) {
+        // Metacopy bookkeeping reads sidecar metadata off the *host* file;
+        // skip it for stream handles -- they don't drive lazy completion
+        // and the host's metacopy flag already governs main-stream reads.
         LayerMountMetadata metadata =
             MetadataADS::ReadLayerMountMetadata(ctx->actualPath, &config_);
         ctx->isMetacopyOnly = metadata.metacopy;
@@ -931,39 +1084,64 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
 
     std::wstring normalized = NormalizePath(relativePath);
 
-    // Reject traversal / drive-qualified / empty paths before any upper-path
-    // construction. Without this, `..\escape.txt` becomes `upper\..\escape.txt`
-    // and Windows canonicalizes the write target outside the overlay root.
-    if (!IsSafeRelativePath(normalized)) {
+    // Stream-aware validation. Reject traversal / drive-qualified / empty
+    // paths and reserved stream names before any upper-path construction.
+    // Without this, `..\escape.txt` becomes `upper\..\escape.txt` and
+    // Windows canonicalizes the write target outside the overlay root.
+    std::wstring hostNorm;
+    std::wstring streamSuffix;
+    if (!TryParseStreamPath(normalized, hostNorm, streamSuffix)) {
         return STATUS_OBJECT_NAME_INVALID;
     }
 
     // Reject writes into the reserved sidecar subtree. Callers must never be
     // able to create or materialize files inside `<upper>\.overlay\`.
-    if (IsReservedRelativePath(normalized)) {
+    if (IsReservedRelativePath(hostNorm)) {
         return STATUS_ACCESS_DENIED;
     }
 
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
-        if (!tracker->CheckAccess(callerPid, normalized, OperationType::Create)) {
+        if (!tracker->CheckAccess(callerPid, hostNorm, OperationType::Create)) {
             return STATUS_ACCESS_DENIED;
         }
     }
 
     const bool isDirectory = (createOptions & FILE_DIRECTORY_FILE) != 0;
+    if (isDirectory && !streamSuffix.empty()) {
+        // Directory + stream qualifier is nonsensical in our model. NTFS
+        // technically permits ADS on directories; we explicitly do not.
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
 
     // Defer whiteout removal until the create commits — an early remove
     // leaves a resurrection window where a failed Create*W surfaces the
-    // lower entry to a caller who saw an error.
+    // lower entry to a caller who saw an error. Whiteouts are host-keyed.
     const bool hadWhiteout =
-        whiteoutMgr_->HasWhiteout(normalized, config_.upperPath);
+        whiteoutMgr_->HasWhiteout(hostNorm, config_.upperPath);
 
-    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(normalized);
+    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(hostNorm);
     const bool existsInLower = lowerResolved.Found();
     const bool lowerIsDir = existsInLower &&
         (lowerResolved.attributes & FILE_ATTRIBUTE_DIRECTORY);
 
-    std::wstring upperPath = pathResolver_->GetUpperPath(normalized);
+    std::wstring upperPath = pathResolver_->GetUpperPath(hostNorm);
+
+    if (!streamSuffix.empty()) {
+        // ADS-on-directory is rejected: NTFS technically allows it but our
+        // overlay does not. Catches both pre-existing upper-layer directories
+        // and lower-layer-only directories. The caller-supplied
+        // FILE_DIRECTORY_FILE flag is already covered by the earlier
+        // `isDirectory && !streamSuffix.empty()` reject; this catches the
+        // case where the host *is* a directory but the caller did not pass
+        // the flag.
+        const DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
+        const bool upperIsDir =
+            (upperAttrs != INVALID_FILE_ATTRIBUTES) &&
+            (upperAttrs & FILE_ATTRIBUTE_DIRECTORY);
+        if (upperIsDir || lowerIsDir) {
+            return STATUS_FILE_IS_A_DIRECTORY;
+        }
+    }
 
     std::filesystem::path parentDir = std::filesystem::path(upperPath).parent_path();
     if (!parentDir.empty()) {
@@ -971,8 +1149,9 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
     }
 
     auto ctx = std::make_unique<FileContext>();
-    ctx->relativePath = normalized;
-    ctx->actualPath = upperPath;
+    ctx->relativePath = hostNorm;
+    ctx->streamSuffix = streamSuffix;
+    ctx->actualPath = upperPath + streamSuffix;
     ctx->isDirectory = isDirectory;
     ctx->writable = true;
     ctx->ownerPid = callerPid;
@@ -1051,7 +1230,47 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
             fileAttributes = FILE_ATTRIBUTE_NORMAL;
         }
 
-        ctx->handle = ::CreateFileW(upperPath.c_str(),
+        // Stream creates against a host whose upper-layer copy doesn't yet
+        // hold the lower-layer data must finalize copy-up before the new
+        // stream attaches -- otherwise a later main-stream read/write
+        // triggers CompleteLazyCopyUp, which carries lower ADS onto upper
+        // and silently clobbers the just-created stream if its name
+        // collides with a lower stream (and re-attaches lower's other
+        // streams the user may not expect either).
+        //
+        // Two shapes need handling: a) host lives only in lower (no upper
+        // copy yet) -- full CopyUpFile; b) upper already holds a metacopy
+        // shell (sparse skeleton + :overlay metadata) -- CompleteLazyCopyUp
+        // promotes the shell into a full file (data + lower ADS) before we
+        // attach. After completion the lower ADS sit on upper; a colliding
+        // user stream name surfaces as STATUS_OBJECT_NAME_COLLISION from
+        // the CREATE_NEW below, which is the right answer.
+        if (!streamSuffix.empty()) {
+            if (existsInLower && !lowerIsDir &&
+                !pathResolver_->ExistsInUpper(hostNorm)) {
+                NTSTATUS cpStatus = copyUp_->CopyUpFile(hostNorm);
+                if (!NT_SUCCESS(cpStatus)) {
+                    return cpStatus;
+                }
+                upperPath = pathResolver_->GetUpperPath(hostNorm);
+                ctx->actualPath = upperPath + streamSuffix;
+            } else if (pathResolver_->ExistsInUpper(hostNorm)) {
+                const std::wstring upperHostPath =
+                    pathResolver_->GetUpperPath(hostNorm);
+                const LayerMountMetadata metadata =
+                    MetadataADS::ReadLayerMountMetadata(upperHostPath, &config_);
+                if (metadata.metacopy) {
+                    NTSTATUS cpStatus = copyUp_->CompleteLazyCopyUp(hostNorm);
+                    if (!NT_SUCCESS(cpStatus)) {
+                        return cpStatus;
+                    }
+                }
+                upperPath = upperHostPath;
+                ctx->actualPath = upperPath + streamSuffix;
+            }
+        }
+
+        ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
             grantedAccess,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, CREATE_NEW, fileAttributes, nullptr);
@@ -1060,46 +1279,51 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
             return NtStatusFromWin32(::GetLastError());
         }
 
-        // Same reasoning as the directory branch: use SetKernelObjectSecurity
-        // on a backup-semantics handle so SE_RESTORE_NAME lets us write the
-        // caller's SD onto a file that inherits a restrictive DACL from its
-        // parent (e.g. PROTECTED Everyone-only, no WRITE_DAC).
-        if (securityDescriptor) {
-            HANDLE sh = ::CreateFileW(upperPath.c_str(),
-                READ_CONTROL | WRITE_DAC | WRITE_OWNER,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-            if (sh == INVALID_HANDLE_VALUE) {
-                DWORD err = ::GetLastError();
-                ::CloseHandle(ctx->handle);
-                ctx->handle = INVALID_HANDLE_VALUE;
-                ::DeleteFileW(upperPath.c_str());
-                return NtStatusFromWin32(err);
+        // SD and allocationSize apply to the host file, not to an ADS.
+        // Streams inherit the host's security descriptor and have their
+        // own logical size; skip both branches when attaching a stream.
+        if (streamSuffix.empty()) {
+            // Same reasoning as the directory branch: use SetKernelObjectSecurity
+            // on a backup-semantics handle so SE_RESTORE_NAME lets us write the
+            // caller's SD onto a file that inherits a restrictive DACL from its
+            // parent (e.g. PROTECTED Everyone-only, no WRITE_DAC).
+            if (securityDescriptor) {
+                HANDLE sh = ::CreateFileW(upperPath.c_str(),
+                    READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+                if (sh == INVALID_HANDLE_VALUE) {
+                    DWORD err = ::GetLastError();
+                    ::CloseHandle(ctx->handle);
+                    ctx->handle = INVALID_HANDLE_VALUE;
+                    ::DeleteFileW(upperPath.c_str());
+                    return NtStatusFromWin32(err);
+                }
+                SECURITY_INFORMATION sinfo = OWNER_SECURITY_INFORMATION |
+                                             GROUP_SECURITY_INFORMATION |
+                                             DACL_SECURITY_INFORMATION;
+                BOOL sdOk = ::SetKernelObjectSecurity(sh, sinfo, securityDescriptor);
+                DWORD sdErr = sdOk ? 0 : ::GetLastError();
+                ::CloseHandle(sh);
+                if (!sdOk) {
+                    ::CloseHandle(ctx->handle);
+                    ctx->handle = INVALID_HANDLE_VALUE;
+                    ::DeleteFileW(upperPath.c_str());
+                    return NtStatusFromWin32(sdErr);
+                }
             }
-            SECURITY_INFORMATION sinfo = OWNER_SECURITY_INFORMATION |
-                                         GROUP_SECURITY_INFORMATION |
-                                         DACL_SECURITY_INFORMATION;
-            BOOL sdOk = ::SetKernelObjectSecurity(sh, sinfo, securityDescriptor);
-            DWORD sdErr = sdOk ? 0 : ::GetLastError();
-            ::CloseHandle(sh);
-            if (!sdOk) {
-                ::CloseHandle(ctx->handle);
-                ctx->handle = INVALID_HANDLE_VALUE;
-                ::DeleteFileW(upperPath.c_str());
-                return NtStatusFromWin32(sdErr);
-            }
-        }
 
-        if (allocationSize > 0) {
-            FILE_ALLOCATION_INFO allocInfo;
-            allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
-            if (!::SetFileInformationByHandle(ctx->handle, FileAllocationInfo,
-                                               &allocInfo, sizeof(allocInfo))) {
-                DWORD err = ::GetLastError();
-                ::CloseHandle(ctx->handle);
-                ctx->handle = INVALID_HANDLE_VALUE;
-                ::DeleteFileW(upperPath.c_str());
-                return NtStatusFromWin32(err);
+            if (allocationSize > 0) {
+                FILE_ALLOCATION_INFO allocInfo;
+                allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
+                if (!::SetFileInformationByHandle(ctx->handle, FileAllocationInfo,
+                                                   &allocInfo, sizeof(allocInfo))) {
+                    DWORD err = ::GetLastError();
+                    ::CloseHandle(ctx->handle);
+                    ctx->handle = INVALID_HANDLE_VALUE;
+                    ::DeleteFileW(upperPath.c_str());
+                    return NtStatusFromWin32(err);
+                }
             }
         }
     }
@@ -1109,10 +1333,10 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
     }
 
     if (hadWhiteout) {
-        whiteoutMgr_->RemoveWhiteout(normalized);
+        whiteoutMgr_->RemoveWhiteout(hostNorm);
     }
 
-    cache_->InvalidateWithAncestors(normalized);
+    cache_->InvalidateWithAncestors(hostNorm);
 
     NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
     if (!NT_SUCCESS(status)) {
@@ -1370,10 +1594,22 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
     NTSTATUS status = EnsureInUpperLayer(ctx->relativePath, ctx);
     if (!NT_SUCCESS(status)) return status;
 
-    // Same CREATE_ALWAYS contract as legacy SOverwrite: user-visible ADS are
-    // gone; :overlay* stays.
-    status = DeleteUserAlternateDataStreams(ctx->actualPath);
-    if (!NT_SUCCESS(status)) return status;
+    const bool isStreamHandle = !ctx->streamSuffix.empty();
+
+    if (!isStreamHandle) {
+        // Same CREATE_ALWAYS contract as legacy SOverwrite: user-visible ADS are
+        // gone; :overlay* stays.
+        //
+        // Skipped for stream handles: `ctx->actualPath` carries the stream
+        // suffix, so FindFirstStreamW would enumerate the *host* file's
+        // streams and the existing helper would wipe every sibling stream
+        // alongside the one the caller meant to truncate. NTFS overwrite
+        // semantics target the open stream only -- the kernel-level
+        // SetFileInformationByHandle below truncates the stream's data
+        // without touching siblings.
+        status = DeleteUserAlternateDataStreams(ctx->actualPath);
+        if (!NT_SUCCESS(status)) return status;
+    }
 
     // Mirror the SetInfo robustness: the kernel routes IRP_MJ_SET_INFORMATION
     // through whichever handle exists, so an Overwrite arriving via a handle
@@ -1414,15 +1650,21 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
     }
 
     if (fileAttributes != 0) {
+        // File attributes are a property of the host file, not the stream.
+        // Target the host's upper-layer path explicitly so a stream
+        // overwrite still updates the host's attribute bits correctly.
+        const std::wstring attrPath = isStreamHandle
+            ? pathResolver_->GetUpperPath(ctx->relativePath)
+            : ctx->actualPath;
         DWORD newAttrs;
         if (replaceAttributes) {
             newAttrs = fileAttributes;
         } else {
-            DWORD currentAttrs = ::GetFileAttributesW(ctx->actualPath.c_str());
+            DWORD currentAttrs = ::GetFileAttributesW(attrPath.c_str());
             if (currentAttrs == INVALID_FILE_ATTRIBUTES) currentAttrs = 0;
             newAttrs = currentAttrs | fileAttributes;
         }
-        if (!::SetFileAttributesW(ctx->actualPath.c_str(), newAttrs)) {
+        if (!::SetFileAttributesW(attrPath.c_str(), newAttrs)) {
             return NtStatusFromWin32(::GetLastError());
         }
     }
@@ -1462,13 +1704,19 @@ NTSTATUS LayerMount::Flush(FileContext* ctx,
 NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid) {
     std::wstring normalized = NormalizePath(relativePath);
 
+    std::wstring hostNorm;
+    std::wstring streamSuffix;
+    if (!TryParseStreamPath(normalized, hostNorm, streamSuffix)) {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
-        if (!tracker->CheckAccess(callerPid, normalized, OperationType::Delete)) {
+        if (!tracker->CheckAccess(callerPid, hostNorm, OperationType::Delete)) {
             return STATUS_ACCESS_DENIED;
         }
     }
 
-    ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
+    ResolvedPath resolved = pathResolver_->ResolvePath(hostNorm);
     if (!resolved.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
@@ -1478,8 +1726,26 @@ NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid
         return STATUS_CANNOT_DELETE;
     }
 
+    if (!streamSuffix.empty()) {
+        if (isDirectory) {
+            // Directory + stream qualifier is rejected here for symmetry
+            // with Create/Open; deleting a stream from a directory makes
+            // no sense in our model.
+            return STATUS_FILE_IS_A_DIRECTORY;
+        }
+        // Mirror Delete's lower-only rejection so CanDelete -> Delete is
+        // consistent. There is no stream-level whiteout, so a stream that
+        // exists only on the lower-layer host cannot be removed through
+        // the overlay; tell the caller up front rather than approving the
+        // delete and then failing.
+        if (!pathResolver_->ExistsInUpper(hostNorm)) {
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+        return STATUS_SUCCESS;
+    }
+
     if (isDirectory) {
-        auto entries = MergeDirectoryEntries(normalized);
+        auto entries = MergeDirectoryEntries(hostNorm);
         if (!entries.empty()) {
             return STATUS_DIRECTORY_NOT_EMPTY;
         }
@@ -1493,6 +1759,9 @@ NTSTATUS LayerMount::CanDelete(FileContext* ctx, DWORD callerPid) {
         return STATUS_INVALID_PARAMETER;
     }
 
+    // `ctx->relativePath` is host-only by construction (Create / Open /
+    // UpdateContextPath all strip the stream suffix into ctx->streamSuffix
+    // before storing). No re-parsing needed.
     std::wstring normalized = NormalizePath(ctx->relativePath);
 
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
@@ -1511,6 +1780,18 @@ NTSTATUS LayerMount::CanDelete(FileContext* ctx, DWORD callerPid) {
     }
 
     const bool isDirectory = (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (!ctx->streamSuffix.empty()) {
+        if (isDirectory) {
+            return STATUS_FILE_IS_A_DIRECTORY;
+        }
+        // Lower-only stream hosts can't be deleted through the overlay;
+        // see the matching guard in Delete().
+        if (!pathResolver_->ExistsInUpper(normalized)) {
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+        return STATUS_SUCCESS;
+    }
+
     const bool openedAsReparsePoint =
         (ctx->createOptions & FILE_OPEN_REPARSE_POINT) != 0 &&
         (resolved.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
@@ -1530,22 +1811,59 @@ NTSTATUS LayerMount::CanDelete(FileContext* ctx, DWORD callerPid) {
 NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
     std::wstring normalized = NormalizePath(relativePath);
 
+    std::wstring hostNorm;
+    std::wstring streamSuffix;
+    if (!TryParseStreamPath(normalized, hostNorm, streamSuffix)) {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
     NTSTATUS canDelete = CanDelete(normalized, callerPid);
     if (!NT_SUCCESS(canDelete)) {
         return canDelete;
     }
 
-    ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
+    if (!streamSuffix.empty()) {
+        // Stream delete: target the host's upper-layer file with the
+        // stream suffix appended. Host file and other streams survive.
+        // Whiteouts are deliberately NOT touched -- they live at the file
+        // level. A stream that exists only on the lower-layer host is
+        // not deletable through the overlay (no stream-level whiteout).
+        const std::wstring hostUpperPath = pathResolver_->GetUpperPath(hostNorm);
+        if (!pathResolver_->ExistsInUpper(hostNorm)) {
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+        const std::wstring streamPath = hostUpperPath + streamSuffix;
+        HANDLE h = ::CreateFileW(streamPath.c_str(),
+            DELETE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            return NtStatusFromWin32(::GetLastError());
+        }
+        FILE_DISPOSITION_INFO disp{};
+        disp.DeleteFileW = TRUE;
+        const BOOL ok = ::SetFileInformationByHandle(
+            h, FileDispositionInfo, &disp, sizeof(disp));
+        const DWORD setErr = ok ? 0 : ::GetLastError();
+        ::CloseHandle(h);
+        if (!ok) {
+            return NtStatusFromWin32(setErr);
+        }
+        cache_->InvalidateWithAncestors(hostNorm);
+        return STATUS_SUCCESS;
+    }
+
+    ResolvedPath resolved = pathResolver_->ResolvePath(hostNorm);
     const bool isDirectory = resolved.Found() &&
         (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(normalized);
+    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(hostNorm);
     const bool lowerHasIt = lowerResolved.Found();
 
     // If upper has a shadow, sweep it. For directories we rely on
     // remove_all to take any opaque-marker / leftover whiteout files
     // with it (legacy SCleanup did the same), falling back to a single
     // RemoveDirectoryW for the empty-dir case.
-    const std::wstring upperPath = pathResolver_->GetUpperPath(normalized);
+    const std::wstring upperPath = pathResolver_->GetUpperPath(hostNorm);
     DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
         if (isDirectory) {
@@ -1604,6 +1922,28 @@ NTSTATUS LayerMount::Delete(FileContext* ctx, DWORD callerPid) {
     NTSTATUS canDelete = CanDelete(ctx, callerPid);
     if (!NT_SUCCESS(canDelete)) {
         return canDelete;
+    }
+
+    if (!ctx->streamSuffix.empty()) {
+        // Stream delete on an open handle: flip the delete disposition
+        // on the existing stream handle, close it (which commits the
+        // delete), and leave the host file + sibling streams intact.
+        if (ctx->handle == INVALID_HANDLE_VALUE) {
+            return STATUS_INVALID_HANDLE;
+        }
+        FILE_DISPOSITION_INFO disp{};
+        disp.DeleteFileW = TRUE;
+        const BOOL ok = ::SetFileInformationByHandle(
+            ctx->handle, FileDispositionInfo, &disp, sizeof(disp));
+        const DWORD setErr = ok ? 0 : ::GetLastError();
+        ::CloseHandle(ctx->handle);
+        ctx->handle = INVALID_HANDLE_VALUE;
+        ctx->handleNeedsReopen = false;
+        if (!ok) {
+            return NtStatusFromWin32(setErr);
+        }
+        cache_->InvalidateWithAncestors(ctx->relativePath);
+        return STATUS_SUCCESS;
     }
 
     std::wstring normalized = NormalizePath(ctx->relativePath);
@@ -1683,14 +2023,29 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
 
     // Reject unsafe destinations before any copy-up, parent creation, or
     // MoveFileExW. `BuildUpperPathPreserveCase` only strips separators; it
-    // does not filter `..` segments or drive/stream qualifiers, so without
-    // this guard `newRelativePath = "..\\escape.txt"` moves upper content
+    // does not filter `..` segments or drive qualifiers, so without this
+    // guard `newRelativePath = "..\\escape.txt"` moves upper content
     // outside the overlay root (and still creates a source-side whiteout).
     // Source is additionally filtered by ResolvePath below, but validate it
-    // here too so the caller gets a clean STATUS_OBJECT_NAME_INVALID rather
-    // than an ambiguous not-found.
-    if (!IsSafeRelativePath(oldNorm) || !IsSafeRelativePath(newNorm)) {
-        return STATUS_OBJECT_NAME_INVALID;
+    // here too so the caller gets a clean status rather than an ambiguous
+    // not-found.
+    //
+    // Stream-qualified paths are intentionally rejected on both sides:
+    // ADS renames have ugly NTFS semantics (no atomic move; copy+delete
+    // only) and aren't worth wiring up at this surface. Returning
+    // STATUS_INVALID_PARAMETER (rather than the malformed-path
+    // STATUS_OBJECT_NAME_INVALID) signals to callers that the input shape
+    // is recognized but unsupported.
+    {
+        std::wstring oldHostNorm, oldStreamSuffix;
+        std::wstring newHostNorm, newStreamSuffix;
+        if (!TryParseStreamPath(oldNorm, oldHostNorm, oldStreamSuffix) ||
+            !TryParseStreamPath(newNorm, newHostNorm, newStreamSuffix)) {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+        if (!oldStreamSuffix.empty() || !newStreamSuffix.empty()) {
+            return STATUS_INVALID_PARAMETER;
+        }
     }
 
     // Reject renames that touch the reserved sidecar subtree on either end.
@@ -1876,22 +2231,50 @@ NTSTATUS LayerMount::UpdateContextPath(FileContext* ctx,
                                        const std::wstring& newRelativePath) {
     if (ctx == nullptr) return STATUS_INVALID_HANDLE;
     const std::wstring newNorm = NormalizePath(newRelativePath);
+
     // Reject the same invalid shapes that Create/Rename/Delete reject at
     // their write-side entry points. Accepting them here would let a buggy
     // host rebind an open handle onto a path outside the overlay root and
     // then issue set-info / delete / read through the rebound context.
-    if (!IsSafeRelativePath(newNorm) || IsReservedRelativePath(newNorm)) {
+    // Stream-qualified inputs are intentionally permitted: hosts that
+    // walk their open-handle table after a *file* rename will pass
+    // `newhost:stream` for any stream handles that were open on the
+    // source; rejecting those would break legitimate host renames.
+    std::wstring newHostNorm;
+    std::wstring newStreamSuffix;
+    if (!TryParseStreamPath(newNorm, newHostNorm, newStreamSuffix)) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (ctx->relativePath == newNorm) return STATUS_SUCCESS;
+    if (IsReservedRelativePath(newHostNorm)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (ctx->relativePath == newHostNorm &&
+        ctx->streamSuffix  == newStreamSuffix) {
+        return STATUS_SUCCESS;
+    }
 
     if (ctx->handle != INVALID_HANDLE_VALUE) {
         ::CloseHandle(ctx->handle);
         ctx->handle = INVALID_HANDLE_VALUE;
     }
-    ctx->relativePath      = newNorm;
+    ctx->relativePath      = newHostNorm;
+    ctx->streamSuffix      = newStreamSuffix;
+    // Feed the case-preserved input (not the lowercased newHostNorm) to
+    // BuildUpperPathPreserveCase so display-time consumers reading
+    // ctx->actualPath see the caller's original casing. NormalizePath and
+    // NormalizePathPreserveCase strip the same leading/trailing slashes,
+    // so the stream suffix occupies the same trailing slice of both forms.
+    std::wstring newRelativeHostPreserved;
+    if (newStreamSuffix.empty()) {
+        newRelativeHostPreserved = newRelativePath;
+    } else {
+        const std::wstring preserved = NormalizePathPreserveCase(newRelativePath);
+        newRelativeHostPreserved =
+            preserved.substr(0, preserved.length() - newStreamSuffix.length());
+    }
     ctx->actualPath        = BuildUpperPathPreserveCase(config_.upperPath,
-                                                         newRelativePath);
+                                                         newRelativeHostPreserved)
+                              + newStreamSuffix;
     ctx->handleNeedsReopen = true;
     return STATUS_SUCCESS;
 }
@@ -2379,7 +2762,7 @@ namespace {
 // kLayerMountADSStream / kOpaqueADSStream constants the metadata
 // writers use (see MetadataADS.cpp). Adding a new internal stream by
 // extending those constants automatically extends this filter.
-bool IsReservedStreamName(const wchar_t* name) noexcept {
+bool IsReservedFullNtfsStreamName(const wchar_t* name) noexcept {
     if (name == nullptr) return false;
     static const std::wstring kMainData      = L"::$DATA";
     static const std::wstring kOverlayData   =
@@ -2424,7 +2807,7 @@ NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
     std::unique_ptr<void, decltype(&::FindClose)> findGuard(h, &::FindClose);
 
     do {
-        if (IsReservedStreamName(findData.cStreamName)) {
+        if (IsReservedFullNtfsStreamName(findData.cStreamName)) {
             continue;
         }
         InternalStreamInfo info;

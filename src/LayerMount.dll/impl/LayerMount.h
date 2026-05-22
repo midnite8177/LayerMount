@@ -149,6 +149,16 @@ struct FileContext {
     UINT32 createOptions = 0;       // Original open flags; reopen paths must
                                     // preserve FILE_OPEN_REPARSE_POINT.
     bool handleNeedsReopen = false; // Rename retargets lazily on next use.
+    std::wstring streamSuffix;      // Empty for main-stream handles. For ADS
+                                    // handles holds the parsed suffix with
+                                    // leading colon (`:secret` or
+                                    // `:secret:$DATA`). `relativePath` stays
+                                    // host-only so every path-keyed lookup
+                                    // (cache, whiteout, tracker, resolver)
+                                    // operates on the host; the suffix is
+                                    // only consumed when re-deriving
+                                    // `actualPath` or opening the underlying
+                                    // NT handle.
 };
 
 // ---------------------------------------------------------------------------
@@ -196,10 +206,39 @@ std::wstring NormalizePath(const std::wstring& path);
 // Returns true if `normalized` is safe to combine with a layer root. Rejects
 // empty input, drive/stream-qualified forms (any `:` character), and any `..`
 // segment that would traverse out of the layer root when concatenated. Call
-// this at every write-side entry point (Create/Rename/etc.) before building
-// paths with `GetUpperPath` / `BuildUpperPathPreserveCase` or passing results
-// to `EnsureDirectoryExists`.
+// this at every write-side entry point that *must not* accept stream
+// qualifiers (CreateWhiteout, SetOpaque, Rename source/dest, ReadDirectory)
+// before building paths with `GetUpperPath` / `BuildUpperPathPreserveCase`
+// or passing results to `EnsureDirectoryExists`. For callsites that
+// legitimately handle alternate data streams (Create / Open / Delete /
+// UpdateContextPath), use `TryParseStreamPath` instead.
 bool IsSafeRelativePath(const std::wstring& normalized);
+
+// Returns true if `streamName` (the parsed stream name only, *without* the
+// leading colon and without any `$TYPE` suffix) matches one of LayerMount's
+// reserved internal streams. Reserved streams hold sidecar bookkeeping
+// (metacopy / opaque markers) and must never be exposed to callers as
+// creatable / openable / deletable names. Case-insensitive.
+bool IsReservedStreamName(const std::wstring& streamName) noexcept;
+
+// Parse a normalized relative path into <host>[:<stream>[:$DATA]] components.
+// Returns true iff every rule holds:
+//   - `normalized` is non-empty
+//   - host portion (the substring before the first `:`) passes
+//     `IsSafeRelativePath` (no embedded `:`, no `..`, no empty, no
+//     drive-qualifier)
+//   - if a stream is present: the stream name is non-empty, contains no `\`,
+//     and is not a reserved name per `IsReservedStreamName`
+//   - if a stream-type suffix is present: it is exactly `:$DATA`
+//     (case-insensitive); other NTFS types (`$INDEX_ALLOCATION`, `$BITMAP`,
+//     ...) are rejected
+//   - there is no third `:` anywhere
+// `outStreamSuffix` is the parsed canonical suffix with leading `:` (e.g.
+// `:secret` or `:secret:$DATA`), or empty when `normalized` has no `:`.
+// `outHostNorm` is the host substring (already normalized).
+bool TryParseStreamPath(const std::wstring& normalized,
+                        std::wstring& outHostNorm,
+                        std::wstring& outStreamSuffix);
 
 // Reserved internal subtree: sidecar metadata lives under `<upper>\.overlay\`
 // on hosts without ADS. Exposing it through the merged namespace would let a

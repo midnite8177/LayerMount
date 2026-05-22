@@ -351,6 +351,19 @@ and anything beneath it. That subtree is the sidecar-metadata store on
 non-ADS hosts (see below); exposing it through the merged view would
 let a caller open, modify, or delete internal records.
 
+### Stream-qualified paths and case
+
+The write-side ADS surface (`Create` / `Open` / `Overwrite` / `Delete`
+/ `UpdateContextPath`) accepts paths of the form
+`host[:stream[:$DATA]]`. `TryParseStreamPath` runs *after*
+normalization, which means the stream name inherits the
+whole-path lowercasing from step 2. A caller that creates
+`\host.txt:MyStream` lands `host.txt:mystream` on disk;
+`LayerMountEnumerateStreams` returns the on-disk (lowercased) form.
+This matches how host names are handled and keeps stream resolution
+case-insensitive end-to-end — but it does mean stream-name casing is
+not round-trippable through the overlay.
+
 ---
 
 ## Copy-up

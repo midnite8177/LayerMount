@@ -72,6 +72,7 @@
     <ClCompile Include="AbiShapeTests.cpp" />
     <ClCompile Include="AbiLifecycleTests.cpp" />
     <ClCompile Include="AbiFileOpsTests.cpp" />
+    <ClCompile Include="AbiAdsWriteTests.cpp" />
     <ClCompile Include="AbiPathTests.cpp" />
     <ClCompile Include="AbiVhdTests.cpp" />
     <ClCompile Include="AbiVssTests.cpp" />
