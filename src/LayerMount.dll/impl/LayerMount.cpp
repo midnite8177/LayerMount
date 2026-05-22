@@ -24,6 +24,31 @@ namespace LayerMount {
 
 namespace {
 NTSTATUS ReopenContextHandle(FileContext* ctx);
+
+// Opens a transient kernel handle to the upper-layer file at
+// <paramref name="path"/> with the requested access mask. Used by
+// SetInfo / Overwrite when the caller-supplied handle lacks the access
+// required by SetFileTime / SetFileInformationByHandle (e.g. a handle
+// opened with DELETE only — common for del-style flows). Returns an
+// invalid ScopedHandle on failure; callers fall back to surfacing the
+// original access-denied error. Directory status comes from the
+// caller's FileContext rather than a path-based query, which would
+// fail silently for DELETE_PENDING files and lose
+// FILE_FLAG_BACKUP_SEMANTICS.
+ScopedHandle OpenTransientWritableHandle(const std::wstring& path,
+                                         DWORD desiredAccess,
+                                         bool isDirectory) {
+    DWORD flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0;
+    HANDLE h = ::CreateFileW(
+        path.c_str(),
+        desiredAccess,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        flags,
+        nullptr);
+    return ScopedHandle{h};
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +346,21 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
                                         FileContext* ctx) {
     if (!ctx) {
         return STATUS_INVALID_PARAMETER;
+    }
+
+    // Fast path: ctx already represents an upper-layer file with a valid,
+    // non-stale kernel handle. The handle itself is proof the file exists
+    // in upper; redoing the path-based ExistsInUpper check here is both
+    // redundant and incorrect when the upper-layer file is in
+    // DELETE_PENDING state from another handle (path-based queries report
+    // the file as missing once any handle has set FileDispositionInfo,
+    // even though existing handles are still valid). Callers that hold
+    // a valid handle should be able to continue mutating attributes /
+    // timestamps / sizes through it until they close.
+    if (ctx->writable &&
+        ctx->handle != INVALID_HANDLE_VALUE &&
+        !ctx->handleNeedsReopen) {
+        return STATUS_SUCCESS;
     }
 
     // Already in upper layer — nothing to do
@@ -1335,19 +1375,42 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
     status = DeleteUserAlternateDataStreams(ctx->actualPath);
     if (!NT_SUCCESS(status)) return status;
 
+    // Mirror the SetInfo robustness: the kernel routes IRP_MJ_SET_INFORMATION
+    // through whichever handle exists, so an Overwrite arriving via a handle
+    // that lacks FILE_WRITE_DATA fails the direct SetFileInformationByHandle
+    // call with ERROR_ACCESS_DENIED. On that one error, open a transient
+    // FILE_WRITE_DATA handle to the upper-layer file and retry.
+    auto setSizeInfoRobust = [&](FILE_INFO_BY_HANDLE_CLASS cls,
+                                 LPVOID buf, DWORD bufSize) -> NTSTATUS {
+        if (::SetFileInformationByHandle(ctx->handle, cls, buf, bufSize)) {
+            return STATUS_SUCCESS;
+        }
+        DWORD firstErr = ::GetLastError();
+        if (firstErr != ERROR_ACCESS_DENIED) {
+            return NtStatusFromWin32(firstErr);
+        }
+        ScopedHandle transient = OpenTransientWritableHandle(
+            ctx->actualPath, FILE_WRITE_DATA, ctx->isDirectory);
+        if (!transient.IsValid()) {
+            return NtStatusFromWin32(firstErr);
+        }
+        if (!::SetFileInformationByHandle(transient.Get(), cls, buf, bufSize)) {
+            return NtStatusFromWin32(::GetLastError());
+        }
+        return STATUS_SUCCESS;
+    };
+
     FILE_END_OF_FILE_INFO eofInfo{};
-    if (!::SetFileInformationByHandle(ctx->handle, FileEndOfFileInfo,
-                                      &eofInfo, sizeof(eofInfo))) {
-        return NtStatusFromWin32(::GetLastError());
-    }
+    NTSTATUS sizeStatus = setSizeInfoRobust(
+        FileEndOfFileInfo, &eofInfo, sizeof(eofInfo));
+    if (!NT_SUCCESS(sizeStatus)) return sizeStatus;
 
     if (allocationSize > 0) {
         FILE_ALLOCATION_INFO allocInfo{};
         allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
-        if (!::SetFileInformationByHandle(ctx->handle, FileAllocationInfo,
-                                          &allocInfo, sizeof(allocInfo))) {
-            return NtStatusFromWin32(::GetLastError());
-        }
+        NTSTATUS allocStatus = setSizeInfoRobust(
+            FileAllocationInfo, &allocInfo, sizeof(allocInfo));
+        if (!NT_SUCCESS(allocStatus)) return allocStatus;
     }
 
     if (fileAttributes != 0) {
@@ -2164,11 +2227,68 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
     NTSTATUS status = EnsureInUpperLayer(ctx->relativePath, ctx);
     if (!NT_SUCCESS(status)) return status;
 
+    // Prefer handle-based attribute set so we don't have to re-open the
+    // file by path. The path-based ::SetFileAttributesW would otherwise
+    // be refused with STATUS_DELETE_PENDING (-> ERROR_ACCESS_DENIED)
+    // whenever the upper-layer file has been marked for deletion by a
+    // separate handle. SetFileInformationByHandle(FileBasicInfo) goes
+    // through ctx->handle, which is already past the kernel's open-by-
+    // name gate. Zero values for the timestamp fields signal "no
+    // change" to NT, so a basic-info call carrying only FileAttributes
+    // is metadata-only.
     if (fileAttributes != INVALID_FILE_ATTRIBUTES) {
-        if (!::SetFileAttributesW(ctx->actualPath.c_str(), fileAttributes)) {
+        if (ctx->handle != INVALID_HANDLE_VALUE) {
+            FILE_BASIC_INFO bi{};
+            bi.FileAttributes = fileAttributes;
+            if (!::SetFileInformationByHandle(ctx->handle, FileBasicInfo,
+                                               &bi, sizeof(bi))) {
+                DWORD firstErr = ::GetLastError();
+                if (firstErr != ERROR_ACCESS_DENIED) {
+                    return NtStatusFromWin32(firstErr);
+                }
+                ScopedHandle transient = OpenTransientWritableHandle(
+                    ctx->actualPath, FILE_WRITE_ATTRIBUTES, ctx->isDirectory);
+                if (!transient.IsValid()) {
+                    return NtStatusFromWin32(firstErr);
+                }
+                if (!::SetFileInformationByHandle(transient.Get(),
+                        FileBasicInfo, &bi, sizeof(bi))) {
+                    return NtStatusFromWin32(::GetLastError());
+                }
+            }
+        } else if (!::SetFileAttributesW(ctx->actualPath.c_str(),
+                                          fileAttributes)) {
             return NtStatusFromWin32(::GetLastError());
         }
     }
+
+    // SetFileTime / SetFileInformationByHandle require FILE_WRITE_ATTRIBUTES
+    // (timestamps) or FILE_WRITE_DATA / GENERIC_WRITE (sizes) on the handle.
+    // The kernel routes SET_INFORMATION calls through whichever open handle
+    // exists for the file, regardless of the access mask requested at open
+    // time, so a handle opened with e.g. DELETE alone can land here and the
+    // direct ::SetFileTime(ctx->handle, ...) would be refused with
+    // ERROR_ACCESS_DENIED. OpenTransientWritableHandle returns a transient
+    // ScopedHandle with the requested access; it closes automatically on
+    // scope exit.
+    auto setFileTimeRobust = [&](FILETIME* ct, FILETIME* at, FILETIME* wt) -> NTSTATUS {
+        if (::SetFileTime(ctx->handle, ct, at, wt)) {
+            return STATUS_SUCCESS;
+        }
+        DWORD firstErr = ::GetLastError();
+        if (firstErr != ERROR_ACCESS_DENIED) {
+            return NtStatusFromWin32(firstErr);
+        }
+        ScopedHandle transient = OpenTransientWritableHandle(
+            ctx->actualPath, FILE_WRITE_ATTRIBUTES, ctx->isDirectory);
+        if (!transient.IsValid()) {
+            return NtStatusFromWin32(firstErr);
+        }
+        if (!::SetFileTime(transient.Get(), ct, at, wt)) {
+            return NtStatusFromWin32(::GetLastError());
+        }
+        return STATUS_SUCCESS;
+    };
 
     if (ctx->handle != INVALID_HANDLE_VALUE &&
         (creationTime || lastAccessTime || lastWriteTime)) {
@@ -2178,12 +2298,11 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
                        at.dwHighDateTime = static_cast<DWORD>(lastAccessTime >> 32);
         FILETIME wt{}; wt.dwLowDateTime  = static_cast<DWORD>(lastWriteTime);
                        wt.dwHighDateTime = static_cast<DWORD>(lastWriteTime >> 32);
-        if (!::SetFileTime(ctx->handle,
-                creationTime    ? &ct : nullptr,
-                lastAccessTime  ? &at : nullptr,
-                lastWriteTime   ? &wt : nullptr)) {
-            return NtStatusFromWin32(::GetLastError());
-        }
+        NTSTATUS timeStatus = setFileTimeRobust(
+            creationTime    ? &ct : nullptr,
+            lastAccessTime  ? &at : nullptr,
+            lastWriteTime   ? &wt : nullptr);
+        if (!NT_SUCCESS(timeStatus)) return timeStatus;
     }
 
     constexpr UINT64 kUnchanged = UINT64_MAX;
@@ -2200,21 +2319,45 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
         return STATUS_INVALID_PARAMETER;
     }
 
+    // Sizes need a handle with write-data semantics. As with timestamps
+    // above, fall back to a transient FILE_WRITE_DATA / FILE_WRITE_ATTRIBUTES
+    // handle if ctx->handle was opened with insufficient access.
+    auto setInfoByHandleRobust = [&](FILE_INFO_BY_HANDLE_CLASS cls,
+                                     LPVOID buf, DWORD bufSize,
+                                     DWORD transientAccess) -> NTSTATUS {
+        if (::SetFileInformationByHandle(ctx->handle, cls, buf, bufSize)) {
+            return STATUS_SUCCESS;
+        }
+        DWORD firstErr = ::GetLastError();
+        if (firstErr != ERROR_ACCESS_DENIED) {
+            return NtStatusFromWin32(firstErr);
+        }
+        ScopedHandle transient = OpenTransientWritableHandle(
+            ctx->actualPath, transientAccess, ctx->isDirectory);
+        if (!transient.IsValid()) {
+            return NtStatusFromWin32(firstErr);
+        }
+        if (!::SetFileInformationByHandle(transient.Get(), cls, buf, bufSize)) {
+            return NtStatusFromWin32(::GetLastError());
+        }
+        return STATUS_SUCCESS;
+    };
+
     if (allocationSize != kUnchanged && ctx->handle != INVALID_HANDLE_VALUE) {
         FILE_ALLOCATION_INFO allocInfo;
         allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
-        if (!::SetFileInformationByHandle(ctx->handle, FileAllocationInfo,
-                                           &allocInfo, sizeof(allocInfo))) {
-            return NtStatusFromWin32(::GetLastError());
-        }
+        NTSTATUS s = setInfoByHandleRobust(
+            FileAllocationInfo, &allocInfo, sizeof(allocInfo),
+            FILE_WRITE_DATA);
+        if (!NT_SUCCESS(s)) return s;
     }
     if (fileSize != kUnchanged && ctx->handle != INVALID_HANDLE_VALUE) {
         FILE_END_OF_FILE_INFO eofInfo;
         eofInfo.EndOfFile.QuadPart = static_cast<LONGLONG>(fileSize);
-        if (!::SetFileInformationByHandle(ctx->handle, FileEndOfFileInfo,
-                                           &eofInfo, sizeof(eofInfo))) {
-            return NtStatusFromWin32(::GetLastError());
-        }
+        NTSTATUS s = setInfoByHandleRobust(
+            FileEndOfFileInfo, &eofInfo, sizeof(eofInfo),
+            FILE_WRITE_DATA);
+        if (!NT_SUCCESS(s)) return s;
     }
 
     if (outInfo != nullptr) {
