@@ -96,7 +96,7 @@ jobs:
 
       - name: Upload test results
         if: always() && matrix.platform == 'x64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-x64
           path: |
@@ -105,7 +105,7 @@ jobs:
 
       - name: Upload arm64 native artifacts
         if: matrix.platform == 'ARM64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: layermount-native-arm64
           path: |
