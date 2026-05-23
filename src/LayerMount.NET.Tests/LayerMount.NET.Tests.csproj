@@ -20,7 +20,7 @@
   <!-- Migrated from MSTest 3.6.1 to xUnit 2.9.2 + Xunit.SkippableFact
        1.4.13 so consumer C# test projects share a single framework. -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
