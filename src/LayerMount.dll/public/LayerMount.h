@@ -776,9 +776,27 @@ LM_API HRESULT LM_CALL LayerMountUpdateOpenFilePath(
     LM_FILE_HANDLE file,
     PCWSTR          newRelativePath);
 
+/*
+ * Path-based security accessor. Size-probe pattern:
+ *   securityDescriptor == NULL or securityDescriptorBytes == 0:
+ *     *requiredBytes is filled with the required size, S_OK.
+ *   securityDescriptorBytes < required: *requiredBytes is filled
+ *     with the required size, HRESULT_FROM_WIN32(ERROR_MORE_DATA).
+ *   otherwise: securityDescriptor is filled, *requiredBytes with the
+ *     size written, S_OK.
+ *
+ * securityInformation names the sections the caller wants
+ * (OWNER_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
+ * DACL_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION). The engine
+ * drops SACL unless the filesystem process holds SE_SECURITY_NAME. A
+ * value of 0 is not an error: it writes *requiredBytes = 0 and
+ * returns S_OK with an empty descriptor. Other bits pass through to
+ * Win32 unexamined.
+ */
 LM_API HRESULT LM_CALL LayerMountGetSecurity(
     LM_HANDLE handle,
     PCWSTR     relativePath,
+    UINT32     securityInformation,
     UINT32*    outFileAttributes,
     BYTE*      securityDescriptor,
     SIZE_T     securityDescriptorBytes,

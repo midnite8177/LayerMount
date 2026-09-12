@@ -2284,11 +2284,74 @@ NTSTATUS LayerMount::UpdateContextPath(FileContext* ctx,
     return STATUS_SUCCESS;
 }
 
+namespace {
+
+// Builds a synthetic world-readable descriptor for an upper layer that
+// carries no real NTFS ACLs, holding only the sections `effective`
+// asks for (Owner=World, Group=World, DACL grants FILE_GENERIC_READ to
+// Everyone). SACL is never synthesized: a non-ACL-capable upper layer
+// has no audit data to fabricate.
+NTSTATUS GetSyntheticWorldSecurity(SECURITY_INFORMATION effective,
+                                    bool isProbe,
+                                    PSECURITY_DESCRIPTOR sd,
+                                    SIZE_T sdBytes,
+                                    SIZE_T* requiredBytes) {
+    std::wstring worldSddl;
+    if (effective & OWNER_SECURITY_INFORMATION) {
+        worldSddl += L"O:WD";
+    }
+    if (effective & GROUP_SECURITY_INFORMATION) {
+        worldSddl += L"G:WD";
+    }
+    if (effective & DACL_SECURITY_INFORMATION) {
+        worldSddl += L"D:(A;;FR;;;WD)";
+    }
+    if (worldSddl.empty()) {
+        if (requiredBytes != nullptr) {
+            *requiredBytes = 0;
+        }
+        return STATUS_SUCCESS;
+    }
+
+    PSECURITY_DESCRIPTOR worldSd = nullptr;
+    ULONG worldSize = 0;
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            worldSddl.c_str(), SDDL_REVISION_1, &worldSd, &worldSize)) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+    if (requiredBytes != nullptr) {
+        *requiredBytes = worldSize;
+    }
+    if (isProbe) {
+        ::LocalFree(worldSd);
+        return STATUS_SUCCESS;
+    }
+    if (sdBytes < worldSize) {
+        ::LocalFree(worldSd);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    std::memcpy(sd, worldSd, worldSize);
+    ::LocalFree(worldSd);
+    return STATUS_SUCCESS;
+}
+
+}
+
 NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
+                                UINT32 securityInformation,
                                 PUINT32 outAttributes,
                                 PSECURITY_DESCRIPTOR sd,
                                 SIZE_T sdBytes,
                                 SIZE_T* requiredBytes) {
+    // SACL needs SE_SECURITY_NAME. Drop it from the request. Otherwise
+    // ::GetFileSecurityW fails the whole call with
+    // ERROR_PRIVILEGE_NOT_HELD, and the caller loses OWNER, GROUP, and
+    // DACL too.
+    const SECURITY_INFORMATION effective =
+        CopyUp::IsSecurityPrivAvailable()
+            ? securityInformation
+            : (securityInformation & ~static_cast<UINT32>(SACL_SECURITY_INFORMATION));
+
     std::wstring normalized = NormalizePath(relativePath);
 
     // Resolve target + populate outAttributes -- shared by both the
@@ -2317,46 +2380,24 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
 
     const bool isProbe = (sd == nullptr || sdBytes == 0);
 
-    // Capability gate: when the upper layer
-    // doesn't carry NTFS ACLs (FAT32, exFAT, network shares with no
-    // permissions plumbing), there's no SD to read. Return a synthetic
-    // world-readable descriptor (Owner=World, Group=World, DACL grants
-    // FILE_GENERIC_READ to Everyone) so callers get a well-formed SD
-    // they can hand to other Win32 APIs without surprises.
-    if (!capabilities_.HasNtfsAcls()) {
-        PSECURITY_DESCRIPTOR worldSd = nullptr;
-        ULONG worldSize = 0;
-        if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"O:WDG:WDD:(A;;FR;;;WD)", SDDL_REVISION_1,
-                &worldSd, &worldSize)) {
-            return NtStatusFromWin32(::GetLastError());
-        }
+    if (effective == 0) {
         if (requiredBytes != nullptr) {
-            *requiredBytes = worldSize;
+            *requiredBytes = 0;
         }
-        if (isProbe) {
-            ::LocalFree(worldSd);
-            return STATUS_SUCCESS;
-        }
-        if (sdBytes < worldSize) {
-            ::LocalFree(worldSd);
-            return STATUS_BUFFER_OVERFLOW;
-        }
-        std::memcpy(sd, worldSd, worldSize);
-        ::LocalFree(worldSd);
         return STATUS_SUCCESS;
     }
 
-    // Include SACL iff the FS process holds SE_SECURITY_NAME; otherwise
-    // ::GetFileSecurityW fails the whole call with ERROR_PRIVILEGE_NOT_HELD
-    // and we lose even OWNER/DACL.
-    const SECURITY_INFORMATION secInfo =
-        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-        DACL_SECURITY_INFORMATION |
-        (CopyUp::IsSecurityPrivAvailable() ? SACL_SECURITY_INFORMATION : 0);
+    // Capability gate: when the upper layer doesn't carry NTFS ACLs
+    // (FAT32, exFAT, network shares with no permissions plumbing),
+    // there's no SD to read. Fall back to a synthetic one.
+    if (!capabilities_.HasNtfsAcls()) {
+        return GetSyntheticWorldSecurity(effective, isProbe, sd, sdBytes, requiredBytes);
+    }
 
+    // Bits outside owner, group, DACL, and SACL pass through to
+    // ::GetFileSecurityW unexamined.
     DWORD needed = 0;
-    BOOL ok = ::GetFileSecurityW(targetPath.c_str(), secInfo,
+    BOOL ok = ::GetFileSecurityW(targetPath.c_str(), effective,
                                   sd, static_cast<DWORD>(sdBytes), &needed);
     if (requiredBytes != nullptr) {
         *requiredBytes = needed;

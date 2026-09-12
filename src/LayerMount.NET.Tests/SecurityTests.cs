@@ -95,6 +95,21 @@ public sealed class SecurityTests
         }
     }
 
+    [Fact]
+    public void GetSecurity_DaclOnlyOverload_OmitsOwnerAndGroup()
+    {
+        using var env = new TempLayerEnvironment(0);
+        using var mount = LayerMount.Create(env.BuildConfig());
+        CreatePlainFile(mount, @"\daclonly.txt");
+
+        var (_, sd) = mount.GetSecurity(@"\daclonly.txt", DACL_SECURITY_INFORMATION);
+        var raw = new RawSecurityDescriptor(sd, 0);
+
+        Assert.Null(raw.Owner);
+        Assert.Null(raw.Group);
+        Assert.NotNull(raw.DiscretionaryAcl);
+    }
+
     private static void CreatePlainFile(LayerMount mount, string relativePath)
     {
         using var file = mount.CreateFile(

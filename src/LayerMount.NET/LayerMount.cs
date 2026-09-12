@@ -208,7 +208,7 @@ public sealed partial class LayerMount : IDisposable
 
             LM_CONFIG native = default;
             native.structSize            = (uint)sizeof(LM_CONFIG);
-            native.abiVersion            = 1u;
+            native.abiVersion            = 2u;
             native.hostCapabilities      = (uint)config.Capabilities;
             native.accessLogCapacity     = config.AccessLogCapacity;
             native.pathCacheCapacity     = config.PathCacheCapacity;

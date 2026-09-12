@@ -717,6 +717,7 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(LM_HANDLE             handle,
 
 LM_API HRESULT LM_CALL LayerMountGetSecurity(LM_HANDLE handle,
                                             PCWSTR     relativePath,
+                                            UINT32     securityInformation,
                                             UINT32*    outFileAttributes,
                                             BYTE*      securityDescriptor,
                                             SIZE_T     securityDescriptorBytes,
@@ -738,7 +739,8 @@ LM_API HRESULT LM_CALL LayerMountGetSecurity(LM_HANDLE handle,
 
     PSECURITY_DESCRIPTOR sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(securityDescriptor);
     NTSTATUS status = mountHolder->core->GetSecurity(
-        relativePath, reinterpret_cast<PUINT32>(outFileAttributes),
+        relativePath, securityInformation,
+        reinterpret_cast<PUINT32>(outFileAttributes),
         sd, securityDescriptorBytes, requiredBytes);
     if (status == STATUS_BUFFER_OVERFLOW) {
         return HRESULT_FROM_WIN32(ERROR_MORE_DATA);

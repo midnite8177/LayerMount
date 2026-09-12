@@ -113,10 +113,34 @@ public sealed partial class LayerMount
     // Security
     // ------------------------------------------------------------------
 
+    private const uint OWNER_SECURITY_INFORMATION = 0x1u;
+    private const uint GROUP_SECURITY_INFORMATION = 0x2u;
+    private const uint DACL_SECURITY_INFORMATION  = 0x4u;
+    private const uint SACL_SECURITY_INFORMATION  = 0x8u;
+
+    private const uint DefaultSecurityInformation =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+        DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
+
     /// <summary>Reads the owner, group, DACL, and SACL of the file or
     /// directory at <paramref name="relativePath"/>.</summary>
     /// <returns>The Win32 attributes and a self-relative security
     /// descriptor.</returns>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT
+    /// (most commonly file-not-found).
+    /// </exception>
+    public (uint Attributes, byte[] SecurityDescriptor) GetSecurity(string relativePath)
+        => GetSecurityCore(relativePath, DefaultSecurityInformation);
+
+    /// <summary>Reads the descriptor sections named by
+    /// <paramref name="securityInformation"/> for the file or directory
+    /// at <paramref name="relativePath"/>.</summary>
+    /// <returns>
+    /// The Win32 attributes and a self-relative security descriptor
+    /// that holds only the requested sections. An empty array when
+    /// <paramref name="securityInformation"/> is 0.
+    /// </returns>
     /// <exception cref="LayerMountException">
     /// If the underlying native call returns a non-success HRESULT
     /// (most commonly file-not-found). Concurrent permission changes
@@ -124,7 +148,12 @@ public sealed partial class LayerMount
     /// <see cref="BufferHelpers.MaxFillRetries"/> times before surfacing
     /// <c>ERROR_MORE_DATA</c>.
     /// </exception>
-    public unsafe (uint Attributes, byte[] SecurityDescriptor) GetSecurity(string relativePath)
+    public (uint Attributes, byte[] SecurityDescriptor) GetSecurity(
+        string relativePath, uint securityInformation)
+        => GetSecurityCore(relativePath, securityInformation);
+
+    private unsafe (uint Attributes, byte[] SecurityDescriptor) GetSecurityCore(
+        string relativePath, uint securityInformation)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
         using var lease = new SafeHandleLease(_handle);
@@ -132,7 +161,8 @@ public sealed partial class LayerMount
         nuint required = 0;
 
         int hr = NativeMethods.LayerMountGetSecurity(
-            lease.Handle, relativePath, &attributes, null, 0, &required);
+            lease.Handle, relativePath, securityInformation,
+            &attributes, null, 0, &required);
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetSecurity));
 
         if (required == 0)
@@ -151,7 +181,8 @@ public sealed partial class LayerMount
             fixed (byte* p = sd)
             {
                 hr = NativeMethods.LayerMountGetSecurity(
-                    lease.Handle, relativePath, &attributes, p, required, &actual);
+                    lease.Handle, relativePath, securityInformation,
+                    &attributes, p, required, &actual);
             }
 
             if (hr == HRESULT_E_MORE_DATA && actual > required

@@ -496,8 +496,16 @@ public:
     //                                     *requiredBytes, returns S_OK
     //   sdBytes < needed              -> writes needed, returns
     //                                     STATUS_BUFFER_OVERFLOW
+    // securityInformation names the descriptor sections the caller
+    // wants: owner, group, DACL, or SACL. GetSecurity drops SACL
+    // unless the FS process holds SE_SECURITY_NAME, even when the
+    // caller asks for it.
+    // A requested value of 0 is not an error. It writes
+    // *requiredBytes = 0 and returns STATUS_SUCCESS with an empty
+    // descriptor.
     // outAttributes (optional) receives the file's Win32 attributes.
     NTSTATUS GetSecurity(const std::wstring& relativePath,
+                         UINT32 securityInformation,
                          PUINT32 outAttributes,
                          PSECURITY_DESCRIPTOR sd,
                          SIZE_T sdBytes,

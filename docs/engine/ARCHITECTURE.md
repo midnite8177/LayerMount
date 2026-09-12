@@ -675,8 +675,11 @@ Output strings, blobs, and arrays use the two-call pattern: pass
 `*requiredChars`; allocate; call again with the populated buffer. A
 short buffer returns `HRESULT_FROM_WIN32(ERROR_MORE_DATA)` and always
 writes `*requiredChars` so the caller can resize and retry. The engine
-honors this on every list/string surface, including nested per-entry
-strings inside `LM_VHD_LAYER_INFO` and `LM_VSS_SNAPSHOT_INFO`.
+honors this on every list, string, and blob surface, including nested
+per-entry strings inside `LM_VHD_LAYER_INFO` and `LM_VSS_SNAPSHOT_INFO`.
+`LayerMountGetSecurity` conforms as of `LM_ABI_VERSION` 2. That version
+also added a caller-supplied `SECURITY_INFORMATION` parameter to the
+call.
 
 ### Forward-extensible structs
 

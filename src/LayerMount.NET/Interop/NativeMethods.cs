@@ -229,6 +229,7 @@ internal static unsafe partial class NativeMethods
     internal static partial int LayerMountGetSecurity(
         IntPtr handle,
         string relativePath,
+        uint   securityInformation,
         uint*  outFileAttributes,
         byte*  securityDescriptor,
         nuint  securityDescriptorBytes,
