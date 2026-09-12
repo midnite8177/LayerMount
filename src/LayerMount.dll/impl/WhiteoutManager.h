@@ -77,7 +77,8 @@ public:
     // --- Directory enumeration support ---
 
     // List all whiteout-hidden filenames in a directory within a given layer.
-    // Returns original names (with .wh. prefix stripped).
+    // Returns original names (with .wh. prefix stripped), in an unspecified
+    // order that follows the directory.
     // On success (enumeration reached ERROR_NO_MORE_FILES) writes true to
     // *ok if ok != nullptr. A mid-enumeration FindNextFileW failure (sharing
     // violation, network error, etc.) leaves *ok == false so callers can

@@ -17,10 +17,6 @@ using namespace LayerMount;
 
 namespace LayerMountTests {
 
-// ============================================================================
-// 9.3 — Whiteout primitives
-// ============================================================================
-
 TEST_CLASS(WhiteoutTests) {
 public:
     TEST_CLASS_INITIALIZE(ClassInit) {
@@ -174,7 +170,13 @@ public:
             L"Cache entry should be invalidated after CreateWhiteout");
     }
 
-    // --- Integration with PathResolver (whiteout hides lower file) ---
+};
+
+TEST_CLASS(WhiteoutPathResolverTests) {
+public:
+    TEST_CLASS_INITIALIZE(ClassInit) {
+        AssertTempIsNTFS();
+    }
 
     TEST_METHOD(PathResolve_WithWhiteoutInUpper_HidesLowerFile) {
         TempLayerEnvironment env(1);
@@ -216,7 +218,13 @@ public:
         Assert::IsTrue(result.source == LayerSource::Lower);
     }
 
-    // --- Directory enumeration ---
+};
+
+TEST_CLASS(WhiteoutDirectoryEnumerationTests) {
+public:
+    TEST_CLASS_INITIALIZE(ClassInit) {
+        AssertTempIsNTFS();
+    }
 
     TEST_METHOD(ListWhiteoutsInDirectory_ReturnsOriginalNamesWithPrefixStripped) {
         TempLayerEnvironment env(1);
@@ -230,7 +238,6 @@ public:
 
         auto whiteouts = wm.ListWhiteoutsInDirectory(L"", env.Upper());
 
-        // Verify all three original names are present (regardless of order)
         auto contains = [&](const std::wstring& name) {
             return std::find(whiteouts.begin(), whiteouts.end(), name) != whiteouts.end();
         };
@@ -239,11 +246,24 @@ public:
         Assert::IsTrue(contains(L"b.txt"));
         Assert::IsTrue(contains(L"c.txt"));
     }
-};
 
-// ============================================================================
-// 9.4 — Opaque directory support
-// ============================================================================
+    TEST_METHOD(ListWhiteoutsInDirectory_RootOfExtendedFormLayerPath_ScansSuccessfully) {
+        TempLayerEnvironment env(1);
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+
+        wm.CreateWhiteout(L"a.txt");
+
+        std::wstring extendedUpper = L"\\\\?\\" + env.Upper();
+        bool ok = false;
+        auto whiteouts = wm.ListWhiteoutsInDirectory(L"", extendedUpper, &ok);
+
+        Assert::IsTrue(ok, L"Root scan of an extended-form layer path should succeed");
+        Assert::AreEqual(size_t{1}, whiteouts.size());
+        Assert::AreEqual(std::wstring(L"a.txt"), whiteouts[0]);
+    }
+};
 
 TEST_CLASS(OpaqueDirectoryTests) {
 public:

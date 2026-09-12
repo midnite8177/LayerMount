@@ -279,13 +279,29 @@ bool WhiteoutManager::HasWhitedOutAncestorInLayer(const std::wstring& relativePa
 // Directory enumeration support
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Build the FindFirstFileW search path for a layer's own directory. Skip
+// the extra separator when there is no relative subpath: FindFirstFileW
+// refuses a doubled separator at the root of an extended-form (\\?\) path,
+// though it accepts the same doubled separator for a plain path and a
+// single separator for a non-empty subpath under an extended-form root.
+std::wstring JoinLayerScanPath(const std::wstring& layerPath,
+                                const std::wstring& dirRelativePath) {
+    return dirRelativePath.empty()
+        ? layerPath + L"\\*"
+        : layerPath + L"\\" + dirRelativePath + L"\\*";
+}
+
+}  // namespace
+
 std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
     const std::wstring& dirRelativePath,
     const std::wstring& layerPath,
     bool* ok) const {
 
     std::vector<std::wstring> result;
-    std::wstring searchPath = layerPath + L"\\" + dirRelativePath + L"\\*";
+    std::wstring searchPath = JoinLayerScanPath(layerPath, dirRelativePath);
 
     WIN32_FIND_DATAW findData;
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
@@ -304,24 +320,18 @@ std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
     do {
         std::wstring name(findData.cFileName);
 
-        // Skip . and ..
         if (name == L"." || name == L"..") continue;
 
-        // Check for .wh. prefix
-        if (name.size() >= prefixLen &&
-            name.compare(0, prefixLen, kWhiteoutPrefix) == 0) {
-            // Skip the opaque marker — it's not a file whiteout
+        if (IsWhiteoutName(name)) {
             if (name == kOpaqueMarkerFile) continue;
 
-            // Strip .wh. prefix to get the original filename
             result.push_back(name.substr(prefixLen));
         }
     } while (FindNextFileW(hFind, &findData));
 
-    // FindNextFileW returning false terminates enumeration either normally
-    // (ERROR_NO_MORE_FILES) or with a real I/O / sharing failure. Treat any
-    // non-normal terminal as a failed enumeration so directory merge can
-    // refuse to expose a potentially-incomplete whiteout set.
+    // FindNextFileW returns false both at a normal end and on a real I/O failure.
+    // Read the error before FindClose, which can overwrite it, or a failed
+    // enumeration reports success.
     const DWORD terminalErr = ::GetLastError();
     FindClose(hFind);
 
