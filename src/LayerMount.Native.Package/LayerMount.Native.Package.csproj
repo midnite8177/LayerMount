@@ -8,13 +8,14 @@
     convention, plus the public C header (LayerMount.h) and the
     .def file under build/native/ for native C/C++ consumers.
 
-    No managed assembly is produced. NU5128 (no lib/ folder) is
-    silenced because that is intentional for an RID-asset package.
+    The project produces no managed assembly. The compiler still runs
+    on every build and reports CS2008 (no source files). NuGet pack
+    reports NU5128 (no lib/ folder). Neither names a defect in an
+    asset-only package.
 
     Build prerequisite: LayerMount.dll must already exist in
-    ../../x64/Release/ and/or ../../arm64/Release/ before packing.
-    `dotnet pack -c Release` is the entry point; NoBuild=true keeps
-    the SDK from invoking ClCompile from this csproj.
+    ../../x64/Release/ or ../../arm64/Release/, or in both, before
+    packing. `dotnet pack -c Release` is the entry point.
   -->
 
   <PropertyGroup>
@@ -25,7 +26,7 @@
          build can still target this project (it just produces nothing). -->
     <IsPackable>true</IsPackable>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
-    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <NoWarn>$(NoWarn);NU5128;CS2008</NoWarn>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
@@ -108,5 +109,26 @@
           Pack="true"
           PackagePath="THIRD_PARTY_NOTICES.md" />
   </ItemGroup>
+
+  <!-- The None items above test Exists, so a machine that built one
+       architecture packs only that one. That keeps a single-arch developer
+       pack working, and it also lets a release pack publish a package that
+       lacks an architecture, which fails at load time on that architecture
+       and nothing upstream reports it. Require the full set by default and
+       make the partial set a choice. -->
+  <Target Name="RequireEveryRidAsset"
+          BeforeTargets="Pack"
+          Condition="'$(AllowPartialRidAssets)' != 'true'">
+    <ItemGroup>
+      <ExpectedRidAsset Include="..\..\x64\$(Configuration)\LayerMount.dll" />
+      <ExpectedRidAsset Include="..\..\x64\$(Configuration)\LayerMount.lib" />
+      <ExpectedRidAsset Include="..\..\arm64\$(Configuration)\LayerMount.dll" />
+      <ExpectedRidAsset Include="..\..\arm64\$(Configuration)\LayerMount.lib" />
+      <MissingRidAsset Include="@(ExpectedRidAsset)"
+                       Condition="!Exists('%(FullPath)')" />
+    </ItemGroup>
+    <Error Condition="'@(MissingRidAsset)' != ''"
+           Text="LayerMount.Native cannot pack a complete package. These files are missing: @(MissingRidAsset->'%(Identity)', ', '). Build $(Configuration) for x64 and for ARM64 first. To pack only the architectures on disk, pass -p:AllowPartialRidAssets=true." />
+  </Target>
 
 </Project>
