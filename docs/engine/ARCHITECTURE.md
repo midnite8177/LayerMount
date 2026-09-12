@@ -674,7 +674,9 @@ Output strings, blobs, and arrays use the two-call pattern: pass
 `buffer = NULL`, `bufferChars = 0` to receive the required size in
 `*requiredChars`; allocate; call again with the populated buffer. A
 short buffer returns `HRESULT_FROM_WIN32(ERROR_MORE_DATA)` and always
-writes `*requiredChars` so the caller can resize and retry. The engine
+writes `*requiredChars` so the caller can resize and retry. The fill
+call writes the count the engine produced, not the capacity the caller
+offered. A caller must cut the result to that count. The engine
 honors this on every list, string, and blob surface, including nested
 per-entry strings inside `LM_VHD_LAYER_INFO` and `LM_VSS_SNAPSHOT_INFO`.
 `LayerMountGetSecurity` conforms as of `LM_ABI_VERSION` 2. That version

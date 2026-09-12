@@ -82,8 +82,8 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes:
 - `chore:` — tooling / build / non-code
 
 Area tags used in this repo: `vhd`, `vss`, `cli`, `host`, `powershell`,
-`build`, `test-shared`. Reference the task number in the body when
-relevant.
+`build`, `test-shared`, `security`. Reference the task number in the body
+when relevant.
 
 A defect in test-only code takes `test(test-shared):`, not `fix(...)`.
 `src/LayerMount.TestShared` and `src/LayerMount.NET.Tests` set

@@ -21,11 +21,10 @@ public sealed class SecurityTests
     [Fact]
     public void GetSecurity_OnUpperLayerFile_ReturnsNonEmptyValidDescriptor()
     {
-        using var env = new TempLayerEnvironment(0);
-        using var mount = LayerMount.Create(env.BuildConfig());
-        CreatePlainFile(mount, @"\plain.txt");
+        using var fixture = new MountFixture();
+        CreatePlainFile(fixture.Mount, @"\plain.txt");
 
-        var (attributes, sd) = mount.GetSecurity(@"\plain.txt");
+        var (attributes, sd) = fixture.Mount.GetSecurity(@"\plain.txt");
 
         Assert.NotEmpty(sd);
         var raw = new RawSecurityDescriptor(sd, 0);
@@ -36,15 +35,14 @@ public sealed class SecurityTests
     [Fact]
     public void GetSecurity_SddlMatchesUnderlyingFile()
     {
-        using var env = new TempLayerEnvironment(0);
-        using var mount = LayerMount.Create(env.BuildConfig());
-        CreatePlainFile(mount, @"\match.txt");
+        using var fixture = new MountFixture();
+        CreatePlainFile(fixture.Mount, @"\match.txt");
 
-        var (_, sd) = mount.GetSecurity(@"\match.txt");
+        var (_, sd) = fixture.Mount.GetSecurity(@"\match.txt");
         string fromMount = new RawSecurityDescriptor(sd, 0).GetSddlForm(AccessControlSections.All);
 
         byte[] direct = ReadWin32Security(
-            System.IO.Path.Combine(env.Upper, "match.txt"),
+            System.IO.Path.Combine(fixture.Upper, "match.txt"),
             OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
         string fromDisk = new RawSecurityDescriptor(direct, 0).GetSddlForm(AccessControlSections.All);
 
@@ -54,11 +52,10 @@ public sealed class SecurityTests
     [Fact]
     public void GetSecurity_ManyDistinctSidAces_RoundTripsWhole()
     {
-        using var env = new TempLayerEnvironment(0);
-        using var mount = LayerMount.Create(env.BuildConfig());
-        CreatePlainFile(mount, @"\manyaces.txt");
+        using var fixture = new MountFixture();
+        CreatePlainFile(fixture.Mount, @"\manyaces.txt");
 
-        string upperPath = System.IO.Path.Combine(env.Upper, "manyaces.txt");
+        string upperPath = System.IO.Path.Combine(fixture.Upper, "manyaces.txt");
         var sddl = new System.Text.StringBuilder("D:");
         string[] wellKnownSids =
         {
@@ -74,7 +71,7 @@ public sealed class SecurityTests
         }
         SetWin32SecurityFromSddl(upperPath, sddl.ToString());
 
-        var (_, sd) = mount.GetSecurity(@"\manyaces.txt");
+        var (_, sd) = fixture.Mount.GetSecurity(@"\manyaces.txt");
         var raw = new RawSecurityDescriptor(sd, 0);
 
         RawAcl? dacl = raw.DiscretionaryAcl;
@@ -98,16 +95,63 @@ public sealed class SecurityTests
     [Fact]
     public void GetSecurity_DaclOnlyOverload_OmitsOwnerAndGroup()
     {
-        using var env = new TempLayerEnvironment(0);
-        using var mount = LayerMount.Create(env.BuildConfig());
-        CreatePlainFile(mount, @"\daclonly.txt");
+        using var fixture = new MountFixture();
+        CreatePlainFile(fixture.Mount, @"\daclonly.txt");
 
-        var (_, sd) = mount.GetSecurity(@"\daclonly.txt", DACL_SECURITY_INFORMATION);
+        var (_, sd) = fixture.Mount.GetSecurity(@"\daclonly.txt", DACL_SECURITY_INFORMATION);
         var raw = new RawSecurityDescriptor(sd, 0);
 
         Assert.Null(raw.Owner);
         Assert.Null(raw.Group);
         Assert.NotNull(raw.DiscretionaryAcl);
+    }
+
+    [Fact]
+    public unsafe void GetSecurity_ReturnedArray_HoldsExactlyOneDescriptor()
+    {
+        using var fixture = new MountFixture();
+        CreatePlainFile(fixture.Mount, @"\exact.txt");
+
+        var (_, sd) = fixture.Mount.GetSecurity(@"\exact.txt");
+
+        uint descriptorLength;
+        fixed (byte* p = sd)
+        {
+            Assert.True(IsValidSecurityDescriptor(p),
+                "GetSecurityDescriptorLength reads the header of a self-relative descriptor, "
+                    + "so the length assertion below means nothing unless the bytes are one");
+            descriptorLength = GetSecurityDescriptorLength(p);
+        }
+        Assert.Equal((int)descriptorLength, sd.Length);
+    }
+
+    private sealed class MountFixture : IDisposable
+    {
+        private readonly TempLayerEnvironment _env;
+
+        public MountFixture()
+        {
+            _env = new TempLayerEnvironment(0);
+            try
+            {
+                Mount = LayerMount.Create(_env.BuildConfig());
+            }
+            catch
+            {
+                _env.Dispose();
+                throw;
+            }
+        }
+
+        public LayerMount Mount { get; }
+
+        public string Upper => _env.Upper;
+
+        public void Dispose()
+        {
+            Mount.Dispose();
+            _env.Dispose();
+        }
     }
 
     private static void CreatePlainFile(LayerMount mount, string relativePath)
@@ -159,6 +203,12 @@ public sealed class SecurityTests
     [DllImport("advapi32.dll", EntryPoint = "GetFileSecurityW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern unsafe bool NativeGetFileSecurity(
         string fileName, uint requestedInformation, byte* buffer, uint bufferLength, ref uint lengthNeeded);
+
+    [DllImport("advapi32.dll", EntryPoint = "GetSecurityDescriptorLength")]
+    private static extern unsafe uint GetSecurityDescriptorLength(byte* securityDescriptor);
+
+    [DllImport("advapi32.dll", EntryPoint = "IsValidSecurityDescriptor")]
+    private static extern unsafe bool IsValidSecurityDescriptor(byte* securityDescriptor);
 
     [DllImport("advapi32.dll", EntryPoint = "SetFileSecurityW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool NativeSetFileSecurity(

@@ -125,7 +125,8 @@ public sealed partial class LayerMount
     /// <summary>Reads the owner, group, DACL, and SACL of the file or
     /// directory at <paramref name="relativePath"/>.</summary>
     /// <returns>The Win32 attributes and a self-relative security
-    /// descriptor.</returns>
+    /// descriptor. The array holds exactly one descriptor, with no
+    /// trailing padding.</returns>
     /// <exception cref="LayerMountException">
     /// If the underlying native call returns a non-success HRESULT
     /// (most commonly file-not-found).
@@ -138,8 +139,11 @@ public sealed partial class LayerMount
     /// at <paramref name="relativePath"/>.</summary>
     /// <returns>
     /// The Win32 attributes and a self-relative security descriptor
-    /// that holds only the requested sections. An empty array when
-    /// <paramref name="securityInformation"/> is 0.
+    /// that holds only the requested sections. The array holds exactly
+    /// one descriptor, with no trailing padding. An empty array when
+    /// <paramref name="securityInformation"/> is 0, and also when every
+    /// requested section becomes unavailable between the size probe and
+    /// the fill call.
     /// </returns>
     /// <exception cref="LayerMountException">
     /// If the underlying native call returns a non-success HRESULT
@@ -192,7 +196,7 @@ public sealed partial class LayerMount
                 continue;
             }
             HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetSecurity));
-            return (attributes, sd);
+            return (attributes, TrimToActual(sd, actual));
         }
 
         HResultGuard.ThrowIfFailed(HRESULT_E_MORE_DATA, nameof(NativeMethods.LayerMountGetSecurity));
@@ -276,9 +280,6 @@ public sealed partial class LayerMount
                 lease.Handle, relativePath, p, (nuint)buffer.Length, actual);
         }
     }
-
-    private static byte[] TrimToActual(byte[] buffer, nuint actual) =>
-        actual == (nuint)buffer.Length ? buffer : buffer[..(int)actual];
 
     public unsafe void SetReparsePoint(string relativePath, ReadOnlySpan<byte> buffer)
     {
@@ -417,6 +418,9 @@ public sealed partial class LayerMount
     }
 
     private const int HRESULT_E_MORE_DATA = unchecked((int)0x800700EA);
+
+    private static byte[] TrimToActual(byte[] buffer, nuint actual) =>
+        actual == (nuint)buffer.Length ? buffer : buffer[..(int)actual];
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static unsafe int MergeDirectoryTrampoline(

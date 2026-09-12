@@ -783,7 +783,9 @@ LM_API HRESULT LM_CALL LayerMountUpdateOpenFilePath(
  *   securityDescriptorBytes < required: *requiredBytes is filled
  *     with the required size, HRESULT_FROM_WIN32(ERROR_MORE_DATA).
  *   otherwise: securityDescriptor is filled, *requiredBytes with the
- *     size written, S_OK.
+ *     size written, S_OK. A buffer larger than the descriptor is
+ *     accepted, so a caller whose descriptor shrank between the two
+ *     calls must cut the result to *requiredBytes.
  *
  * securityInformation names the sections the caller wants
  * (OWNER_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
