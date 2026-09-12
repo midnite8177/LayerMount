@@ -2315,6 +2315,8 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
         }
     }
 
+    const bool isProbe = (sd == nullptr || sdBytes == 0);
+
     // Capability gate: when the upper layer
     // doesn't carry NTFS ACLs (FAT32, exFAT, network shares with no
     // permissions plumbing), there's no SD to read. Return a synthetic
@@ -2332,9 +2334,13 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
         if (requiredBytes != nullptr) {
             *requiredBytes = worldSize;
         }
-        if (sd == nullptr || sdBytes < worldSize) {
+        if (isProbe) {
             ::LocalFree(worldSd);
-            return (sd == nullptr) ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW;
+            return STATUS_SUCCESS;
+        }
+        if (sdBytes < worldSize) {
+            ::LocalFree(worldSd);
+            return STATUS_BUFFER_OVERFLOW;
         }
         std::memcpy(sd, worldSd, worldSize);
         ::LocalFree(worldSd);
@@ -2358,7 +2364,7 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
     if (!ok) {
         DWORD err = ::GetLastError();
         if (err == ERROR_INSUFFICIENT_BUFFER) {
-            return STATUS_BUFFER_OVERFLOW;
+            return isProbe ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW;
         }
         return NtStatusFromWin32(err);
     }

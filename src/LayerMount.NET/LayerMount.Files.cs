@@ -113,6 +113,17 @@ public sealed partial class LayerMount
     // Security
     // ------------------------------------------------------------------
 
+    /// <summary>Reads the owner, group, DACL, and SACL of the file or
+    /// directory at <paramref name="relativePath"/>.</summary>
+    /// <returns>The Win32 attributes and a self-relative security
+    /// descriptor.</returns>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT
+    /// (most commonly file-not-found). Concurrent permission changes
+    /// between the size probe and the fill call are retried up to
+    /// <see cref="BufferHelpers.MaxFillRetries"/> times before surfacing
+    /// <c>ERROR_MORE_DATA</c>.
+    /// </exception>
     public unsafe (uint Attributes, byte[] SecurityDescriptor) GetSecurity(string relativePath)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
@@ -124,18 +135,37 @@ public sealed partial class LayerMount
             lease.Handle, relativePath, &attributes, null, 0, &required);
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetSecurity));
 
-        byte[] sd = new byte[(int)required];
-        if (required > 0)
+        if (required == 0)
         {
+            return (attributes, []);
+        }
+
+        // Probe-then-fill against a descriptor that can change size
+        // between the two calls, for example when someone adds an ACE.
+        // Bounded so pathological churn surfaces as a real failure
+        // rather than spinning forever.
+        for (int attempt = 0; attempt < BufferHelpers.MaxFillRetries; attempt++)
+        {
+            byte[] sd = new byte[(int)required];
+            nuint actual = 0;
             fixed (byte* p = sd)
             {
-                nuint actual = 0;
                 hr = NativeMethods.LayerMountGetSecurity(
                     lease.Handle, relativePath, &attributes, p, required, &actual);
-                HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetSecurity));
             }
+
+            if (hr == HRESULT_E_MORE_DATA && actual > required
+                && attempt < BufferHelpers.MaxFillRetries - 1)
+            {
+                required = actual;
+                continue;
+            }
+            HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetSecurity));
+            return (attributes, sd);
         }
-        return (attributes, sd);
+
+        HResultGuard.ThrowIfFailed(HRESULT_E_MORE_DATA, nameof(NativeMethods.LayerMountGetSecurity));
+        return (attributes, []);
     }
 
     public unsafe void SetSecurity(
@@ -253,7 +283,7 @@ public sealed partial class LayerMount
     /// If the underlying native call returns a non-success HRESULT
     /// (most commonly file-not-found). Concurrent stream additions
     /// between the size probe and the fill call are retried up to
-    /// <see cref="MaxStreamRetries"/> times before surfacing
+    /// <see cref="BufferHelpers.MaxFillRetries"/> times before surfacing
     /// <c>ERROR_MORE_DATA</c>.
     /// </exception>
     public unsafe StreamInfo[] EnumerateStreams(string relativePath)
@@ -266,7 +296,7 @@ public sealed partial class LayerMount
         // side return ERROR_MORE_DATA -- treat that as transient and
         // re-probe instead of throwing. Bounded so pathological churn
         // surfaces as a real failure rather than spinning forever.
-        for (int attempt = 0; attempt < MaxStreamRetries; attempt++)
+        for (int attempt = 0; attempt < BufferHelpers.MaxFillRetries; attempt++)
         {
             uint required = 0;
             int hrProbe = NativeMethods.LayerMountEnumerateStreams(
@@ -287,7 +317,7 @@ public sealed partial class LayerMount
                     lease.Handle, relativePath, p, required, &written);
             }
 
-            if (hrFill == HRESULT_E_MORE_DATA && attempt < MaxStreamRetries - 1)
+            if (hrFill == HRESULT_E_MORE_DATA && attempt < BufferHelpers.MaxFillRetries - 1)
             {
                 // A stream was added between probe and fill. Re-probe.
                 continue;
@@ -315,9 +345,6 @@ public sealed partial class LayerMount
         return [];
     }
 
-    // Match BufferHelpers.MaxFillRetries and HRESULT_E_MORE_DATA so the
-    // race-handling shape is uniform across the wrapper.
-    private const int MaxStreamRetries = 5;
     private const int HRESULT_E_MORE_DATA = unchecked((int)0x800700EA);
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]

@@ -25,7 +25,7 @@ internal static class BufferHelpers
     // callbacks still fire) can legitimately grow between sizing and fill,
     // but we cap retries so a pathological grow-faster-than-we-allocate
     // scenario surfaces as a proper error instead of looping forever.
-    private const int MaxFillRetries = 5;
+    internal const int MaxFillRetries = 5;
 
     // HRESULT_FROM_WIN32(ERROR_MORE_DATA) -- the ABI returns this on the
     // fill call when the live payload grew past our allocated capacity.
