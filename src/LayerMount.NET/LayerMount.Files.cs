@@ -219,26 +219,66 @@ public sealed partial class LayerMount
     // Reparse points
     // ------------------------------------------------------------------
 
+    private const int MaximumReparseDataBufferSize = 16 * 1024;
+
+    /// <summary>Reads the raw reparse descriptor of the file or directory
+    /// at <paramref name="relativePath"/>.</summary>
+    /// <returns>
+    /// The descriptor as the filesystem holds it, trimmed to the bytes the
+    /// native side wrote. An empty array only if the filesystem reports a
+    /// zero-length descriptor; a path that carries no reparse data at all
+    /// throws instead.
+    /// </returns>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT:
+    /// <c>STATUS_NOT_A_REPARSE_POINT</c> for a path that exists but is not
+    /// a reparse point, and (as <see cref="LayerMountNotFoundException"/>)
+    /// not-found for a path that does not resolve. A descriptor rewritten
+    /// between the size probe and the fill call is re-read once at the
+    /// documented reparse-data ceiling, which every descriptor fits, so the
+    /// rewrite surfaces as the current descriptor rather than
+    /// <c>ERROR_MORE_DATA</c>.
+    /// </exception>
     public unsafe byte[] GetReparsePoint(string relativePath)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
         using var lease = new SafeHandleLease(_handle);
         nuint required = 0;
-        int hr = NativeMethods.LayerMountGetReparsePoint(lease.Handle, relativePath, null, 0, &required);
+        int hr = NativeMethods.LayerMountGetReparsePoint(
+            lease.Handle, relativePath, null, 0, &required);
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetReparsePoint));
 
-        byte[] buffer = new byte[(int)required];
-        if (required > 0)
+        if (required == 0)
         {
-            fixed (byte* p = buffer)
-            {
-                nuint actual = 0;
-                hr = NativeMethods.LayerMountGetReparsePoint(lease.Handle, relativePath, p, required, &actual);
-                HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetReparsePoint));
-            }
+            return [];
         }
-        return buffer;
+
+        byte[] buffer = new byte[(int)required];
+        nuint actual = 0;
+        hr = FillReparseBuffer(lease, relativePath, buffer, &actual);
+
+        if (hr == HRESULT_E_MORE_DATA)
+        {
+            buffer = new byte[MaximumReparseDataBufferSize];
+            hr = FillReparseBuffer(lease, relativePath, buffer, &actual);
+        }
+        HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetReparsePoint));
+
+        return TrimToActual(buffer, actual);
     }
+
+    private static unsafe int FillReparseBuffer(
+        SafeHandleLease lease, string relativePath, byte[] buffer, nuint* actual)
+    {
+        fixed (byte* p = buffer)
+        {
+            return NativeMethods.LayerMountGetReparsePoint(
+                lease.Handle, relativePath, p, (nuint)buffer.Length, actual);
+        }
+    }
+
+    private static byte[] TrimToActual(byte[] buffer, nuint actual) =>
+        actual == (nuint)buffer.Length ? buffer : buffer[..(int)actual];
 
     public unsafe void SetReparsePoint(string relativePath, ReadOnlySpan<byte> buffer)
     {

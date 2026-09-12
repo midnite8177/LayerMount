@@ -821,6 +821,28 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
 LM_API HRESULT LM_CALL LayerMountSetOpaque(
     LM_HANDLE handle, PCWSTR dirRelativePath);
 
+/*
+ * Path-based reparse-descriptor accessor. Size-probe pattern:
+ *   buffer == NULL or bufferBytes == 0:
+ *     *requiredBytes is filled with the required size, S_OK.
+ *   bufferBytes < required: *requiredBytes is filled with the required
+ *     size, HRESULT_FROM_WIN32(ERROR_MORE_DATA).
+ *   otherwise: buffer is filled, *requiredBytes with the size written,
+ *     S_OK.
+ *
+ * A buffer larger than the descriptor is accepted, and *requiredBytes
+ * then reports the bytes written rather than the capacity offered, so a
+ * caller whose descriptor changed size between the probe and the fill
+ * can re-read at MAXIMUM_REPARSE_DATA_BUFFER_SIZE (16384 bytes) and get
+ * the current descriptor in one further call. That ceiling is the
+ * documented maximum for reparse data, and the engine stages every read
+ * through a buffer of exactly that size, so no descriptor it returns
+ * needs more.
+ *
+ * A path that exists but carries no reparse data returns
+ * HRESULT_FROM_NT(STATUS_NOT_A_REPARSE_POINT); a path that does not
+ * resolve returns HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND).
+ */
 LM_API HRESULT LM_CALL LayerMountGetReparsePoint(
     LM_HANDLE handle,
     PCWSTR     relativePath,
