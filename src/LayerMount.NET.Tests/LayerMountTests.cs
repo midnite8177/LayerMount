@@ -8,10 +8,10 @@ namespace LayerMount.Tests;
 public sealed class LayerMountTests
 {
     [Fact]
-    public void GetVersion_ReturnsAbiVersionTwo()
+    public void GetVersion_AbiVersion_MatchesTheConstantTheWrapperSends()
     {
         var (_, _, _, abi) = LayerMount.GetVersion();
-        Assert.Equal(2u, abi);
+        Assert.Equal(LayerMountVersion.AbiVersion, abi);
     }
 
     [Fact]

@@ -14,8 +14,8 @@ public sealed class SmokeTests
     public void LayerMountGetVersion_ReturnsSaneTuple()
     {
         var (major, minor, patch, abi) = LayerMount.GetVersion();
-        Assert.Equal(2u, abi);
-        // major/minor/patch live in LM_VER_* constants (0/1/0 as of 2026-04).
+        Assert.Equal(LayerMountVersion.AbiVersion, abi);
+        // major/minor/patch live in LM_VER_* constants (0.2.0 per version.props).
         // Keep the assertion loose: just insist they fit in uint and don't
         // surface as garbage.
         Assert.True(major <= 100 && minor <= 100 && patch <= 1000,

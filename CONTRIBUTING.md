@@ -92,11 +92,15 @@ markers to decide the next version.
 ## Versioning and releases
 
 LayerMount follows [Semantic Versioning](https://semver.org/). The
-canonical version lives in `version.props` at the repo root; the managed
-projects pick it up through `Directory.Build.props`, and the native
-`LM_VER_*` macros are generated from it by an MSBuild target
-(`src/LayerMount.dll/LayerMount.version.targets` → `public/LayerMountVersion.h`,
-which is `.gitignored`).
+canonical version lives in `version.props` at the repository root.
+
+The managed projects read the version through `Directory.Build.props`.
+An MSBuild target generates the native `LM_VER_*` macros from it.
+`src/LayerMount.dll/LayerMount.version.targets` writes
+`public/LayerMountVersion.h`, and Git ignores that file. A similar
+target generates the managed `LayerMountVersion.AbiVersion` constant.
+`src/LayerMount.NET/LayerMount.NET.version.targets` writes it into the
+intermediate output directory.
 
 `LM_ABI_VERSION` is independent of the SemVer string and ticks only on
 binary-breaking changes to the public C exports in `LayerMount.def`.

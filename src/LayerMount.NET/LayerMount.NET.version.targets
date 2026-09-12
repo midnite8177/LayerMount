@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    This target adds the generated file to @(Compile) itself. It does
+    not declare a static <Compile> item, and it has no Inputs or
+    Outputs. A C# Compile item must exist on every build.
+  -->
+
+  <PropertyGroup>
+    <_LMNetVersionTemplate>$(MSBuildThisFileDirectory)LayerMountVersion.cs.in</_LMNetVersionTemplate>
+  </PropertyGroup>
+
+  <Target Name="GenerateLayerMountVersionSource"
+          BeforeTargets="BeforeCompile">
+    <!--
+      Compute $(IntermediateOutputPath) here, not in the static
+      PropertyGroup above: the SDK appends the target framework
+      segment (net8.0) only after Sdk.targets runs.
+    -->
+    <Error Condition="'$(LayerMountAbiVersion)'==''"
+           Text="LayerMountAbiVersion is not set. Import version.props before this target runs." />
+    <PropertyGroup>
+      <_LMNetVersionGenerated>$(IntermediateOutputPath)LayerMountVersion.g.cs</_LMNetVersionGenerated>
+      <_LMNetVersionSourceText>$([MSBuild]::Escape($([System.IO.File]::ReadAllText('$(_LMNetVersionTemplate)').Replace('@LM_ABI_VERSION@','$(LayerMountAbiVersion)'))))</_LMNetVersionSourceText>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_LMNetVersionGenerated)"
+                      Lines="$(_LMNetVersionSourceText)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(_LMNetVersionGenerated)" />
+    </ItemGroup>
+    <Message Importance="low" Text="LayerMountVersion.g.cs generated (ABI $(LayerMountAbiVersion))" />
+  </Target>
+
+</Project>

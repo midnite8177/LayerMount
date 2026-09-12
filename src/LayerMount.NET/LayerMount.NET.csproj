@@ -69,6 +69,7 @@
   </ItemGroup>
 
   <Import Project="LayerMount.NET.props" />
+  <Import Project="LayerMount.NET.version.targets" />
 
   <!-- Enforce native-DLL-first build ordering. Without this, msbuild
        builds the managed and native projects in parallel, and if the
