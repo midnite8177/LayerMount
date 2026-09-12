@@ -82,7 +82,14 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes:
 - `chore:` — tooling / build / non-code
 
 Area tags used in this repo: `vhd`, `vss`, `cli`, `host`, `powershell`,
-`build`. Reference the task number in the body when relevant.
+`build`, `test-shared`. Reference the task number in the body when
+relevant.
+
+A defect in test-only code takes `test(test-shared):`, not `fix(...)`.
+`src/LayerMount.TestShared` and `src/LayerMount.NET.Tests` set
+`IsPackable=false`, so no package consumer can observe the change, and
+Versionize must not bump the version or write a `CHANGELOG.md` entry for
+it.
 
 A breaking change (anything that bumps the major version of either the
 managed surface or the native ABI) **must** include `!` after the type or

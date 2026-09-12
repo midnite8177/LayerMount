@@ -17,7 +17,7 @@ public sealed class LayerMountTransientTests
     [Fact]
     public void CreateTransient_FreshWorkDir_ReturnsUsableLayerMount()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("Tr");
         string workDir = scratch.Sub("transient");
 
         using var mount = LayerMount.CreateTransient(workDir);
@@ -33,7 +33,7 @@ public sealed class LayerMountTransientTests
     [Fact]
     public void CreateTransient_ExistingWorkDir_Succeeds()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("Tr");
         string workDir = scratch.Sub("already-exists");
         Directory.CreateDirectory(workDir);
 
@@ -59,7 +59,7 @@ public sealed class LayerMountTransientTests
     [Fact]
     public void CreateTransient_DoubleDispose_IsIdempotent()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("Tr");
         string workDir = scratch.Sub("dispose-twice");
 
         var mount = LayerMount.CreateTransient(workDir);
@@ -70,7 +70,7 @@ public sealed class LayerMountTransientTests
     [Fact]
     public void CreateTransient_VssList_ReturnsSnapshotCollection()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("Tr");
         string workDir = scratch.Sub("vss-probe");
 
         using var mount = LayerMount.CreateTransient(workDir);
@@ -88,23 +88,4 @@ public sealed class LayerMountTransientTests
         }
     }
 
-    private sealed class TempScratchDir : IDisposable
-    {
-        public string Root { get; }
-
-        public TempScratchDir()
-        {
-            Root = Path.Combine(Path.GetTempPath(),
-                "LayerMountTr_" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(Root);
-        }
-
-        public string Sub(string name) => Path.Combine(Root, name);
-
-        public void Dispose()
-        {
-            try { Directory.Delete(Root, recursive: true); }
-            catch { /* best-effort */ }
-        }
-    }
 }

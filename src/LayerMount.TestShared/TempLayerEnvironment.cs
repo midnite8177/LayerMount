@@ -6,8 +6,11 @@ namespace LayerMount.TestShared;
 
 /// <summary>
 /// C# twin of the native TempLayerEnv: creates a unique directory tree
-/// under %TEMP% with upper/, work/, and one-or-more lowerN/ folders.
-/// Removes everything on <see cref="Dispose"/>.
+/// under %TEMP% with upper/, work/, and zero or more lowerN/ folders.
+/// Tries to remove everything on <see cref="Dispose"/>. The cleanup stays
+/// inside <see cref="Root"/> and does not follow a reparse point out of it.
+/// It is best-effort: <see cref="Dispose"/> swallows a failure, so
+/// <see cref="Root"/> can outlive it.
 ///
 /// Lives in TestShared so consumer test projects across the engine and
 /// host adapters can share one fixture.
@@ -69,14 +72,7 @@ public sealed class TempLayerEnvironment : IDisposable
         {
             if (Directory.Exists(Root))
             {
-                // Clear read-only attributes that copy-up may leave behind.
-                foreach (var file in Directory.EnumerateFiles(
-                             Root, "*", SearchOption.AllDirectories))
-                {
-                    try { File.SetAttributes(file, FileAttributes.Normal); }
-                    catch { /* best-effort */ }
-                }
-                Directory.Delete(Root, recursive: true);
+                DirectoryTree.DeleteWithoutFollowingLinks(Root);
             }
         }
         catch
@@ -84,4 +80,5 @@ public sealed class TempLayerEnvironment : IDisposable
             // Tests must not fail on cleanup; the OS will reclaim %TEMP%.
         }
     }
+
 }

@@ -68,7 +68,7 @@ public sealed class LayerMountPointTests
     [Fact]
     public void PrepareDirectory_FreshPath_ValidatesWithoutClaimingOwnership()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("MP");
         string path = scratch.Sub("mnt");
 
         var prep = LayerMount.MountPoint.PrepareDirectory(path);
@@ -86,7 +86,7 @@ public sealed class LayerMountPointTests
     [Fact]
     public void PrepareDirectory_PathExists_ThrowsCollision()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("MP");
         string path = scratch.Sub("already-here");
         Directory.CreateDirectory(path);
 
@@ -114,7 +114,7 @@ public sealed class LayerMountPointTests
     [Fact]
     public void RoundTrip_CaptureIdentityWithoutOwnership_LeavesDirectory()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("MP");
         string path = scratch.Sub("mnt");
 
         var prep = LayerMount.MountPoint.PrepareDirectory(path);
@@ -138,7 +138,7 @@ public sealed class LayerMountPointTests
     [Fact]
     public void RoundTrip_NotOwnedByUs_LeavesDirectory()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("MP");
         string path = scratch.Sub("foreign");
         Directory.CreateDirectory(path);
 
@@ -155,7 +155,7 @@ public sealed class LayerMountPointTests
     [Fact]
     public void CaptureIdentity_MissingDirectory_LeavesIdentityZero()
     {
-        using var scratch = new TempScratchDir();
+        using var scratch = new TempScratchDir("MP");
         string path = scratch.Sub("never-created");
 
         // Native: no-op, identity stays zero, returns S_OK.
@@ -164,28 +164,4 @@ public sealed class LayerMountPointTests
         Assert.Equal(0UL, prep.VolumeSerial);
     }
 
-    // ------------------------------------------------------------------
-    // Inline scratch helper -- no project-wide fixture needed for these
-    // self-contained mount-point tests.
-    // ------------------------------------------------------------------
-
-    private sealed class TempScratchDir : IDisposable
-    {
-        public string Root { get; }
-
-        public TempScratchDir()
-        {
-            Root = Path.Combine(Path.GetTempPath(),
-                "LayerMountMP_" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(Root);
-        }
-
-        public string Sub(string name) => Path.Combine(Root, name);
-
-        public void Dispose()
-        {
-            try { Directory.Delete(Root, recursive: true); }
-            catch { /* best-effort cleanup */ }
-        }
-    }
 }
