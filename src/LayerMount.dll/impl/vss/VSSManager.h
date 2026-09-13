@@ -62,8 +62,8 @@ public:
                          std::wstring& outSnapshotId, std::wstring& outDevicePath);
 
     // 5.5 — Delete a specific snapshot by ID.
-    // Persistent snapshots: creates a new IVssBackupComponents to call DeleteSnapshots.
-    // Non-persistent snapshots: releases the held IVssBackupComponents (auto-deletes).
+    // Deletes through a fresh IVssBackupComponents under VSS_CTX_ALL for both
+    // contexts, then drops the tracked entry and its held instance, if any.
     DWORD DeleteSnapshot(const std::wstring& snapshotId);
 
     // 5.5 — Delete all non-persistent snapshots.
