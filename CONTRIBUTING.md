@@ -64,6 +64,19 @@ elevation required; tests that need an adapter binary (formerly
 dotnet test src\LayerMount.NET.Tests -c Release
 ```
 
+The managed test projects also build for `ARM64`. Build the solution for
+that platform, point the wrapper at the ARM64 native DLL, and then run
+the built test assembly on an ARM64 host:
+
+```powershell
+msbuild LayerMount.sln /p:Configuration=Release /p:Platform=ARM64 /p:LayerMountNativeArch=ARM64
+dotnet test src\LayerMount.NET.Tests -c Release -p:Platform=ARM64 --no-build
+```
+
+`LayerMountNativeArch` selects the native DLL that `LayerMount.NET.props`
+copies next to the managed assemblies. It defaults to `x64`. The native
+test suites have no ARM64 configuration yet.
+
 ### Host-adapter test suites
 
 Native integration tests, host-spawning E2E tests, the PowerShell Pester
