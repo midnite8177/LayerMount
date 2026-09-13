@@ -153,6 +153,44 @@ public sealed class VssApi
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountVssCleanupSnapshots));
     }
 
+    /// <summary>
+    /// Reports whether a snapshot this overlay created still has a
+    /// reachable device path. Returns <c>true</c> while the path
+    /// resolves and <c>false</c> once it stops resolving.
+    /// </summary>
+    /// <remarks>
+    /// Scope is this overlay, not the machine. <see cref="ListSnapshots"/>
+    /// reports every snapshot on the system; this reports only ids created
+    /// through this instance, and throws for any other id.
+    /// <para>
+    /// A snapshot destroyed outside this process stays tracked here, so it
+    /// reports <c>false</c> rather than throw. That is what lets a caller
+    /// tell a dead snapshot from one it never owned. A failed open of the
+    /// device path as a lower layer cannot make that distinction, because
+    /// both produce the same error.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="snapshotId"/> is null or empty.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// The id was not created through this overlay, which surfaces as
+    /// <c>HRESULT_FROM_WIN32(ERROR_NOT_FOUND)</c>, or the call could not
+    /// be made at all.
+    /// </exception>
+    public unsafe bool ValidateSnapshotPath(string snapshotId)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(snapshotId);
+        using var lease = new SafeHandleLease(_owner.Handle);
+
+        int reachable = 0;
+        int hr = NativeMethods.LayerMountVssValidateSnapshotPath(
+            lease.Handle, snapshotId, &reachable);
+        HResultGuard.ThrowIfFailed(
+            hr, nameof(NativeMethods.LayerMountVssValidateSnapshotPath));
+        return reachable != 0;
+    }
+
     // DateTime.FromFileTimeUtc throws ArgumentOutOfRangeException for
     // FILETIME values outside [0, 2650467743999999999]. A native side
     // returning 0 (snapshot whose createdAt was never populated), -1
@@ -174,6 +212,21 @@ public sealed class VssApi
     }
 }
 
+/// <summary>One snapshot as <see cref="VssApi.ListSnapshots"/> reports it.</summary>
+/// <param name="Id">VSS snapshot id (GUID without braces).</param>
+/// <param name="VssId">The same id as a <see cref="Guid"/>.</param>
+/// <param name="VolumePath">The volume the snapshot was taken from.</param>
+/// <param name="DevicePath">
+/// OS device path of the shadow copy, without a trailing separator. The
+/// bare form names the device object, not a directory: append a backslash
+/// before a directory query such as GetFileAttributesW, or the query fails
+/// while the snapshot is live.
+/// </param>
+/// <param name="Persistent">True when the snapshot survives process exit.</param>
+/// <param name="CreatedAtUtc">
+/// Creation time, or <see cref="DateTime.MinValue"/> when the native side
+/// reported no usable timestamp.
+/// </param>
 public sealed record VssSnapshotInfo(
     string Id,
     Guid VssId,

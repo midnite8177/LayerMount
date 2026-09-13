@@ -31,8 +31,14 @@ public sealed class VssSnapshot : IDisposable
     /// <summary>VSS snapshot id (GUID without braces).</summary>
     public string Id { get; }
 
-    /// <summary>OS device path of the shadow copy
-    /// (e.g. <c>\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy123</c>).</summary>
+    /// <summary>
+    /// OS device path of the shadow copy
+    /// (e.g. <c>\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy123</c>),
+    /// without a trailing separator. The bare form names the device
+    /// object, not a directory: append a backslash before a directory
+    /// query such as GetFileAttributesW, or the query fails while the
+    /// snapshot is live.
+    /// </summary>
     public string DevicePath { get; }
 
     /// <summary>

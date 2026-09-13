@@ -419,6 +419,11 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial int LayerMountVssCleanupSnapshots(IntPtr mount);
 
+    [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf16)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial int LayerMountVssValidateSnapshotPath(
+        IntPtr mount, string snapshotId, int* outReachable);
+
     [LibraryImport(DllName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial int LayerMountVssCloseSnapshot(IntPtr snapshot);

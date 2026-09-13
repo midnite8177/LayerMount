@@ -1027,6 +1027,29 @@ LM_API HRESULT LM_CALL LayerMountVssListSnapshots(
 LM_API HRESULT LM_CALL LayerMountVssCleanupSnapshots(LM_HANDLE mount);
 
 /*
+ * Report whether a snapshot this overlay created still has a reachable
+ * device path. The answer travels in *outReachable; the HRESULT reports
+ * only whether the query was made.
+ *
+ *   S_OK
+ *     This overlay tracks the id. *outReachable is TRUE when the device
+ *     path resolves and FALSE when it does not.
+ *   HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
+ *     This overlay never created that id. Scope is per-overlay and
+ *     in-process, unlike LayerMountVssListSnapshots, which reports the
+ *     whole machine under VSS_CTX_ALL.
+ *   E_HANDLE, E_INVALIDARG, E_POINTER, or any other failure
+ *     The query was not made. *outReachable is undefined.
+ *
+ * A snapshot destroyed outside this process stays tracked, so it
+ * reports S_OK with *outReachable FALSE, never ERROR_NOT_FOUND. A
+ * caller can therefore tell a dead snapshot from one it never owned,
+ * which a lower-layer open failure alone cannot.
+ */
+LM_API HRESULT LM_CALL LayerMountVssValidateSnapshotPath(
+    LM_HANDLE mount, PCWSTR snapshotId, BOOL* outReachable);
+
+/*
  * Release the handle-table slot backing an LM_VSS_SNAPSHOT_HANDLE. The
  * snapshot itself -- if non-persistent -- remains tracked by the
  * engine's VSSManager and is eligible for LayerMountVssCleanupSnapshots.

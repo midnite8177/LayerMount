@@ -1,7 +1,6 @@
-// AbiVss.cpp -- VSS-primitive ABI entry points.
-// LayerMountVssCreateSnapshot / DeleteSnapshot / ListSnapshots /
-// CleanupSnapshots. Each shim opens a ComScope on entry so consumers do
-// not need to CoInitializeEx the thread they call from; nested ComScopes
+// AbiVss.cpp -- VSS-primitive ABI entry points. Each shim opens a
+// ComScope on entry so consumers do not need to CoInitializeEx the
+// thread they call from; nested ComScopes
 // on a thread already initialized by the DLL are cheap counter bumps
 // (see ComScope.h).
 //
@@ -414,6 +413,40 @@ LM_API HRESULT LM_CALL LayerMountVssCleanupSnapshots(LM_HANDLE mount)
     if (dw != ERROR_SUCCESS) {
         return HRESULT_FROM_WIN32(dw);
     }
+    return S_OK;
+
+    LM_ABI_END();
+}
+
+LM_API HRESULT LM_CALL LayerMountVssValidateSnapshotPath(LM_HANDLE mount,
+                                                        PCWSTR     snapshotId,
+                                                        BOOL*      outReachable)
+{
+    using namespace ::LayerMount::abi;
+
+    if (mount        == nullptr) return E_HANDLE;
+    if (snapshotId   == nullptr || *snapshotId == L'\0') return E_INVALIDARG;
+    if (outReachable == nullptr) return E_POINTER;
+
+    LM_ABI_BEGIN();
+
+    ::LayerMount::ComScope com;
+    if (HRESULT hr = GuardComScope(com); FAILED(hr)) return hr;
+
+    const std::uint64_t encoded =
+        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(mount));
+    auto mountHolder = Handles().mount.Resolve(encoded);
+    if (mountHolder == nullptr) {
+        return E_HANDLE;
+    }
+
+    bool reachable = false;
+    const DWORD dw = mountHolder->core->Vss().ValidateSnapshotPath(
+        snapshotId, reachable);
+    if (dw != ERROR_SUCCESS) {
+        return HRESULT_FROM_WIN32(dw);
+    }
+    *outReachable = reachable ? TRUE : FALSE;
     return S_OK;
 
     LM_ABI_END();
