@@ -184,17 +184,17 @@ jobs:
           # `dotnet nuget push` is unreliable across versions/platforms
           # and silently fails as "File does not exist (artifacts/*.nupkg)"
           # when more than one match exists. Push files one-by-one.
-          $nupkgs  = @(Get-ChildItem -Path 'artifacts/*.nupkg')
-          $snupkgs = @(Get-ChildItem -Path 'artifacts/*.snupkg')
+          #
+          # Do not push the .snupkg files in a second loop. When
+          # `dotnet nuget push` uploads a .nupkg, it also uploads the
+          # .snupkg with the same name from the same folder. A second
+          # push of the symbols gets a Conflict from nuget.org.
+          $nupkgs = @(Get-ChildItem -Path 'artifacts/*.nupkg')
           if ($nupkgs.Count -eq 0) { throw 'No .nupkg files found under artifacts/.' }
 
           foreach ($pkg in $nupkgs) {
             dotnet nuget push $pkg.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
             if ($LASTEXITCODE -ne 0) { throw "nuget push failed for $($pkg.Name) (exit $LASTEXITCODE)" }
-          }
-          foreach ($pkg in $snupkgs) {
-            dotnet nuget push $pkg.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
-            if ($LASTEXITCODE -ne 0) { throw "nuget push (symbols) failed for $($pkg.Name) (exit $LASTEXITCODE)" }
           }
 
       - name: Create GitHub Release
