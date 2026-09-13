@@ -103,8 +103,11 @@ canonical version lives in `version.props` at the repository root.
 
 The managed projects read the version through `Directory.Build.props`.
 An MSBuild target generates the native `LM_VER_*` macros from it.
-`src/LayerMount.dll/LayerMount.version.targets` writes
-`public/LayerMountVersion.h`, and Git ignores that file. A similar
+`src/LayerMount.dll/LayerMount.version.proj` writes
+`public/LayerMountVersion.h`, and Git ignores that file. Both native
+projects call that project through the MSBuild task from
+`LayerMount.version.targets`, so the header has one writer under `/m`.
+A similar
 target generates the managed `LayerMountVersion.AbiVersion` constant.
 `src/LayerMount.NET/LayerMount.NET.version.targets` writes it into the
 intermediate output directory.

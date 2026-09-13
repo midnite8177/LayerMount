@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    Generates src\LayerMount.dll\public\LayerMountVersion.h from the
+    committed template LayerMountVersion.h.in. The target replaces the
+    placeholders with the values from version.props.
+
+    This is a standalone project, not an import. LayerMount.version.targets
+    calls it through the MSBuild task from both LayerMount.dll.vcxproj and
+    LayerMount-static.vcxproj. MSBuild builds one project instance only
+    once per build, so the header has one writer. The second caller waits
+    for the result. When both vcxproj files ran the target themselves, the
+    two parallel writes to the same file failed at random with MSB3491.
+
+    This project does not import Directory.Build.props, because it has no
+    SDK and no Microsoft.Common.props import. It imports version.props
+    directly.
+
+    The generated header sits next to LayerMount.h in the public include
+    folder, so every project that includes LayerMount.h gets the version
+    macros with no more include directories. Git ignores the generated
+    file.
+  -->
+
+  <Import Project="$(MSBuildThisFileDirectory)..\..\version.props" />
+
+  <PropertyGroup>
+    <_LMVersionTemplate>$(MSBuildThisFileDirectory)public\LayerMountVersion.h.in</_LMVersionTemplate>
+    <_LMVersionGenerated>$(MSBuildThisFileDirectory)public\LayerMountVersion.h</_LMVersionGenerated>
+  </PropertyGroup>
+
+  <Target Name="GenerateLayerMountVersionHeader"
+          Inputs="$(_LMVersionTemplate);$(MSBuildThisFileFullPath);$(MSBuildThisFileDirectory)..\..\version.props"
+          Outputs="$(_LMVersionGenerated)">
+    <Error Condition="'$(LayerMountAbiVersion)'==''"
+           Text="LayerMountAbiVersion is not set. version.props did not import." />
+    <PropertyGroup>
+      <_LMVersionHeaderText>$([System.IO.File]::ReadAllText('$(_LMVersionTemplate)').Replace('@LM_VER_MAJOR@','$(LayerMountVersionMajor)').Replace('@LM_VER_MINOR@','$(LayerMountVersionMinor)').Replace('@LM_VER_PATCH@','$(LayerMountVersionPatch)').Replace('@LM_VER_STRING@','$(LayerMountVersionFull)').Replace('@LM_ABI_VERSION@','$(LayerMountAbiVersion)'))</_LMVersionHeaderText>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_LMVersionGenerated)"
+                      Lines="$(_LMVersionHeaderText)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <Message Importance="low" Text="LayerMountVersion.h generated (version $(LayerMountVersionFull), ABI $(LayerMountAbiVersion))" />
+  </Target>
+
+</Project>

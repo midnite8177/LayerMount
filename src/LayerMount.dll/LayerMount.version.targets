@@ -2,38 +2,26 @@
 <Project>
 
   <!--
-    Generates src\LayerMount.dll\public\LayerMountVersion.h from the
-    committed template LayerMountVersion.h.in, substituting placeholders
-    from version.props (imported via Directory.Build.props).
+    Imported by LayerMount.dll.vcxproj and LayerMount-static.vcxproj.
 
-    The generated header sits next to LayerMount.h in the public include
-    folder so every project that already includes LayerMount.h picks up
-    the version macros transitively (no extra AdditionalIncludeDirectories
-    needed for test projects).
+    Before ClCompile, this target asks MSBuild to build the header
+    generator in LayerMount.version.proj. The generator writes
+    public\LayerMountVersion.h from LayerMountVersion.h.in and
+    version.props.
 
-    The generated file is .gitignored. Both LayerMount.dll.vcxproj and
-    LayerMount-static.vcxproj run this target; WriteOnlyWhenDifferent
-    keeps incremental builds clean and makes concurrent writes idempotent
-    (both projects produce byte-identical output for the same version).
+    The MSBuild task is the point of this indirection. Both vcxproj
+    files build in parallel under /m, and a target that runs in each of
+    them writes the header twice at the same time. MSBuild builds one
+    project instance only once per build, so the generator runs once and
+    the second caller waits. RemoveProperties drops Configuration and
+    Platform, so every caller maps to the same project instance.
   -->
 
-  <PropertyGroup>
-    <_LMVersionTemplate>$(MSBuildThisFileDirectory)public\LayerMountVersion.h.in</_LMVersionTemplate>
-    <_LMVersionGenerated>$(MSBuildThisFileDirectory)public\LayerMountVersion.h</_LMVersionGenerated>
-  </PropertyGroup>
-
   <Target Name="GenerateLayerMountVersionHeader"
-          BeforeTargets="ClCompile"
-          Inputs="$(_LMVersionTemplate);$(MSBuildThisFileFullPath);$(MSBuildProjectDirectory)\..\..\version.props"
-          Outputs="$(_LMVersionGenerated)">
-    <PropertyGroup>
-      <_LMVersionHeaderText>$([System.IO.File]::ReadAllText('$(_LMVersionTemplate)').Replace('@LM_VER_MAJOR@','$(LayerMountVersionMajor)').Replace('@LM_VER_MINOR@','$(LayerMountVersionMinor)').Replace('@LM_VER_PATCH@','$(LayerMountVersionPatch)').Replace('@LM_VER_STRING@','$(LayerMountVersionFull)').Replace('@LM_ABI_VERSION@','$(LayerMountAbiVersion)'))</_LMVersionHeaderText>
-    </PropertyGroup>
-    <WriteLinesToFile File="$(_LMVersionGenerated)"
-                      Lines="$(_LMVersionHeaderText)"
-                      Overwrite="true"
-                      WriteOnlyWhenDifferent="true" />
-    <Message Importance="low" Text="LayerMountVersion.h generated (version $(LayerMountVersionFull), ABI $(LayerMountAbiVersion))" />
+          BeforeTargets="ClCompile">
+    <MSBuild Projects="$(MSBuildThisFileDirectory)LayerMount.version.proj"
+             Targets="GenerateLayerMountVersionHeader"
+             RemoveProperties="Configuration;Platform" />
   </Target>
 
 </Project>
