@@ -1,9 +1,27 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
 
+#include <thread>
+
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {
+
+namespace {
+
+// Run |fn| on a thread with no COM apartment. The test host's own thread
+// already holds an apartment that the VSS shims' COINIT_MULTITHREADED
+// scope rejects with RPC_E_CHANGED_MODE, so a shim called from it never
+// reaches the code under test.
+template <typename Fn>
+HRESULT OnFreshThread(Fn&& fn) {
+    HRESULT hr = E_FAIL;
+    std::thread worker([&] { hr = fn(); });
+    worker.join();
+    return hr;
+}
+
+} // namespace
 
 // VSS primitives. Creating a snapshot requires elevation +
 // an actual volume; we skip that path when the runner isn't admin. The
@@ -59,6 +77,30 @@ public:
         HRESULT hr = ::LayerMountVssCleanupSnapshots(mount.Get());
         Assert::IsTrue(SUCCEEDED(hr) || FAILED(hr),
             L"Cleanup must return a defined HRESULT");
+    }
+
+    // The unknown-id answer comes from the overlay's own snapshot table,
+    // before any VSS provider is asked, so it is testable on every host.
+    TEST_METHOD(VssValidateSnapshotPath_UnknownId_ReturnsNotFound) {
+        TempLayerEnv  env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        BOOL reachable = TRUE;
+        HRESULT hr = OnFreshThread([&] {
+            return ::LayerMountVssValidateSnapshotPath(
+                mount.Get(), L"00000000-0000-0000-0000-000000000000", &reachable);
+        });
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_WIN32(ERROR_NOT_FOUND), hr,
+            L"an id this overlay never created must report ERROR_NOT_FOUND");
+    }
+
+    TEST_METHOD(VssValidateSnapshotPath_NullOutParam_ReturnsEPointer) {
+        TempLayerEnv  env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        HRESULT hr = ::LayerMountVssValidateSnapshotPath(
+            mount.Get(), L"00000000-0000-0000-0000-000000000000", nullptr);
+        Assert::AreEqual<HRESULT>(E_POINTER, hr);
     }
 };
 

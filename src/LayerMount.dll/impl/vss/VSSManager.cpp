@@ -479,18 +479,22 @@ DWORD VSSManager::CleanupNonPersistent() {
 // ValidateSnapshotPath
 // ===========================================================================
 
-DWORD VSSManager::ValidateSnapshotPath(const std::wstring& snapshotId) {
+DWORD VSSManager::ValidateSnapshotPath(const std::wstring& snapshotId,
+                                       bool& outReachable) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = snapshots_.find(snapshotId);
     if (it == snapshots_.end()) return ERROR_NOT_FOUND;
 
-    // GetFileAttributesW works with \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN
-    DWORD attrs = ::GetFileAttributesW(it->second.info.devicePath.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
-        return ::GetLastError();
-    }
-
+    // Query the volume-root form, with the trailing separator restored.
+    // SnapshotInfo::devicePath is stored stripped, and the bare
+    // \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN names the device
+    // object rather than a directory: GetFileAttributesW fails on it
+    // while the snapshot is live and healthy. A query on the stripped
+    // form reports every live snapshot as unreachable.
+    const std::wstring rootPath = it->second.info.devicePath + L'\\';
+    outReachable =
+        ::GetFileAttributesW(rootPath.c_str()) != INVALID_FILE_ATTRIBUTES;
     return ERROR_SUCCESS;
 }
 

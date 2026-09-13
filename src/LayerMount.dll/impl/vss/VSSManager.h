@@ -70,9 +70,14 @@ public:
     // Call after LayerMount::Unmount() to clean up session-scoped snapshots.
     DWORD CleanupNonPersistent();
 
-    // Verify that a tracked snapshot's device path is still accessible.
-    // Returns ERROR_SUCCESS if GetFileAttributesW succeeds on the device path.
-    DWORD ValidateSnapshotPath(const std::wstring& snapshotId);
+    // Report whether a tracked snapshot's device path still resolves.
+    // Returns ERROR_NOT_FOUND when this manager never created |snapshotId|.
+    // Otherwise returns ERROR_SUCCESS and sets |outReachable|: true when the
+    // volume-root form of the device path answers GetFileAttributesW, false
+    // when it does not. A snapshot deleted outside this process stays
+    // tracked, so it reports as unreachable rather than as not found.
+    DWORD ValidateSnapshotPath(const std::wstring& snapshotId,
+                               bool& outReachable) const;
 
     // 5.4 — Query methods.
     // ListSnapshots enumerates ALL snapshots present on the system via

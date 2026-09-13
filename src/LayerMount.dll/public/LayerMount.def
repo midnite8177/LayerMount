@@ -73,6 +73,7 @@ EXPORTS
     LayerMountVssDeleteSnapshot
     LayerMountVssListSnapshots
     LayerMountVssCleanupSnapshots
+    LayerMountVssValidateSnapshotPath
     LayerMountVssCloseSnapshot
 
     ; Layer image primitives
