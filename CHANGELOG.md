@@ -12,6 +12,26 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="1.0.0"></a>
+## [1.0.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v1.0.0) (2026-09-13)
+
+### Features
+
+* GetSecurity takes a SECURITY_INFORMATION ([1bcb314](https://www.github.com/midnite8177/LayerMount/commit/1bcb314b7b7a4739e9957d4f6ef686d4b49542ed))
+
+### Bug Fixes
+
+* honor the two-call size probe in GetSecurity ([ed5b10e](https://www.github.com/midnite8177/LayerMount/commit/ed5b10e46304c5def7e0addcc5966d70adb3685b))
+* re-read a reparse descriptor that changes size between probe and fill ([d7ca79c](https://www.github.com/midnite8177/LayerMount/commit/d7ca79c941c858211f26ba8579ad5c9277ca7dae))
+* **build:** generate the managed ABI constant from version.props ([e802502](https://www.github.com/midnite8177/LayerMount/commit/e80250273037dd33a39206bb40c2108db28a3143))
+* **build:** generate the native version header from one writer ([0adfafc](https://www.github.com/midnite8177/LayerMount/commit/0adfafc860e7eba1eb9d26f54b7425cbde968b61))
+* **security:** trim a security descriptor that shrank between probe and fill ([2559f98](https://www.github.com/midnite8177/LayerMount/commit/2559f98766e33bd850a5ea107462b1f2b6f21d70))
+* **vss:** do not double the path separator when scanning a layer's root for whiteouts ([8bb965f](https://www.github.com/midnite8177/LayerMount/commit/8bb965fd3917c686f2599f43f11c7111c98afc09))
+
+### Breaking Changes
+
+* GetSecurity takes a SECURITY_INFORMATION ([1bcb314](https://www.github.com/midnite8177/LayerMount/commit/1bcb314b7b7a4739e9957d4f6ef686d4b49542ed))
+
 <a name="0.2.0"></a>
 ## [0.2.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v0.2.0) (2026-05-22)
 
