@@ -190,6 +190,33 @@ std::wstring VSSManager::FormatVssTimestamp(VSS_TIMESTAMP ts) {
 }
 
 // ===========================================================================
+// DeleteShadow
+// ===========================================================================
+
+// Delete one shadow by VSS_ID through a fresh IVssBackupComponents under
+// VSS_CTX_ALL. A shadow created under VSS_CTX_BACKUP is documented to
+// auto-delete when its creating IVssBackupComponents releases, but the
+// kernel shadow persists in Query results well past the Release. An
+// explicit delete under VSS_CTX_ALL makes the delete deterministic for
+// both contexts.
+static HRESULT DeleteShadow(const VSS_ID& vssId) {
+    IVssBackupComponents* bc = nullptr;
+    HRESULT hr = ::CreateVssBackupComponents(&bc);
+    if (FAILED(hr)) return hr;
+
+    hr = bc->InitializeForBackup();
+    if (SUCCEEDED(hr)) hr = bc->SetContext(VSS_CTX_ALL);
+    if (SUCCEEDED(hr)) {
+        LONG deletedCount = 0;
+        VSS_ID nonDeletedId = GUID_NULL;
+        hr = bc->DeleteSnapshots(vssId, VSS_OBJECT_SNAPSHOT,
+                                 TRUE, &deletedCount, &nonDeletedId);
+    }
+    bc->Release();
+    return hr;
+}
+
+// ===========================================================================
 // 5.1 + 5.3 — CreateSnapshot
 // ===========================================================================
 
@@ -311,27 +338,23 @@ DWORD VSSManager::CreateSnapshot(const std::wstring& volumePath, bool persistent
     VSS_SNAPSHOT_PROP prop{};
     hr = backup->GetSnapshotProperties(snapshotId, &prop);
     if (FAILED(hr)) {
-        // Snapshot was created but we can't retrieve its path. Two
-        // sub-cases, treated differently:
+        // The snapshot exists, but its path cannot be read. This function
+        // returns an error, so the caller never sees the ID, and the
+        // entry never enters snapshots_. A shadow left behind here cannot
+        // be named again by anyone; manual recovery needs `vssadmin list
+        // shadows` and then `vssadmin delete shadows`. Delete it now, in
+        // both contexts.
         //
-        //   * Non-persistent: releasing the IVssBackupComponents below
-        //     auto-deletes the snapshot via VSS_CTX_BACKUP semantics, so
-        //     no extra cleanup is required.
-        //   * Persistent (VSS_CTX_CLIENT_ACCESSIBLE): the snapshot
-        //     survives backup->Release(). Without an explicit
-        //     DeleteSnapshots here it would leak in VSS forever -- the
-        //     caller never sees the ID (we are returning an error) and
-        //     manual recovery requires `vssadmin list shadows` followed
-        //     by `vssadmin delete shadows`. Best-effort: ignore the
-        //     delete result so we do not mask the original
-        //     GetSnapshotProperties HRESULT, which is what the caller
-        //     needs to know about.
-        if (persistent) {
-            LONG deletedCount = 0;
-            VSS_ID nonDeleted = GUID_NULL;
-            backup->DeleteSnapshots(snapshotId, VSS_OBJECT_SNAPSHOT,
-                                    FALSE, &deletedCount, &nonDeleted);
-        }
+        // backup->Release() alone is not enough for either context. A
+        // persistent (VSS_CTX_CLIENT_ACCESSIBLE) shadow survives the
+        // Release by design. A non-persistent one auto-deletes only some
+        // time after the Release (see DeleteShadow), which leaves a window
+        // in which the shadow exists and no ID for it has escaped this
+        // function.
+        //
+        // Best-effort: the delete result is dropped so the original
+        // GetSnapshotProperties HRESULT reaches the caller unmasked.
+        DeleteShadow(snapshotId);
         backup->Release();
         return HResultToDword(hr);
     }
@@ -405,33 +428,9 @@ DWORD VSSManager::DeleteSnapshot(const std::wstring& snapshotId) {
         return ERROR_INVALID_PARAMETER;
     }
 
-    // Delete via a dedicated IVssBackupComponents under VSS_CTX_ALL. For
-    // tracked non-persistent snapshots we cannot rely on the original
-    // IVssBackupComponents::Release alone — observed behavior is that the
-    // kernel shadow persists in Query results well past the Release, so an
-    // explicit DeleteSnapshots makes the delete deterministic.
-    IVssBackupComponents* bc = nullptr;
-    HRESULT hr = ::CreateVssBackupComponents(&bc);
-    if (FAILED(hr)) return HResultToDword(hr);
-
-    hr = bc->InitializeForBackup();
-    if (FAILED(hr)) {
-        bc->Release();
-        return HResultToDword(hr);
-    }
-
-    hr = bc->SetContext(VSS_CTX_ALL);
-    if (FAILED(hr)) {
-        bc->Release();
-        return HResultToDword(hr);
-    }
-
-    LONG deletedCount = 0;
-    VSS_ID nonDeletedId = GUID_NULL;
-    hr = bc->DeleteSnapshots(vssId, VSS_OBJECT_SNAPSHOT,
-                              TRUE, &deletedCount, &nonDeletedId);
-    bc->Release();
-
+    // Delete under VSS_CTX_ALL, never through the held instance's Release
+    // alone (see DeleteShadow).
+    HRESULT hr = DeleteShadow(vssId);
     if (FAILED(hr)) return HResultToDword(hr);
 
     if (it != snapshots_.end()) {
