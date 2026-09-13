@@ -13,12 +13,14 @@
 
     The managed wrapper itself is AnyCPU; the per-RID native asset is
     chosen by override property $(LayerMountNativeArch) which defaults to
-    x64 (the local-dev common case, also what the test projects use).
-    Consumers building an arm64 host adapter via ProjectReference can set
-    $(LayerMountNativeArch)=ARM64 in their own props to pick up the arm64
-    DLL instead. For published consumers, the LayerMount.Native NuGet
-    package handles RID resolution automatically and this props is not in
-    play.
+    x64 (the local-dev common case). The test projects build for x64 or
+    ARM64, but this file is evaluated in the AnyCPU wrapper project and
+    cannot see the test project's platform, so an ARM64 test build passes
+    /p:LayerMountNativeArch=ARM64 on the command line. Consumers building
+    an arm64 host adapter via ProjectReference can set
+    $(LayerMountNativeArch)=ARM64 the same way to pick up the arm64 DLL
+    instead. For published consumers, the LayerMount.Native NuGet package
+    handles RID resolution automatically and this props is not in play.
 
     Resolution order for the source path:
       1. $(SolutionDir) if set AND the DLL actually lives there (normal
