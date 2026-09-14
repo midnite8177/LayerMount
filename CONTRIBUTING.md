@@ -11,6 +11,10 @@ PowerShell modules, and smoke procedures live with them.
 
 - **Visual Studio 2026** with the **Desktop development with C++** workload
   (installs MSBuild, the Windows SDK, and the CRT/STL used by the project).
+  Visual Studio 2022 works too. The C++ projects use the toolset that the
+  installed Visual Studio supplies, so no extra toolset component is needed.
+  To build the ARM64 targets, add the **MSVC Build Tools for ARM64/ARM64EC
+  (Latest)** component.
 - **.NET 8 SDK** (installed alongside VS 2026 by default; needed for the
   managed projects and `dotnet test`).
 

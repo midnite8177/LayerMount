@@ -7,9 +7,14 @@
     <VendorDir>$(MSBuildThisFileDirectory)vendor\</VendorDir>
   </PropertyGroup>
 
-  <!-- Shared configuration properties -->
+  <!-- Shared configuration properties. The C++ toolset follows the
+       Visual Studio that runs the build: v143 under VS 2022 (17.x), v145
+       under VS 2026 (18.x). An empty PlatformToolset is not an option,
+       because Microsoft.Cpp.Default.props then falls back to v100.
+       /p:PlatformToolset=<name> on the command line overrides this. -->
   <PropertyGroup Label="Configuration">
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset Condition="'$(PlatformToolset)' == '' and '$(VisualStudioVersion)' != '' and '$(VisualStudioVersion)' &lt; '18.0'">v143</PlatformToolset>
+    <PlatformToolset Condition="'$(PlatformToolset)' == ''">v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
