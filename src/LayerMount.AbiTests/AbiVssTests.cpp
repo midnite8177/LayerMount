@@ -1,27 +1,9 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
 
-#include <thread>
-
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {
-
-namespace {
-
-// Run |fn| on a thread with no COM apartment. The test host's own thread
-// already holds an apartment that the VSS shims' COINIT_MULTITHREADED
-// scope rejects with RPC_E_CHANGED_MODE, so a shim called from it never
-// reaches the code under test.
-template <typename Fn>
-HRESULT OnFreshThread(Fn&& fn) {
-    HRESULT hr = E_FAIL;
-    std::thread worker([&] { hr = fn(); });
-    worker.join();
-    return hr;
-}
-
-} // namespace
 
 // VSS primitives. Creating a snapshot requires elevation +
 // an actual volume; we skip that path when the runner isn't admin. The
@@ -34,8 +16,10 @@ public:
 
         UINT32 written = 0;
         UINT32 required = 0;
-        HRESULT hr = ::LayerMountVssListSnapshots(
-            mount.Get(), nullptr, 0, &written, &required);
+        HRESULT hr = OnFreshThread([&] {
+            return ::LayerMountVssListSnapshots(
+                mount.Get(), nullptr, 0, &written, &required);
+        });
         // Either S_OK with some snapshot count (usually 0 on a fresh test
         // box, but can be non-zero if the machine has persistent shadow
         // copies), or a VSS-related error when VSS service is unavailable.
@@ -57,11 +41,13 @@ public:
         wchar_t devBuf[MAX_PATH]= {};
         SIZE_T  idReq = 0, devReq = 0;
 
-        HRESULT hr = ::LayerMountVssCreateSnapshot(
-            mount.Get(), L"Z:\\does_not_exist", /*persistent*/ FALSE,
-            &snap,
-            idBuf, 64, &idReq,
-            devBuf, MAX_PATH, &devReq);
+        HRESULT hr = OnFreshThread([&] {
+            return ::LayerMountVssCreateSnapshot(
+                mount.Get(), L"Z:\\does_not_exist", /*persistent*/ FALSE,
+                &snap,
+                idBuf, 64, &idReq,
+                devBuf, MAX_PATH, &devReq);
+        });
         Assert::AreNotEqual<HRESULT>(S_OK, hr,
             L"CreateSnapshot on a nonexistent volume must fail");
         Assert::IsNull(snap);
@@ -72,11 +58,13 @@ public:
         TempLayerEnv  env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Cleanup is idempotent -- zero orphaned snapshots is the
-        // common case on a clean test machine.
-        HRESULT hr = ::LayerMountVssCleanupSnapshots(mount.Get());
-        Assert::IsTrue(SUCCEEDED(hr) || FAILED(hr),
-            L"Cleanup must return a defined HRESULT");
+        // Cleanup is idempotent -- zero tracked snapshots is the common
+        // case on a clean test machine, and that case succeeds.
+        HRESULT hr = OnFreshThread([&] {
+            return ::LayerMountVssCleanupSnapshots(mount.Get());
+        });
+        Assert::IsTrue(SUCCEEDED(hr),
+            L"Cleanup with nothing tracked must succeed");
     }
 
     // The unknown-id answer comes from the overlay's own snapshot table,

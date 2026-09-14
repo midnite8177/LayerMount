@@ -4,6 +4,8 @@
 
 #include "LayerMount.h"
 
+#include <exception>
+#include <functional>
 #include <rpc.h> // UuidCreate / UuidToStringW / RpcStringFreeW (Rpcrt4.lib — linked via vcxproj)
 
 namespace LayerMountTests {
@@ -244,5 +246,76 @@ private:
     std::wstring work_;
     std::vector<std::wstring> lowers_;
 };
+
+// ---------------------------------------------------------------------------
+// Fresh-thread runner for subsystems that need a COM apartment of their own
+// (VSS). The test host's thread already holds an apartment that
+// CoInitializeEx(COINIT_MULTITHREADED) rejects with RPC_E_CHANGED_MODE, so a
+// body that needs MTA runs on a new thread. An assertion failure inside the
+// body is a structured exception (ERROR_ASSERT_FAILED) raised by the
+// framework DLL. The worker catches it, copies the message while the raising
+// frame is still alive, and the calling thread fails the test with it.
+// ---------------------------------------------------------------------------
+
+struct FreshThreadOutcome {
+    DWORD              sehCode   = 0;
+    DWORD              numParams = 0;
+    std::wstring       message;
+    std::exception_ptr cppException;
+};
+
+inline LONG CaptureFreshThreadFailure(EXCEPTION_POINTERS* ep,
+                                      FreshThreadOutcome* out) noexcept {
+    const EXCEPTION_RECORD& rec = *ep->ExceptionRecord;
+    out->sehCode   = rec.ExceptionCode;
+    out->numParams = rec.NumberParameters;
+    if (rec.ExceptionCode == ERROR_ASSERT_FAILED && rec.NumberParameters >= 1
+        && rec.ExceptionInformation[0] != 0) {
+        out->message = reinterpret_cast<const wchar_t*>(rec.ExceptionInformation[0]);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// No objects with destructors in this function: __try forbids them (C2712).
+inline void RunUnderSehCapture(const std::function<void()>* body,
+                               FreshThreadOutcome* out) {
+    __try {
+        (*body)();
+    } __except (CaptureFreshThreadFailure(GetExceptionInformation(), out)) {
+    }
+}
+
+inline void RunOnComFreeThread(std::function<void()> body) {
+    namespace cuf = Microsoft::VisualStudio::CppUnitTestFramework;
+
+    FreshThreadOutcome outcome;
+    std::function<void()> guarded = [&] {
+        try {
+            body();
+        } catch (...) {
+            outcome.cppException = std::current_exception();
+        }
+    };
+    std::thread worker([&] { RunUnderSehCapture(&guarded, &outcome); });
+    worker.join();
+
+    if (outcome.cppException) {
+        std::rethrow_exception(outcome.cppException);
+    }
+    if (outcome.sehCode == ERROR_ASSERT_FAILED) {
+        if (outcome.message.empty()) {
+            outcome.message = L"assertion failed on the worker thread, message "
+                              L"not available (parameters: "
+                              + std::to_wstring(outcome.numParams) + L")";
+        }
+        cuf::Assert::Fail(outcome.message.c_str());
+    }
+    if (outcome.sehCode != 0) {
+        wchar_t buf[80] = {};
+        swprintf_s(buf, L"structured exception 0x%08X on the worker thread",
+                   static_cast<unsigned>(outcome.sehCode));
+        cuf::Assert::Fail(buf);
+    }
+}
 
 } // namespace LayerMountTests
