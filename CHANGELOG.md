@@ -12,6 +12,17 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="1.1.0"></a>
+## [1.1.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v1.1.0) (2026-09-14)
+
+### Features
+
+* **vss:** expose ValidateSnapshotPath, and query the reachable path form ([cefe222](https://www.github.com/midnite8177/LayerMount/commit/cefe2222575570102c46e83d5e944ec4c5fdb5c9))
+
+### Bug Fixes
+
+* **vss:** delete the snapshot when CreateSnapshot cannot read its path ([66658cd](https://www.github.com/midnite8177/LayerMount/commit/66658cd4b883ebe6a5a993128ce451dfbad65b03))
+
 <a name="1.0.0"></a>
 ## [1.0.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v1.0.0) (2026-09-13)
 
