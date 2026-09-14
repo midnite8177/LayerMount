@@ -57,10 +57,12 @@ jobs:
             nuget-${{ runner.os }}-
 
       - name: Restore (managed)
-        run: dotnet restore LayerMount.sln /p:Platform=${{ matrix.platform }}
+        run: dotnet restore LayerMount.sln /p:Platform=${{ matrix.platform }} /p:LayerMountNativeArch=${{ matrix.platform }}
 
       - name: Build solution (${{ matrix.platform }})
-        run: msbuild LayerMount.sln /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:ContinuousIntegrationBuild=true /m /v:minimal
+        # LayerMountNativeArch puts the native DLL of the same platform next
+        # to the managed test assemblies; LayerMount.NET.props defaults to x64.
+        run: msbuild LayerMount.sln /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:LayerMountNativeArch=${{ matrix.platform }} /p:ContinuousIntegrationBuild=true /m /v:minimal
 
       # Tests only run on the architecture the runner can execute.
       # Native MSTest C++ adapter is bundled with VS test runner, not the
@@ -89,9 +91,8 @@ jobs:
 
       - name: Managed wrapper tests (x64)
         if: matrix.platform == 'x64'
-        # -p:Platform=x64 so --no-build finds the solution-built binary
-        # under bin/x64/Release/ (msbuild puts it there when the solution
-        # is built with /p:Platform=x64, not the SDK default bin/Release/).
+        # -p:Platform=x64 so --no-build evaluates the same output path the
+        # solution build used, bin/x64/Release/.
         run: dotnet test src/LayerMount.NET.Tests -c Release -p:Platform=x64 --no-build --logger trx --results-directory TestResults
 
       - name: Upload test results
