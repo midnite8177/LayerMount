@@ -79,7 +79,14 @@ dotnet test src\LayerMount.NET.Tests -c Release -p:Platform=ARM64 --no-build
 
 `LayerMountNativeArch` selects the native DLL that `LayerMount.NET.props`
 copies next to the managed assemblies. It defaults to `x64`. The native
-test suites have no ARM64 configuration yet.
+test suites build for ARM64 under the same solution platform. Run them on
+an ARM64 host with the native runner, because the x64 runner under
+emulation cannot load the ARM64 test framework:
+
+```powershell
+& "$vsRoot\Common7\IDE\Extensions\TestPlatform\vstest.console.arm64.exe" ARM64\Release\LayerMount.Tests.dll /Platform:ARM64
+& "$vsRoot\Common7\IDE\Extensions\TestPlatform\vstest.console.arm64.exe" ARM64\Release\LayerMount.AbiTests.dll /Platform:ARM64
+```
 
 ### Host-adapter test suites
 
