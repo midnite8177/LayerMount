@@ -225,4 +225,19 @@ inline bool IsFileNotFoundHr(HRESULT hr) noexcept {
         || hr == static_cast<HRESULT>(0xD000003AL);
 }
 
+// -----------------------------------------------------------------------------
+// Run |fn| on a thread with no COM apartment and return its HRESULT. The test
+// host's own thread already holds an apartment that the VSS shims'
+// COINIT_MULTITHREADED scope rejects with RPC_E_CHANGED_MODE, so a shim called
+// from it never reaches the code under test. Assertions stay on the calling
+// thread: |fn| only returns the HRESULT.
+// -----------------------------------------------------------------------------
+template <typename Fn>
+HRESULT OnFreshThread(Fn&& fn) {
+    HRESULT hr = E_FAIL;
+    std::thread worker([&] { hr = fn(); });
+    worker.join();
+    return hr;
+}
+
 } // namespace LayerMountAbiTests
