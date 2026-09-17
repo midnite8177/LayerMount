@@ -478,7 +478,7 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial int LayerMountImageGetManifest(
         IntPtr              mount,
-        string              imagePath,
+        string              manifestPath,
         LM_IMAGE_MANIFEST* manifest);
 
     [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf16)]

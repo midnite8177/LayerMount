@@ -1,15 +1,20 @@
-// LayerMountConfig -- managed construction parameters for an LayerMount.
-//
-// Mirrors the native LM_CONFIG field set while projecting
-// pointer-based fields into idiomatic managed types. Forward-compatible
-// through the native structSize mechanism; new fields added here project
-// to new fields in the native struct without breaking compilers that
-// built against an older header.
-
 using System.Collections.Generic;
 
 namespace LayerMount;
 
+/// <summary>
+/// Construction parameters for <see cref="LayerMount.Create"/>.
+/// </summary>
+/// <remarks>
+/// Mirrors the native <c>LM_CONFIG</c> field set while projecting
+/// pointer-based fields into idiomatic managed types, forward-compatible
+/// through the native <c>structSize</c> mechanism: a field added here in
+/// a later version projects onto a larger native struct without breaking
+/// callers built against an older header. Every path here is read only
+/// for the duration of the <c>Create</c> call. The native DLL copies all
+/// referenced strings into internal storage before returning, so the
+/// caller owns nothing past that call.
+/// </remarks>
 public sealed record LayerMountConfig
 {
     /// <summary>Absolute path to the upper (writable) layer root.</summary>
@@ -34,6 +39,10 @@ public sealed record LayerMountConfig
         | HostCapabilities.MultipleStreams
         | HostCapabilities.NtfsAcls;
 
+    /// <summary>
+    /// Whether the process tracker starts enabled. See
+    /// <see cref="ProcessRulesPath"/> for the rules file it loads.
+    /// </summary>
     public bool EnableProcessTracking { get; init; }
 
     /// <summary>Optional path to a JSON rules file for the process tracker.</summary>

@@ -588,6 +588,16 @@ static NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
     return STATUS_SUCCESS;
 }
 
+NTSTATUS CopyUp::WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
+                                            const LayerMountMetadata& metadata) {
+    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
+        const DWORD err = ::GetLastError();
+        ::DeleteFileW(upperPath.c_str());
+        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     std::wstring normalized = NormalizePath(relativePath);
 
@@ -763,15 +773,10 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(adsErr);
     }
 
-    // Write ADS metadata. Failure here is fatal: the overlay's authoritative
-    // copy-up fingerprint (origin/stable-id/metacopy markers) drives later
-    // resolution; without it the upper file looks like a foreign creation and
-    // lazy copy-up or rename fanout can misbehave.
     LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath, srcHandle.Get());
-    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
-        const DWORD err = ::GetLastError();
-        ::DeleteFileW(upperPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+    NTSTATUS metadataStatus = WriteCopyUpMetadataOrAbort(upperPath, metadata);
+    if (!NT_SUCCESS(metadataStatus)) {
+        return metadataStatus;
     }
 
     // Re-apply captured attributes + timestamps through a single handle
@@ -847,8 +852,40 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
 }
 
 // ---------------------------------------------------------------------------
-// 3.3 — Lazy/metadata-only copy-up
+// 3.3 — Metacopy
 // ---------------------------------------------------------------------------
+
+NTSTATUS CopyUp::MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
+                                              const std::wstring& workPath) {
+    DWORD bytesReturned = 0;
+    if (!DeviceIoControl(dstHandle.Get(), FSCTL_SET_SPARSE, nullptr, 0,
+                         nullptr, 0, &bytesReturned, nullptr)) {
+        DWORD err = ::GetLastError();
+        dstHandle.Reset();
+        ::DeleteFileW(workPath.c_str());
+        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::ApplyPlaceholderCompressionOrAbort(ScopedHandle& dstHandle,
+                                                    const std::wstring& workPath,
+                                                    DWORD srcAttributes) {
+    if ((srcAttributes & FILE_ATTRIBUTE_COMPRESSED) == 0) {
+        return STATUS_SUCCESS;
+    }
+    USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
+    DWORD bytesReturned = 0;
+    if (!DeviceIoControl(dstHandle.Get(), FSCTL_SET_COMPRESSION,
+                         &cmpFormat, sizeof(cmpFormat),
+                         nullptr, 0, &bytesReturned, nullptr)) {
+        DWORD err = ::GetLastError();
+        dstHandle.Reset();
+        ::DeleteFileW(workPath.c_str());
+        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+    }
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
     std::wstring normalized = NormalizePath(relativePath);
@@ -904,37 +941,20 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
-    // Mark as sparse. Sparse is load-bearing for metacopy: the placeholder
-    // allocates no data blocks and the overlay's lazy-copy-up semantics depend
-    // on it. If it fails we must abort -- committing a non-sparse placeholder
-    // would inflate the upper volume and break the metacopy contract.
-    DWORD bytesReturned;
-    if (!DeviceIoControl(dstHandle.Get(), FSCTL_SET_SPARSE, nullptr, 0,
-                         nullptr, 0, &bytesReturned, nullptr)) {
-        DWORD err = ::GetLastError();
-        dstHandle.Reset();
-        ::DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+    NTSTATUS sparseStatus = MarkPlaceholderSparseOrAbort(dstHandle, workPath);
+    if (!NT_SUCCESS(sparseStatus)) {
+        return sparseStatus;
     }
 
     // NTFS compression is a per-file FSCTL, not a CreateFileW attribute flag.
     // srcAttrs.dwFileAttributes passed at CreateFileW above is silently
-    // ignored for FILE_ATTRIBUTE_COMPRESSED. Apply it explicitly here so a
-    // compressed lower file doesn't balloon uncompressed in upper. Order
-    // matters: compression must be set BEFORE SetEndOfFile and any data
-    // writes (same invariant CopyFilePreservingMetadata relies on). A
-    // failure here also aborts -- without compression the metacopy shell
-    // would diverge from source in allocation semantics.
-    if ((srcAttrs.dwFileAttributes & FILE_ATTRIBUTE_COMPRESSED) != 0) {
-        USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
-        if (!DeviceIoControl(dstHandle.Get(), FSCTL_SET_COMPRESSION,
-                             &cmpFormat, sizeof(cmpFormat),
-                             nullptr, 0, &bytesReturned, nullptr)) {
-            DWORD err = ::GetLastError();
-            dstHandle.Reset();
-            ::DeleteFileW(workPath.c_str());
-            return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-        }
+    // ignored for FILE_ATTRIBUTE_COMPRESSED. Apply it here, before
+    // SetEndOfFile and any data writes (same invariant
+    // CopyFilePreservingMetadata relies on).
+    NTSTATUS compressionStatus =
+        ApplyPlaceholderCompressionOrAbort(dstHandle, workPath, srcAttrs.dwFileAttributes);
+    if (!NT_SUCCESS(compressionStatus)) {
+        return compressionStatus;
     }
 
     // Set file size without allocating disk space
@@ -967,16 +987,11 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return status;
     }
 
-    // Write metacopy ADS metadata. Fatal on failure: without the metacopy
-    // flag, later reads won't know to complete the lazy copy-up and will
-    // serve the zero-filled shell as if it were real content. Tear down
-    // the staged upper so the caller can retry cleanly.
-    LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
-    metadata.metacopy = true;
-    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
-        const DWORD err = ::GetLastError();
-        ::DeleteFileW(upperPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+    LayerMountMetadata metacopyMetadata = MakeCopyUpMetadata(source.absolutePath);
+    metacopyMetadata.metacopy = true;
+    NTSTATUS metacopyMetadataStatus = WriteCopyUpMetadataOrAbort(upperPath, metacopyMetadata);
+    if (!NT_SUCCESS(metacopyMetadataStatus)) {
+        return metacopyMetadataStatus;
     }
 
     // Re-apply timestamps LAST — ADS write updates NTFS LastWriteTime, so

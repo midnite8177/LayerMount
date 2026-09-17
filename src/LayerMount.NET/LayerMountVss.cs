@@ -1,7 +1,3 @@
-// LayerMount.Vss -- managed facade for VSS snapshot primitives.
-// Obtained via <see cref="LayerMount.Vss"/>. All entry points open a native
-// ComScope internally; callers never have to CoInitializeEx.
-
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -9,12 +5,27 @@ using LayerMount.Interop;
 
 namespace LayerMount;
 
+/// <summary>
+/// Facade for VSS snapshot primitives. A caller gets an instance from
+/// <see cref="LayerMount.Vss"/>. Every method opens a native COM scope
+/// internally, so a caller never has to call CoInitializeEx.
+/// </summary>
 public sealed class VssApi
 {
     private readonly LayerMount _owner;
 
     internal VssApi(LayerMount owner) => _owner = owner;
 
+    /// <summary>
+    /// Creates a VSS shadow copy of <paramref name="volumePath"/> and
+    /// returns a receipt for it. Set <paramref name="persistent"/> to
+    /// keep the snapshot across process exit; the default snapshot is
+    /// torn down when every handle in the creating process closes.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT. On failure, no
+    /// snapshot is created.
+    /// </exception>
     public unsafe VssSnapshot CreateSnapshot(string volumePath, bool persistent = false)
     {
         ArgumentNullException.ThrowIfNull(volumePath);
@@ -48,6 +59,14 @@ public sealed class VssApi
         return new VssSnapshot(safe, idStr, devStr, persistent);
     }
 
+    /// <summary>
+    /// Deletes the VSS shadow copy at <paramref name="snapshotId"/>,
+    /// tracked by this overlay or not. Accepts either a snapshot id
+    /// this overlay returned or a raw VSS shadow-copy GUID string.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public void DeleteSnapshot(string snapshotId)
     {
         ArgumentNullException.ThrowIfNull(snapshotId);
@@ -57,6 +76,13 @@ public sealed class VssApi
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountVssDeleteSnapshot));
     }
 
+    /// <summary>
+    /// Lists every VSS shadow copy visible on the machine, not only the
+    /// ones this overlay created.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe IReadOnlyList<VssSnapshotInfo> ListSnapshots()
     {
         using var lease = new SafeHandleLease(_owner.Handle);
@@ -146,6 +172,14 @@ public sealed class VssApi
         throw new InvalidOperationException("unreachable");
     }
 
+    /// <summary>
+    /// Deletes every non-persistent VSS shadow copy this overlay
+    /// created. Persistent snapshots are left for the caller or the
+    /// backup administrator to delete.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public void Cleanup()
     {
         using var lease = new SafeHandleLease(_owner.Handle);

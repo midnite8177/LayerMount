@@ -5,14 +5,10 @@
 // (LayerMount, LayerMountFile, VhdImage, LayerImage); consumers never see these
 // directly.
 //
-// ReleaseHandle cannot throw -- it may run on the finalizer thread. A
-// failure HRESULT from the underlying destroy/close entry point is logged
-// (returning false from ReleaseHandle makes the CLR raise a
-// SafeHandleCriticalFailure on managed debug builds but is otherwise
-// harmless). The common failure mode is LayerMountDestroy returning
+// The common failure mode is LayerMountDestroy returning
 // E_ILLEGAL_METHOD_CALL when a host adapter is still attached -- callers
-// must clear the host-attached flag (via the matching Unmount path) before
-// disposing the overlay.
+// must clear the host-attached flag (via the matching Unmount path)
+// before disposing the overlay.
 
 using System;
 using System.Diagnostics;
@@ -22,13 +18,19 @@ using LayerMount.Interop;
 
 namespace LayerMount;
 
-// Internal helper used from every ReleaseHandle below. A failing HRESULT
-// means the native slot is now stranded until process exit -- that leak is
-// silent without diagnostic output, so route it to Debug.WriteLine so it
-// at least surfaces when attached to a debugger or instrumented host.
-// Must not throw; called from finalizer thread.
+// Internal helper called from every ReleaseHandle override below. Without
+// this log line, a failed release leak stays silent. The log can surface
+// under a debugger or on an instrumented host.
 internal static class ReleaseDiagnostics
 {
+    /// <summary>
+    /// Reports a native release result. This method does not throw,
+    /// because ReleaseHandle can run on the finalizer thread. If the
+    /// call fails, this method logs the failure and leaves the native
+    /// handle-table slot allocated until the process ends. On a managed
+    /// debug build, a false return from ReleaseHandle can also make the
+    /// CLR raise a SafeHandleCriticalFailure. That failure is harmless.
+    /// </summary>
     public static bool Report(string handleKind, IntPtr raw, int hr)
     {
         if (hr >= 0) return true;
@@ -108,6 +110,7 @@ public sealed class LayerMountHandle : SafeHandleZeroOrMinusOneIsInvalid
 
     internal void SetRawHandle(IntPtr h) => SetHandle(h);
 
+    /// <inheritdoc cref="ReleaseDiagnostics.Report(string, IntPtr, int)"/>
     protected override bool ReleaseHandle()
     {
         int hr = NativeMethods.LayerMountDestroy(handle);
@@ -124,6 +127,7 @@ public sealed class LayerMountFileHandle : SafeHandleZeroOrMinusOneIsInvalid
 
     internal void SetRawHandle(IntPtr h) => SetHandle(h);
 
+    /// <inheritdoc cref="ReleaseDiagnostics.Report(string, IntPtr, int)"/>
     protected override bool ReleaseHandle()
     {
         int hr = NativeMethods.LayerMountCloseFile(handle);
@@ -140,6 +144,7 @@ public sealed class VhdHandle : SafeHandleZeroOrMinusOneIsInvalid
 
     internal void SetRawHandle(IntPtr h) => SetHandle(h);
 
+    /// <inheritdoc cref="ReleaseDiagnostics.Report(string, IntPtr, int)"/>
     protected override bool ReleaseHandle()
     {
         int hr = NativeMethods.LayerMountVhdClose(handle);
@@ -163,6 +168,7 @@ public sealed class VssSnapshotHandle : SafeHandleZeroOrMinusOneIsInvalid
 
     internal void SetRawHandle(IntPtr h) => SetHandle(h);
 
+    /// <inheritdoc cref="ReleaseDiagnostics.Report(string, IntPtr, int)"/>
     protected override bool ReleaseHandle()
     {
         int hr = NativeMethods.LayerMountVssCloseSnapshot(handle);
@@ -179,6 +185,7 @@ public sealed class ImageHandle : SafeHandleZeroOrMinusOneIsInvalid
 
     internal void SetRawHandle(IntPtr h) => SetHandle(h);
 
+    /// <inheritdoc cref="ReleaseDiagnostics.Report(string, IntPtr, int)"/>
     protected override bool ReleaseHandle()
     {
         int hr = NativeMethods.LayerMountImageClose(handle);

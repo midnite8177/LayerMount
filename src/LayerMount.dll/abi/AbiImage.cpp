@@ -91,6 +91,12 @@ inline bool FillCallerWString(const std::wstring& src,
     return true;
 }
 
+inline HRESULT ValidateMountHandle(std::uint64_t encoded) noexcept {
+    return ::LayerMount::abi::Handles().mount.Resolve(encoded) != nullptr
+               ? S_OK
+               : E_HANDLE;
+}
+
 } // namespace
 
 namespace {
@@ -298,34 +304,27 @@ LM_API HRESULT LM_CALL LayerMountImageValidate(LM_HANDLE mount,
 }
 
 LM_API HRESULT LM_CALL LayerMountImageGetManifest(LM_HANDLE          mount,
-                                                 PCWSTR              imagePath,
+                                                 PCWSTR              manifestPath,
                                                  LM_IMAGE_MANIFEST* manifest)
 {
     using namespace ::LayerMount::abi;
 
     if (mount   == nullptr) return E_HANDLE;
-    if (imagePath == nullptr || *imagePath == L'\0') return E_INVALIDARG;
+    if (manifestPath == nullptr || *manifestPath == L'\0') return E_INVALIDARG;
     if (manifest  == nullptr) return E_POINTER;
 
     LM_ABI_BEGIN();
 
     const std::uint64_t encoded =
         static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(mount));
-    auto mountHolder = Handles().mount.Resolve(encoded);
-    if (mountHolder == nullptr) {
-        return E_HANDLE;
+    const HRESULT validateHr = ValidateMountHandle(encoded);
+    if (FAILED(validateHr)) {
+        return validateHr;
     }
-    (void)mountHolder; // LoadManifest is static; kept the handle resolve
-                         // so bogus handles fail fast.
 
-    // Despite the parameter name, the ABI's `imagePath` here is the path
-    // to a LayerManifest JSON file (LayerImageManager::LoadManifest). The
-    // parameter name predates the separation between per-image metadata
-    // (LayerMountImageGetMetadata) and multi-image manifests (this
-    // function).
     ::LayerMount::LayerImage::LayerManifest loaded;
     const DWORD dw =
-        ::LayerMount::LayerImage::LayerImageManager::LoadManifest(imagePath, loaded);
+        ::LayerMount::LayerImage::LayerImageManager::LoadManifest(manifestPath, loaded);
     if (dw != ERROR_SUCCESS) {
         return HresultFromWin32Dword(dw);
     }

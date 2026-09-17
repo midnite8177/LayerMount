@@ -1,6 +1,8 @@
 #include "VHDLayerManager.h"
 #include "Manifest.h"
 #include "VolumeGuid.h"
+#include "../ElevationUtil.h"
+#include "../PathUtil.h"
 
 #include <limits>
 
@@ -37,18 +39,12 @@ std::wstring Utf8ToWide(const std::string& utf8) {
 }
 
 // ===========================================================================
-// Trailing backslash helpers
+// Trailing backslash helper
 // ===========================================================================
 
 std::wstring EnsureTrailingBackslash(const std::wstring& path) {
     if (path.empty() || path.back() == L'\\') return path;
     return path + L'\\';
-}
-
-std::wstring StripTrailingBackslash(const std::wstring& path) {
-    if (!path.empty() && path.back() == L'\\')
-        return path.substr(0, path.size() - 1);
-    return path;
 }
 
 // ===========================================================================
@@ -100,21 +96,7 @@ VHDLayerManager::~VHDLayerManager() {
 // ===========================================================================
 
 DWORD VHDLayerManager::CheckElevation() {
-    HANDLE token = nullptr;
-    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
-        return ::GetLastError();
-    }
-
-    TOKEN_ELEVATION elevation{};
-    DWORD size = 0;
-    BOOL ok = ::GetTokenInformation(token, TokenElevation,
-                                    &elevation, sizeof(elevation), &size);
-    DWORD err = ok ? ERROR_SUCCESS : ::GetLastError();
-    ::CloseHandle(token);
-
-    if (err != ERROR_SUCCESS) return err;
-
-    return elevation.TokenIsElevated ? ERROR_SUCCESS : ERROR_PRIVILEGE_NOT_HELD;
+    return LayerMount::CheckElevation();
 }
 
 // ===========================================================================
@@ -189,6 +171,9 @@ const Manifest& VHDLayerManager::GetManifest() const { return *manifest_; }
 
 DWORD VHDLayerManager::CreateVHD(const std::wstring& path, ULONGLONG sizeBytes,
                                   bool dynamic, VhdHandle& outHandle) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     // Always create as VHDX
     VIRTUAL_STORAGE_TYPE storageType{};
     storageType.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_VHDX;
@@ -210,7 +195,7 @@ DWORD VHDLayerManager::CreateVHD(const std::wstring& path, ULONGLONG sizeBytes,
         : CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION;
 
     // Version 2 create params require VIRTUAL_DISK_ACCESS_NONE
-    DWORD result = ::CreateVirtualDisk(
+    result = ::CreateVirtualDisk(
         &storageType,
         path.c_str(),
         VIRTUAL_DISK_ACCESS_NONE,
@@ -233,10 +218,13 @@ DWORD VHDLayerManager::AttachVHD(const std::wstring& path, bool readOnly,
                                   std::wstring& outPhysicalPath,
                                   AttachLifetime lifetime,
                                   bool suppressDriveLetter) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     outPhysicalPath.clear();
 
     VhdHandle handle;
-    DWORD result = OpenVHD(path, handle);
+    result = OpenVHD(path, handle);
     if (result != ERROR_SUCCESS) return result;
 
     ATTACH_VIRTUAL_DISK_PARAMETERS attachParams{};
@@ -286,8 +274,11 @@ DWORD VHDLayerManager::AttachVHD(const std::wstring& path, bool readOnly,
 }
 
 DWORD VHDLayerManager::DetachVHD(const std::wstring& path) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     VhdHandle handle;
-    DWORD result = OpenVHD(path, handle);
+    result = OpenVHD(path, handle);
     if (result != ERROR_SUCCESS) return result;
 
     result = ::DetachVirtualDisk(
@@ -305,6 +296,9 @@ DWORD VHDLayerManager::DetachVHD(const std::wstring& path) {
 DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
                                               const std::wstring& parentPath,
                                               VhdHandle& outHandle) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     VIRTUAL_STORAGE_TYPE storageType{};
     storageType.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_VHDX;
     storageType.VendorId = VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT;
@@ -320,7 +314,7 @@ DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
     createParams.Version2.PhysicalSectorSizeInBytes = 0;
 
     // Version 2 create params require VIRTUAL_DISK_ACCESS_NONE
-    DWORD result = ::CreateVirtualDisk(
+    result = ::CreateVirtualDisk(
         &storageType,
         childPath.c_str(),
         VIRTUAL_DISK_ACCESS_NONE,
@@ -339,8 +333,11 @@ DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
 // ===========================================================================
 
 DWORD VHDLayerManager::MergeVHD(const std::wstring& childPath) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     VhdHandle handle;
-    DWORD result = OpenVHD(childPath, handle);
+    result = OpenVHD(childPath, handle);
     if (result != ERROR_SUCCESS) return result;
 
     MERGE_VIRTUAL_DISK_PARAMETERS mergeParams{};
@@ -368,6 +365,9 @@ static const GUID PARTITION_BASIC_DATA_ID =
 
 DWORD VHDLayerManager::InitializeVHD(const std::wstring& physicalDiskPath,
                                       const std::wstring& vhdPath) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     // Open the physical disk
     HANDLE hDisk = ::CreateFileW(
         physicalDiskPath.c_str(),
@@ -688,6 +688,9 @@ DWORD VHDLayerManager::InitializeVHDDiskpart(const std::wstring& vhdPath) {
 DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
                                         const std::wstring& vhdPath,
                                         ULONGLONG sizeBytes) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     namespace fs = std::filesystem;
 
     // Auto-calculate size if not specified. Accumulate with overflow
@@ -724,7 +727,7 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
 
     // Create the VHD
     VhdHandle createHandle;
-    DWORD result = CreateVHD(vhdPath, sizeBytes, true, createHandle);
+    result = CreateVHD(vhdPath, sizeBytes, true, createHandle);
     if (result != ERROR_SUCCESS) return result;
     createHandle.Close();  // Close create handle before attach
 
@@ -820,15 +823,18 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
 
 DWORD VHDLayerManager::ExportToDirectory(const std::wstring& vhdPath,
                                           const std::wstring& directoryPath) {
+    DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
     namespace fs = std::filesystem;
 
     // Attach read-only. Transient: process-scoped + drive-letter-suppressed
     // (see ImportDirectory for rationale).
     VhdHandle attachHandle;
     std::wstring physicalPath;
-    DWORD result = AttachVHD(vhdPath, true, attachHandle, physicalPath,
-                             AttachLifetime::ProcessScoped,
-                             /*suppressDriveLetter=*/ true);
+    result = AttachVHD(vhdPath, true, attachHandle, physicalPath,
+                       AttachLifetime::ProcessScoped,
+                       /*suppressDriveLetter=*/ true);
     if (result != ERROR_SUCCESS) return result;
 
     // Discover the volume GUID

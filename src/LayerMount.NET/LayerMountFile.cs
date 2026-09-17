@@ -10,6 +10,11 @@ using LayerMount.Interop;
 
 namespace LayerMount;
 
+/// <summary>
+/// Managed wrapper over an open <c>LM_FILE_HANDLE</c>, exposing the
+/// handle-bound file primitives: read, write, overwrite, flush, and
+/// file-info queries and updates.
+/// </summary>
 public sealed class LayerMountFile : IDisposable
 {
     private readonly LayerMountFileHandle _handle;
@@ -25,6 +30,11 @@ public sealed class LayerMountFile : IDisposable
     /// <see cref="Flush"/>, and <see cref="SetFileInfo"/>.</summary>
     public FileInfoSnapshot Info { get; private set; }
 
+    /// <summary>
+    /// True once <see cref="Dispose"/> has closed the underlying handle.
+    /// A file operation called after that throws
+    /// <see cref="LayerMountInvalidHandleException"/>.
+    /// </summary>
     public bool IsClosed => _handle.IsClosed;
 
     /// <summary>
@@ -32,6 +42,9 @@ public sealed class LayerMountFile : IDisposable
     /// <paramref name="offset"/>. Returns the number of bytes actually
     /// read (may be less than the buffer). Returns 0 at EOF.
     /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe uint Read(long offset, Span<byte> buffer, uint originatorPid = 0)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
@@ -53,6 +66,9 @@ public sealed class LayerMountFile : IDisposable
     /// <paramref name="constrainedIo"/> truncates the write to fit the
     /// current EOF.
     /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe uint Write(
         long offset,
         ReadOnlySpan<byte> buffer,
@@ -81,6 +97,9 @@ public sealed class LayerMountFile : IDisposable
     /// per <paramref name="replaceAttributes"/> and deletes non-overlay
     /// ADS streams.
     /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe void Overwrite(
         uint fileAttributes,
         bool replaceAttributes,
@@ -96,6 +115,13 @@ public sealed class LayerMountFile : IDisposable
         Info = FileInfoSnapshot.From(info);
     }
 
+    /// <summary>
+    /// Flushes buffered writes for this file. Updates <see cref="Info"/>
+    /// with the post-flush metadata.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe void Flush(uint originatorPid = 0)
     {
         using var lease = new SafeHandleLease(_handle);
@@ -105,6 +131,15 @@ public sealed class LayerMountFile : IDisposable
         Info = FileInfoSnapshot.From(info);
     }
 
+    /// <summary>
+    /// Returns the current metadata for this file, completing any
+    /// pending metacopy first so the reported size and attributes
+    /// reflect the materialized file. Updates <see cref="Info"/> with
+    /// the result.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe FileInfoSnapshot GetFileInfo()
     {
         using var lease = new SafeHandleLease(_handle);
@@ -123,6 +158,9 @@ public sealed class LayerMountFile : IDisposable
     /// <paramref name="allocationSize"/> / <paramref name="fileSize"/>
     /// to leave sizes unchanged.
     /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe void SetFileInfo(
         uint fileAttributes = 0xFFFFFFFFu,
         ulong creationTime = 0,
@@ -148,6 +186,9 @@ public sealed class LayerMountFile : IDisposable
     /// while a delete-on-close handle on <c>a.txt</c> is still open) so
     /// subsequent handle-bound operations target the current name.
     /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public void UpdatePathAfterRename(string newRelativePath)
     {
         ArgumentNullException.ThrowIfNull(newRelativePath);
@@ -156,6 +197,10 @@ public sealed class LayerMountFile : IDisposable
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountUpdateOpenFilePath));
     }
 
+    /// <summary>
+    /// Closes the underlying handle, releasing its native handle-table
+    /// slot.
+    /// </summary>
     public void Dispose() => _handle.Dispose();
 }
 
@@ -165,16 +210,38 @@ public sealed class LayerMountFile : IDisposable
 /// </summary>
 public readonly struct FileInfoSnapshot
 {
+    /// <summary>Win32 file attribute flags (e.g. <c>FILE_ATTRIBUTE_DIRECTORY</c>).</summary>
     public uint FileAttributes { get; }
+
+    /// <summary>Reparse point tag, or 0 if the file is not a reparse point.</summary>
     public uint ReparseTag { get; }
+
+    /// <summary>On-disk allocation in bytes.</summary>
     public ulong AllocationSize { get; }
+
+    /// <summary>Logical end-of-file in bytes.</summary>
     public ulong FileSize { get; }
+
+    /// <summary>Creation timestamp, as FILETIME.</summary>
     public ulong CreationTime { get; }
+
+    /// <summary>Last-access timestamp, as FILETIME.</summary>
     public ulong LastAccessTime { get; }
+
+    /// <summary>Last-write timestamp, as FILETIME.</summary>
     public ulong LastWriteTime { get; }
+
+    /// <summary>Last metadata-change timestamp, as FILETIME.</summary>
     public ulong ChangeTime { get; }
+
+    /// <summary>The file's index number, unique per volume.</summary>
     public ulong IndexNumber { get; }
+
+    /// <summary>Count of hard links to the file; 1 for a file with no
+    /// additional links.</summary>
     public uint HardLinks { get; }
+
+    /// <summary>Size of the file's extended attributes, in bytes.</summary>
     public uint EaSize { get; }
 
     internal FileInfoSnapshot(
@@ -204,9 +271,32 @@ public readonly struct FileInfoSnapshot
         info.lastWriteTime, info.changeTime,
         info.indexNumber, info.hardLinks, info.eaSize);
 
+    /// <summary>
+    /// <see cref="CreationTime"/> converted to UTC, or
+    /// <see cref="DateTime.MinValue"/> if the underlying FILETIME value
+    /// is zero or out of range.
+    /// </summary>
     public DateTime CreationTimeUtc   => FileTimeToDateTime(CreationTime);
+
+    /// <summary>
+    /// <see cref="LastAccessTime"/> converted to UTC, or
+    /// <see cref="DateTime.MinValue"/> if the underlying FILETIME value
+    /// is zero or out of range.
+    /// </summary>
     public DateTime LastAccessTimeUtc => FileTimeToDateTime(LastAccessTime);
+
+    /// <summary>
+    /// <see cref="LastWriteTime"/> converted to UTC, or
+    /// <see cref="DateTime.MinValue"/> if the underlying FILETIME value
+    /// is zero or out of range.
+    /// </summary>
     public DateTime LastWriteTimeUtc  => FileTimeToDateTime(LastWriteTime);
+
+    /// <summary>
+    /// <see cref="ChangeTime"/> converted to UTC, or
+    /// <see cref="DateTime.MinValue"/> if the underlying FILETIME value
+    /// is zero or out of range.
+    /// </summary>
     public DateTime ChangeTimeUtc     => FileTimeToDateTime(ChangeTime);
 
     // Clamp out-of-range FILETIME values to DateTime.MinValue rather than

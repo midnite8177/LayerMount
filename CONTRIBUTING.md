@@ -26,15 +26,12 @@ the consumer repositories and are not required to build this engine.
 From a Developer PowerShell or Developer Command Prompt at the repo root:
 
 ```powershell
-msbuild LayerMount.sln /p:Configuration=Release /p:Platform=x64
+msbuild LayerMount.sln /p:Configuration=Release /p:Platform=x64 /restore
 ```
 
 Debug builds work too (`/p:Configuration=Debug`). The output drops under
-`x64\<Config>\`. No CMake, no vcpkg — NuGet package restore happens during
-MSBuild automatically.
-
-To build only one host (and skip the dependencies of the other), see the
-host-specific fragment.
+`x64\<Config>\`. No CMake, no vcpkg. `/restore` on the command line restores
+NuGet packages before the build runs.
 
 ## Running the test suites
 
@@ -73,7 +70,7 @@ that platform, point the wrapper at the ARM64 native DLL, and then run
 the built test assembly on an ARM64 host:
 
 ```powershell
-msbuild LayerMount.sln /p:Configuration=Release /p:Platform=ARM64 /p:LayerMountNativeArch=ARM64
+msbuild LayerMount.sln /p:Configuration=Release /p:Platform=ARM64 /p:LayerMountNativeArch=ARM64 /restore
 dotnet test src\LayerMount.NET.Tests -c Release -p:Platform=ARM64 --no-build
 ```
 
@@ -105,9 +102,10 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes:
 - `docs:` — documentation only
 - `chore:` — tooling / build / non-code
 
-Area tags used in this repo: `vhd`, `vss`, `cli`, `host`, `powershell`,
-`build`, `test-shared`, `security`. Reference the task number in the body
-when relevant.
+Area tags used in this repo: `vhd`, `vss`, `abi`, `native`, `net`, `deps`,
+`build`, `release`, `test-shared`, `security`, `copy-up`. Commit messages never
+reference a task, issue, or bead number; they describe the change in
+the project's own terms.
 
 A defect in test-only code takes `test(test-shared):`, not `fix(...)`.
 `src/LayerMount.TestShared` and `src/LayerMount.NET.Tests` set
@@ -171,8 +169,6 @@ The workflow:
 
 Required repository secret: `NUGET_API_KEY` (a nuget.org API key scoped
 to `LayerMount` and `LayerMount.Native`).
-
-# 
 
 ## Vendored third-party components
 

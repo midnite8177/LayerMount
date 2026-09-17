@@ -1,22 +1,3 @@
-// LayerMount -- top-level managed wrapper over an <c>LM_HANDLE</c>.
-//
-// Constructed via <see cref="Create"/>. Owns the underlying SafeHandle,
-// manages the native event-callback subscription, and exposes the four
-// subsystem APIs (<see cref="ProcessTracker"/>, <see cref="Vhd"/>,
-// <see cref="Vss"/>, <see cref="Images"/>) as sub-objects that internally
-// route to the parent overlay handle.
-//
-// Dispose contract: consumers should call <see cref="Dispose"/> (e.g.
-// via <c>using</c>) to release the native instance deterministically.
-// If Dispose is skipped the finalizer makes a best-effort cleanup pass:
-// it clears the native event-callback slot (which drains any in-flight
-// native emits via EventEmitter::Clear) and frees the self GCHandle, so
-// the contained SafeHandle can then release the native overlay. The
-// GCHandle is Weak rather than Normal -- a strong handle would root
-// the LayerMount to itself and block collection forever. The event
-// trampoline checks GCHandle.Target for null before dispatching, so
-// a collected-but-not-yet-finalized LayerMount silently drops events.
-
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -24,6 +5,25 @@ using LayerMount.Interop;
 
 namespace LayerMount;
 
+/// <summary>
+/// Managed wrapper over a native <c>LM_HANDLE</c> overlay instance.
+/// </summary>
+/// <remarks>
+/// Constructed via <see cref="Create"/> or <see cref="CreateTransient"/>.
+/// Owns the underlying SafeHandle, manages the native event-callback
+/// subscription, and exposes the four subsystem APIs
+/// (<see cref="ProcessTracker"/>, <see cref="Vhd"/>, <see cref="Vss"/>,
+/// <see cref="Images"/>) as sub-objects that route to the parent overlay
+/// handle.
+/// <para>
+/// Call <see cref="Dispose"/> (e.g. via <c>using</c>) to release the
+/// native instance deterministically; see its own remarks for the full
+/// teardown order. If <c>Dispose</c> is skipped, the finalizer makes a
+/// best-effort cleanup pass: it clears the native event-callback slot,
+/// which drains any in-flight native emits, and frees the self GCHandle
+/// so the contained SafeHandle can then release the native overlay.
+/// </para>
+/// </remarks>
 public sealed partial class LayerMount : IDisposable
 {
     private readonly LayerMountHandle _handle;
@@ -157,6 +157,13 @@ public sealed partial class LayerMount : IDisposable
     /// The default capability set covers the features typical host adapters
     /// expose; callers can override per call.
     /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="workDir"/> is null or empty.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT, including when
+    /// <paramref name="workDir"/> could not be created.
+    /// </exception>
     public static unsafe LayerMount CreateTransient(
         string workDir,
         HostCapabilities caps = HostCapabilities.Ads
@@ -176,6 +183,24 @@ public sealed partial class LayerMount : IDisposable
         return new LayerMount(safe);
     }
 
+    /// <summary>
+    /// Creates an overlay from <paramref name="config"/>. Validates that
+    /// the upper layer exists and is writable and that every lower path
+    /// exists, then creates the work directory if it is missing.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="config"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <see cref="LayerMountConfig.UpperPath"/> or
+    /// <see cref="LayerMountConfig.WorkDirPath"/> is null or empty.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT: the ABI version
+    /// does not match the loaded DLL, a required path failed layer
+    /// validation, the work directory could not be created, or the
+    /// overlay handle table is exhausted.
+    /// </exception>
     public static unsafe LayerMount Create(LayerMountConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -248,6 +273,12 @@ public sealed partial class LayerMount : IDisposable
     /// upper/lower layer that services it. Returns layer-source metadata
     /// alongside the absolute path.
     /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="relativePath"/> is null.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe ResolvedPath ResolvePath(string relativePath)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
@@ -289,6 +320,13 @@ public sealed partial class LayerMount : IDisposable
             probe.attributes);
     }
 
+    /// <summary>
+    /// Returns the overlay's total and free space and its fixed volume
+    /// label.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The underlying volume query fails.
+    /// </exception>
     public unsafe VolumeInfo GetVolumeInfo()
     {
         using var lease = new SafeHandleLease(_handle);
@@ -310,6 +348,18 @@ public sealed partial class LayerMount : IDisposable
         return new VolumeInfo(info.totalSize, info.freeSize, label);
     }
 
+    /// <summary>
+    /// Ensures the file or directory at <paramref name="relativePath"/>
+    /// exists in the upper layer, triggering a copy-up if it currently
+    /// resolves only to a lower layer. No-op if the path is already in
+    /// the upper layer.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="relativePath"/> is null.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public void EnsureInUpperLayer(string relativePath)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
@@ -318,6 +368,14 @@ public sealed partial class LayerMount : IDisposable
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountEnsureInUpperLayer));
     }
 
+    /// <summary>
+    /// Snapshots the overlay's internal counters: cache hits/misses,
+    /// copy-up count, read/write counts and byte totals, active handles,
+    /// and metadata cleanup failures.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe LayerMountStats GetStats()
     {
         using var lease = new SafeHandleLease(_handle);
@@ -389,6 +447,12 @@ public sealed partial class LayerMount : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>
+    /// Runs during garbage collection if <see cref="Dispose"/> was never
+    /// called. Cleans up non-deterministically and, unlike
+    /// <see cref="Dispose"/>, does not synchronously release child
+    /// handles.
+    /// </summary>
     ~LayerMount()
     {
         // Best-effort cleanup when the caller forgot Dispose. Clearing
@@ -508,6 +572,18 @@ public sealed partial class LayerMount : IDisposable
 // Projection types for GetVolumeInfo / ResolvePath / GetStats
 // ----------------------------------------------------------------------
 
+/// <summary>Output of <see cref="LayerMount.ResolvePath"/>.</summary>
+/// <param name="AbsolutePath">The absolute path in the layer that services the request.</param>
+/// <param name="Source">Which layer produced <paramref name="AbsolutePath"/>.</param>
+/// <param name="LowerIndex">
+/// Index into the configured lower layers, or -1 unless
+/// <paramref name="Source"/> is a lower layer.
+/// </param>
+/// <param name="IsWhiteout">Whether the path is marked deleted by a whiteout.</param>
+/// <param name="Attributes">
+/// Win32 file attributes, or <c>INVALID_FILE_ATTRIBUTES</c> if the path
+/// was not found.
+/// </param>
 public sealed record ResolvedPath(
     string AbsolutePath,
     LayerSource Source,
@@ -515,11 +591,19 @@ public sealed record ResolvedPath(
     bool IsWhiteout,
     uint Attributes);
 
+/// <summary>Output of <see cref="LayerMount.GetVolumeInfo"/>.</summary>
+/// <param name="TotalSize">Total volume size in bytes.</param>
+/// <param name="FreeSize">Free volume space in bytes.</param>
+/// <param name="VolumeLabel">The overlay's fixed volume label.</param>
 public sealed record VolumeInfo(
     ulong TotalSize,
     ulong FreeSize,
     string VolumeLabel);
 
+/// <summary>
+/// Snapshot of an overlay's internal counters, as returned by
+/// <see cref="LayerMount.GetStats"/>.
+/// </summary>
 public sealed record LayerMountStats(
     ulong CacheHits,
     ulong CacheMisses,

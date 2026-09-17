@@ -6,12 +6,25 @@ using LayerMount.Interop;
 
 namespace LayerMount;
 
+/// <summary>
+/// Facade for the process-tracker subsystem. A caller gets an instance
+/// from <see cref="LayerMount.ProcessTracker"/>.
+/// </summary>
 public sealed class ProcessTrackerApi
 {
     private readonly LayerMount _owner;
 
     internal ProcessTrackerApi(LayerMount owner) => _owner = owner;
 
+    /// <summary>
+    /// Turns process tracking on or off for the overlay. Enabling fails
+    /// if a configured rules file cannot be loaded, since an empty rule
+    /// set would silently allow every operation.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT, including when a
+    /// configured rules file cannot be loaded.
+    /// </exception>
     public void Enable(bool enable)
     {
         using var lease = new SafeHandleLease(_owner.Handle);
@@ -20,6 +33,18 @@ public sealed class ProcessTrackerApi
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountProcessTrackerEnable));
     }
 
+    /// <summary>
+    /// (Re-)loads the process-tracker rules JSON at
+    /// <paramref name="rulesPath"/>.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="rulesPath"/> is null.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT, including an empty
+    /// <paramref name="rulesPath"/>, the tracker not enabled
+    /// (<see cref="Enable"/>), or the file could not be read or parsed.
+    /// </exception>
     public void SetRules(string rulesPath)
     {
         ArgumentNullException.ThrowIfNull(rulesPath);
@@ -29,6 +54,13 @@ public sealed class ProcessTrackerApi
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountProcessTrackerSetRules));
     }
 
+    /// <summary>
+    /// Exports the process-tracker access log as a JSON string.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT, including when the
+    /// tracker is not enabled (<see cref="Enable"/>).
+    /// </exception>
     public unsafe string ExportJson()
     {
         using var lease = new SafeHandleLease(_owner.Handle);
@@ -41,6 +73,13 @@ public sealed class ProcessTrackerApi
         return result ?? string.Empty;
     }
 
+    /// <summary>
+    /// Exports the process-tracker access log as CSV.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT, including when the
+    /// tracker is not enabled (<see cref="Enable"/>).
+    /// </exception>
     public unsafe string ExportCsv()
     {
         using var lease = new SafeHandleLease(_owner.Handle);

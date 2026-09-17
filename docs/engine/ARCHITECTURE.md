@@ -1,19 +1,19 @@
 # LayerMount.dll — Architecture
 
 This document describes the internal architecture of `LayerMount.dll`, the
-native engine that powers every LayerMount host on Windows. The DLL is
-deliberately host-agnostic: it owns the overlay semantics (layer
-precedence, whiteouts, copy-up, metadata) and exposes them through a
-stable C ABI. Filesystem-host adapters live above this DLL and are the
-only consumers of its handle types.
+native engine that powers every LayerMount host adapter on Windows. The
+DLL is deliberately filesystem-host-agnostic: it owns the overlay
+semantics (layer precedence, whiteouts, copy-up, metadata) and exposes
+them through a stable C ABI. Host adapters live above this DLL and are
+the only consumers of its handle types.
 
 The engine takes its model from Linux `layermount(5)`: a single writable
 **upper** layer stacks on top of zero or more read-only **lower** layers,
-and a **work** directory provides scratch space for atomic operations.
-Reads pass through to the first layer that has the file; writes promote
-the file into the upper layer with a copy-up; deletes drop a *whiteout*
-marker that hides the lower entry from the merged view. The lower layers
-are never modified.
+and a **work** directory provides the atomic-operation space the engine
+uses for copy-up. Reads pass through to the first layer that has the
+file; writes copy the file into the upper layer with a copy-up; deletes
+drop a *whiteout* marker that hides the lower entry from the overlay.
+The lower layers are never modified.
 
 ---
 
@@ -23,8 +23,8 @@ are never modified.
 src/LayerMount.dll/
   public/         LayerMount.h          Stable C ABI (the only installed header)
                   LayerMount.def        Exported symbols
-  abi/            CapabilityGate.h     Host-capability bitfield wrapper
-                  EventEmitter.h       Host event-callback fan-out
+  abi/            CapabilityGate.h     Host-adapter capability bitfield wrapper
+                  EventEmitter.h       Host-adapter event-callback fan-out
                   ErrorTls.{h,cpp}     Per-thread last-error storage
                   HandleTypes.h        Per-handle-kind payloads + magics
                   HandleTable.{h,cpp}  Typed slot/generation/magic registry
@@ -68,12 +68,13 @@ The split is load-bearing:
 
 ## Design philosophy
 
-**Host-agnostic.** The DLL has no compile-time or run-time dependency on
-any particular filesystem-host kernel. Adapters bind the engine to the
-host's callback table and translate the host's request shape into ABI
-calls; the engine answers in pure HRESULT/NTSTATUS without knowing what
-delivered the request. A unit test that drives the engine through the C
-ABI sees exactly what a production host sees.
+**Filesystem-host-agnostic.** The DLL has no compile-time or run-time
+dependency on any particular filesystem host. Host adapters bind the
+engine to the filesystem host's callback table and translate the
+filesystem host's request shape into ABI calls; the engine answers in
+pure HRESULT/NTSTATUS without knowing what delivered the request. A unit
+test that drives the engine through the C ABI sees exactly what a
+production host adapter sees.
 
 **Lower layers are read-only.** No engine code path writes into a lower
 path. The closest the engine comes is *reading* whiteout markers from a
@@ -92,7 +93,7 @@ does not silently downgrade. Examples:
   `SetProcessTrackerEnabled(true)` to fail rather than coming up with an
   empty (allow-everything) rule set.
 
-**Capability gating, not feature stubs.** When the host advertises
+**Capability gating, not feature stubs.** When the host adapter advertises
 limited capabilities (no ADS, no sparse files, no NTFS ACLs), the engine
 takes a documented fallback path rather than refusing the operation.
 The `CapabilityGate` wrapper makes the choice explicit at every fork.
@@ -118,7 +119,7 @@ rename, so a crash mid-operation never leaves a half-built shadow.
 struct LayerConfig {
     std::wstring upperPath;                  // writable layer (required)
     std::vector<std::wstring> lowerPaths;    // index 0 = highest-priority lower
-    std::wstring workDirPath;                // copy-up scratch
+    std::wstring workDirPath;                // copy-up work directory
     bool         enableProcessTracking;
     std::wstring processRulesPath;
     size_t       accessLogCapacity;
@@ -128,7 +129,7 @@ struct LayerConfig {
 ```
 
 Lookup precedence is **upper, then lowers in declared order, first-match
-wins**. A file present in the upper layer is the file the merged view
+wins**. A file present in the upper layer is the file the overlay
 shows — even if a lower layer also has a copy. A file present in
 `lowerPaths[1]` is shadowed by a copy in `lowerPaths[0]`.
 
@@ -136,8 +137,8 @@ shows — even if a lower layer also has a copy. A file present in
 and is writable (by writing and deleting a temp file under
 `FILE_FLAG_DELETE_ON_CLOSE`). It verifies every lower path exists. It
 emits a debug warning when the upper layer's volume is not NTFS or
-ReFS — non-NTFS hosts cannot use the ADS metadata path and fall back to
-sidecar JSON files.
+ReFS — non-NTFS upper layers cannot use the ADS metadata path and fall
+back to sidecar JSON files.
 
 `LayerConfig::Prepare` creates the work directory if missing.
 
@@ -267,7 +268,7 @@ otherwise resurface on the next resolve.
 
 ### What about whiteouts in directory listings?
 
-Whiteout markers are *never* visible in the merged view. Directory
+Whiteout markers are *never* visible in the overlay. Directory
 merging in `LayerMount::MergeDirectoryEntries`:
 
 1. Enumerates upper. For each `.wh.<name>` it sees, it strips the prefix
@@ -348,19 +349,19 @@ It rejects:
 
 `IsReservedRelativePath(normalized)` rejects the `.overlay` directory
 and anything beneath it. That subtree is the sidecar-metadata store on
-non-ADS hosts (see below); exposing it through the merged view would
+non-ADS upper layers (see below); exposing it through the overlay would
 let a caller open, modify, or delete internal records.
 
 ### Stream-qualified paths and case
 
 The write-side ADS surface (`Create` / `Open` / `Overwrite` / `Delete`
 / `UpdateContextPath`) accepts paths of the form
-`host[:stream[:$DATA]]`. `TryParseStreamPath` runs *after*
+`file[:stream[:$DATA]]`. `TryParseStreamPath` runs *after*
 normalization, which means the stream name inherits the
 whole-path lowercasing from step 2. A caller that creates
-`\host.txt:MyStream` lands `host.txt:mystream` on disk;
+`\example.txt:MyStream` lands `example.txt:mystream` on disk;
 `LayerMountEnumerateStreams` returns the on-disk (lowercased) form.
-This matches how host names are handled and keeps stream resolution
+This treats file names the same way and keeps stream resolution
 case-insensitive end-to-end — but it does mean stream-name casing is
 not round-trippable through the overlay.
 
@@ -402,9 +403,9 @@ unavailable. Steps:
 9. Invalidate the cache for the affected path (and ancestors).
 10. Bump `stats.copyUpCount` and emit `LM_EVT_COPY_UP`.
 
-### Metacopy / lazy copy-up (`CopyUpMetadataOnly`)
+### Metacopy (`CopyUpMetadataOnly`)
 
-For files larger than 1 MiB on hosts that support sparse files
+For files larger than 1 MiB on host adapters that support sparse files
 (`LM_CAP_SPARSE_FILES`), the engine stages a *metacopy shell* in the
 upper layer instead of a full data copy:
 
@@ -505,34 +506,12 @@ shims) see a consistent value before and after copy-up.
 
 ### Two backends, one dispatcher
 
-`MetadataADS` is the engine's dispatcher. It picks between two stores
-based on the host's advertised capability (`LM_CAP_ADS`):
-
-1. **NTFS Alternate Data Streams** — the optimized path. Metadata lives
-   in the `:overlay` ADS on the file itself; the opaque marker lives in
-   `:overlay.opaque` on the directory. Single-stat detection, no
-   sidecar to keep in sync.
-2. **Sidecar JSON** (`SidecarMetadata`) — the fallback for non-NTFS
-   upper layers (FAT32, exFAT, network shares without stream support).
-   Metadata lives at `<upper>\.overlay\<sha1(rel)>.meta.json` and the
-   opaque marker at `<upper>\.overlay\<sha1(rel)>.opaque`.
-
-Why SHA-1 of the path? It side-steps NTFS's filename character
-restrictions (`<`, `>`, `:`, ...) and tolerates very long paths in a
-flat namespace. Lowercased before hashing so it matches NTFS
-case-insensitivity.
-
-Reads from `MetadataADS::ReadLayerMountMetadata` fall through from ADS to
-sidecar transparently. Writes pick the store based on the capability
-bit. Removes clean **both** stores so a host can flip capabilities (or
-the operator can change file system) without leaving stale records
-behind.
-
-The `corrupted` out-param on `Read` distinguishes "no metadata
-recorded" from "metadata exists but cannot be parsed". Callers whose
-correctness depends on metadata fidelity (resolver-side redirect
-follow) treat `*corrupted == true` as a hard failure rather than
-silently returning the default record.
+`MetadataADS` is the engine's dispatcher. It picks an NTFS
+alternate-data-stream store or a sidecar JSON store, based on the host
+adapter's advertised capability. It falls back to the sidecar store
+when the ADS store has no entry. See
+[metadata-dispatcher.md](../metadata-dispatcher.md) for the backend
+choice, the SHA-1 rationale, and the read and remove details.
 
 ### Reserved namespaces
 
@@ -551,13 +530,15 @@ The engine reserves two namespaces in the upper layer:
 
 `Cache` is an LRU map from normalized relative path to `ResolvedPath`,
 guarded by a `std::shared_mutex`. The default capacity is 10000
-entries; the host can raise it via `LM_CONFIG::pathCacheCapacity` for
-large lower trees that thrash on cold start.
+entries; the host adapter can raise it via `LM_CONFIG::pathCacheCapacity`
+for large lower trees that thrash on cold start.
 
 Reads acquire the shared lock and (under the shared lock) update each
-entry's `lastAccessTicks` via `std::atomic_ref` so concurrent readers
-don't block each other for LRU bookkeeping. Writes acquire the
-exclusive lock; the eviction pass picks the oldest tick.
+entry's `lastAccessTicks` with `_InterlockedExchange64` on a
+reinterpret-cast pointer to the tick field, so concurrent readers don't
+block each other for LRU bookkeeping. The project targets C++17, where
+`std::atomic_ref` is not available. Writes acquire the exclusive lock;
+the eviction pass picks the oldest tick.
 
 Invalidation is explicit at every mutation:
 
@@ -627,39 +608,32 @@ first use because most overlays never exercise them.
 
 ### VHDX layer manager (`impl/vhd/`)
 
-`VHDLayerManager` wraps the Win32 `VirtAttach`/`AttachVirtualDisk` API
-to attach a VHD or VHDX file as a Windows volume, expose its volume
-GUID path, and record it in a JSON manifest at
-`<workDir>\layers.manifest.json`. The manifest is mutated under a named
-mutex (`ManifestLock`) so concurrent processes don't corrupt it.
-`Attach` lifetimes are either permanent (survives process exit) or
-process-scoped (auto-detached when the last handle closes).
+`VHDLayerManager` wraps the Win32 `OpenVirtualDisk`/`CreateVirtualDisk`/
+`AttachVirtualDisk` API to attach a VHD or VHDX file as a Windows
+volume, expose its volume GUID path, and record it in a JSON manifest
+guarded by a named cross-process mutex. See
+[LAYER-SOURCES.md](LAYER-SOURCES.md) for the create, attach, list,
+clean-up, and privilege details.
 
 ### VSS snapshot manager (`impl/vss/`)
 
 `VSSManager` drives the VSS COM interface to take, list, and delete
-shadow copies. COM is initialized per-thread via `ComScope` (RAII).
-Snapshots can be persistent (visible to the backup admin until
-explicitly deleted) or non-persistent (cleaned up by
-`LayerMountVssCleanupSnapshots`).
+shadow copies, with COM initialized per-thread via `ComScope` (RAII).
+See [LAYER-SOURCES.md](LAYER-SOURCES.md) for the create, list,
+clean-up, and privilege details.
 
 ### Layer-image manager (`impl/image/`)
 
-A `.lmnt` layer image is a self-contained file with:
-
-- 128-byte `LayerImageHeader` (magic `OVLYIMG\0`, version, compression
-  type, offsets, SHA-256 of data section).
-- JSON metadata block (id, parent id, author, description, tags,
-  whiteouts list, file count, sizes).
-- Compressed (zstd) tar-like archive of `FileEntryHeader` + UTF-8 path
-  + data, terminated by a sentinel header with `nameLength = 0xFFFF`.
-
-`LayerImageManager::Pack` walks a source directory and emits the
-archive; `Unpack` reverses the process and verifies the SHA-256 unless
-the caller opts out. `PackDifferential` produces an image that records
-only the entries that differ from a base directory and writes whiteout
-entries for files deleted in the source. A multi-image manifest groups
-ordered images for distribution.
+The layer-image manager packs a directory tree into one self-contained
+`.lmnt` file: a fixed header, a JSON metadata block, and a compressed
+archive of file entries with a SHA-256 checksum. `Pack` builds an
+image from a source directory. `Unpack` reverses the process and
+verifies the checksum, unless the caller turns verification off.
+`PackDifferential` builds an image that records only the entries that
+changed against a base directory, with a whiteout entry for each
+deletion. A manifest lists an ordered set of images for distribution.
+See [LAYER-IMAGE-FORMAT.md](LAYER-IMAGE-FORMAT.md) for the byte-level
+format.
 
 ---
 
@@ -722,8 +696,8 @@ outlives the slot until the last reference drops.
 free. `LayerMountDestroy` refuses to release the engine while
 `childCount != 0` or `hostAttached == true`. File handles additionally
 pin their parent overlay via a `shared_ptr<LayerMountHolder>`, so a
-buggy host that bypasses the `childCount` check still cannot trigger a
-use-after-free.
+buggy host adapter that bypasses the `childCount` check still cannot
+trigger a use-after-free.
 
 ### Error reporting
 
@@ -736,12 +710,12 @@ returns `*requiredChars = 0` so a caller cannot accidentally read a
 stale message belonging to a different operation.
 
 Reserved overlay-specific HRESULT range: `FACILITY_ITF` codes
-`0xB000..0xBFFF`. Hosts must not emit codes in this range from their
-own layers.
+`0xB000..0xBFFF`. Host adapters must not emit codes in this range from
+their own layers.
 
 `LayerMountHResultToNtStatus` converts any HRESULT the engine returns
 into the equivalent NTSTATUS for adapters that bridge into an
-NTSTATUS-shaped host callback surface. Coverage includes the
+NTSTATUS-shaped filesystem host callback surface. Coverage includes the
 COM-style codes, `FACILITY_WIN32`-wrapped Win32 errors (the path the
 engine takes when wrapping `GetLastError`), and `HRESULT_FROM_NT`
 inversions. Unknown codes map to `STATUS_UNSUCCESSFUL`.
@@ -761,18 +735,19 @@ shared lock, increments an in-flight counter, releases the lock, and
 invokes the callback. `Clear` takes the unique lock to null out the
 slot, then spins on the in-flight counter until zero — guaranteeing no
 further invocations of the previously-registered callback are in
-progress, so the host can safely free the user context (e.g. a managed
-GCHandle).
+progress, so the host adapter can safely free the user context (e.g. a
+managed GCHandle).
 
 ### Mount-point helpers
 
 `LayerMountPointPrepareDirectory` /
 `LayerMountPointCaptureIdentity` / `LayerMountPointReleaseIfSafe`
-are host-kernel-agnostic helpers for the directory-mount-point
-lifecycle. The host calls them around its own mount/unmount calls so
-the ownership-tracked release at the end never deletes a directory the
-host did not create. Drive-letter mount points (`X:` / `X:\`) skip the
-dance entirely — `LayerMountPointIsDriveLetter` reports them.
+are filesystem-host-agnostic helpers for the directory-mount-point
+lifecycle. The host adapter calls them around its own mount/unmount
+calls so the ownership-tracked release at the end never deletes a
+directory the host adapter did not create. Drive-letter mount points
+(`X:` / `X:\`) skip the dance entirely — `LayerMountPointIsDriveLetter`
+reports them.
 
 ---
 
@@ -803,16 +778,17 @@ synchronously on the same handle.
 
 ## What this DLL deliberately does *not* own
 
-- Mounting. The engine has no mount/unmount lifecycle. A host adapter
-  binds a filesystem-host kernel to the engine's primitives and is
-  responsible for surfacing the merged view as a real Windows volume.
-  `LayerMountSetHostAttached` is the single coupling point: while the flag
-  is set, `LayerMountDestroy` returns `E_ILLEGAL_METHOD_CALL` so the host
-  must unmount and clear the flag first.
-- Driver lifecycle. Anything that installs, configures, or licenses a
-  filesystem-host kernel lives in the host adapter, not in the engine.
-- CLI. The shipped command-line surface (mount/vhd/vss/layer/stats/log)
-  is a separate process that links the engine via the C ABI.
+- Mounting. `LayerMountSetHostAttached` is the single coupling point.
+  While the flag is set, `LayerMountDestroy` returns
+  `E_ILLEGAL_METHOD_CALL`. The host adapter must unmount and clear the
+  flag first.
+- Driver lifecycle. Installing, configuring, or licensing a filesystem
+  host lives in the host adapter, not in the engine.
+- CLI. A command-line surface (mount/vhd/vss/layer/stats/log) can exist
+  as a separate process that links the engine via the C ABI.
 - IPC. Control-pipe protocols, JSON handshakes, and background-process
   daemonization live above the engine. The engine answers HRESULTs and
-  emits events; everything else is policy in the host.
+  emits events; everything else is policy in the host adapter.
+
+See [0001-engine-is-not-a-filesystem-driver.md](../adr/0001-engine-is-not-a-filesystem-driver.md)
+for why the engine draws this boundary.

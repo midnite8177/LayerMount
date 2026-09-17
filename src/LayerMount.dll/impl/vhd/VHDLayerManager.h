@@ -20,6 +20,7 @@
 #include <filesystem>
 
 #include "Manifest.h"
+#include "../PathUtil.h"
 
 namespace LayerMount::VHD {
 
@@ -191,8 +192,7 @@ private:
 std::string WideToUtf8(const std::wstring& wide);
 std::wstring Utf8ToWide(const std::string& utf8);
 
-// Trailing backslash helpers for volume GUID paths
+// Returns path with a trailing backslash added, unless it already has one.
 std::wstring EnsureTrailingBackslash(const std::wstring& path);
-std::wstring StripTrailingBackslash(const std::wstring& path);
 
 } // namespace LayerMount::VHD

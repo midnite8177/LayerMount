@@ -397,9 +397,9 @@ public:
         WriteRawStream(env.Upper() + L"\\host.txt:a", "AAAAAAAA", 8);
         WriteRawStream(env.Upper() + L"\\host.txt:b", "BBBBBBBBBB", 10);
 
-        // Open :a with FILE_OVERWRITE_IF semantics (CBFS would route this
-        // to Open + Overwrite). The host adapter chains these; we drive
-        // Open then Overwrite explicitly to mirror that flow.
+        // Open :a with FILE_OVERWRITE_IF semantics. A host adapter can
+        // chain this into an Open followed by an Overwrite; this test
+        // drives that sequence explicitly to mirror that flow.
         LM_FILE_HANDLE fh = nullptr;
         LM_FILE_INFO   info{};
         Assert::AreEqual<HRESULT>(S_OK,

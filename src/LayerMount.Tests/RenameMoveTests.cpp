@@ -309,7 +309,7 @@ public:
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
 
-        // Stage the lazy copy-up, then rename in-upper.
+        // Stage the metacopy, then rename in-upper.
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin")));
         Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(
                            env.Upper() + L"\\lazy.bin").metacopy);
@@ -328,7 +328,7 @@ public:
         Assert::IsFalse(md.originLayer.empty(),
             L"originLayer must survive MoveFileExW");
 
-        // Completing the lazy copy at the new name must still fill data.
+        // Completing the metacopy at the new name must still fill data.
         Assert::IsTrue(NT_SUCCESS(cu.CompleteLazyCopyUp(L"renamed.bin")));
         Assert::AreEqual(std::string(1024, 'Q'),
                          env.ReadFile(env.Upper(), L"renamed.bin"));
