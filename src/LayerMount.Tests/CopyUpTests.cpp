@@ -1,7 +1,7 @@
 // Unit tests for CopyUp. Test the class in isolation — do NOT mount
-// an overlay, do NOT invoke host-adapter callbacks. Read-triggered lazy
-// copy-up (LayerMount::SRead → CompleteLazyCopyUp) is integration-tested
-// in 10.0.
+// an overlay, do NOT invoke host-adapter callbacks. Read-triggered
+// metacopy completion (LayerMount::SRead → CompleteLazyCopyUp) is
+// integration-tested in 10.0.
 
 #include "pch.h"
 #include "TestFixture.h"
@@ -527,10 +527,10 @@ public:
 };
 
 // ============================================================================
-// 9.6 — Lazy copy-up tests
+// 9.6 — Metacopy tests
 // ============================================================================
 
-TEST_CLASS(LazyCopyUpTests) {
+TEST_CLASS(MetacopyTests) {
 public:
     TEST_CLASS_INITIALIZE(ClassInit) {
         AssertTempIsNTFS();

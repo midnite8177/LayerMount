@@ -80,12 +80,12 @@ public:
     // Creates parent directories as needed. Preserves security, timestamps, data.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
 
-    // --- Lazy/metadata-only copy-up (3.3) ---
+    // --- Metacopy (3.3) ---
 
     // Copy only metadata (security, timestamps) as a sparse file. Data copied on demand.
     NTSTATUS CopyUpMetadataOnly(const std::wstring& relativePath);
 
-    // Complete a lazy copy-up by copying actual file data from the lower layer.
+    // Complete a metacopy by copying actual file data from the lower layer.
     // Clears the metacopy ADS flag when done.
     NTSTATUS CompleteLazyCopyUp(const std::wstring& relativePath);
 
@@ -139,6 +139,31 @@ private:
 
     // Copy file data in chunks.
     NTSTATUS CopyFileData(HANDLE srcHandle, HANDLE dstHandle);
+
+    // Write the copy-up bookkeeping metadata to upperPath. On failure,
+    // delete upperPath and return the failure status. Without this
+    // metadata the upper file looks like a foreign creation to later
+    // resolution, and a metacopy shell without its metacopy flag set
+    // serves its zero-filled data as real content on the next read.
+    NTSTATUS WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
+                                        const LayerMountMetadata& metadata);
+
+    // Mark dstHandle sparse so a metacopy placeholder allocates no data
+    // blocks. On failure, close dstHandle, delete workPath, and return the
+    // failure status. A non-sparse placeholder inflates the upper volume
+    // and breaks the metacopy contract.
+    NTSTATUS MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
+                                          const std::wstring& workPath);
+
+    // Apply NTFS compression to dstHandle when srcAttributes marks the
+    // source compressed, so a compressed lower file does not balloon
+    // uncompressed in the upper layer. Returns STATUS_SUCCESS immediately
+    // if the source is not compressed. On failure, close dstHandle, delete
+    // workPath, and return the failure status: a metacopy shell that skips
+    // this diverges from its source in allocation semantics.
+    NTSTATUS ApplyPlaceholderCompressionOrAbort(ScopedHandle& dstHandle,
+                                                const std::wstring& workPath,
+                                                DWORD srcAttributes);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;

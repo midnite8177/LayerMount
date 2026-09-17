@@ -20,10 +20,6 @@
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
 
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <!-- CS1591: 'missing XML comment for publicly visible member'. The
-         wrapper has partial XML documentation; do not block builds on
-         the gaps. Existing comments still flow into the generated .xml. -->
-    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <!-- NuGet packaging metadata. The LayerMount package (managed wrapper)

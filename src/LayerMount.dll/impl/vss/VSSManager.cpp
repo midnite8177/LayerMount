@@ -1,5 +1,7 @@
 #include "VSSManager.h"
 #include "Manifest.h"
+#include "../ElevationUtil.h"
+#include "../PathUtil.h"
 
 #include <objbase.h>
 #include <ctime>
@@ -9,15 +11,8 @@
 namespace LayerMount::VSS {
 
 // ===========================================================================
-// Helpers — shared with VHDLayerManager (duplicated here to avoid cross-lib
-// link dependency; these are small, self-contained utilities).
+// Helpers
 // ===========================================================================
-
-static std::wstring StripTrailingBackslash(const std::wstring& path) {
-    if (!path.empty() && path.back() == L'\\')
-        return path.substr(0, path.size() - 1);
-    return path;
-}
 
 // Extract a Win32 DWORD from an HRESULT. Used to surface VSS COM
 // failures through the ListSnapshots DWORD contract: if the HRESULT
@@ -47,25 +42,11 @@ VSSManager::~VSSManager() {
 }
 
 // ===========================================================================
-// CheckElevation — same pattern as VHDLayerManager
+// CheckElevation
 // ===========================================================================
 
 DWORD VSSManager::CheckElevation() {
-    HANDLE token = nullptr;
-    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
-        return ::GetLastError();
-    }
-
-    TOKEN_ELEVATION elevation{};
-    DWORD size = 0;
-    BOOL ok = ::GetTokenInformation(token, TokenElevation,
-                                    &elevation, sizeof(elevation), &size);
-    DWORD err = ok ? ERROR_SUCCESS : ::GetLastError();
-    ::CloseHandle(token);
-
-    if (err != ERROR_SUCCESS) return err;
-
-    return elevation.TokenIsElevated ? ERROR_SUCCESS : ERROR_PRIVILEGE_NOT_HELD;
+    return LayerMount::CheckElevation();
 }
 
 // ===========================================================================

@@ -1,6 +1,3 @@
-// LayerMount.Vhd -- managed facade for VHD/VHDX primitives.
-// Obtained via <see cref="LayerMount.Vhd"/>.
-
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -8,12 +5,29 @@ using LayerMount.Interop;
 
 namespace LayerMount;
 
+/// <summary>
+/// Facade for VHD and VHDX primitives. A caller gets an instance from
+/// <see cref="LayerMount.Vhd"/>. It has methods to create, open, import,
+/// and export a VHD, and to manage entries in the layer manifest.
+/// </summary>
 public sealed class VhdApi
 {
     private readonly LayerMount _owner;
 
     internal VhdApi(LayerMount owner) => _owner = owner;
 
+    /// <summary>
+    /// Creates a new VHD or VHDX file at <paramref name="path"/> and
+    /// returns a handle to it. The file is not attached yet; call
+    /// <see cref="VhdImage.Attach"/> to mount it as a volume.
+    /// <paramref name="sizeBytes"/> is required for
+    /// <see cref="VhdKind.Fixed"/> and <see cref="VhdKind.Dynamic"/>.
+    /// <paramref name="parentPath"/> is required for
+    /// <see cref="VhdKind.Differencing"/>.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe VhdImage Create(
         string path,
         ulong sizeBytes,
@@ -27,6 +41,17 @@ public sealed class VhdApi
             readOnly, suppressDriveLetter, lifetime, create: true);
     }
 
+    /// <summary>
+    /// Opens the existing VHD or VHDX file at <paramref name="path"/>
+    /// and returns a handle to it, without attaching it.
+    /// </summary>
+    /// <exception cref="LayerMountNotFoundException">
+    /// <paramref name="path"/> does not exist.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// <paramref name="path"/> names a directory, or the native call
+    /// returns another non-success HRESULT.
+    /// </exception>
     public unsafe VhdImage Open(
         string path,
         bool readOnly = false,
@@ -86,6 +111,15 @@ public sealed class VhdApi
         }
     }
 
+    /// <summary>
+    /// Creates a VHD at <paramref name="vhdPath"/> and copies the
+    /// contents of <paramref name="directoryPath"/> into it.
+    /// <paramref name="sizeBytes"/> is the requested VHD capacity; pass
+    /// 0 to size the VHD to fit the source directory.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public void Import(string directoryPath, string vhdPath, ulong sizeBytes)
     {
         ArgumentNullException.ThrowIfNull(directoryPath);
@@ -96,6 +130,17 @@ public sealed class VhdApi
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountVhdImport));
     }
 
+    /// <summary>
+    /// Attaches the VHD at <paramref name="vhdPath"/> read-only and
+    /// copies its user-visible content into
+    /// <paramref name="directoryPath"/>, creating the directory if it
+    /// is missing. The call skips the NTFS system entries at the volume
+    /// root, and a permission error on one file does not stop the rest
+    /// of the export.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public void Export(string vhdPath, string directoryPath)
     {
         ArgumentNullException.ThrowIfNull(vhdPath);
@@ -111,6 +156,9 @@ public sealed class VhdApi
     /// <paramref name="manifestDir"/> (pass null for the current working
     /// directory). Returns an empty array if the manifest is absent.
     /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe IReadOnlyList<VhdLayerInfo> ListLayers(string? manifestDir = null)
     {
         IntPtr manifestDirPtr = manifestDir != null
@@ -232,6 +280,16 @@ public sealed class VhdApi
         return Marshal.PtrToStringUni(ptr) ?? string.Empty;
     }
 
+    /// <summary>
+    /// Removes the entry for <paramref name="layerId"/> from the VHD
+    /// manifest at <paramref name="manifestDir"/> (pass null for the
+    /// current working directory). The call is idempotent. It returns
+    /// <c>false</c>, rather than throwing, when the id is not in the
+    /// manifest or the manifest file is missing.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// The native call returns a non-success HRESULT.
+    /// </exception>
     public unsafe bool UnregisterLayer(string layerId, string? manifestDir = null)
     {
         ArgumentNullException.ThrowIfNull(layerId);
@@ -254,6 +312,16 @@ public sealed class VhdApi
         }
     }
 
+    /// <summary>
+    /// Returns the per-layer metadata map for <paramref name="layerId"/>
+    /// as a JSON object string. Returns <c>"{}"</c> when the layer has
+    /// no metadata.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// <paramref name="layerId"/> is not in the manifest at
+    /// <paramref name="manifestDir"/>, or the native call returns
+    /// another non-success HRESULT.
+    /// </exception>
     public unsafe string GetLayerMetadataJson(string layerId, string? manifestDir = null)
     {
         ArgumentNullException.ThrowIfNull(layerId);
@@ -280,6 +348,19 @@ public sealed class VhdApi
     }
 }
 
+/// <summary>One VHD layer as <see cref="VhdApi.ListLayers"/> reports it.</summary>
+/// <param name="Id">Layer id recorded in the manifest.</param>
+/// <param name="Type">The storage backend the layer uses.</param>
+/// <param name="Path">Path to the layer's backing directory or VHD file.</param>
+/// <param name="ParentId">
+/// Id of the parent layer, or an empty string when the layer has none.
+/// </param>
+/// <param name="MountStatus">Attach status recorded for the layer.</param>
+/// <param name="VolumeGuid">
+/// Volume GUID path for the layer, or an empty string when it is not
+/// attached.
+/// </param>
+/// <param name="CreatedAt">Creation timestamp recorded in the manifest.</param>
 public sealed record VhdLayerInfo(
     string Id,
     VhdLayerType Type,

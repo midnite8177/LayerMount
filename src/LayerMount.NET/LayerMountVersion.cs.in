@@ -4,7 +4,13 @@
 // Edit version.props at the repository root instead.
 namespace LayerMount;
 
+/// <summary>Version constants embedded in this managed build.</summary>
 public static class LayerMountVersion
 {
+    /// <summary>
+    /// The ABI version this managed build was compiled against. Compared
+    /// against the loaded native DLL's ABI version at
+    /// <see cref="LayerMount.Create"/> time; a mismatch is a hard error.
+    /// </summary>
     public const uint AbiVersion = @LM_ABI_VERSION@u;
 }

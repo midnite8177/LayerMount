@@ -494,12 +494,33 @@ typedef void (LM_CALL *LM_EVENT_CALLBACK)(
 
 /* ---- Lifecycle / diagnostics-lite ---- */
 
+/* Reports the DLL's SemVer and ABI version. Each out-parameter is
+ * independently optional; pass NULL for any value the caller does not
+ * need. Always returns S_OK. */
 LM_API HRESULT LM_CALL LayerMountGetVersion(
     UINT32* major, UINT32* minor, UINT32* patch, UINT32* abiVersion);
 
+/* Fetches the human-readable message for the most recent failure whose
+ * HRESULT matches `hr` on the calling thread, using the two-call buffer
+ * pattern. Passing an `hr` other than the one currently stored for this
+ * thread returns *requiredChars = 0 rather than a stale message. */
 LM_API HRESULT LM_CALL LayerMountGetLastErrorMessage(
     HRESULT hr, PWSTR buffer, SIZE_T bufferChars, SIZE_T* requiredChars);
 
+/*
+ * Creates an overlay from `config` and returns its handle in *outHandle.
+ * Validates that the upper layer exists and is writable and that every
+ * lower path exists, then creates the work directory if it is missing.
+ *
+ * Returns:
+ *   S_OK          -- overlay created
+ *   E_POINTER     -- config or outHandle is NULL
+ *   E_INVALIDARG  -- structSize too small, abiVersion does not match
+ *                    LM_ABI_VERSION, a required path is NULL, or layer
+ *                    validation failed (see LayerMountGetLastErrorMessage)
+ *   E_FAIL        -- the work directory could not be created
+ *   E_OUTOFMEMORY -- the overlay handle table is exhausted
+ */
 LM_API HRESULT LM_CALL LayerMountCreate(
     const LM_CONFIG* config, LM_HANDLE* outHandle);
 
@@ -510,25 +531,39 @@ LM_API HRESULT LM_CALL LayerMountCreate(
  * parents) on demand; if creation fails, LayerMountCreate's error path
  * surfaces the precise reason via LayerMountGetLastErrorMessage.
  *
- * Hosts pass their own hostCapabilities so the helper stays portable
+ * Host adapters pass their own hostCapabilities so the helper stays portable
  * across NTFS / non-NTFS / non-Windows backends. */
 LM_API HRESULT LM_CALL LayerMountCreateTransient(
     PCWSTR workDir, UINT32 hostCapabilities, LM_HANDLE* outHandle);
 
+/*
+ * Releases the overlay handle and its engine instance.
+ *
+ * Returns:
+ *   S_OK                   -- released
+ *   E_HANDLE               -- handle is NULL, stale, or wrong-kind
+ *   E_ILLEGAL_METHOD_CALL  -- the instance is host-attached
+ *                             (LayerMountSetHostAttached) or still has
+ *                             open LM_FILE_HANDLEs
+ */
 LM_API HRESULT LM_CALL LayerMountDestroy(LM_HANDLE handle);
 
+/* Installs `callback` as the overlay's LM_EVENT_CALLBACK, replacing any
+ * previous one. Passing NULL uninstalls it. `userContext` is threaded
+ * through to every invocation unchanged. */
 LM_API HRESULT LM_CALL LayerMountSetEventCallback(
     LM_HANDLE handle, LM_EVENT_CALLBACK callback, void* userContext);
 
 /* ---- Host adapter integration ----------------------------------
  *
  * LayerMountSetHostAttached is called by a host adapter to mark an overlay
- * as "currently mounted by a host". While the flag is TRUE,
+ * as "currently mounted by a host adapter". While the flag is TRUE,
  * LayerMountDestroy refuses to release the instance and returns
  * E_ILLEGAL_METHOD_CALL -- the host adapter must
  * unmount and clear the flag (attached = FALSE) first. General DLL
  * consumers should not call this function; the default value is FALSE
- * so LayerMountDestroy works without ceremony for non-hosted use.
+ * so LayerMountDestroy works without ceremony when no host adapter is
+ * attached.
  * ------------------------------------------------------------------------- */
 LM_API HRESULT LM_CALL LayerMountSetHostAttached(
     LM_HANDLE handle, BOOL attached);
@@ -555,7 +590,7 @@ LM_API HRESULT LM_CALL LayerMountHResultToNtStatus(
 /* ---- Host adapter helpers: Windows mount points -----------------------
  *
  * Directory-mount-point validation and ownership-tracked cleanup.
- * Host-kernel-agnostic: any Windows host adapter calls these to reserve
+ * Filesystem-host-agnostic: any Windows host adapter calls these to reserve
  * and release a mount-point directory without re-implementing the
  * directory-identity check.
  *
@@ -571,9 +606,9 @@ LM_API HRESULT LM_CALL LayerMountHResultToNtStatus(
  *        mount-point contract is that the host adapter creates the leaf
  *        itself when it mounts (so adapters that fail on a pre-existing
  *        directory aren't pre-empted). An eager create here would be
- *        actively harmful, and claiming ownership before the host mount
- *        call would be a contract lie: nothing is reserved yet.
- *   2. (host-specific mount call here -- creates + mounts on the leaf)
+ *        actively harmful, and claiming ownership before the host adapter's
+ *        mount call would be a contract lie: nothing is reserved yet.
+ *   2. (host-adapter-specific mount call here -- creates + mounts on the leaf)
  *   3. LayerMountPointCaptureIdentity(mp, &prep)
  *        Captures the volume-serial + file-id of the now-mounted
  *        directory. Side-effect-free on prep.directoryCreatedByUs by
@@ -584,13 +619,13 @@ LM_API HRESULT LM_CALL LayerMountHResultToNtStatus(
  *        the leaf was fresh (the mount would have failed otherwise), so
  *        ownership is legitimate at this commit point and no TOCTOU
  *        window remains.
- *   5. (host-specific unmount call here)
+ *   5. (host-adapter-specific unmount call here)
  *   6. LayerMountPointReleaseIfSafe(mp, &prep)
  *        Best-effort: removes the directory iff we claimed ownership,
  *        the identity still matches, and it's empty. Never fails.
  *
  * LM_MOUNT_POINT_PREP is fixed-shape -- revisions via LM_ABI_VERSION
- * bumps. Hosts must zero-initialize before passing to PrepareDirectory.
+ * bumps. Host adapters must zero-initialize before passing to PrepareDirectory.
  * ------------------------------------------------------------------------- */
 typedef struct LM_MOUNT_POINT_PREP {
     BOOL   directoryCreatedByUs;  /* TRUE iff PrepareDirectory created the path */
@@ -640,12 +675,22 @@ LM_API HRESULT LM_CALL LayerMountPointReleaseIfSafe(
 
 /* ---- Path / volume ---- */
 
+/* Resolves `relativePath` through the overlay and fills
+ * `outResolved` with the winning layer, the lower index (-1 unless the
+ * source is a lower), whiteout state, and Win32 attributes. Uses the
+ * two-call buffer pattern for `absolutePath`. */
 LM_API HRESULT LM_CALL LayerMountResolvePath(
     LM_HANDLE handle, PCWSTR relativePath, LM_RESOLVED_PATH* outResolved);
 
+/* Fills `outInfo` with the overlay's total and free space and a fixed
+ * volume label. Returns the translated NTSTATUS as an HRESULT if the
+ * underlying volume query fails. */
 LM_API HRESULT LM_CALL LayerMountGetVolumeInfo(
     LM_HANDLE handle, LM_VOLUME_INFO* outInfo);
 
+/* Ensures the file or directory at `relativePath` exists in the upper
+ * layer, triggering a copy-up if it currently resolves only to a lower
+ * layer. No-op if the path is already in the upper layer. */
 LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
     LM_HANDLE handle, PCWSTR relativePath);
 
@@ -661,6 +706,13 @@ LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
  * will fall back to GetCurrentProcessId().
  */
 
+/*
+ * Opens the file or directory at `relativePath` for `grantedAccess`
+ * under `createOptions`, returning a new LM_FILE_HANDLE in *outFile and
+ * its metadata in *outInfo. `originatorPid` identifies the requesting
+ * process for process-tracker rules; pass 0 to use the current process.
+ * The returned handle pins its parent overlay until closed.
+ */
 LM_API HRESULT LM_CALL LayerMountOpenFile(
     LM_HANDLE       handle,
     PCWSTR           relativePath,
@@ -670,6 +722,17 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(
     LM_FILE_HANDLE* outFile,
     LM_FILE_INFO*   outInfo);
 
+/*
+ * Creates a new file or directory at `relativePath` with `fileAttributes`
+ * and, when non-NULL, a self-relative `securityDescriptor` bounded by
+ * `securityDescriptorBytes`. Returns a new LM_FILE_HANDLE in *outFile and
+ * its metadata in *outInfo. `originatorPid` identifies the requesting
+ * process for process-tracker rules; pass 0 to use the current process.
+ *
+ * Returns E_INVALIDARG if `securityDescriptor` is non-NULL but is not a
+ * structurally valid self-relative descriptor fitting within
+ * `securityDescriptorBytes`.
+ */
 LM_API HRESULT LM_CALL LayerMountCreateFile(
     LM_HANDLE       handle,
     PCWSTR           relativePath,
@@ -683,8 +746,15 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(
     LM_FILE_HANDLE* outFile,
     LM_FILE_INFO*   outInfo);
 
+/* Closes `file`, releasing its handle-table slot and decrementing the
+ * parent overlay's open-file count. */
 LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file);
 
+/* Reads up to `length` bytes at `offset` from `file` into `buffer`,
+ * completing a pending metacopy first if the file is still a metacopy
+ * shell. `originatorPid` identifies the requesting process for
+ * process-tracker rules; pass 0 to use the current process.
+ * *bytesTransferred is always written, including on failure. */
 LM_API HRESULT LM_CALL LayerMountReadFile(
     LM_FILE_HANDLE file,
     void*           buffer,
@@ -693,6 +763,15 @@ LM_API HRESULT LM_CALL LayerMountReadFile(
     DWORD           originatorPid,         /* 0 = use current process */
     UINT32*         bytesTransferred);
 
+/*
+ * Writes `length` bytes from `buffer` to `file` at `offset` (or at the
+ * current end-of-file when `writeToEnd` is TRUE), copying the file up
+ * into the upper layer first if it is not already there.
+ * `constrainedIo` rejects a write that would extend the file past its
+ * current allocation. `originatorPid` identifies the requesting process
+ * for process-tracker rules; pass 0 to use the current process. Fills
+ * `outInfo` with post-write metadata when non-NULL.
+ */
 LM_API HRESULT LM_CALL LayerMountWriteFile(
     LM_FILE_HANDLE file,
     const void*     buffer,
@@ -727,9 +806,16 @@ LM_API HRESULT LM_CALL LayerMountFlushFile(
     DWORD           originatorPid,         /* 0 = use current process */
     LM_FILE_INFO*  outInfo);
 
+/* Fills `outInfo` with the current metadata of the open `file`,
+ * completing any pending metacopy first so the reported size and
+ * attributes reflect the materialized file. */
 LM_API HRESULT LM_CALL LayerMountGetFileInfo(
     LM_FILE_HANDLE file, LM_FILE_INFO* outInfo);
 
+/* Updates attributes, timestamps, allocation size, and end-of-file for
+ * the open `file`; each parameter's leave-unchanged sentinel is
+ * documented at its declaration below. Fills `outInfo` with the
+ * resulting metadata when non-NULL. */
 LM_API HRESULT LM_CALL LayerMountSetFileInfo(
     LM_FILE_HANDLE file,
     UINT32          fileAttributes,      /* INVALID_FILE_ATTRIBUTES to leave unchanged */
@@ -741,24 +827,38 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(
     UINT64          fileSize,
     LM_FILE_INFO*  outInfo);
 
+/* Deletes the file or directory at `relativePath`, dropping a whiteout
+ * marker in the upper layer when the path also exists in a lower layer. */
 LM_API HRESULT LM_CALL LayerMountDeleteFile(
     LM_HANDLE handle, PCWSTR relativePath);
 
+/* Reports via the returned HRESULT whether `relativePath` may be
+ * deleted, without deleting it. S_OK means the delete would succeed. */
 LM_API HRESULT LM_CALL LayerMountCanDeleteFile(
     LM_HANDLE handle, PCWSTR relativePath);
 
+/* Reports via the returned HRESULT whether the open `file` may be
+ * deleted, without deleting it. S_OK means the delete would succeed. */
 LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(
     LM_FILE_HANDLE file);
 
+/* Deletes the open `file`, dropping a whiteout marker in the upper layer
+ * when the path also exists in a lower layer. */
 LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(
     LM_FILE_HANDLE file);
 
+/* Renames `oldRelativePath` to `newRelativePath`, copying the entry into
+ * the upper layer first if it currently resolves only to a lower layer.
+ * `replaceIfExists` controls whether an existing entry at the
+ * destination is replaced or the call fails. */
 LM_API HRESULT LM_CALL LayerMountRenameFile(
     LM_HANDLE handle,
     PCWSTR     oldRelativePath,
     PCWSTR     newRelativePath,
     BOOL       replaceIfExists);
 
+/* Renames the open `file` to `newRelativePath`, with the same copy-up
+ * and replace semantics as LayerMountRenameFile. */
 LM_API HRESULT LM_CALL LayerMountRenameOpenFile(
     LM_FILE_HANDLE file,
     PCWSTR          newRelativePath,
@@ -804,6 +904,21 @@ LM_API HRESULT LM_CALL LayerMountGetSecurity(
     SIZE_T     securityDescriptorBytes,
     SIZE_T*    requiredBytes);
 
+/*
+ * Applies the sections named by `securityInformation` from the
+ * self-relative `modificationDescriptor` to `relativePath`.
+ *
+ * Returns:
+ *   S_OK          -- applied
+ *   E_HANDLE      -- handle is NULL, stale, or wrong-kind
+ *   E_INVALIDARG  -- relativePath or modificationDescriptor is NULL, or
+ *                    the descriptor is not a structurally valid
+ *                    self-relative SECURITY_DESCRIPTOR fitting within
+ *                    modificationDescriptorBytes
+ *   other         -- an NTSTATUS from applying the security descriptor,
+ *                    translated to HRESULT (e.g. access denied, path
+ *                    not found)
+ */
 LM_API HRESULT LM_CALL LayerMountSetSecurity(
     LM_HANDLE  handle,
     PCWSTR      relativePath,
@@ -811,15 +926,28 @@ LM_API HRESULT LM_CALL LayerMountSetSecurity(
     const BYTE* modificationDescriptor,
     SIZE_T      modificationDescriptorBytes);
 
+/* Enumerates the merged directory listing at `dirRelativePath`, invoking
+ * `callback` once per visible entry with its name and LM_FILE_INFO.
+ * Whiteout markers and the entries they hide are never reported. Stops
+ * and returns the callback's HRESULT the first time it returns anything
+ * other than S_OK. */
 LM_API HRESULT LM_CALL LayerMountMergeDirectory(
     LM_HANDLE             handle,
     PCWSTR                 dirRelativePath,
     LM_DIR_ENUM_CALLBACK  callback,
     void*                  userContext);
 
+/* Creates a whiteout marker for `relativePath` in the upper layer,
+ * hiding the corresponding lower-layer entry. `isDirectory` selects the
+ * directory- or file-shaped marker. Rejects a path outside the overlay
+ * root or inside the reserved metadata subtree with E_INVALIDARG. */
 LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
     LM_HANDLE handle, PCWSTR relativePath, BOOL isDirectory);
 
+/* Marks the directory at `dirRelativePath` opaque, hiding every
+ * lower-layer entry beneath it regardless of name. Rejects a path
+ * outside the overlay root or inside the reserved metadata subtree with
+ * E_INVALIDARG. */
 LM_API HRESULT LM_CALL LayerMountSetOpaque(
     LM_HANDLE handle, PCWSTR dirRelativePath);
 
@@ -852,12 +980,20 @@ LM_API HRESULT LM_CALL LayerMountGetReparsePoint(
     SIZE_T     bufferBytes,
     SIZE_T*    requiredBytes);
 
+/* Sets the reparse-point data at `relativePath` to the `bufferBytes`
+ * bytes in `buffer`, copying the entry into the upper layer first if it
+ * currently resolves only to a lower layer. Rejects a buffer larger
+ * than MAXIMUM_REPARSE_DATA_BUFFER_SIZE (a translated
+ * STATUS_INVALID_PARAMETER). */
 LM_API HRESULT LM_CALL LayerMountSetReparsePoint(
     LM_HANDLE  handle,
     PCWSTR      relativePath,
     const BYTE* buffer,
     SIZE_T      bufferBytes);
 
+/* Removes the reparse point at `relativePath`. `buffer` and
+ * `bufferBytes` carry the caller's current reparse tag data; the delete
+ * fails if it does not match the on-disk reparse point's tag. */
 LM_API HRESULT LM_CALL LayerMountDeleteReparsePoint(
     LM_HANDLE  handle,
     PCWSTR      relativePath,
@@ -891,37 +1027,64 @@ LM_API HRESULT LM_CALL LayerMountEnumerateStreams(
 
 /* ---- VHD primitives ---- */
 
+/* Creates a new VHD or VHDX file per `config->kind` (fixed, dynamic, or
+ * differencing) and returns a handle to it in *outVhd. The file is
+ * created but not attached; call LayerMountVhdAttach to mount it as a
+ * volume. `config->sizeBytes` is required for a fixed or dynamic disk;
+ * `config->parentPath` is required for a differencing disk. */
 LM_API HRESULT LM_CALL LayerMountVhdCreate(
     LM_HANDLE            mount,
     const LM_VHD_CONFIG* config,
     LM_VHD_HANDLE*       outVhd);
 
+/* Opens the existing VHD or VHDX file at `config->path` and returns a
+ * handle to it in *outVhd, without attaching it. Fails with a
+ * Win32-translated HRESULT if the path does not exist, and with
+ * HRESULT_FROM_WIN32(ERROR_FILE_INVALID) if it names a directory. */
 LM_API HRESULT LM_CALL LayerMountVhdOpen(
     LM_HANDLE            mount,
     const LM_VHD_CONFIG* config,
     LM_VHD_HANDLE*       outVhd);
 
+/* Attaches `vhd` as a Windows volume and reports its physical device
+ * path using the two-call buffer pattern. A second call on an
+ * already-attached handle re-emits the cached path without attaching
+ * again, so a sizing probe followed by a fill call is safe. */
 LM_API HRESULT LM_CALL LayerMountVhdAttach(
     LM_VHD_HANDLE vhd,
     PWSTR          physicalPathBuffer,
     SIZE_T         physicalPathChars,
     SIZE_T*        physicalPathRequired);
 
+/* Detaches `vhd` from its Windows volume and clears the cached physical
+ * path, so a later LayerMountVhdAttach call attaches fresh. */
 LM_API HRESULT LM_CALL LayerMountVhdDetach(LM_VHD_HANDLE vhd);
 
+/* Merges the differencing disk `childVhd` into its parent. Fails at the
+ * Win32 layer if the VHD is currently attached. */
 LM_API HRESULT LM_CALL LayerMountVhdMerge(LM_VHD_HANDLE childVhd);
 
+/* Creates a VHD at `vhdPath` and copies the contents of `directoryPath`
+ * into it. `sizeBytes` is the requested VHD capacity; 0 auto-sizes to
+ * fit the source directory. */
 LM_API HRESULT LM_CALL LayerMountVhdImport(
     LM_HANDLE mount,
     PCWSTR     directoryPath,
     PCWSTR     vhdPath,
     UINT64     sizeBytes);
 
+/* Attaches `vhdPath` read-only and copies its user-visible contents into
+ * `directoryPath`, creating the directory if missing. Skips the NTFS
+ * system entries at the volume root and tolerates a permission error on
+ * an individual file so a restrictive ACL does not abort the export. */
 LM_API HRESULT LM_CALL LayerMountVhdExport(
     LM_HANDLE mount,
     PCWSTR     vhdPath,
     PCWSTR     directoryPath);
 
+/* Releases the `vhd` handle-table slot. For a process-scoped attach this
+ * also detaches it; a permanent attach outlives the handle and needs an
+ * explicit LayerMountVhdDetach to go offline. */
 LM_API HRESULT LM_CALL LayerMountVhdClose(LM_VHD_HANDLE vhd);
 
 /*
@@ -1014,9 +1177,15 @@ LM_API HRESULT LM_CALL LayerMountVssCreateSnapshot(
     SIZE_T                   devicePathBufferChars,
     SIZE_T*                  devicePathRequired);
 
+/* Deletes the VSS shadow copy at `snapshotId`, tracked by this overlay
+ * or not, persistent or not. Accepts either a snapshot id this overlay
+ * returned or a raw VSS shadow-copy GUID string. */
 LM_API HRESULT LM_CALL LayerMountVssDeleteSnapshot(
     LM_HANDLE mount, PCWSTR snapshotId);
 
+/* Lists every VSS shadow copy visible under VSS_CTX_ALL (the whole
+ * machine, not just snapshots this overlay created), using the two-call
+ * buffer pattern on `entries`. */
 LM_API HRESULT LM_CALL LayerMountVssListSnapshots(
     LM_HANDLE             mount,
     LM_VSS_SNAPSHOT_INFO* entries,
@@ -1024,6 +1193,9 @@ LM_API HRESULT LM_CALL LayerMountVssListSnapshots(
     UINT32*                entriesWritten,
     UINT32*                entriesRequired);
 
+/* Deletes every non-persistent VSS shadow copy this overlay created.
+ * Persistent snapshots are left for the caller or the backup admin to
+ * delete explicitly. */
 LM_API HRESULT LM_CALL LayerMountVssCleanupSnapshots(LM_HANDLE mount);
 
 /*
@@ -1061,6 +1233,10 @@ LM_API HRESULT LM_CALL LayerMountVssCloseSnapshot(LM_VSS_SNAPSHOT_HANDLE snapsho
 
 /* ---- Layer image primitives ---- */
 
+/* Packs `sourceDir` into a `.lmnt` layer image at `outputPath` with the
+ * given zstd `compressionLevel`, stamping `options`' author and
+ * description when non-NULL. Returns a receipt handle in *outImage when
+ * non-NULL; the handle carries no long-lived state beyond the path. */
 LM_API HRESULT LM_CALL LayerMountImagePack(
     LM_HANDLE                    mount,
     PCWSTR                        sourceDir,
@@ -1095,44 +1271,80 @@ LM_API HRESULT LM_CALL LayerMountImageCreateManifest(
     const PCWSTR* imagePaths,
     UINT32        imageCount);
 
+/* Extracts the layer image at `imagePath` into `targetDir`.
+ * `verifyChecksum` rejects the image if the data section's SHA-256 does
+ * not match the header. */
 LM_API HRESULT LM_CALL LayerMountImageUnpack(
     LM_HANDLE mount,
     PCWSTR     imagePath,
     PCWSTR     targetDir,
     BOOL       verifyChecksum);
 
+/* Validates the layer image at `imagePath`: reads the header and
+ * metadata, then streams the data section to verify its SHA-256 against
+ * the header's checksum. Does not extract anything. */
 LM_API HRESULT LM_CALL LayerMountImageValidate(
     LM_HANDLE mount, PCWSTR imagePath);
 
+/* Loads the multi-image manifest JSON at `manifestPath` and lists its
+ * entries in `manifest` using the two-call pattern on `entries`. */
 LM_API HRESULT LM_CALL LayerMountImageGetManifest(
     LM_HANDLE          mount,
-    PCWSTR              imagePath,
+    PCWSTR              manifestPath,
     LM_IMAGE_MANIFEST* manifest);
 
+/* Reads the header and metadata of the layer image at `imagePath` into
+ * `metadata`. Scalar fields are always written; string fields use the
+ * two-call pattern per field. Tags and whiteouts are not projected here. */
 LM_API HRESULT LM_CALL LayerMountImageGetMetadata(
     LM_HANDLE          mount,
     PCWSTR              imagePath,
     LM_IMAGE_METADATA* metadata);
 
+/* Releases the `image` handle-table slot. The underlying `.lmnt` file on
+ * disk is unaffected. */
 LM_API HRESULT LM_CALL LayerMountImageClose(LM_IMAGE_HANDLE image);
 
 /* ---- Diagnostics, eventing, process tracker ---- */
 
+/* Snapshots the overlay's internal counters (cache hits/misses, copy-up
+ * count, read/write counts and byte totals, active handles, and
+ * metadata cleanup failures) into `outStats`. */
 LM_API HRESULT LM_CALL LayerMountGetStats(
     LM_HANDLE handle, LM_STATS* outStats);
 
+/* Turns process tracking on or off for the overlay. Enabling fails if a
+ * configured rules file cannot be loaded, since an empty rule set would
+ * silently allow every operation. */
 LM_API HRESULT LM_CALL LayerMountProcessTrackerEnable(
     LM_HANDLE handle, BOOL enable);
 
+/*
+ * (Re-)loads the process-tracker rules JSON at `rulesPath`.
+ *
+ * Returns:
+ *   S_OK                   -- loaded
+ *   E_HANDLE               -- handle is NULL, stale, or wrong-kind
+ *   E_INVALIDARG           -- rulesPath is NULL or empty
+ *   E_ILLEGAL_METHOD_CALL  -- the tracker is not enabled
+ *                             (LayerMountProcessTrackerEnable)
+ *   E_FAIL                 -- the file could not be parsed or read
+ */
 LM_API HRESULT LM_CALL LayerMountProcessTrackerSetRules(
     LM_HANDLE handle, PCWSTR rulesPath);
 
+/* Exports the process-tracker access log as a JSON string using the
+ * two-call buffer pattern. Fails with E_ILLEGAL_METHOD_CALL if the
+ * tracker is not enabled. */
 LM_API HRESULT LM_CALL LayerMountProcessTrackerExportJson(
     LM_HANDLE handle,
     PWSTR      buffer,
     SIZE_T     bufferChars,
     SIZE_T*    requiredChars);
 
+/* Exports the process-tracker access log as CSV using the two-call
+ * buffer pattern. Fails with E_ILLEGAL_METHOD_CALL if the tracker is not
+ * enabled. */
 LM_API HRESULT LM_CALL LayerMountProcessTrackerExportCsv(
     LM_HANDLE handle,
     PWSTR      buffer,

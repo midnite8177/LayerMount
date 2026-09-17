@@ -8,7 +8,7 @@
 
 **LayerMount** is a Windows engine for **Linux-style overlay filesystems** (union mounts) — a writable upper layer, prioritized read-only lowers, copy-up on first write, with optional VHD/VHDX and VSS snapshot sources and `.lmnt` layer-image packing.
 
-**What it isn't:** LayerMount is **not a filesystem driver.** It enforces overlay *semantics* — copy-up, whiteouts, layer priority, image packing — over real paths in a writable upper directory. Presenting the resulting overlay as a mountable filesystem (at a drive letter or directory) is the job of a separate **host adapter** that targets a userspace-filesystem driver. Host adapters live in their own repositories and depend on this engine via NuGet.
+**What it isn't:** LayerMount is **not a filesystem driver.** It enforces overlay *semantics* — copy-up, whiteouts, layer priority, image packing — over real paths in a writable upper directory. Presenting the resulting overlay as a mountable filesystem (at a drive letter or directory) is the job of a separate **host adapter** that targets a filesystem host. Host adapters live in their own repositories and depend on this engine via NuGet.
 
 This repo ships the **engine**: the native library (`LayerMount.dll`) and its managed wrapper (`LayerMount.NET`). The engine is host-agnostic and links only system + CRT libraries (a post-build check enforces this).
 
@@ -47,9 +47,9 @@ An overlay is composed of three path roles, borrowed from Linux `overlayfs`:
 
 - **Upper** — the writable layer. All new writes land here. Required.
 - **Lower** — read-only layers, prioritized left-to-right (first lower wins for reads). Zero or more.
-- **Work dir** — scratch space used for atomic copy-up. Defaults to `<upperParent>\.layermount-work` if not supplied.
+- **Work directory** — space used for atomic copy-up. Defaults to `<upperParent>\.layermount-work` if not supplied.
 
-When a file exists only in a lower layer, reads pass through. The first write promotes (copies up) the file into the upper layer and subsequent access reads/writes the upper copy. Lower layers are never modified.
+When a file exists only in a lower layer, reads pass through. The first write copies up the file into the upper layer and subsequent access reads/writes the upper copy. Lower layers are never modified.
 
 Two additional layer sources can stand in for a directory path:
 
@@ -63,16 +63,16 @@ For the deeper engine architecture (path resolution, whiteouts, copy-up flavors,
 ## Features
 
 - **Overlay semantics** — upper / lower / work paths with copy-up on first write, file and directory whiteouts, opaque-directory markers.
-- **Lazy copy-up** — metacopy promotes metadata immediately and completes data copy on first read or close, keeping mount-time fast.
-- **VHD / VHDX layers** — attach a virtual disk at mount time and use its volume GUID as a high-priority lower.
-- **VSS snapshot layers** — take a Volume Shadow Copy at mount time and use it as a read-only lower without holding open file handles.
-- **`.lmnt` layer images** — pack a directory tree into a portable zstd-compressed image with SHA-256 footer; supports differential packs against a base image and multi-image manifests.
+- **Metacopy** — copies up metadata immediately and completes data copy on first read or close, keeping mount-time fast.
+- **VHD / VHDX layers** — attach a virtual disk at mount time and use its volume GUID as a high-priority lower. See [docs/engine/LAYER-SOURCES.md](docs/engine/LAYER-SOURCES.md) for how to create, attach, list, and clean these up.
+- **VSS snapshot layers** — take a Volume Shadow Copy at mount time and use it as a read-only lower without holding open file handles. See [docs/engine/LAYER-SOURCES.md](docs/engine/LAYER-SOURCES.md) for how to create, list, and clean these up.
+- **`.lmnt` layer images** — pack a directory tree into a portable zstd-compressed image with a SHA-256 checksum in the header; supports differential packs against a base directory and multi-image manifests. See [docs/engine/LAYER-IMAGE-FORMAT.md](docs/engine/LAYER-IMAGE-FORMAT.md) for the byte-level format.
 - **Capability-gated fallbacks** — opt out of ADS, reparse points, sparse files, multiple streams, or NTFS ACLs and the engine routes around the missing feature instead of erroring.
 - **Reparse-point and ADS preservation** — both surface on copy-up.
 - **ACL preservation** — DACL on every copy-up; SACL too when the process holds `SE_SECURITY_NAME`.
 - **Per-process access tracking** — optional access log and JSON-rule-driven gating, keyed by `(pid, image path, creation time)`.
 - **Diagnostic events** — single managed event stream for warnings, copy-ups, whiteouts, and access denials.
-- **Host-agnostic** — links only system + CRT libraries (a post-build check enforces this); zero dependency on any userspace-filesystem driver.
+- **Host-agnostic** — links only system + CRT libraries (a post-build check enforces this); zero dependency on any filesystem host.
 - **AOT-compatible managed wrapper** — `[LibraryImport]`-based P/Invoke with trim analysis enabled; ships as AnyCPU with per-RID native via `LayerMount.Native`.
 
 ## Quick start
@@ -91,21 +91,21 @@ var config = new LayerMountConfig
 using var mount = LayerMount.Create(config);
 
 // Diagnostic events: warnings, copy-up, whiteouts, denials.
-mount.Event += (_, e) => Console.WriteLine($"[{e.Kind}] {e.Path}");
+mount.Event += (_, e) => Console.WriteLine($"[{e.Type}] {e.RelativePath}");
 
 // Path resolution: tells you which layer a relative path resolves to,
-// and surfaces whiteouts / opaque-dir markers.
+// and surfaces whiteouts.
 var resolved = mount.ResolvePath(@"bin\app.exe");
-Console.WriteLine($"{resolved.FullPath}  (origin: {resolved.Origin})");
+Console.WriteLine($"{resolved.AbsolutePath}  (source: {resolved.Source})");
 
 // Pack the upper layer into a portable, zstd-compressed image.
 mount.Images.Pack(
-    sourceDir:    config.UpperPath,
-    outputPath:   @"C:\images\my-app-0.1.lmnt",
-    description:  "first build");
+    sourceDir:  config.UpperPath,
+    outputPath: @"C:\images\my-app-0.1.lmnt",
+    stampOptions: new ImageStampOptions(Description: "first build"));
 ```
 
-For mount-driven I/O (`OpenFile` / `CreateFile` / `Read` / `Write`), the engine takes Win32-style access masks and create options because it's designed to be wired straight to a userspace-filesystem driver's I/O requests. The managed unit tests under `src/LayerMount.NET.Tests/` are the most practical reference for the I/O patterns.
+For mount-driven I/O (`OpenFile` / `CreateFile` / `Read` / `Write`), the engine takes Win32-style access masks and create options because it's designed to be wired straight to a filesystem host's I/O requests. The managed unit tests under `src/LayerMount.NET.Tests/` are the most practical reference for the I/O patterns. See [docs/engine/HOST-ADAPTER-GUIDE.md](docs/engine/HOST-ADAPTER-GUIDE.md) for the full ABI contract a host adapter needs: handle lifecycle, capability fallbacks, event threading, the two-call buffer pattern, and the HRESULT-to-NTSTATUS bridge.
 
 ## API surface
 

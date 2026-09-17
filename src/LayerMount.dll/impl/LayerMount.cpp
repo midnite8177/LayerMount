@@ -1376,6 +1376,16 @@ NTSTATUS LayerMount::EnsureHandleReady(FileContext* ctx) {
     return ReopenContextHandle(ctx);
 }
 
+NTSTATUS LayerMount::EnsureMetacopyMaterialized(FileContext* ctx) {
+    if (!ctx->isMetacopyOnly) {
+        return STATUS_SUCCESS;
+    }
+    NTSTATUS status = copyUp_->CompleteLazyCopyUp(ctx->relativePath);
+    if (!NT_SUCCESS(status)) return status;
+    ctx->isMetacopyOnly = false;
+    return ReopenContextHandle(ctx);
+}
+
 NTSTATUS LayerMount::Read(FileContext* ctx,
                          void* buffer,
                          UINT64 offset,
@@ -1396,16 +1406,8 @@ NTSTATUS LayerMount::Read(FileContext* ctx,
         }
     }
 
-    // Complete lazy copy-up before reading: a metacopy shell is a sparse
-    // file with no real data blocks, so reading from it returns zeros
-    // instead of the lower-layer content the caller expects.
-    if (ctx->isMetacopyOnly) {
-        NTSTATUS status = copyUp_->CompleteLazyCopyUp(ctx->relativePath);
-        if (!NT_SUCCESS(status)) return status;
-        ctx->isMetacopyOnly = false;
-        NTSTATUS reopenStatus = ReopenContextHandle(ctx);
-        if (!NT_SUCCESS(reopenStatus)) return reopenStatus;
-    }
+    NTSTATUS metacopyStatus = EnsureMetacopyMaterialized(ctx);
+    if (!NT_SUCCESS(metacopyStatus)) return metacopyStatus;
 
     LARGE_INTEGER io;
     io.QuadPart = static_cast<LONGLONG>(offset);
@@ -1453,16 +1455,8 @@ NTSTATUS LayerMount::Write(FileContext* ctx,
     NTSTATUS status = EnsureInUpperLayer(ctx->relativePath, ctx);
     if (!NT_SUCCESS(status)) return status;
 
-    // If the upper copy is still a metacopy shell (sparse skeleton with no
-    // data blocks), finish the copy before we write -- otherwise we'd be
-    // writing user content into holes that CompleteLazyCopyUp clobbers.
-    if (ctx->isMetacopyOnly) {
-        NTSTATUS lazyStatus = copyUp_->CompleteLazyCopyUp(ctx->relativePath);
-        if (!NT_SUCCESS(lazyStatus)) return lazyStatus;
-        ctx->isMetacopyOnly = false;
-        NTSTATUS reopenStatus = ReopenContextHandle(ctx);
-        if (!NT_SUCCESS(reopenStatus)) return reopenStatus;
-    }
+    NTSTATUS metacopyStatus = EnsureMetacopyMaterialized(ctx);
+    if (!NT_SUCCESS(metacopyStatus)) return metacopyStatus;
 
     LARGE_INTEGER fileSize{};
     if (!::GetFileSizeEx(ctx->handle, &fileSize)) {

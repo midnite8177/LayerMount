@@ -1,17 +1,16 @@
-// VssSnapshot -- managed receipt returned from
-// <see cref="LayerMount.Vss.CreateSnapshot"/>.
-//
-// The native ABI has no LayerMountVssClose export -- the handle is a
-// reference, not a resource owner. OS-side lifetime is driven by
-// <see cref="LayerMount.Vss.DeleteSnapshot"/> (non-persistent) or by the
-// backup administrator (persistent). Disposing this object is a no-op
-// with respect to the OS snapshot; it only releases the slot in the
-// native handle table.
-
 using System;
 
 namespace LayerMount;
 
+/// <summary>
+/// Managed receipt for a VSS snapshot, returned from
+/// <see cref="VssApi.CreateSnapshot"/>. The handle is a reference, not
+/// an owner of a resource. Closing it releases only the slot in the
+/// native handle table; it does not change the OS-side snapshot. The
+/// lifetime of the OS-side snapshot depends on
+/// <see cref="VssApi.DeleteSnapshot"/> (non-persistent) or on the
+/// backup administrator (persistent).
+/// </summary>
 public sealed class VssSnapshot : IDisposable
 {
     private readonly VssSnapshotHandle _handle;
@@ -48,5 +47,9 @@ public sealed class VssSnapshot : IDisposable
     /// </summary>
     public bool Persistent { get; }
 
+    /// <summary>
+    /// Releases the slot in the native handle table. Has no effect on
+    /// the OS-side snapshot.
+    /// </summary>
     public void Dispose() => _handle.Dispose();
 }

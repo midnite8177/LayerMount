@@ -13,8 +13,24 @@ namespace LayerMount;
 
 public sealed partial class LayerMount
 {
-    /// <summary>Opens an existing file or directory. Returns null if the
-    /// path resolves to a whiteout.</summary>
+    /// <summary>
+    /// Opens the existing file or directory at
+    /// <paramref name="relativePath"/> for <paramref name="grantedAccess"/>
+    /// under <paramref name="createOptions"/>. The returned handle pins
+    /// the parent overlay until closed.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <param name="grantedAccess">Win32 access mask requested for the handle.</param>
+    /// <param name="createOptions">Win32 create-options flags (e.g. <c>FILE_DIRECTORY_FILE</c>).</param>
+    /// <param name="originatorPid">
+    /// Requesting process ID for process-tracker rules; 0 uses the current process.
+    /// </param>
+    /// <returns>A handle-bound <see cref="LayerMountFile"/> with its initial metadata.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT
+    /// (most commonly file-not-found).
+    /// </exception>
     public unsafe LayerMountFile OpenFile(
         string relativePath,
         uint grantedAccess,
@@ -36,7 +52,31 @@ public sealed partial class LayerMount
         return new LayerMountFile(safe, FileInfoSnapshot.From(info));
     }
 
-    /// <summary>Creates a new file or directory.</summary>
+    /// <summary>
+    /// Creates a new file or directory at <paramref name="relativePath"/>
+    /// with the given attributes and, optionally, a self-relative
+    /// security descriptor.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <param name="createOptions">Win32 create-options flags.</param>
+    /// <param name="grantedAccess">Win32 access mask requested for the handle.</param>
+    /// <param name="fileAttributes">Win32 file attributes to apply to the new entry.</param>
+    /// <param name="allocationSize">Initial allocation size in bytes.</param>
+    /// <param name="securityDescriptor">
+    /// Self-relative security descriptor to apply, or empty to use the
+    /// engine's default. The caller owns the buffer; it is read only
+    /// for the duration of the call.
+    /// </param>
+    /// <param name="originatorPid">
+    /// Requesting process ID for process-tracker rules; 0 uses the current process.
+    /// </param>
+    /// <returns>A handle-bound <see cref="LayerMountFile"/> with its initial metadata.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT,
+    /// including when <paramref name="securityDescriptor"/> is
+    /// non-empty but not a structurally valid self-relative descriptor.
+    /// </exception>
     public unsafe LayerMountFile CreateFile(
         string relativePath,
         uint createOptions,
@@ -65,6 +105,17 @@ public sealed partial class LayerMount
         return new LayerMountFile(safe, FileInfoSnapshot.From(info));
     }
 
+    /// <summary>
+    /// Deletes the file or directory at <paramref name="relativePath"/>,
+    /// dropping a whiteout marker in the upper layer when the path also
+    /// exists in a lower layer.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT
+    /// (most commonly file-not-found).
+    /// </exception>
     public void DeleteFile(string relativePath)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
@@ -73,6 +124,16 @@ public sealed partial class LayerMount
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountDeleteFile));
     }
 
+    /// <summary>
+    /// Checks whether <paramref name="relativePath"/> may be deleted,
+    /// without deleting it.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If the delete would not succeed, or the underlying native call
+    /// otherwise returns a non-success HRESULT.
+    /// </exception>
     public void CheckCanDeleteFile(string relativePath)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
@@ -81,6 +142,24 @@ public sealed partial class LayerMount
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountCanDeleteFile));
     }
 
+    /// <summary>
+    /// Renames <paramref name="oldRelativePath"/> to
+    /// <paramref name="newRelativePath"/>, triggering a copy-up first if
+    /// the entry currently resolves only to a lower layer.
+    /// </summary>
+    /// <param name="oldRelativePath">Current path relative to the overlay root.</param>
+    /// <param name="newRelativePath">Destination path relative to the overlay root.</param>
+    /// <param name="replaceIfExists">
+    /// Whether an existing entry at <paramref name="newRelativePath"/>
+    /// is replaced; if false, the call fails when the destination
+    /// exists.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="oldRelativePath"/> or <paramref name="newRelativePath"/> is null.
+    /// </exception>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
     public void RenameFile(string oldRelativePath, string newRelativePath, bool replaceIfExists = false)
     {
         ArgumentNullException.ThrowIfNull(oldRelativePath);
@@ -92,6 +171,18 @@ public sealed partial class LayerMount
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountRenameFile));
     }
 
+    /// <summary>
+    /// Creates a whiteout marker for <paramref name="relativePath"/> in
+    /// the upper layer, hiding the corresponding lower-layer entry.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <param name="isDirectory">Whether to create a directory- or file-shaped marker.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If <paramref name="relativePath"/> is outside the overlay root or
+    /// inside the reserved metadata subtree, or the underlying native
+    /// call otherwise returns a non-success HRESULT.
+    /// </exception>
     public void CreateWhiteout(string relativePath, bool isDirectory = false)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
@@ -101,6 +192,17 @@ public sealed partial class LayerMount
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountCreateWhiteout));
     }
 
+    /// <summary>
+    /// Marks the directory at <paramref name="dirRelativePath"/> opaque,
+    /// hiding every lower-layer entry beneath it regardless of name.
+    /// </summary>
+    /// <param name="dirRelativePath">Directory path relative to the overlay root.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="dirRelativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If <paramref name="dirRelativePath"/> is outside the overlay root
+    /// or inside the reserved metadata subtree, or the underlying
+    /// native call otherwise returns a non-success HRESULT.
+    /// </exception>
     public void SetOpaque(string dirRelativePath)
     {
         ArgumentNullException.ThrowIfNull(dirRelativePath);
@@ -203,6 +305,27 @@ public sealed partial class LayerMount
         return (attributes, []);
     }
 
+    /// <summary>
+    /// Applies the sections named by <paramref name="securityInformation"/>
+    /// from <paramref name="modificationDescriptor"/> to the file or
+    /// directory at <paramref name="relativePath"/>.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <param name="securityInformation">
+    /// Bitmask of the descriptor sections to apply (owner, group, DACL, SACL).
+    /// </param>
+    /// <param name="modificationDescriptor">
+    /// Self-relative security descriptor holding the sections to apply.
+    /// The caller owns the buffer; it is read only for the duration of
+    /// the call.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If <paramref name="modificationDescriptor"/> is not a
+    /// structurally valid self-relative descriptor, or the underlying
+    /// native call otherwise returns a non-success HRESULT (for example
+    /// access denied or path not found).
+    /// </exception>
     public unsafe void SetSecurity(
         string relativePath,
         uint securityInformation,
@@ -281,6 +404,23 @@ public sealed partial class LayerMount
         }
     }
 
+    /// <summary>
+    /// Sets the reparse-point data at <paramref name="relativePath"/> to
+    /// <paramref name="buffer"/>, triggering a copy-up first if the
+    /// entry currently resolves only to a lower layer.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <param name="buffer">
+    /// The raw reparse descriptor. The caller owns the buffer; it is
+    /// read only for the duration of the call.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If <paramref name="buffer"/> is larger than the documented
+    /// reparse-data ceiling (<c>MAXIMUM_REPARSE_DATA_BUFFER_SIZE</c>,
+    /// 16384 bytes), or the underlying native call otherwise returns a
+    /// non-success HRESULT.
+    /// </exception>
     public unsafe void SetReparsePoint(string relativePath, ReadOnlySpan<byte> buffer)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
@@ -293,6 +433,21 @@ public sealed partial class LayerMount
         }
     }
 
+    /// <summary>
+    /// Removes the reparse point at <paramref name="relativePath"/>.
+    /// </summary>
+    /// <param name="relativePath">Path relative to the overlay root.</param>
+    /// <param name="buffer">
+    /// The caller's current reparse tag data. The delete fails if it
+    /// does not match the on-disk reparse point's tag. The caller owns
+    /// the buffer; it is read only for the duration of the call.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
+    /// <exception cref="LayerMountException">
+    /// If <paramref name="buffer"/> does not match the on-disk reparse
+    /// point's tag, or the underlying native call otherwise returns a
+    /// non-success HRESULT.
+    /// </exception>
     public unsafe void DeleteReparsePoint(string relativePath, ReadOnlySpan<byte> buffer)
     {
         ArgumentNullException.ThrowIfNull(relativePath);

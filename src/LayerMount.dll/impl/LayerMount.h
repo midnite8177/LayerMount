@@ -143,7 +143,7 @@ struct FileContext {
     DWORD ownerPid = 0;             // PID of process that opened this handle
     UINT32 grantedAccess = 0;       // Access mask from Create/Open — used when
                                     // the overlay needs to reopen the handle
-                                    // internally (e.g., after lazy copy-up
+                                    // internally (e.g., after metacopy
                                     // completion) so the caller's original
                                     // access rights survive.
     UINT32 createOptions = 0;       // Original open flags; reopen paths must
@@ -385,7 +385,7 @@ public:
     void Close(FileContext* ctx);
 
     // Read up to `length` bytes from the open file at the given absolute
-    // offset. Completes any deferred lazy copy-up before reading and
+    // offset. Completes any deferred metacopy before reading and
     // reopens the underlying NT handle with the caller's original
     // grantedAccess so subsequent writes still work. Returns
     // STATUS_END_OF_FILE on read past EOF (with *bytesTransferred = 0).
@@ -616,6 +616,13 @@ public:
     HRESULT SetProcessTrackerEnabled(bool enabled);
 
 private:
+    // Complete a pending metacopy before ctx's handle serves data. A
+    // metacopy shell is sparse with no real data blocks: skipping this
+    // before a read returns zeros instead of the lower-layer content, and
+    // skipping it before a write lets a later metacopy completion
+    // overwrite the bytes the write just landed.
+    NTSTATUS EnsureMetacopyMaterialized(FileContext* ctx);
+
     // --- Members (declared in construction order) ---
 
     LayerConfig config_;

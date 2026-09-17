@@ -41,7 +41,7 @@ public sealed class SafeHandleTests
         System.IO.File.WriteAllText(System.IO.Path.Combine(src, "only.txt"), "x");
 
         string imagePath = System.IO.Path.Combine(env.Root, "out.lmnt");
-        var img = mount.Images.Pack(src, imagePath, compressionLevel: 1);
+        var img = mount.Images.Pack(src, imagePath, new ImageStampOptions(CompressionLevel: 1));
         img.Dispose();
         img.Dispose();
     }
@@ -113,7 +113,7 @@ public sealed class SafeHandleTests
             System.IO.Path.Combine(src, "only.txt"), "x");
 
         string imagePath = System.IO.Path.Combine(env.Root, "held.lmnt");
-        var img = mount.Images.Pack(src, imagePath, compressionLevel: 1);
+        var img = mount.Images.Pack(src, imagePath, new ImageStampOptions(CompressionLevel: 1));
         Assert.False(img.IsClosed);
 
         mount.Dispose();

@@ -27,11 +27,32 @@ namespace LayerMount;
 /// </summary>
 public sealed class LayerMountEventArgs : EventArgs
 {
+    /// <summary>The event's category.</summary>
     public LayerMountEventType Type { get; }
+
+    /// <summary>The event's HRESULT. <c>S_OK</c> for an informational event.</summary>
     public int HResult { get; }
+
+    /// <summary>
+    /// The path the event concerns, relative to the overlay root. Null
+    /// when the event has no associated path.
+    /// </summary>
     public string? RelativePath { get; }
+
+    /// <summary>
+    /// A human-readable message for the event, when the engine supplies
+    /// one. Null otherwise.
+    /// </summary>
     public string? Message { get; }
+
+    /// <summary>
+    /// When the event occurred, in UTC. A native timestamp outside the
+    /// range <see cref="DateTime"/> can represent is clamped to
+    /// <see cref="DateTime.MinValue"/> instead of throwing.
+    /// </summary>
     public DateTime TimestampUtc { get; }
+
+    /// <summary>The process id associated with the event, when known. 0 if not applicable.</summary>
     public int Pid { get; }
 
     internal LayerMountEventArgs(

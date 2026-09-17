@@ -49,10 +49,16 @@
 
   <!-- Core engine. NtStatusUtil.{h,cpp} lets the engine map Win32 errors
        to NTSTATUS internally, without taking on any host-adapter
-       dependency. -->
+       dependency. ElevationUtil.{h,cpp} gives the VHD and VSS managers
+       a shared elevation check. PathUtil.{h,cpp} gives them a shared
+       path-string helper. -->
   <ItemGroup>
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\NtStatusUtil.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\NtStatusUtil.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\ElevationUtil.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\ElevationUtil.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\PathUtil.h" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\PathUtil.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\Cache.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\CopyUp.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\MetadataADS.h" />

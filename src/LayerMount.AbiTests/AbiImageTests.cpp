@@ -81,6 +81,20 @@ public:
         Assert::AreNotEqual<HRESULT>(S_OK, hr,
             L"A truncated .lmnt must fail LayerMountImageValidate");
     }
+
+    TEST_METHOD(GetManifest_OnDestroyedMountHandle_ReturnsEHandle) {
+        TempLayerEnv  env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        LM_HANDLE stale = mount.Get();
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountDestroy(mount.Release()));
+
+        LM_IMAGE_MANIFEST manifest{};
+        HRESULT hr = ::LayerMountImageGetManifest(
+            stale, L"C:\\does-not-matter.lmnt", &manifest);
+        Assert::AreEqual<HRESULT>(E_HANDLE, hr,
+            L"A destroyed mount handle must return E_HANDLE");
+    }
 };
 
 } // namespace LayerMountAbiTests
