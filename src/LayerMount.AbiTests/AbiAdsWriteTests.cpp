@@ -290,57 +290,37 @@ public:
             L"newly created stream must land on the upper host");
     }
 
-    TEST_METHOD(CreateFile_AdsOnMetacopyShell_SurvivesLazyCompletion) {
-        // A metacopy upper shell satisfies ExistsInUpper, so an unguarded
-        // stream Create would attach to the sparse skeleton. Later, when
-        // any main-stream read/write through the host handle triggers
-        // CompleteLazyCopyUp, lower's ADS would be copied onto upper -- a
-        // collision with the user's stream silently overwrites the user's
-        // bytes with lower content. The fix is to finalize the metacopy
-        // *before* attaching the new stream, so lower's ADS are visible
-        // immediately and a colliding user stream surfaces a CREATE_NEW
-        // collision instead of a silent overwrite.
-        //
-        // Test shape: lower host > 1 MB so writable Open stages a metacopy
-        // shell on upper; pre-existing lower stream :keep-me; user creates
-        // a non-colliding stream :user-stream. The load-bearing assertion
-        // is that :keep-me appears on upper RIGHT AFTER the stream Create
-        // (proving CompleteLazyCopyUp ran during Create, not deferred to
-        // the later main-stream write).
+    TEST_METHOD(CreateFile_AdsOnMetacopyShell_SurvivesLaterDataOpen) {
+        // A stream Create on a metacopy shell fills the shell first, so the
+        // lower's streams cannot land over the user's stream later. A
+        // colliding user stream gets a CREATE_NEW collision instead of a
+        // silent overwrite.
         TempLayerEnv env(1);
-        const std::string bigContent(2u * 1024u * 1024u, 'L');
+        const std::string bigContent(
+            static_cast<size_t>(kAboveMetacopyThresholdBytes), 'L');
         env.WriteLowerFile(0, L"big.bin", bigContent);
         WriteRawStream(env.Lower(0) + L"\\big.bin:keep-me",
                        "lower-stream-content", 20);
 
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Open the host writable to stage a metacopy shell on upper. The
-        // engine's metacopy threshold is 1 MB with sparse-file capability
-        // on; the 2 MB lower file is comfortably over it.
-        //
-        // Use FILE_GENERIC_READ / FILE_GENERIC_WRITE rather than the
-        // GENERIC_* aliases: the engine's HasWriteAccess() checks specific
-        // bits (FILE_WRITE_DATA etc.), and GENERIC_WRITE alone wouldn't
-        // trigger the lower-source copy-up path.
         LM_FILE_HANDLE hostFh = nullptr;
         LM_FILE_INFO   hostInfo{};
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountOpenFile(mount.Get(), L"\\big.bin",
-                FILE_GENERIC_READ | FILE_GENERIC_WRITE, 0u, 0u,
+                kAttributeOnlyAccess, 0u, 0u,
                 &hostFh, &hostInfo));
 
         const std::wstring upperHost = env.Upper() + L"\\big.bin";
         Assert::IsTrue(std::filesystem::exists(upperHost),
-            L"writable Open of a > 1 MB lower file should stage a metacopy "
-            L"shell on upper");
+            L"attribute-only Open of a > 1 MB lower file must stage a "
+            L"metacopy shell on upper");
         // Sanity: pre-stream-Create, the lower-only :keep-me should NOT
         // have been carried up yet (still a metacopy shell).
         Assert::IsFalse(StreamExistsOnDisk(upperHost + L":keep-me"),
             L":keep-me must not be on upper yet -- metacopy shell only");
+        ::LayerMountCloseFile(hostFh);
 
-        // Create a non-colliding stream on the metacopy upper. The fix
-        // finalizes the metacopy synchronously here.
         LM_FILE_HANDLE streamFh = nullptr;
         LM_FILE_INFO   streamInfo{};
         Assert::AreEqual<HRESULT>(S_OK,
@@ -355,30 +335,26 @@ public:
         Assert::AreEqual<UINT32>(9u, userWritten);
         ::LayerMountCloseFile(streamFh);
 
-        // Load-bearing: :keep-me must now be on upper. Without the fix,
-        // lower ADS would not be copied until the main-stream write below
-        // triggers CompleteLazyCopyUp; with the fix, the Create above did
-        // it. This is the assertion that pins the timing-change.
         Assert::IsTrue(StreamExistsOnDisk(upperHost + L":keep-me"),
-            L"lower ADS must be carried up DURING the stream Create, not "
-            L"deferred to a later main-stream write");
+            L"the stream Create carries the lower ADS up; a later "
+            L"main-stream open is too late");
         Assert::IsTrue(StreamExistsOnDisk(upperHost + L":user-stream"),
             L"newly created user stream must be on the upper host");
         Assert::AreEqual<std::string>("USER-DATA",
             ReadRawStream(upperHost + L":user-stream"));
 
-        // Drive a main-stream write through the original host handle. The
-        // host context still has isMetacopyOnly = true from the original
-        // Open; the engine's main-stream-write path will call
-        // CompleteLazyCopyUp again, which short-circuits because the
-        // metacopy flag has already been cleared. The user stream must
-        // survive intact across this second pass.
+        LM_FILE_HANDLE mainFh = nullptr;
+        LM_FILE_INFO   mainInfo{};
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountOpenFile(mount.Get(), L"\\big.bin",
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE, 0u, 0u,
+                &mainFh, &mainInfo));
         UINT32 mainWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(hostFh, "MAIN", 0, 4,
+            ::LayerMountWriteFile(mainFh, "MAIN", 0, 4,
                 FALSE, FALSE, 0u, &mainWritten, nullptr));
         Assert::AreEqual<UINT32>(4u, mainWritten);
-        ::LayerMountCloseFile(hostFh);
+        ::LayerMountCloseFile(mainFh);
 
         Assert::AreEqual<std::string>("USER-DATA",
             ReadRawStream(upperHost + L":user-stream"),

@@ -723,6 +723,12 @@ LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
  * its metadata in *outInfo. `originatorPid` identifies the requesting
  * process for process-tracker rules; pass 0 to use the current process.
  * The returned handle pins its parent overlay until closed.
+ *
+ * When the file is a metacopy shell and `grantedAccess` asks for data
+ * (read, write, append, or execute), the engine fills the shell before
+ * it returns. *outInfo then reports the filled file. An open for
+ * attributes, security, or delete keeps the shell sparse. A failed fill
+ * fails the open with the fill's status and returns no handle.
  */
 LM_API HRESULT LM_CALL LayerMountOpenFile(
     LM_HANDLE       handle,
@@ -761,10 +767,11 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(
  * parent overlay's open-file count. */
 LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file);
 
-/* Reads up to `length` bytes at `offset` from `file` into `buffer`,
- * completing a pending metacopy first if the file is still a metacopy
- * shell. `originatorPid` identifies the requesting process for
- * process-tracker rules; pass 0 to use the current process.
+/* Reads up to `length` bytes at `offset` from `file` into `buffer`.
+ * A read never copies a file up and never reopens the handle for a
+ * fill. The one reopen a read can do is the retarget after a rename.
+ * `originatorPid` identifies the requesting process for process-tracker
+ * rules; pass 0 to use the current process.
  * The engine always writes *bytesTransferred, also on failure.
  *
  * A read that starts inside the file and runs past its end succeeds with
@@ -822,9 +829,10 @@ LM_API HRESULT LM_CALL LayerMountFlushFile(
     DWORD           originatorPid,         /* 0 = use current process */
     LM_FILE_INFO*  outInfo);
 
-/* Fills `outInfo` with the current metadata of the open `file`,
- * completing any pending metacopy first so the reported size and
- * attributes reflect the materialized file. */
+/* Fills `outInfo` with the current metadata of the open `file`. The
+ * info describes the file as the handle opened it. A handle opened for
+ * data describes the filled file, and an attribute-only handle on a
+ * metacopy shell still describes the sparse shell. */
 LM_API HRESULT LM_CALL LayerMountGetFileInfo(
     LM_FILE_HANDLE file, LM_FILE_INFO* outInfo);
 

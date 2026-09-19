@@ -8,6 +8,12 @@
 
 namespace LayerMountAbiTests {
 
+// The engine stages a metacopy shell only for a lower file larger than
+// 1 MiB, so a 2 MiB lower file stages a shell.
+constexpr UINT64 kAboveMetacopyThresholdBytes = 2ull * 1024 * 1024;
+
+constexpr UINT32 kAttributeOnlyAccess = FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+
 // -----------------------------------------------------------------------------
 // TempLayerEnv -- creates %TEMP%\LayerMountAbi_<uuid>\{upper,work,lowerN}\ and
 // removes the tree on destruction. Mirrors the shape of the existing unit /

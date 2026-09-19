@@ -132,10 +132,11 @@ public sealed class LayerMountFile : IDisposable
     }
 
     /// <summary>
-    /// Returns the current metadata for this file, completing any
-    /// pending metacopy first so the reported size and attributes
-    /// reflect the materialized file. Updates <see cref="Info"/> with
-    /// the result.
+    /// Returns the current metadata for this file. Updates
+    /// <see cref="Info"/> with the result. The info describes the file
+    /// as the handle opened it. A handle opened for data describes the
+    /// filled file, and an attribute-only handle on a metacopy shell
+    /// still describes the sparse shell.
     /// </summary>
     /// <exception cref="LayerMountException">
     /// If the underlying native call returns a non-success HRESULT.

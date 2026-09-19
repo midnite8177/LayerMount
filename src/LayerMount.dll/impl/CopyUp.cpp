@@ -1022,7 +1022,7 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
 
     // Serialize concurrent completions on the same path. Without this, two
-    // handles' SRead/SWrite paths can both enter here and both copy lower
+    // callers on the same path can both enter here and both copy lower
     // bytes into the same upper file. The loser's still-running CopyFileData
     // can clobber a user-write that landed between the two completions, or
     // simply duplicate writes onto the same handle range. Reservation makes
@@ -1062,9 +1062,9 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     GetFileTime(srcHandle.Get(), &srcCreation, &srcAccess, &srcWrite);
 
     // Open destination (upper layer file) for writing. Share modes must
-    // include SHARE_READ | SHARE_WRITE | SHARE_DELETE so a caller that is
-    // already holding the file via SOpen (GrantedAccess RW) doesn't deadlock
-    // us with a sharing violation when we run inside SRead/SWrite.
+    // include SHARE_READ | SHARE_WRITE | SHARE_DELETE so a caller that
+    // already holds a writable handle on the file does not fail this open
+    // with a sharing violation.
     ScopedHandle dstHandle(CreateFileW(
         upperPath.c_str(),
         GENERIC_WRITE,
