@@ -23,6 +23,13 @@
   file an ignore pattern covers, such as build output. It also does
   not touch the `.git` directory.
 
+  The script also removes an untracked file that is present when it
+  starts, such as a log redirected into the checkout, unless an
+  ignore pattern covers its path. If the shell still holds that log
+  open, the removal fails and the script stops with exit code 1.
+  Write such a log under an ignored folder, for example TestResults/,
+  or outside the checkout.
+
 .PARAMETER SourcePath
   The folder to copy files from, such as a Parallels shared folder
   reaching the repository's working tree.
@@ -110,17 +117,21 @@ function Get-RelativePathsUnderRoot {
 
 function Remove-EmptyDirectories {
   param(
-    [string]$Root
+    [string]$Root,
+    [array]$IgnorePatterns
   )
 
   $removedAny = $true
   while ($removedAny) {
     $removedAny = $false
 
+    # The trailing slash marks the path as a directory, so a directory-only
+    # pattern matches the ignored directory itself and not only its contents.
     $candidates = Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force |
       Where-Object {
         $relative = ([System.IO.Path]::GetRelativePath($Root, $_.FullName)) -replace '\\', '/'
-        -not (Test-UnderGitDir -RelativePath $relative)
+        -not (Test-UnderGitDir -RelativePath $relative) -and
+          -not (Test-PathIgnoredBySyncManifest -RelativePath "$relative/" -IgnorePatterns $IgnorePatterns)
       } |
       Sort-Object { $_.FullName.Length } -Descending
 
@@ -206,7 +217,7 @@ try {
   }
 
   if ($PSCmdlet.ShouldProcess($DestPath, 'Remove empty directories')) {
-    Remove-EmptyDirectories -Root $DestPath
+    Remove-EmptyDirectories -Root $DestPath -IgnorePatterns $ignorePatterns
   }
 
   Write-Host ''

@@ -55,9 +55,13 @@ src/LayerMount.dll/**/*.user
 *.snupkg
 .nuget/
 packages/
+.nuget-packages/
 
 # Local tools (dotnet tool install --tool-path)
 .tools/
+
+# VM sync manifest (build/write-vm-sync-manifest.ps1 writes it)
+vm-sync-manifest.json
 
 # OS metadata
 Thumbs.db

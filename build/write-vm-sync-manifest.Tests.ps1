@@ -2,6 +2,36 @@
 
 BeforeAll {
   $script:ScriptPath = Join-Path $PSScriptRoot 'write-vm-sync-manifest.ps1'
+
+  $script:WorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "vm-sync-manifest-tests-$([guid]::NewGuid())"
+  New-Item -ItemType Directory -Path $script:WorkRoot -Force | Out-Null
+
+  # The writer folds core.excludesFile from the global and system git config
+  # into the manifest. An empty global config and no system config keep a
+  # developer's own excludes out of every manifest these tests read.
+  $script:SavedGitConfigGlobal = $env:GIT_CONFIG_GLOBAL
+  $script:SavedGitConfigNoSystem = $env:GIT_CONFIG_NOSYSTEM
+  $emptyGitConfig = Join-Path $script:WorkRoot 'empty-gitconfig'
+  Set-Content -LiteralPath $emptyGitConfig -Value ''
+  $env:GIT_CONFIG_GLOBAL = $emptyGitConfig
+  $env:GIT_CONFIG_NOSYSTEM = '1'
+
+  function Write-ManifestFor {
+    param(
+      [Parameter(Mandatory)]
+      [string]$SourcePath
+    )
+
+    $manifestPath = Join-Path $script:WorkRoot "$([guid]::NewGuid()).json"
+    & $script:ScriptPath -SourcePath $SourcePath -ManifestPath $manifestPath
+    Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  }
+}
+
+AfterAll {
+  $env:GIT_CONFIG_GLOBAL = $script:SavedGitConfigGlobal
+  $env:GIT_CONFIG_NOSYSTEM = $script:SavedGitConfigNoSystem
+  Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Describe 'write-vm-sync-manifest.ps1' {
@@ -24,10 +54,7 @@ Describe 'write-vm-sync-manifest.ps1' {
     & git -C $script:FixtureRepo add 'a.txt' 'sub/b.txt' '.gitignore'
     & git -C $script:FixtureRepo commit -q -m 'Initial commit'
 
-    $script:ManifestPath = Join-Path $script:FixtureRepo 'manifest.json'
-    & $script:ScriptPath -SourcePath $script:FixtureRepo -ManifestPath $script:ManifestPath
-
-    $script:Manifest = Get-Content -LiteralPath $script:ManifestPath -Raw | ConvertFrom-Json
+    $script:Manifest = Write-ManifestFor -SourcePath $script:FixtureRepo
   }
 
   AfterAll {

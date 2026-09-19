@@ -59,4 +59,13 @@
     </ClCompile>
   </ItemDefinitionGroup>
 
+  <!-- SourceLink and the git build task need a git repository. The VM
+       test checkout is a copy of the tracked files with no repository,
+       so both tasks report a warning on every build there. A git worktree
+       has a .git file, not a directory. Exists() accepts both. -->
+  <PropertyGroup Condition="!Exists('$(MSBuildThisFileDirectory).git')">
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+    <EnableSourceLink>false</EnableSourceLink>
+  </PropertyGroup>
+
 </Project>

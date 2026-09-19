@@ -33,6 +33,27 @@ Debug builds work too (`/p:Configuration=Debug`). The output drops under
 `x64\<Config>\`. No CMake, no vcpkg. `/restore` on the command line restores
 NuGet packages before the build runs.
 
+### Paging read repro
+
+`build/Invoke-PagingReadRepro.ps1` reproduces the paging read symptom
+end to end. It builds the engine and packs both packages into a local
+folder under a unique prerelease version. It builds a throwaway copy of
+a host adapter against that package, installs the filesystem host
+driver, and mounts an overlay. Then it runs `find.exe` and the
+mapped-read program in `src/LayerMount.MappedRead` over every origin
+and size in the matrix. It prints a Markdown table with one row per
+case and writes the same table to `result-table.md` in its workspace.
+
+It needs a Windows machine with the build prerequisites above. It also
+needs a checkout of a host adapter whose project references the
+`LayerMount` package, and that adapter's runtime license in a file. The
+script copies the adapter checkout and never edits it. The license goes
+into the adapter process's environment only. The script never prints
+it. Every product-specific value is a mandatory parameter: the adapter
+path, the executable, the install arguments, the license variable and
+the license file. `Get-Help ./build/Invoke-PagingReadRepro.ps1
+-Detailed` lists them.
+
 ## Running the test suites
 
 ### Native unit tests (host-agnostic)
