@@ -52,8 +52,8 @@
  *   larger structSize, new enum values, new exported functions) do
  *   not. Structs carrying a `structSize` first field (LM_CONFIG,
  *   LM_VHD_CONFIG) are forward-extensible per that rule; fixed-shape
- *   structs (LM_FILE_INFO, LM_STATS, LM_EVENT, LM_VOLUME_INFO)
- *   revision only via LM_ABI_VERSION bumps.
+ *   structs (LM_FILE_INFO, LM_RESOLVED_PATH, LM_STATS, LM_EVENT,
+ *   LM_VOLUME_INFO) revision only via LM_ABI_VERSION bumps.
  *
  * PLATFORM
  *   Windows user-mode only. Requires <windows.h>. The DLL itself has
@@ -273,6 +273,13 @@ typedef struct LM_STREAM_INFO {
  * Output of LayerMountResolvePath. Uses the two-call buffer pattern for
  * absolutePath: pass absolutePath = NULL, absolutePathChars = 0 on the
  * sizing call; absolutePathRequired is always written.
+ *
+ * fileSize matches LayerMountGetFileInfo. allocationSize is the file
+ * size rounded up to 4 KiB, the number LayerMountMergeDirectory reports.
+ * An open handle reports the real on-disk allocation when it is larger,
+ * for example after a preallocation. Both are zero for a directory, a
+ * whiteout, a path that does not exist, and a path the engine cannot
+ * stat.
  * ------------------------------------------------------------------------- */
 typedef struct LM_RESOLVED_PATH {
     PWSTR            absolutePath;          /* in/out: caller-provided buffer */
@@ -282,6 +289,8 @@ typedef struct LM_RESOLVED_PATH {
     INT32            lowerIndex;            /* -1 when source != LM_LAYER_LOWER */
     BOOL             isWhiteout;
     UINT32           attributes;            /* Win32 file attributes; INVALID_FILE_ATTRIBUTES if not found */
+    UINT64           fileSize;              /* logical end-of-file in bytes */
+    UINT64           allocationSize;        /* allocation in bytes, at least fileSize */
 } LM_RESOLVED_PATH;
 
 /* -------------------------------------------------------------------------
@@ -677,8 +686,10 @@ LM_API HRESULT LM_CALL LayerMountPointReleaseIfSafe(
 
 /* Resolves `relativePath` through the overlay and fills
  * `outResolved` with the winning layer, the lower index (-1 unless the
- * source is a lower), whiteout state, and Win32 attributes. Uses the
- * two-call buffer pattern for `absolutePath`. */
+ * source is a lower), whiteout state, Win32 attributes, file size, and
+ * allocation size. Uses the two-call buffer pattern for `absolutePath`.
+ * A call on a path that exists costs one attribute query of the resolved
+ * file for the two sizes. */
 LM_API HRESULT LM_CALL LayerMountResolvePath(
     LM_HANDLE handle, PCWSTR relativePath, LM_RESOLVED_PATH* outResolved);
 
@@ -754,7 +765,12 @@ LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file);
  * completing a pending metacopy first if the file is still a metacopy
  * shell. `originatorPid` identifies the requesting process for
  * process-tracker rules; pass 0 to use the current process.
- * *bytesTransferred is always written, including on failure. */
+ * The engine always writes *bytesTransferred, also on failure.
+ *
+ * A read that starts inside the file and runs past its end succeeds with
+ * the short count in *bytesTransferred. The engine then zero-fills `buffer`
+ * from that count to `length`. A read that starts at or past the end of
+ * the file fails with the end-of-file status and *bytesTransferred = 0. */
 LM_API HRESULT LM_CALL LayerMountReadFile(
     LM_FILE_HANDLE file,
     void*           buffer,

@@ -53,13 +53,24 @@ public:
     // Write a blob into lowerN\<relativePath>. Creates intermediate dirs.
     void WriteLowerFile(size_t index, const std::wstring& relative,
                         const std::string& contents) const {
-        auto path = std::filesystem::path(Lower(index)) / relative;
+        WriteFileUnder(Lower(index), relative, contents);
+    }
+
+    // Write a blob into upper\<relativePath>. Creates intermediate dirs.
+    void WriteUpperFile(const std::wstring& relative,
+                        const std::string& contents) const {
+        WriteFileUnder(Upper(), relative, contents);
+    }
+
+private:
+    static void WriteFileUnder(const std::wstring& root, const std::wstring& relative,
+                               const std::string& contents) {
+        auto path = std::filesystem::path(root) / relative;
         std::filesystem::create_directories(path.parent_path());
         std::ofstream f(path, std::ios::binary | std::ios::trunc);
         f.write(contents.data(), static_cast<std::streamsize>(contents.size()));
     }
 
-private:
     std::wstring              root_;
     std::wstring              upper_;
     std::wstring              work_;

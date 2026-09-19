@@ -684,20 +684,18 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(LM_HANDLE             handle,
 
         LM_FILE_INFO info{};
         info.fileAttributes = entry.findData.dwFileAttributes;
-        info.fileSize = (static_cast<UINT64>(entry.findData.nFileSizeHigh) << 32) |
-                        entry.findData.nFileSizeLow;
-        // 4 KiB rounding mirrors the legacy SReadDirectory shape; LM_FILE_INFO
-        // doesn't carry a real allocation-size source from FindFirstFileW.
-        info.allocationSize = (info.fileSize + 4095) & ~static_cast<UINT64>(4095);
-        info.creationTime =
-            (static_cast<UINT64>(entry.findData.ftCreationTime.dwHighDateTime) << 32) |
-            entry.findData.ftCreationTime.dwLowDateTime;
-        info.lastAccessTime =
-            (static_cast<UINT64>(entry.findData.ftLastAccessTime.dwHighDateTime) << 32) |
-            entry.findData.ftLastAccessTime.dwLowDateTime;
-        info.lastWriteTime =
-            (static_cast<UINT64>(entry.findData.ftLastWriteTime.dwHighDateTime) << 32) |
-            entry.findData.ftLastWriteTime.dwLowDateTime;
+        info.fileSize = ::LayerMount::ComposeUInt64(entry.findData.nFileSizeHigh,
+                                                    entry.findData.nFileSizeLow);
+        info.allocationSize = ::LayerMount::AllocationSizeFor(info.fileSize);
+        info.creationTime   = ::LayerMount::ComposeUInt64(
+            entry.findData.ftCreationTime.dwHighDateTime,
+            entry.findData.ftCreationTime.dwLowDateTime);
+        info.lastAccessTime = ::LayerMount::ComposeUInt64(
+            entry.findData.ftLastAccessTime.dwHighDateTime,
+            entry.findData.ftLastAccessTime.dwLowDateTime);
+        info.lastWriteTime  = ::LayerMount::ComposeUInt64(
+            entry.findData.ftLastWriteTime.dwHighDateTime,
+            entry.findData.ftLastWriteTime.dwLowDateTime);
         info.changeTime = info.lastWriteTime; // approximation; native ChangeTime
                                               // requires a per-entry handle open.
         if (entry.findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {

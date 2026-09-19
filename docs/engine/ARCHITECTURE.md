@@ -666,8 +666,8 @@ the size it knows about and interprets only the fields it understands.
 Adding a field at the end of the struct does not bump
 `LM_ABI_VERSION`. Reordering or removing a field does.
 
-Fixed-shape structs (`LM_FILE_INFO`, `LM_STATS`, `LM_EVENT`,
-`LM_VOLUME_INFO`) revise only via `LM_ABI_VERSION` bumps.
+Fixed-shape structs (`LM_FILE_INFO`, `LM_RESOLVED_PATH`, `LM_STATS`,
+`LM_EVENT`, `LM_VOLUME_INFO`) revise only via `LM_ABI_VERSION` bumps.
 
 ### Opaque handles
 

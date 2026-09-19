@@ -60,6 +60,10 @@ LM_API HRESULT LM_CALL LayerMountResolvePath(LM_HANDLE         handle,
     outResolved->isWhiteout = resolved.isWhiteout ? TRUE : FALSE;
     outResolved->attributes = resolved.attributes;
 
+    const ::LayerMount::ResolvedSizes sizes = mountHolder->core->SizesOf(resolved);
+    outResolved->fileSize       = sizes.fileSize;
+    outResolved->allocationSize = sizes.allocationSize;
+
     // Two-call buffer pattern for absolutePath (NUL terminator counted).
     const SIZE_T requiredChars = resolved.absolutePath.size() + 1;
     outResolved->absolutePathRequired = requiredChars;

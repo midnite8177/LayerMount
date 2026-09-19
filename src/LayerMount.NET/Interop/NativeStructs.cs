@@ -5,24 +5,9 @@
 // populate them with raw pointers from fixed/stackalloc/Marshal allocations
 // without forcing every owning struct to be `unsafe`.
 //
-// Struct-size invariants (asserted at runtime in the managed wrappers where
-// relevant; also enforced by the native DLL's own structSize checks for
-// forward-extensible structs):
-//   LM_CONFIG                 =  64 bytes
-//   LM_FILE_INFO              =  72 bytes
-//   LM_RESOLVED_PATH          =  40 bytes
-//   LM_VOLUME_INFO            =  84 bytes (no trailing pad; fully fixed)
-//   LM_STATS                  =  72 bytes
-//   LM_EVENT                  =  40 bytes
-//   LM_VHD_CONFIG             =  48 bytes
-//   LM_VHD_LAYER_INFO         = 256 bytes
-//   LM_VSS_SNAPSHOT_INFO      = 160 bytes
-//   LM_IMAGE_MANIFEST_ENTRY   = 160 bytes
-//   LM_IMAGE_MANIFEST         =  32 bytes
-//   LM_IMAGE_PACK_OPTIONS     =  32 bytes
-//   LM_IMAGE_METADATA         = 152 bytes
-//   LM_MOUNT_POINT_PREP       =  40 bytes (4 BOOL + 4 implicit pad + 8
-//                                          UINT64 + 16 fileId + 8 reserved)
+// InteropStructSizeTests pins the managed size of every struct here to the
+// size the native header produces. The native DLL also checks structSize on
+// the forward-extensible structs.
 
 using System;
 using System.Runtime.InteropServices;
@@ -85,6 +70,8 @@ internal struct LM_RESOLVED_PATH
     public int    lowerIndex;
     public int    isWhiteout;             // BOOL
     public uint   attributes;
+    public ulong  fileSize;
+    public ulong  allocationSize;
 }
 
 [StructLayout(LayoutKind.Sequential)]

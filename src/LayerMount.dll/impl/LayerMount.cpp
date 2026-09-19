@@ -549,9 +549,8 @@ NTSTATUS LayerMount::FillFileInfo(const std::wstring& path,
     fileInfo->LastAccessTime = FileTimeToUInt64(attrData.ftLastAccessTime);
     fileInfo->LastWriteTime  = FileTimeToUInt64(attrData.ftLastWriteTime);
     fileInfo->ChangeTime     = fileInfo->LastWriteTime; // Windows doesn't expose ChangeTime
-    fileInfo->FileSize       = (static_cast<UINT64>(attrData.nFileSizeHigh) << 32) |
-                               attrData.nFileSizeLow;
-    fileInfo->AllocationSize = (fileInfo->FileSize + 4095) & ~static_cast<UINT64>(4095);
+    fileInfo->FileSize       = ComposeUInt64(attrData.nFileSizeHigh, attrData.nFileSizeLow);
+    fileInfo->AllocationSize = AllocationSizeFor(fileInfo->FileSize);
     fileInfo->HardLinks      = 0;
     fileInfo->EaSize         = 0;
     fileInfo->IndexNumber    = 0;
@@ -572,6 +571,20 @@ NTSTATUS LayerMount::FillFileInfo(const std::wstring& path,
     return STATUS_SUCCESS;
 }
 
+ResolvedSizes LayerMount::SizesOf(const ResolvedPath& resolved) const {
+    ResolvedSizes sizes;
+    if (!resolved.Found()) {
+        return sizes;
+    }
+    InternalFileInfo info{};
+    if (!NT_SUCCESS(FillFileInfo(resolved.absolutePath, &info))) {
+        return sizes;
+    }
+    sizes.fileSize       = info.FileSize;
+    sizes.allocationSize = info.AllocationSize;
+    return sizes;
+}
+
 NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
                                             InternalFileInfo* fileInfo,
                                             const std::wstring* pathHint) {
@@ -587,24 +600,13 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
     fileInfo->LastAccessTime = FileTimeToUInt64(info.ftLastAccessTime);
     fileInfo->LastWriteTime  = FileTimeToUInt64(info.ftLastWriteTime);
     fileInfo->ChangeTime     = fileInfo->LastWriteTime;
-    fileInfo->FileSize       = (static_cast<UINT64>(info.nFileSizeHigh) << 32) |
-                               info.nFileSizeLow;
-    // Query the real on-disk allocation size instead of rounding FileSize up to
-    // a 4K boundary. NTFS preallocation (SetFileInformationByHandle with
-    // FileAllocationInfo) only persists on an open handle, and callers who set
-    // it expect GetFileInformationByHandleEx to report the preallocation back.
-    // The old rounding heuristic silently clipped allocation down to EOF, so
-    // FileAllocationInfo appeared to have no effect through the mount.
-    {
-        FILE_STANDARD_INFO si{};
-        if (::GetFileInformationByHandleEx(handle, FileStandardInfo,
-                                             &si, sizeof(si))) {
-            fileInfo->AllocationSize = static_cast<UINT64>(si.AllocationSize.QuadPart);
-        } else {
-            fileInfo->AllocationSize =
-                (fileInfo->FileSize + 4095) & ~static_cast<UINT64>(4095);
-        }
+    fileInfo->FileSize       = ComposeUInt64(info.nFileSizeHigh, info.nFileSizeLow);
+    UINT64 realAllocation = 0;
+    FILE_STANDARD_INFO si{};
+    if (::GetFileInformationByHandleEx(handle, FileStandardInfo, &si, sizeof(si))) {
+        realAllocation = static_cast<UINT64>(si.AllocationSize.QuadPart);
     }
+    fileInfo->AllocationSize = AllocationSizeFor(fileInfo->FileSize, realAllocation);
     fileInfo->HardLinks      = 0;
     fileInfo->EaSize         = 0;
     fileInfo->IndexNumber    = MakeIndexNumber(info);
@@ -1386,6 +1388,18 @@ NTSTATUS LayerMount::EnsureMetacopyMaterialized(FileContext* ctx) {
     return ReopenContextHandle(ctx);
 }
 
+namespace {
+
+// A host hands the buffer of a paging read back to the memory manager as
+// a page. Without the fill, the part past the end of the file keeps stale
+// memory and a mapped file shows it.
+void ZeroFillTail(void* buffer, ULONG filled, ULONG length) {
+    if (filled >= length) return;
+    memset(static_cast<BYTE*>(buffer) + filled, 0, length - filled);
+}
+
+}
+
 NTSTATUS LayerMount::Read(FileContext* ctx,
                          void* buffer,
                          UINT64 offset,
@@ -1423,6 +1437,11 @@ NTSTATUS LayerMount::Read(FileContext* ctx,
         }
         return NtStatusFromWin32(err);
     }
+
+    if (*bytesTransferred == 0 && length != 0) {
+        return STATUS_END_OF_FILE;
+    }
+    ZeroFillTail(buffer, *bytesTransferred, length);
 
     stats_.readCount.fetch_add(1, std::memory_order_relaxed);
     stats_.bytesRead.fetch_add(*bytesTransferred, std::memory_order_relaxed);

@@ -317,7 +317,9 @@ public sealed partial class LayerMount : IDisposable
             (LayerSource)probe.source,
             probe.lowerIndex,
             probe.isWhiteout != 0,
-            probe.attributes);
+            probe.attributes,
+            probe.fileSize,
+            probe.allocationSize);
     }
 
     /// <summary>
@@ -584,12 +586,25 @@ public sealed partial class LayerMount : IDisposable
 /// Win32 file attributes, or <c>INVALID_FILE_ATTRIBUTES</c> if the path
 /// was not found.
 /// </param>
+/// <param name="FileSize">
+/// Logical end-of-file in bytes. Zero for a directory, a whiteout, a
+/// path that does not exist, or a path the engine cannot stat.
+/// </param>
+/// <param name="AllocationSize">
+/// Allocation in bytes, never below <paramref name="FileSize"/>. It is
+/// the file size rounded up to 4 KiB, the number
+/// <see cref="LayerMount.MergeDirectory"/> reports. An open
+/// <see cref="LayerMountFile"/> reports the real on-disk allocation when
+/// it is larger, for example after a preallocation.
+/// </param>
 public sealed record ResolvedPath(
     string AbsolutePath,
     LayerSource Source,
     int LowerIndex,
     bool IsWhiteout,
-    uint Attributes);
+    uint Attributes,
+    ulong FileSize,
+    ulong AllocationSize);
 
 /// <summary>Output of <see cref="LayerMount.GetVolumeInfo"/>.</summary>
 /// <param name="TotalSize">Total volume size in bytes.</param>
