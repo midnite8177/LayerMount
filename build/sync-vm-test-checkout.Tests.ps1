@@ -54,12 +54,14 @@ Describe 'sync-vm-test-checkout.ps1, run against a fixture with no git' {
     Set-Content -LiteralPath (Join-Path $script:DestRoot 'build.log') -Value 'log data' -NoNewline
     New-Item -ItemType Directory -Path (Join-Path $script:DestRoot 'sub/emptydirsoon') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $script:DestRoot 'sub/emptydirsoon/onlyfile.txt') -Value 'x' -NoNewline
+    New-Item -ItemType Directory -Path (Join-Path $script:DestRoot 'cache/empty') -Force | Out-Null
 
     $script:ManifestPath = Join-Path $script:SourceRoot 'manifest.json'
     $manifest = [PSCustomObject]@{
       trackedFiles   = @('a.txt', 'sub/b.txt')
       ignorePatterns = @(
         New-SyncIgnorePattern -Pattern '*.log' -Scope '' -DirectoryOnly:$false -Anchored:$false -Negate:$false
+        New-SyncIgnorePattern -Pattern 'cache' -Scope '' -DirectoryOnly:$true -Anchored:$false -Negate:$false
       )
     }
     ($manifest | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $script:ManifestPath
@@ -91,5 +93,9 @@ Describe 'sync-vm-test-checkout.ps1, run against a fixture with no git' {
 
   It 'prunes a directory left empty after removing its only file' {
     Test-Path -LiteralPath (Join-Path $script:DestRoot 'sub/emptydirsoon') | Should -BeFalse
+  }
+
+  It 'leaves an empty directory under an ignored directory in place' {
+    Test-Path -LiteralPath (Join-Path $script:DestRoot 'cache/empty') | Should -BeTrue
   }
 }
