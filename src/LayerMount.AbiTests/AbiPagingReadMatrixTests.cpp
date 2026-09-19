@@ -13,7 +13,7 @@ namespace {
 constexpr UINT64 kPageBytes         = 4096;
 constexpr UINT64 kStraddleReadBytes = 8192;
 
-constexpr UINT32 kCopyUpAccess = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+constexpr UINT32 kCopyUpAccess = GENERIC_READ | GENERIC_WRITE;
 
 // HRESULT_FROM_NT(STATUS_END_OF_FILE), the form the ABI returns for a read
 // at or past the end of the file.
@@ -299,6 +299,16 @@ void CreateThroughMount(LM_HANDLE mount, const std::wstring& overlayPath,
         (L"write count " + overlayPath).c_str());
 }
 
+void OpenOrFail(LM_HANDLE mount, const std::wstring& overlayPath, UINT32 grantedAccess,
+                const std::wstring& label, FileHandleHolder& fh, LM_FILE_INFO* info) {
+    Assert::AreEqual<HRESULT>(S_OK,
+        ::LayerMountOpenFile(mount, overlayPath.c_str(),
+            grantedAccess,
+            /*createOptions*/ 0u, /*originatorPid*/ 0u,
+            fh.AddressOf(), info),
+        (label + L" LayerMountOpenFile " + overlayPath).c_str());
+}
+
 struct OpenRecord {
     LM_FILE_INFO openInfo{};
     LM_FILE_INFO handleInfo{};
@@ -308,12 +318,7 @@ OpenRecord OpenAndClose(LM_HANDLE mount, const std::wstring& overlayPath,
                         UINT32 grantedAccess) {
     FileHandleHolder fh;
     OpenRecord       rec;
-    Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountOpenFile(mount, overlayPath.c_str(),
-            grantedAccess,
-            /*createOptions*/ 0u, /*originatorPid*/ 0u,
-            fh.AddressOf(), &rec.openInfo),
-        (L"LayerMountOpenFile " + overlayPath).c_str());
+    OpenOrFail(mount, overlayPath, grantedAccess, L"staging", fh, &rec.openInfo);
     Assert::AreEqual<HRESULT>(S_OK,
         ::LayerMountGetFileInfo(fh.Get(), &rec.handleInfo),
         (L"LayerMountGetFileInfo after open " + overlayPath).c_str());
@@ -351,12 +356,7 @@ CellRecord ReadCell(const MountedEnv& mounted, const MatrixCell& cell,
     CellRecord rec;
 
     FileHandleHolder fh;
-    Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountOpenFile(mount, overlayPath.c_str(),
-            /*grantedAccess*/ GENERIC_READ,
-            /*createOptions*/ 0u, /*originatorPid*/ 0u,
-            fh.AddressOf(), &rec.openInfo),
-        (L"read LayerMountOpenFile " + overlayPath).c_str());
+    OpenOrFail(mount, overlayPath, GENERIC_READ, L"read", fh, &rec.openInfo);
     Assert::AreEqual<HRESULT>(S_OK,
         ::LayerMountGetFileInfo(fh.Get(), &rec.handleInfo),
         (L"LayerMountGetFileInfo before read " + overlayPath).c_str());
@@ -538,6 +538,42 @@ void AssertShellIsSparse(const std::wstring& upperPath, UINT64 fileSize, const w
                     L" of " + std::to_wstring(fileSize)).c_str());
 }
 
+void SetSizeThenReadEndPage(const MountedEnv& mounted, Origin origin, UINT64 listedSize,
+                            UINT64 newSize) {
+    const std::wstring overlayPath = OverlayPath(origin, listedSize);
+    const std::wstring upperPath   = UpperPathOf(mounted.env, origin, listedSize);
+    FileHandleHolder   fh;
+    LM_FILE_INFO       info{};
+    OpenOrFail(mounted.mount, overlayPath, GENERIC_WRITE, L"write-only", fh, &info);
+
+    LM_FILE_INFO postSet{};
+    Assert::AreEqual<HRESULT>(S_OK, SetFileSize(fh.Get(), newSize, &postSet),
+                              L"a set-size on the write-only handle");
+    Assert::AreEqual<UINT64>(newSize, postSet.fileSize,
+                             L"the set-info result reports the new size");
+
+    const UINT64      pageStart = (newSize / kPageBytes) * kPageBytes;
+    std::vector<BYTE> buffer(static_cast<size_t>(kPageBytes), kSentinel);
+    UINT32            count = 0;
+    const HRESULT     hr    = ::LayerMountReadFile(fh.Get(), buffer.data(), pageStart,
+        static_cast<UINT32>(kPageBytes), /*originatorPid*/ 0u, &count);
+    Assert::AreEqual<HRESULT>(S_OK, hr,
+        (L"a read of the page at the new end of file on the write-only handle, got " +
+         Hex(static_cast<unsigned>(hr))).c_str());
+    Assert::AreEqual<UINT32>(static_cast<UINT32>(newSize - pageStart), count,
+                             L"the read returns the bytes up to the new end of file");
+    Assert::IsTrue(buffer[0] == PatternByte(pageStart),
+                   L"the read returns the file's bytes");
+    Assert::IsTrue(TailIsAll(buffer, count, 0),
+                   L"the engine zero-fills the tail past the new end of file");
+    fh.Reset();
+
+    const std::string onDisk = ReadAllBytes(upperPath);
+    Assert::IsTrue(onDisk == PatternBytes(newSize),
+                   (L"the upper file on disk holds the first " + std::to_wstring(newSize) +
+                    L" bytes, got " + std::to_wstring(onDisk.size())).c_str());
+}
+
 void StageShell(const MountedEnv& mounted, UINT64 listedSize) {
     const LM_HANDLE  mount = mounted.mount;
     const OpenRecord rec   = OpenAndClose(
@@ -631,13 +667,8 @@ public:
 
         FileHandleHolder fh;
         LM_FILE_INFO     info{};
-        Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(),
-                OverlayPath(Origin::MetacopyShell, listed).c_str(),
-                kAttributeOnlyAccess,
-                /*createOptions*/ 0u, /*originatorPid*/ 0u,
-                fh.AddressOf(), &info),
-            L"attribute-only LayerMountOpenFile");
+        OpenOrFail(mount.Get(), OverlayPath(Origin::MetacopyShell, listed),
+                   kAttributeOnlyAccess, L"attribute-only", fh, &info);
         Assert::IsTrue((info.fileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0,
                        L"the attribute-only open staged a metacopy shell");
 
@@ -651,6 +682,32 @@ public:
         AssertShellIsSparse(UpperPathOf(env, Origin::MetacopyShell, listed),
                             StagedSize(Origin::MetacopyShell, listed),
                             L"the read path does not fill the shell");
+    }
+
+    TEST_METHOD(UpperThroughMount_SetSizeOnWriteOnlyHandle_ReadSucceedsAndUpperShrinks) {
+        constexpr UINT64 listed  = 65536;
+        constexpr UINT64 newSize = kPageBytes + 1;
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        CreateThroughMount(mount.Get(), OverlayPath(Origin::UpperThroughMount, listed),
+                           PatternBytes(listed));
+
+        SetSizeThenReadEndPage(MountedEnv{env, mount.Get()}, Origin::UpperThroughMount,
+                               listed, newSize);
+    }
+
+    TEST_METHOD(MetacopyShell_SetSizeOnWriteOnlyHandle_ReadSucceedsAndUpperShrinks) {
+        constexpr UINT64 listed  = kPageBytes + 1;
+        constexpr UINT64 newSize = kPageBytes + 1;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        SetSizeThenReadEndPage(MountedEnv{env, mount.Get()}, Origin::MetacopyShell,
+                               listed, newSize);
+        Assert::AreEqual<UINT64>(StagedSize(Origin::MetacopyShell, listed),
+            ReadAllBytes(LowerPathOf(env, Origin::MetacopyShell, listed)).size(),
+            L"the lower file keeps its size");
     }
 
     TEST_METHOD(MetacopyShell_OpenForReadWithOriginMissing_FailsAndReturnsNoHandle) {

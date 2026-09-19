@@ -46,15 +46,10 @@ public:
                                  dstDir.c_str(), /*verifyChecksum*/ TRUE));
 
         // Byte-compare the two files round-tripped.
-        auto readBytes = [](const std::wstring& p) {
-            std::ifstream f(p, std::ios::binary);
-            return std::string((std::istreambuf_iterator<char>(f)),
-                               std::istreambuf_iterator<char>());
-        };
         Assert::AreEqual<std::string>(
-            readBytes(srcDir + L"\\a.txt"), readBytes(dstDir + L"\\a.txt"));
+            ReadAllBytes(srcDir + L"\\a.txt"), ReadAllBytes(dstDir + L"\\a.txt"));
         Assert::AreEqual<std::string>(
-            readBytes(srcDir + L"\\b.bin"), readBytes(dstDir + L"\\b.bin"));
+            ReadAllBytes(srcDir + L"\\b.bin"), ReadAllBytes(dstDir + L"\\b.bin"));
     }
 
     TEST_METHOD(Validate_OnTruncatedImage_Fails) {

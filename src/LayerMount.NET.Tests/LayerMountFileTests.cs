@@ -58,6 +58,32 @@ public sealed class LayerMountFileTests
     }
 
     [Fact]
+    public void Cleanup_ThenRead_ReturnsSameBytes_AndDisposeDropsActiveHandles()
+    {
+        using var env = new TempLayerEnvironment(0);
+        using var mount = LayerMount.Create(env.BuildConfig());
+        ulong baseline = mount.GetStats().ActiveHandles;
+
+        var file = mount.CreateFile(
+            @"\cleanup.txt",
+            createOptions: 0u,
+            grantedAccess: GENERIC_READ | GENERIC_WRITE,
+            fileAttributes: FILE_ATTRIBUTE_NORMAL);
+        byte[] payload = Encoding.UTF8.GetBytes("survives cleanup");
+        file.Write(offset: 0, payload);
+
+        file.Cleanup();
+        Assert.Equal(baseline + 1, mount.GetStats().ActiveHandles);
+
+        byte[] readback = new byte[32];
+        uint readCount = file.Read(offset: 0, readback);
+        Assert.Equal("survives cleanup", Encoding.UTF8.GetString(readback, 0, (int)readCount));
+
+        file.Dispose();
+        Assert.Equal(baseline, mount.GetStats().ActiveHandles);
+    }
+
+    [Fact]
     public void Dispose_Twice_NoThrow()
     {
         using var env = new TempLayerEnvironment(0);

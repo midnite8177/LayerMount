@@ -49,6 +49,37 @@ ScopedHandle OpenTransientWritableHandle(const std::wstring& path,
         nullptr);
     return ScopedHandle{h};
 }
+
+// Runs `setInfo` on the context handle. When that fails with an access
+// or sharing error, runs it again on a transient handle opened with
+// `transientAccess`. The kernel routes SET_INFORMATION calls through
+// whichever open handle exists for the file, regardless of the access
+// mask requested at open time, so a handle opened with DELETE alone can
+// land here. A sharing conflict comes from the copy-up's internal
+// handles, which the kernel tracks briefly after their close. Any other
+// error, or a failed transient open, returns the first error.
+template <typename SetInfoFn>
+NTSTATUS SetInfoWithTransientRetry(const FileContext& ctx,
+                                   DWORD transientAccess,
+                                   SetInfoFn setInfo) {
+    if (setInfo(ctx.handle)) {
+        return STATUS_SUCCESS;
+    }
+    const DWORD firstErr = ::GetLastError();
+    if (firstErr != ERROR_ACCESS_DENIED &&
+        firstErr != ERROR_SHARING_VIOLATION) {
+        return NtStatusFromWin32(firstErr);
+    }
+    ScopedHandle transient = OpenTransientWritableHandle(
+        ctx.actualPath, transientAccess, ctx.isDirectory);
+    if (!transient.IsValid()) {
+        return NtStatusFromWin32(firstErr);
+    }
+    if (!setInfo(transient.Get())) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+    return STATUS_SUCCESS;
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -780,11 +811,6 @@ std::map<std::wstring, MergedEntry> LayerMount::MergeDirectoryEntries(
 
 namespace {
 
-inline bool HasWriteAccess(UINT32 access) {
-    return (access & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES |
-                      FILE_WRITE_EA | WRITE_DAC | WRITE_OWNER)) != 0;
-}
-
 inline UINT32 MapFileGenericRights(UINT32 access) {
     UINT32 mapped = access & ~(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
     if (access & GENERIC_READ)    mapped |= FILE_GENERIC_READ;
@@ -792,6 +818,12 @@ inline UINT32 MapFileGenericRights(UINT32 access) {
     if (access & GENERIC_EXECUTE) mapped |= FILE_GENERIC_EXECUTE;
     if (access & GENERIC_ALL)     mapped |= FILE_ALL_ACCESS;
     return mapped;
+}
+
+inline bool HasWriteAccess(UINT32 access) {
+    return (MapFileGenericRights(access) &
+            (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES |
+             FILE_WRITE_EA | WRITE_DAC | WRITE_OWNER)) != 0;
 }
 
 inline bool HasFileDataAccess(UINT32 access) {
@@ -845,11 +877,25 @@ std::wstring GetExistingPathDisplayCase(const std::wstring& absolutePath) {
     return (parent / fd.cFileName).wstring();
 }
 
+// A file system serves paging reads on a write-only file object: the cache
+// manager reads the page at the new end of file after a truncation, and
+// faults a page in before a partial cached write. The access check for the
+// caller happened at open. So a handle with a write-data or append-data
+// right also carries the read-data right that a file system has for its
+// own reads.
+UINT32 ComputePhysicalHandleAccess(UINT32 grantedAccess) {
+    UINT32 access = MapFileGenericRights(grantedAccess);
+    if ((access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0) {
+        access |= FILE_READ_DATA;
+    }
+    return access;
+}
+
 UINT32 ComputeHandleReopenAccess(const FileContext& ctx) {
-    UINT32 reopenAccess = ctx.grantedAccess & ~static_cast<UINT32>(DELETE);
+    UINT32 reopenAccess =
+        ComputePhysicalHandleAccess(ctx.grantedAccess) & ~static_cast<UINT32>(DELETE);
     if (reopenAccess == 0) {
-        reopenAccess = ctx.isDirectory ? FILE_READ_ATTRIBUTES
-                                       : FILE_READ_ATTRIBUTES;
+        reopenAccess = FILE_READ_ATTRIBUTES;
     }
     return reopenAccess;
 }
@@ -862,13 +908,24 @@ DWORD ComputeHandleReopenFlags(const FileContext& ctx) {
     return flags;
 }
 
-NTSTATUS OpenContextHandleWithAccess(FileContext* ctx, UINT32 accessMask) {
-    if (ctx == nullptr) return STATUS_INVALID_PARAMETER;
-
+void CloseContextHandle(FileContext* ctx) {
     if (ctx->handle != INVALID_HANDLE_VALUE) {
         ::CloseHandle(ctx->handle);
         ctx->handle = INVALID_HANDLE_VALUE;
     }
+}
+
+NTSTATUS CleanupContextHandle(FileContext* ctx) {
+    if (ctx == nullptr) return STATUS_INVALID_HANDLE;
+    CloseContextHandle(ctx);
+    ctx->handleNeedsReopen = true;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS OpenContextHandleWithAccess(FileContext* ctx, UINT32 accessMask) {
+    if (ctx == nullptr) return STATUS_INVALID_PARAMETER;
+
+    CloseContextHandle(ctx);
 
     ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
         accessMask,
@@ -885,6 +942,21 @@ NTSTATUS OpenContextHandleWithAccess(FileContext* ctx, UINT32 accessMask) {
 
 NTSTATUS ReopenContextHandle(FileContext* ctx) {
     return OpenContextHandleWithAccess(ctx, ComputeHandleReopenAccess(*ctx));
+}
+
+// The delete takes effect when the last handle on the file or stream
+// closes, so the close here is part of the delete, not a cleanup.
+NTSTATUS SetDeleteDispositionAndClose(HANDLE handle) {
+    FILE_DISPOSITION_INFO disp{};
+    disp.DeleteFileW = TRUE;
+    const BOOL ok = ::SetFileInformationByHandle(
+        handle, FileDispositionInfo, &disp, sizeof(disp));
+    const DWORD setErr = ok ? 0 : ::GetLastError();
+    ::CloseHandle(handle);
+    if (!ok) {
+        return NtStatusFromWin32(setErr);
+    }
+    return STATUS_SUCCESS;
 }
 
 } // namespace
@@ -936,7 +1008,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         ctx->createOptions = createOptions;
 
         ctx->handle = ::CreateFileW(config_.upperPath.c_str(),
-            grantedAccess,
+            ComputePhysicalHandleAccess(grantedAccess),
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
         if (ctx->handle == INVALID_HANDLE_VALUE) {
@@ -1060,7 +1132,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         flags |= FILE_FLAG_OPEN_REPARSE_POINT;
     }
     ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
-        grantedAccess,
+        ComputePhysicalHandleAccess(grantedAccess),
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, flags, nullptr);
     if (ctx->handle == INVALID_HANDLE_VALUE) {
@@ -1232,7 +1304,7 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
         }
 
         ctx->handle = ::CreateFileW(upperPath.c_str(),
-            grantedAccess,
+            ComputePhysicalHandleAccess(grantedAccess),
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     } else {
@@ -1268,7 +1340,7 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
         }
 
         ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
-            grantedAccess,
+            ComputePhysicalHandleAccess(grantedAccess),
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, CREATE_NEW, fileAttributes, nullptr);
 
@@ -1355,12 +1427,13 @@ void LayerMount::Close(FileContext* ctx) {
         tracker->LogAccess(ctx->ownerPid, ctx->relativePath, OperationType::Close);
     }
 
-    if (ctx->handle != INVALID_HANDLE_VALUE) {
-        ::CloseHandle(ctx->handle);
-        ctx->handle = INVALID_HANDLE_VALUE;
-    }
+    CloseContextHandle(ctx);
 
     stats_.activeHandles.fetch_sub(1, std::memory_order_relaxed);
+}
+
+NTSTATUS LayerMount::Cleanup(FileContext* ctx) {
+    return CleanupContextHandle(ctx);
 }
 
 NTSTATUS LayerMount::EnsureHandleReady(FileContext* ctx) {
@@ -1624,46 +1697,22 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
         if (!NT_SUCCESS(status)) return status;
     }
 
-    // Mirror the SetInfo robustness: the kernel routes IRP_MJ_SET_INFORMATION
-    // through whichever handle exists, so an Overwrite arriving via a handle
-    // that lacks FILE_WRITE_DATA fails the direct SetFileInformationByHandle
-    // call with ERROR_ACCESS_DENIED. Additionally, CopyUp's internal handles
-    // (workdir commit, metadata-ADS write, basic-info reapply) can leave the
-    // kernel briefly tracking the upper-layer file object after RAII close,
-    // and a FileEndOfFileInfo set landing in that window sees
-    // ERROR_SHARING_VIOLATION even though ctx->handle has full share modes.
-    // Retry through a fresh transient FILE_WRITE_DATA handle in either case.
-    auto setSizeInfoRobust = [&](FILE_INFO_BY_HANDLE_CLASS cls,
-                                 LPVOID buf, DWORD bufSize) -> NTSTATUS {
-        if (::SetFileInformationByHandle(ctx->handle, cls, buf, bufSize)) {
-            return STATUS_SUCCESS;
-        }
-        DWORD firstErr = ::GetLastError();
-        if (firstErr != ERROR_ACCESS_DENIED &&
-            firstErr != ERROR_SHARING_VIOLATION) {
-            return NtStatusFromWin32(firstErr);
-        }
-        ScopedHandle transient = OpenTransientWritableHandle(
-            ctx->actualPath, FILE_WRITE_DATA, ctx->isDirectory);
-        if (!transient.IsValid()) {
-            return NtStatusFromWin32(firstErr);
-        }
-        if (!::SetFileInformationByHandle(transient.Get(), cls, buf, bufSize)) {
-            return NtStatusFromWin32(::GetLastError());
-        }
-        return STATUS_SUCCESS;
-    };
-
     FILE_END_OF_FILE_INFO eofInfo{};
-    NTSTATUS sizeStatus = setSizeInfoRobust(
-        FileEndOfFileInfo, &eofInfo, sizeof(eofInfo));
+    NTSTATUS sizeStatus = SetInfoWithTransientRetry(
+        *ctx, FILE_WRITE_DATA, [&](HANDLE h) {
+            return ::SetFileInformationByHandle(
+                h, FileEndOfFileInfo, &eofInfo, sizeof(eofInfo)) != FALSE;
+        });
     if (!NT_SUCCESS(sizeStatus)) return sizeStatus;
 
     if (allocationSize > 0) {
         FILE_ALLOCATION_INFO allocInfo{};
         allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
-        NTSTATUS allocStatus = setSizeInfoRobust(
-            FileAllocationInfo, &allocInfo, sizeof(allocInfo));
+        NTSTATUS allocStatus = SetInfoWithTransientRetry(
+            *ctx, FILE_WRITE_DATA, [&](HANDLE h) {
+                return ::SetFileInformationByHandle(
+                    h, FileAllocationInfo, &allocInfo, sizeof(allocInfo)) != FALSE;
+            });
         if (!NT_SUCCESS(allocStatus)) return allocStatus;
     }
 
@@ -1858,14 +1907,9 @@ NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
         if (h == INVALID_HANDLE_VALUE) {
             return NtStatusFromWin32(::GetLastError());
         }
-        FILE_DISPOSITION_INFO disp{};
-        disp.DeleteFileW = TRUE;
-        const BOOL ok = ::SetFileInformationByHandle(
-            h, FileDispositionInfo, &disp, sizeof(disp));
-        const DWORD setErr = ok ? 0 : ::GetLastError();
-        ::CloseHandle(h);
-        if (!ok) {
-            return NtStatusFromWin32(setErr);
+        NTSTATUS status = SetDeleteDispositionAndClose(h);
+        if (!NT_SUCCESS(status)) {
+            return status;
         }
         cache_->InvalidateWithAncestors(hostNorm);
         return STATUS_SUCCESS;
@@ -1932,6 +1976,26 @@ NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
     return STATUS_SUCCESS;
 }
 
+NTSTATUS LayerMount::DeleteStreamOnContext(FileContext* ctx) {
+    if (ctx->handle == INVALID_HANDLE_VALUE) {
+        // The context's reopen mask strips DELETE, so the disposition set
+        // needs its own access mask.
+        NTSTATUS reopenStatus = OpenContextHandleWithAccess(ctx, DELETE | SYNCHRONIZE);
+        if (!NT_SUCCESS(reopenStatus)) {
+            return reopenStatus;
+        }
+    }
+    const HANDLE streamHandle = ctx->handle;
+    ctx->handle = INVALID_HANDLE_VALUE;
+    ctx->handleNeedsReopen = false;
+    NTSTATUS status = SetDeleteDispositionAndClose(streamHandle);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    cache_->InvalidateWithAncestors(ctx->relativePath);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS LayerMount::Delete(FileContext* ctx, DWORD callerPid) {
     if (ctx == nullptr) {
         return STATUS_INVALID_PARAMETER;
@@ -1943,25 +2007,7 @@ NTSTATUS LayerMount::Delete(FileContext* ctx, DWORD callerPid) {
     }
 
     if (!ctx->streamSuffix.empty()) {
-        // Stream delete on an open handle: flip the delete disposition
-        // on the existing stream handle, close it (which commits the
-        // delete), and leave the host file + sibling streams intact.
-        if (ctx->handle == INVALID_HANDLE_VALUE) {
-            return STATUS_INVALID_HANDLE;
-        }
-        FILE_DISPOSITION_INFO disp{};
-        disp.DeleteFileW = TRUE;
-        const BOOL ok = ::SetFileInformationByHandle(
-            ctx->handle, FileDispositionInfo, &disp, sizeof(disp));
-        const DWORD setErr = ok ? 0 : ::GetLastError();
-        ::CloseHandle(ctx->handle);
-        ctx->handle = INVALID_HANDLE_VALUE;
-        ctx->handleNeedsReopen = false;
-        if (!ok) {
-            return NtStatusFromWin32(setErr);
-        }
-        cache_->InvalidateWithAncestors(ctx->relativePath);
-        return STATUS_SUCCESS;
+        return DeleteStreamOnContext(ctx);
     }
 
     std::wstring normalized = NormalizePath(ctx->relativePath);
@@ -1977,10 +2023,7 @@ NTSTATUS LayerMount::Delete(FileContext* ctx, DWORD callerPid) {
     ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(normalized);
     const bool lowerHasIt = lowerResolved.Found();
 
-    if (ctx->handle != INVALID_HANDLE_VALUE) {
-        ::CloseHandle(ctx->handle);
-        ctx->handle = INVALID_HANDLE_VALUE;
-    }
+    CloseContextHandle(ctx);
     ctx->handleNeedsReopen = false;
 
     const std::wstring upperPath = pathResolver_->GetUpperPath(normalized);
@@ -2652,6 +2695,67 @@ NTSTATUS LayerMount::DeleteReparsePoint(const std::wstring& relativePath,
     return STATUS_SUCCESS;
 }
 
+namespace {
+
+// The handle-based set survives a delete-pending mark on the upper file,
+// which a path-based ::SetFileAttributesW does not. Zero timestamps in
+// FILE_BASIC_INFO mean no change, so the call sets only the attributes.
+NTSTATUS SetContextAttributes(const FileContext& ctx, UINT32 fileAttributes) {
+    FILE_BASIC_INFO bi{};
+    bi.FileAttributes = fileAttributes;
+    return SetInfoWithTransientRetry(
+        ctx, FILE_WRITE_ATTRIBUTES, [&](HANDLE h) {
+            return ::SetFileInformationByHandle(
+                h, FileBasicInfo, &bi, sizeof(bi)) != FALSE;
+        });
+}
+
+FILETIME ToFileTime(UINT64 value) {
+    FILETIME ft{};
+    ft.dwLowDateTime  = static_cast<DWORD>(value);
+    ft.dwHighDateTime = static_cast<DWORD>(value >> 32);
+    return ft;
+}
+
+// A zero time leaves that timestamp unchanged.
+NTSTATUS SetContextTimes(const FileContext& ctx,
+                         UINT64 creationTime,
+                         UINT64 lastAccessTime,
+                         UINT64 lastWriteTime) {
+    FILETIME ct = ToFileTime(creationTime);
+    FILETIME at = ToFileTime(lastAccessTime);
+    FILETIME wt = ToFileTime(lastWriteTime);
+    return SetInfoWithTransientRetry(
+        ctx, FILE_WRITE_ATTRIBUTES, [&](HANDLE h) {
+            return ::SetFileTime(h,
+                                 creationTime   ? &ct : nullptr,
+                                 lastAccessTime ? &at : nullptr,
+                                 lastWriteTime  ? &wt : nullptr) != FALSE;
+        });
+}
+
+NTSTATUS SetContextAllocationSize(const FileContext& ctx, UINT64 allocationSize) {
+    FILE_ALLOCATION_INFO info{};
+    info.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
+    return SetInfoWithTransientRetry(
+        ctx, FILE_WRITE_DATA, [&](HANDLE h) {
+            return ::SetFileInformationByHandle(
+                h, FileAllocationInfo, &info, sizeof(info)) != FALSE;
+        });
+}
+
+NTSTATUS SetContextEndOfFile(const FileContext& ctx, UINT64 fileSize) {
+    FILE_END_OF_FILE_INFO info{};
+    info.EndOfFile.QuadPart = static_cast<LONGLONG>(fileSize);
+    return SetInfoWithTransientRetry(
+        ctx, FILE_WRITE_DATA, [&](HANDLE h) {
+            return ::SetFileInformationByHandle(
+                h, FileEndOfFileInfo, &info, sizeof(info)) != FALSE;
+        });
+}
+
+}
+
 NTSTATUS LayerMount::SetInfo(FileContext* ctx,
                             UINT32 fileAttributes,
                             UINT64 creationTime,
@@ -2675,82 +2779,20 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
     NTSTATUS status = EnsureInUpperLayer(ctx->relativePath, ctx);
     if (!NT_SUCCESS(status)) return status;
 
-    // Prefer handle-based attribute set so we don't have to re-open the
-    // file by path. The path-based ::SetFileAttributesW would otherwise
-    // be refused with STATUS_DELETE_PENDING (-> ERROR_ACCESS_DENIED)
-    // whenever the upper-layer file has been marked for deletion by a
-    // separate handle. SetFileInformationByHandle(FileBasicInfo) goes
-    // through ctx->handle, which is already past the kernel's open-by-
-    // name gate. Zero values for the timestamp fields signal "no
-    // change" to NT, so a basic-info call carrying only FileAttributes
-    // is metadata-only.
+    // The reopen comes after the copy-up decision. Before it, a context
+    // whose handle Cleanup closed would reopen the lower file, and the
+    // copy-up would then reopen it again on the upper file.
+    NTSTATUS ready = EnsureHandleReady(ctx);
+    if (!NT_SUCCESS(ready)) return ready;
+
     if (fileAttributes != INVALID_FILE_ATTRIBUTES) {
-        if (ctx->handle != INVALID_HANDLE_VALUE) {
-            FILE_BASIC_INFO bi{};
-            bi.FileAttributes = fileAttributes;
-            if (!::SetFileInformationByHandle(ctx->handle, FileBasicInfo,
-                                               &bi, sizeof(bi))) {
-                DWORD firstErr = ::GetLastError();
-                if (firstErr != ERROR_ACCESS_DENIED) {
-                    return NtStatusFromWin32(firstErr);
-                }
-                ScopedHandle transient = OpenTransientWritableHandle(
-                    ctx->actualPath, FILE_WRITE_ATTRIBUTES, ctx->isDirectory);
-                if (!transient.IsValid()) {
-                    return NtStatusFromWin32(firstErr);
-                }
-                if (!::SetFileInformationByHandle(transient.Get(),
-                        FileBasicInfo, &bi, sizeof(bi))) {
-                    return NtStatusFromWin32(::GetLastError());
-                }
-            }
-        } else if (!::SetFileAttributesW(ctx->actualPath.c_str(),
-                                          fileAttributes)) {
-            return NtStatusFromWin32(::GetLastError());
-        }
+        NTSTATUS s = SetContextAttributes(*ctx, fileAttributes);
+        if (!NT_SUCCESS(s)) return s;
     }
 
-    // SetFileTime / SetFileInformationByHandle require FILE_WRITE_ATTRIBUTES
-    // (timestamps) or FILE_WRITE_DATA / GENERIC_WRITE (sizes) on the handle.
-    // The kernel routes SET_INFORMATION calls through whichever open handle
-    // exists for the file, regardless of the access mask requested at open
-    // time, so a handle opened with e.g. DELETE alone can land here and the
-    // direct ::SetFileTime(ctx->handle, ...) would be refused with
-    // ERROR_ACCESS_DENIED. OpenTransientWritableHandle returns a transient
-    // ScopedHandle with the requested access; it closes automatically on
-    // scope exit.
-    auto setFileTimeRobust = [&](FILETIME* ct, FILETIME* at, FILETIME* wt) -> NTSTATUS {
-        if (::SetFileTime(ctx->handle, ct, at, wt)) {
-            return STATUS_SUCCESS;
-        }
-        DWORD firstErr = ::GetLastError();
-        if (firstErr != ERROR_ACCESS_DENIED) {
-            return NtStatusFromWin32(firstErr);
-        }
-        ScopedHandle transient = OpenTransientWritableHandle(
-            ctx->actualPath, FILE_WRITE_ATTRIBUTES, ctx->isDirectory);
-        if (!transient.IsValid()) {
-            return NtStatusFromWin32(firstErr);
-        }
-        if (!::SetFileTime(transient.Get(), ct, at, wt)) {
-            return NtStatusFromWin32(::GetLastError());
-        }
-        return STATUS_SUCCESS;
-    };
-
-    if (ctx->handle != INVALID_HANDLE_VALUE &&
-        (creationTime || lastAccessTime || lastWriteTime)) {
-        FILETIME ct{}; ct.dwLowDateTime  = static_cast<DWORD>(creationTime);
-                       ct.dwHighDateTime = static_cast<DWORD>(creationTime >> 32);
-        FILETIME at{}; at.dwLowDateTime  = static_cast<DWORD>(lastAccessTime);
-                       at.dwHighDateTime = static_cast<DWORD>(lastAccessTime >> 32);
-        FILETIME wt{}; wt.dwLowDateTime  = static_cast<DWORD>(lastWriteTime);
-                       wt.dwHighDateTime = static_cast<DWORD>(lastWriteTime >> 32);
-        NTSTATUS timeStatus = setFileTimeRobust(
-            creationTime    ? &ct : nullptr,
-            lastAccessTime  ? &at : nullptr,
-            lastWriteTime   ? &wt : nullptr);
-        if (!NT_SUCCESS(timeStatus)) return timeStatus;
+    if (creationTime || lastAccessTime || lastWriteTime) {
+        NTSTATUS s = SetContextTimes(*ctx, creationTime, lastAccessTime, lastWriteTime);
+        if (!NT_SUCCESS(s)) return s;
     }
 
     constexpr UINT64 kUnchanged = UINT64_MAX;
@@ -2767,51 +2809,12 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Sizes need a handle with write-data semantics. As with timestamps
-    // above, fall back to a transient FILE_WRITE_DATA / FILE_WRITE_ATTRIBUTES
-    // handle if ctx->handle was opened with insufficient access
-    // (ERROR_ACCESS_DENIED). Also retry on ERROR_SHARING_VIOLATION: CopyUp's
-    // internal handles (workdir commit, metadata-ADS write, basic-info
-    // reapply) can leave the kernel briefly tracking the upper-layer file
-    // object after RAII close, and a FileEndOfFileInfo set landing in that
-    // window sees a sharing conflict even though ctx->handle has full share
-    // modes.
-    auto setInfoByHandleRobust = [&](FILE_INFO_BY_HANDLE_CLASS cls,
-                                     LPVOID buf, DWORD bufSize,
-                                     DWORD transientAccess) -> NTSTATUS {
-        if (::SetFileInformationByHandle(ctx->handle, cls, buf, bufSize)) {
-            return STATUS_SUCCESS;
-        }
-        DWORD firstErr = ::GetLastError();
-        if (firstErr != ERROR_ACCESS_DENIED &&
-            firstErr != ERROR_SHARING_VIOLATION) {
-            return NtStatusFromWin32(firstErr);
-        }
-        ScopedHandle transient = OpenTransientWritableHandle(
-            ctx->actualPath, transientAccess, ctx->isDirectory);
-        if (!transient.IsValid()) {
-            return NtStatusFromWin32(firstErr);
-        }
-        if (!::SetFileInformationByHandle(transient.Get(), cls, buf, bufSize)) {
-            return NtStatusFromWin32(::GetLastError());
-        }
-        return STATUS_SUCCESS;
-    };
-
-    if (allocationSize != kUnchanged && ctx->handle != INVALID_HANDLE_VALUE) {
-        FILE_ALLOCATION_INFO allocInfo;
-        allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
-        NTSTATUS s = setInfoByHandleRobust(
-            FileAllocationInfo, &allocInfo, sizeof(allocInfo),
-            FILE_WRITE_DATA);
+    if (allocationSize != kUnchanged) {
+        NTSTATUS s = SetContextAllocationSize(*ctx, allocationSize);
         if (!NT_SUCCESS(s)) return s;
     }
-    if (fileSize != kUnchanged && ctx->handle != INVALID_HANDLE_VALUE) {
-        FILE_END_OF_FILE_INFO eofInfo;
-        eofInfo.EndOfFile.QuadPart = static_cast<LONGLONG>(fileSize);
-        NTSTATUS s = setInfoByHandleRobust(
-            FileEndOfFileInfo, &eofInfo, sizeof(eofInfo),
-            FILE_WRITE_DATA);
+    if (fileSize != kUnchanged) {
+        NTSTATUS s = SetContextEndOfFile(*ctx, fileSize);
         if (!NT_SUCCESS(s)) return s;
     }
 

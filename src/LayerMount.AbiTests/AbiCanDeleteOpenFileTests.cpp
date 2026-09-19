@@ -81,11 +81,8 @@ public:
         LayerMountHolder mount = CreateLayerMount(env);
 
         std::ofstream(env.Upper() + L"\\file.txt") << "data";
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
-        Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\file.txt",
-                GENERIC_READ | DELETE, 0u, 0u, &fh, &info));
+        LM_FILE_HANDLE fh = OpenWithAccess(mount.Get(), L"\\file.txt",
+            GENERIC_READ | DELETE);
 
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountCanDeleteOpenFile(fh));

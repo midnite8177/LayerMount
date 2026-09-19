@@ -17,11 +17,8 @@ public:
 
         std::ofstream(env.Upper() + L"\\gone.txt") << "to delete";
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
-        Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\gone.txt",
-                GENERIC_READ | DELETE, 0u, 0u, &fh, &info));
+        LM_FILE_HANDLE fh = OpenWithAccess(mount.Get(), L"\\gone.txt",
+            GENERIC_READ | DELETE);
 
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountDeleteOpenFile(fh));
@@ -40,11 +37,8 @@ public:
         env.WriteLowerFile(0, L"hidden.txt", "lower data");
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
-        Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\hidden.txt",
-                GENERIC_READ | DELETE, 0u, 0u, &fh, &info));
+        LM_FILE_HANDLE fh = OpenWithAccess(mount.Get(), L"\\hidden.txt",
+            GENERIC_READ | DELETE);
 
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountDeleteOpenFile(fh));
@@ -52,11 +46,7 @@ public:
 
         // Subsequent open must report not-found (the lower file is
         // hidden by the whiteout the engine created in upper).
-        LM_FILE_HANDLE fh2 = nullptr;
-        LM_FILE_INFO   info2{};
-        const HRESULT hrReopen = ::LayerMountOpenFile(mount.Get(),
-            L"\\hidden.txt", GENERIC_READ, 0u, 0u, &fh2, &info2);
-        Assert::IsTrue(IsFileNotFoundHr(hrReopen),
+        AssertOpenFailsNotFound(mount.Get(), L"\\hidden.txt",
             L"After delete, reopen must surface as FileNotFound");
     }
 

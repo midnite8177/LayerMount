@@ -347,7 +347,7 @@ public:
         LM_FILE_INFO   mainInfo{};
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountOpenFile(mount.Get(), L"\\big.bin",
-                FILE_GENERIC_READ | FILE_GENERIC_WRITE, 0u, 0u,
+                GENERIC_READ | GENERIC_WRITE, 0u, 0u,
                 &mainFh, &mainInfo));
         UINT32 mainWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,

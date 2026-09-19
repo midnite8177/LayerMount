@@ -1,10 +1,3 @@
-// LayerMountFile -- managed wrapper over an <c>LM_FILE_HANDLE</c>.
-//
-// Obtained from <see cref="LayerMount.OpenFile"/> and
-// <see cref="LayerMount.CreateFile"/>. Exposes the handle-bound file
-// primitives: Read / Write / Overwrite / Flush / GetFileInfo /
-// SetFileInfo.
-
 using System;
 using LayerMount.Interop;
 
@@ -12,8 +5,8 @@ namespace LayerMount;
 
 /// <summary>
 /// Managed wrapper over an open <c>LM_FILE_HANDLE</c>, exposing the
-/// handle-bound file primitives: read, write, overwrite, flush, and
-/// file-info queries and updates.
+/// handle-bound file primitives: read, write, overwrite, flush, cleanup,
+/// and file-info queries and updates.
 /// </summary>
 public sealed class LayerMountFile : IDisposable
 {
@@ -129,6 +122,25 @@ public sealed class LayerMountFile : IDisposable
         int hr = NativeMethods.LayerMountFlushFile(lease.Handle, originatorPid, &info);
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountFlushFile));
         Info = FileInfoSnapshot.From(info);
+    }
+
+    /// <summary>
+    /// Closes the NT handle behind this file and keeps the native
+    /// handle-table slot. It does not flush and does not change the
+    /// overlay's open-file count. A second call on a file with no open
+    /// NT handle does nothing and succeeds. A later read, write, overwrite, flush, or get-info on
+    /// this file reopens it by its path with the granted access minus
+    /// <c>DELETE</c>.
+    /// <see cref="Dispose"/> stays the call that frees the slot.
+    /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If the underlying native call returns a non-success HRESULT.
+    /// </exception>
+    public void Cleanup()
+    {
+        using var lease = new SafeHandleLease(_handle);
+        int hr = NativeMethods.LayerMountCleanupFile(lease.Handle);
+        HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountCleanupFile));
     }
 
     /// <summary>
