@@ -124,9 +124,9 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes:
 - `chore:` — tooling / build / non-code
 
 Area tags used in this repo: `vhd`, `vss`, `abi`, `native`, `net`, `deps`,
-`build`, `release`, `test-shared`, `security`, `copy-up`. Commit messages never
-reference a task, issue, or bead number; they describe the change in
-the project's own terms.
+`build`, `release`, `test-shared`, `security`, `copy-up`, `engine`. Commit
+messages never reference a task, issue, or bead number; they describe the
+change in the project's own terms.
 
 A defect in test-only code takes `test(test-shared):`, not `fix(...)`.
 `src/LayerMount.TestShared` and `src/LayerMount.NET.Tests` set

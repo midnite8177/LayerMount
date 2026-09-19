@@ -785,6 +785,20 @@ inline bool HasWriteAccess(UINT32 access) {
                       FILE_WRITE_EA | WRITE_DAC | WRITE_OWNER)) != 0;
 }
 
+inline UINT32 MapFileGenericRights(UINT32 access) {
+    UINT32 mapped = access & ~(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
+    if (access & GENERIC_READ)    mapped |= FILE_GENERIC_READ;
+    if (access & GENERIC_WRITE)   mapped |= FILE_GENERIC_WRITE;
+    if (access & GENERIC_EXECUTE) mapped |= FILE_GENERIC_EXECUTE;
+    if (access & GENERIC_ALL)     mapped |= FILE_ALL_ACCESS;
+    return mapped;
+}
+
+inline bool HasFileDataAccess(UINT32 access) {
+    return (MapFileGenericRights(access) &
+            (FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_EXECUTE)) != 0;
+}
+
 std::wstring NormalizePathPreserveCase(const std::wstring& path) {
     if (path.empty()) {
         return {};
@@ -967,16 +981,10 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         if (ctx->isDirectory) {
             status = copyUp_->CopyUpDirectory(hostNorm);
         } else if (!streamSuffix.empty()) {
-            // Stream opens against a lower-only host MUST force a full
-            // data + ADS copy-up. The metacopy optimization defers data
-            // replication until a main-stream read/write triggers
-            // CompleteLazyCopyUp, which a stream-only handle may never
-            // touch -- existing lower-layer ADS would be silently dropped.
+            // A metacopy shell has no lower streams until it fills, and a
+            // stream-only handle never fills it.
             status = copyUp_->CopyUpFile(hostNorm);
         } else {
-            // Large-file optimization: stage a metacopy shell (sparse file +
-            // :overlay metadata) and defer full data copy until the first
-            // read or write actually needs it.
             constexpr LONGLONG kMetacopyThresholdBytes = 1LL * 1024 * 1024;
             LARGE_INTEGER srcSize{};
             if (resolved.attributes != INVALID_FILE_ATTRIBUTES &&
@@ -1012,17 +1020,13 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     } else if (resolved.source == LayerSource::Upper &&
                HasWriteAccess(grantedAccess) &&
                !streamSuffix.empty()) {
-        // Writable stream Open against an upper host that's still a
-        // metacopy shell: finalize the metacopy now so a later main-stream
-        // read/write doesn't trigger CompleteLazyCopyUp and clobber the
-        // stream we're about to open (lower's ADS would be copied onto
-        // upper, overwriting any same-named stream). The lower-only Open
-        // arm above already handles the no-upper-yet case via CopyUpFile.
+        // A later fill would copy the lower's streams over the stream this
+        // open writes, so the shell fills first.
         const std::wstring upperHostPath = pathResolver_->GetUpperPath(hostNorm);
         const LayerMountMetadata metadata =
             MetadataADS::ReadLayerMountMetadata(upperHostPath, &config_);
         if (metadata.metacopy) {
-            NTSTATUS cpStatus = copyUp_->CompleteLazyCopyUp(hostNorm);
+            NTSTATUS cpStatus = FillShell(hostNorm, ctx.get());
             if (!NT_SUCCESS(cpStatus)) {
                 return cpStatus;
             }
@@ -1039,12 +1043,16 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     }
 
     if (resolved.source == LayerSource::Upper && streamSuffix.empty()) {
-        // Metacopy bookkeeping reads sidecar metadata off the *host* file;
-        // skip it for stream handles -- they don't drive lazy completion
-        // and the host's metacopy flag already governs main-stream reads.
         LayerMountMetadata metadata =
             MetadataADS::ReadLayerMountMetadata(ctx->actualPath, &config_);
         ctx->isMetacopyOnly = metadata.metacopy;
+    }
+
+    if (ctx->isMetacopyOnly && !ctx->isDirectory && HasFileDataAccess(grantedAccess)) {
+        NTSTATUS fillStatus = FillShell(hostNorm, ctx.get());
+        if (!NT_SUCCESS(fillStatus)) {
+            return fillStatus;
+        }
     }
 
     DWORD flags = ctx->isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0;
@@ -1232,21 +1240,8 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
             fileAttributes = FILE_ATTRIBUTE_NORMAL;
         }
 
-        // Stream creates against a host whose upper-layer copy doesn't yet
-        // hold the lower-layer data must finalize copy-up before the new
-        // stream attaches -- otherwise a later main-stream read/write
-        // triggers CompleteLazyCopyUp, which carries lower ADS onto upper
-        // and silently clobbers the just-created stream if its name
-        // collides with a lower stream (and re-attaches lower's other
-        // streams the user may not expect either).
-        //
-        // Two shapes need handling: a) host lives only in lower (no upper
-        // copy yet) -- full CopyUpFile; b) upper already holds a metacopy
-        // shell (sparse skeleton + :overlay metadata) -- CompleteLazyCopyUp
-        // promotes the shell into a full file (data + lower ADS) before we
-        // attach. After completion the lower ADS sit on upper; a colliding
-        // user stream name surfaces as STATUS_OBJECT_NAME_COLLISION from
-        // the CREATE_NEW below, which is the right answer.
+        // A shell fills before a stream attaches, so the lower's streams
+        // cannot land over the new one.
         if (!streamSuffix.empty()) {
             if (existsInLower && !lowerIsDir &&
                 !pathResolver_->ExistsInUpper(hostNorm)) {
@@ -1262,7 +1257,7 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
                 const LayerMountMetadata metadata =
                     MetadataADS::ReadLayerMountMetadata(upperHostPath, &config_);
                 if (metadata.metacopy) {
-                    NTSTATUS cpStatus = copyUp_->CompleteLazyCopyUp(hostNorm);
+                    NTSTATUS cpStatus = FillShell(hostNorm, ctx.get());
                     if (!NT_SUCCESS(cpStatus)) {
                         return cpStatus;
                     }
@@ -1378,13 +1373,19 @@ NTSTATUS LayerMount::EnsureHandleReady(FileContext* ctx) {
     return ReopenContextHandle(ctx);
 }
 
+NTSTATUS LayerMount::FillShell(const std::wstring& hostNorm, FileContext* ctx) {
+    NTSTATUS status = copyUp_->CompleteLazyCopyUp(hostNorm);
+    if (!NT_SUCCESS(status)) return status;
+    ctx->isMetacopyOnly = false;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS LayerMount::EnsureMetacopyMaterialized(FileContext* ctx) {
     if (!ctx->isMetacopyOnly) {
         return STATUS_SUCCESS;
     }
-    NTSTATUS status = copyUp_->CompleteLazyCopyUp(ctx->relativePath);
+    NTSTATUS status = FillShell(ctx->relativePath, ctx);
     if (!NT_SUCCESS(status)) return status;
-    ctx->isMetacopyOnly = false;
     return ReopenContextHandle(ctx);
 }
 
@@ -1406,6 +1407,8 @@ NTSTATUS LayerMount::Read(FileContext* ctx,
                          ULONG length,
                          DWORD callerPid,
                          PULONG bytesTransferred) {
+    // A paging read can arrive here. A copy-up or a handle reopen for a
+    // fill inside this call breaks the mapping the memory manager holds.
     if (ctx == nullptr) return STATUS_INVALID_HANDLE;
     NTSTATUS ready = EnsureHandleReady(ctx);
     if (!NT_SUCCESS(ready)) return ready;
@@ -1419,9 +1422,6 @@ NTSTATUS LayerMount::Read(FileContext* ctx,
             return STATUS_ACCESS_DENIED;
         }
     }
-
-    NTSTATUS metacopyStatus = EnsureMetacopyMaterialized(ctx);
-    if (!NT_SUCCESS(metacopyStatus)) return metacopyStatus;
 
     LARGE_INTEGER io;
     io.QuadPart = static_cast<LONGLONG>(offset);

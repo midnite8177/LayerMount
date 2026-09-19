@@ -411,20 +411,26 @@ upper layer instead of a full data copy:
 
 1. Create the upper file as a sparse file (`FSCTL_SET_SPARSE`) of the
    correct logical size, with no allocated data blocks.
-2. Mirror security, attributes, timestamps, and ADS — everything
-   *except* the data.
+2. Mirror security, attributes, and timestamps. The lower's streams
+   arrive with the fill, together with the data.
 3. Write the `:overlay` metadata with `metacopy = true` and the origin
    layer recorded.
 4. Ownership flips to the upper layer; the file context is marked
    `isMetacopyOnly = true`.
 
-When a read or write subsequently targets this file, `Read`/`Write`
-calls `CompleteLazyCopyUp` to stream the actual data from the recorded
-origin into the upper sparse skeleton, clear the metacopy flag, and
-reopen the handle with the caller's original `grantedAccess` so
-subsequent I/O still works. Without the sparse capability the engine
-forces a full copy-up at open time — a non-sparse "metacopy" would be a
-dense zero-filled stub, the worst of both worlds.
+The shell fills at the first open that asks for data: read data, write
+data, append data, or execute. `Open` calls `CompleteLazyCopyUp` before
+it opens the handle. The call streams the data from the recorded origin
+into the upper sparse skeleton and clears the metacopy flag. An open for
+attributes, security, or delete keeps the shell sparse. A failed fill
+fails the open with the fill's status and returns no handle. `Read`
+never copies a file up and never reopens the handle for a fill. The one
+reopen a read can do is the retarget after a rename. `Write` keeps a
+fill as a guard for a handle opened without data access. See
+[ADR 0006](../adr/0006-metacopy-shell-fills-at-open-for-data-access.md).
+Without the sparse capability the engine forces a full copy-up at open
+time, because a non-sparse metacopy would be a dense zero-filled stub
+with no benefit.
 
 ### Directory copy-up (`CopyUpDirectory`)
 

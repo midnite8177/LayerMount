@@ -141,11 +141,7 @@ struct FileContext {
     bool isMetacopyOnly = false;    // True if only metadata was copied up
     LARGE_INTEGER allocSize = {};
     DWORD ownerPid = 0;             // PID of process that opened this handle
-    UINT32 grantedAccess = 0;       // Access mask from Create/Open — used when
-                                    // the overlay needs to reopen the handle
-                                    // internally (e.g., after metacopy
-                                    // completion) so the caller's original
-                                    // access rights survive.
+    UINT32 grantedAccess = 0;
     UINT32 createOptions = 0;       // Original open flags; reopen paths must
                                     // preserve FILE_OPEN_REPARSE_POINT.
     bool handleNeedsReopen = false; // Rename retargets lazily on next use.
@@ -383,6 +379,11 @@ public:
     // write-bearing access is requested against a lower-only entry), and
     // fills outInfo. Returns the new context via outCtx (caller takes
     // ownership).
+    //
+    // A metacopy shell fills before its handle opens when grantedAccess
+    // asks for data: read, write, append, or execute. An open for
+    // attributes, security, or delete keeps the shell sparse. A failed
+    // fill returns its status, leaves *outCtx null, and opens no handle.
     NTSTATUS Open(const std::wstring& relativePath,
                   UINT32 grantedAccess,
                   UINT32 createOptions,
@@ -411,10 +412,8 @@ public:
     void Close(FileContext* ctx);
 
     // Read up to `length` bytes from the open file at the given absolute
-    // offset. Completes any deferred metacopy before reading and
-    // reopens the underlying NT handle with the caller's original
-    // grantedAccess so subsequent writes still work. Returns
-    // STATUS_END_OF_FILE on read past EOF (with *bytesTransferred = 0).
+    // offset. Returns STATUS_END_OF_FILE on read past EOF (with
+    // *bytesTransferred = 0).
     // callerPid: 0 = use ctx->ownerPid (opener's PID) for access check;
     // non-zero = use this PID instead (host adapters thread the
     // originator PID in from their dispatch surface).
@@ -642,11 +641,13 @@ public:
     HRESULT SetProcessTrackerEnabled(bool enabled);
 
 private:
-    // Complete a pending metacopy before ctx's handle serves data. A
-    // metacopy shell is sparse with no real data blocks: skipping this
-    // before a read returns zeros instead of the lower-layer content, and
-    // skipping it before a write lets a later metacopy completion
-    // overwrite the bytes the write just landed.
+    // Fill a metacopy shell from its recorded origin. Returns the fill's
+    // status on failure and clears ctx->isMetacopyOnly on success.
+    NTSTATUS FillShell(const std::wstring& hostNorm, FileContext* ctx);
+
+    // Write guard. Only Write calls it, for a handle that was opened
+    // without data access and reached the write path on a shell. Fills
+    // the shell, then reopens the handle.
     NTSTATUS EnsureMetacopyMaterialized(FileContext* ctx);
 
     // --- Members (declared in construction order) ---

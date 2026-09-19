@@ -1,0 +1,3 @@
+# A metacopy shell fills at the open that asks for data
+
+A metacopy shell holds a lower file's size and metadata in the upper with no data. A paging read can arrive on any handle that maps it. The engine fills the shell inside the open when the granted access includes read data, write data, append data, or execute. An open for attributes, security, or delete keeps the shell sparse. A failed fill fails the open with the fill's status and returns no handle. We rejected the lazy fill inside the read because a paging read must never copy data or swap the handle under the memory manager, and a fill inside the read did both.

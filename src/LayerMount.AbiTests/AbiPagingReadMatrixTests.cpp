@@ -13,15 +13,15 @@ namespace {
 constexpr UINT64 kPageBytes         = 4096;
 constexpr UINT64 kStraddleReadBytes = 8192;
 
-// The engine stages a metacopy shell only for a lower file larger than
-// 1 MiB, so the shell origin adds 2 MiB to every listed size.
-constexpr UINT64 kAboveMetacopyThresholdBytes = 2ull * 1024 * 1024;
-
 constexpr UINT32 kCopyUpAccess = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
 
 // HRESULT_FROM_NT(STATUS_END_OF_FILE), the form the ABI returns for a read
 // at or past the end of the file.
 constexpr HRESULT kHrEndOfFileNt = static_cast<HRESULT>(0xD0000011);
+
+// HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND), the form the ABI returns
+// when a fill finds no origin file.
+constexpr HRESULT kHrObjectNameNotFoundNt = static_cast<HRESULT>(0xD0000034);
 
 constexpr BYTE kSentinel = 0xCD;
 
@@ -44,6 +44,23 @@ const wchar_t* OriginName(Origin origin) {
     case Origin::Lower:             return L"lower";
     }
     return L"unknown";
+}
+
+struct OriginTraits {
+    bool stagesOnUpper;
+    bool isShell;
+    bool exactAllocation;
+};
+
+OriginTraits TraitsOf(Origin origin) {
+    switch (origin) {
+    case Origin::UpperThroughMount: return {true, false, true};
+    case Origin::MetacopyShell:     return {true, true, false};
+    case Origin::LowerCopiedUp:     return {true, false, true};
+    case Origin::UpperBeforeMount:  return {true, false, true};
+    case Origin::Lower:             return {false, false, true};
+    }
+    return {false, false, true};
 }
 
 enum class ReadShape { Inside, Straddle, AtEnd };
@@ -116,6 +133,30 @@ std::wstring OverlayPath(Origin origin, UINT64 listedSize) {
 
 bool IsEndOfFileHr(HRESULT hr) {
     return hr == kHrEndOfFileNt || hr == HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
+}
+
+std::wstring UpperPathOf(const TempLayerEnv& env, Origin origin, UINT64 listedSize) {
+    return env.Upper() + L"\\" + FileName(origin, listedSize);
+}
+
+std::wstring LowerPathOf(const TempLayerEnv& env, Origin origin, UINT64 listedSize) {
+    return env.Lower(0) + L"\\" + FileName(origin, listedSize);
+}
+
+// The volume allocates a sparse file's clusters when cached writes reach
+// the disk, so the probe flushes the file first.
+UINT64 FlushAndMeasureAllocation(const std::wstring& path) {
+    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, 0, nullptr);
+    Assert::IsTrue(h != INVALID_HANDLE_VALUE, (L"open for flush " + path).c_str());
+    Assert::IsTrue(::FlushFileBuffers(h) != FALSE, (L"FlushFileBuffers " + path).c_str());
+    ::CloseHandle(h);
+    DWORD high = 0;
+    const DWORD low = ::GetCompressedFileSizeW(path.c_str(), &high);
+    Assert::IsTrue(low != INVALID_FILE_SIZE || ::GetLastError() == NO_ERROR,
+                   (L"GetCompressedFileSizeW " + path).c_str());
+    return (static_cast<UINT64>(high) << 32) | low;
 }
 
 class FileHandleHolder {
@@ -258,25 +299,31 @@ void CreateThroughMount(LM_HANDLE mount, const std::wstring& overlayPath,
         (L"write count " + overlayPath).c_str());
 }
 
-struct WritableOpenRecord {
+struct OpenRecord {
     LM_FILE_INFO openInfo{};
     LM_FILE_INFO handleInfo{};
 };
 
-WritableOpenRecord OpenWritableAndClose(LM_HANDLE mount, const std::wstring& overlayPath) {
-    FileHandleHolder   fh;
-    WritableOpenRecord rec;
+OpenRecord OpenAndClose(LM_HANDLE mount, const std::wstring& overlayPath,
+                        UINT32 grantedAccess) {
+    FileHandleHolder fh;
+    OpenRecord       rec;
     Assert::AreEqual<HRESULT>(S_OK,
         ::LayerMountOpenFile(mount, overlayPath.c_str(),
-            /*grantedAccess*/ kCopyUpAccess,
+            grantedAccess,
             /*createOptions*/ 0u, /*originatorPid*/ 0u,
             fh.AddressOf(), &rec.openInfo),
-        (L"writable LayerMountOpenFile " + overlayPath).c_str());
+        (L"LayerMountOpenFile " + overlayPath).c_str());
     Assert::AreEqual<HRESULT>(S_OK,
         ::LayerMountGetFileInfo(fh.Get(), &rec.handleInfo),
-        (L"LayerMountGetFileInfo after writable open " + overlayPath).c_str());
+        (L"LayerMountGetFileInfo after open " + overlayPath).c_str());
     return rec;
 }
+
+struct MountedEnv {
+    const TempLayerEnv& env;
+    LM_HANDLE           mount;
+};
 
 struct CellRecord {
     HRESULT        hr            = E_FAIL;
@@ -286,6 +333,7 @@ struct CellRecord {
     bool           tailUntouched = false;
     LM_FILE_INFO   openInfo{};
     LM_FILE_INFO   handleInfo{};
+    UINT64         upperAllocationBeforeRead = 0;
     DirectoryEntry dirEntry;
     PathQuery      path;
 };
@@ -295,9 +343,11 @@ bool TailIsAll(const std::vector<BYTE>& buffer, UINT32 from, BYTE value) {
                        [value](BYTE b) { return b == value; });
 }
 
-CellRecord ReadCell(LM_HANDLE mount, const MatrixCell& cell, const ReadRequest& request) {
+CellRecord ReadCell(const MountedEnv& mounted, const MatrixCell& cell,
+                    const ReadRequest& request) {
     const std::wstring overlayPath = OverlayPath(cell.origin, cell.listedSize);
     const std::wstring fileName    = FileName(cell.origin, cell.listedSize);
+    const LM_HANDLE    mount       = mounted.mount;
     CellRecord rec;
 
     FileHandleHolder fh;
@@ -310,6 +360,10 @@ CellRecord ReadCell(LM_HANDLE mount, const MatrixCell& cell, const ReadRequest& 
     Assert::AreEqual<HRESULT>(S_OK,
         ::LayerMountGetFileInfo(fh.Get(), &rec.handleInfo),
         (L"LayerMountGetFileInfo before read " + overlayPath).c_str());
+    if (TraitsOf(cell.origin).stagesOnUpper) {
+        rec.upperAllocationBeforeRead =
+            FlushAndMeasureAllocation(UpperPathOf(mounted.env, cell.origin, cell.listedSize));
+    }
 
     std::vector<BYTE> buffer(request.length, kSentinel);
     rec.hr = ::LayerMountReadFile(fh.Get(), buffer.data(), request.offset,
@@ -363,6 +417,7 @@ std::wstring CellLine(const MatrixCell& cell, const ReadRequest& request,
     line += rec.hr == S_OK ? (rec.contentMatch ? L"1" : L"0") : L"-";
     line += L" tail-zeroed=" + std::to_wstring(rec.tailZeroed ? 1 : 0);
     line += L" tail-untouched=" + std::to_wstring(rec.tailUntouched ? 1 : 0);
+    line += L" alloc-upper-pre-read=" + std::to_wstring(rec.upperAllocationBeforeRead);
     AppendSizeFields(line, SizesOf(rec));
     line += L" source=" + std::to_wstring(static_cast<int>(rec.path.source));
     line += L" attrs=" + Hex(rec.path.attributes);
@@ -419,18 +474,36 @@ void AssertSizesAgree(const MatrixCell& cell, const CellRecord& rec) {
                              FailMessage(cell, L"path query file size").c_str());
 }
 
+struct ReportedAllocation {
+    UINT64         value;
+    const wchar_t* producer;
+};
+
 // The matrix stages no preallocation, so the rounded file size is the exact
-// value every producer must report.
+// value every producer must report. A filled shell keeps the sparse
+// attribute, so every producer reports at or above the rounded size. The
+// producers do not have to agree: a producer with a handle reports the
+// volume's real allocation, and a listing reports the rounded size.
 void AssertOneAllocation(const MatrixCell& cell, const CellRecord& rec) {
-    const UINT64 expected = RoundUpToPage(cell.stagedSize);
-    Assert::AreEqual<UINT64>(expected, rec.openInfo.allocationSize,
-                             FailMessage(cell, L"open allocation size").c_str());
-    Assert::AreEqual<UINT64>(expected, rec.handleInfo.allocationSize,
-                             FailMessage(cell, L"handle allocation size").c_str());
-    Assert::AreEqual<UINT64>(expected, rec.dirEntry.info.allocationSize,
-                             FailMessage(cell, L"directory allocation size").c_str());
-    Assert::AreEqual<UINT64>(expected, rec.path.allocationSize,
-                             FailMessage(cell, L"path query allocation size").c_str());
+    const UINT64             expected   = RoundUpToPage(cell.stagedSize);
+    const ReportedAllocation reported[] = {
+        {rec.openInfo.allocationSize, L"open allocation size"},
+        {rec.handleInfo.allocationSize, L"handle allocation size"},
+        {rec.dirEntry.info.allocationSize, L"directory allocation size"},
+        {rec.path.allocationSize, L"path query allocation size"},
+    };
+    if (TraitsOf(cell.origin).exactAllocation) {
+        for (const ReportedAllocation& r : reported) {
+            Assert::AreEqual<UINT64>(expected, r.value, FailMessage(cell, r.producer).c_str());
+        }
+        return;
+    }
+    for (const ReportedAllocation& r : reported) {
+        Assert::IsTrue(r.value >= expected,
+                       (FailMessage(cell, r.producer) + L" reports " +
+                        std::to_wstring(r.value) + L", rounded size " +
+                        std::to_wstring(expected)).c_str());
+    }
 }
 
 void AssertPathResolves(const MatrixCell& cell, const CellRecord& rec) {
@@ -443,17 +516,32 @@ void AssertPathResolves(const MatrixCell& cell, const CellRecord& rec) {
                    FailMessage(cell, L"resolve path attributes").c_str());
 }
 
+void AssertShellFilledAtOpen(const MatrixCell& cell, const CellRecord& rec) {
+    if (!TraitsOf(cell.origin).isShell) return;
+    Assert::IsTrue(rec.upperAllocationBeforeRead >= cell.stagedSize,
+                   FailMessage(cell, L"upper allocation before the read").c_str());
+}
+
 void AssertObservedBehavior(const MatrixCell& cell, const ReadRequest& request,
                             const CellRecord& rec) {
     AssertReadShape(cell, request, rec);
     AssertSizesAgree(cell, rec);
     AssertOneAllocation(cell, rec);
     AssertPathResolves(cell, rec);
+    AssertShellFilledAtOpen(cell, rec);
 }
 
-void StageShell(LM_HANDLE mount, UINT64 listedSize) {
-    const WritableOpenRecord rec =
-        OpenWritableAndClose(mount, OverlayPath(Origin::MetacopyShell, listedSize));
+void AssertShellIsSparse(const std::wstring& upperPath, UINT64 fileSize, const wchar_t* what) {
+    const UINT64 allocated = FlushAndMeasureAllocation(upperPath);
+    Assert::IsTrue(allocated < fileSize,
+                   (std::wstring(what) + L": upper allocates " + std::to_wstring(allocated) +
+                    L" of " + std::to_wstring(fileSize)).c_str());
+}
+
+void StageShell(const MountedEnv& mounted, UINT64 listedSize) {
+    const LM_HANDLE  mount = mounted.mount;
+    const OpenRecord rec   = OpenAndClose(
+        mount, OverlayPath(Origin::MetacopyShell, listedSize), kAttributeOnlyAccess);
     const DirectoryEntry dirEntry =
         ListRootEntry(mount, FileName(Origin::MetacopyShell, listedSize));
     const PathQuery path = QueryPath(mount, OverlayPath(Origin::MetacopyShell, listedSize));
@@ -463,18 +551,22 @@ void StageShell(LM_HANDLE mount, UINT64 listedSize) {
     Assert::IsTrue((rec.openInfo.fileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0,
                    (L"the staged file is a metacopy shell, size " +
                     std::to_wstring(listedSize)).c_str());
+    AssertShellIsSparse(UpperPathOf(mounted.env, Origin::MetacopyShell, listedSize),
+                        StagedSize(Origin::MetacopyShell, listedSize),
+                        L"an attribute-only open keeps the shell sparse");
 }
 
-void StageThroughMount(LM_HANDLE mount, Origin origin, UINT64 listedSize) {
+void StageThroughMount(const MountedEnv& mounted, Origin origin, UINT64 listedSize) {
     switch (origin) {
     case Origin::UpperThroughMount:
-        CreateThroughMount(mount, OverlayPath(origin, listedSize), PatternBytes(listedSize));
+        CreateThroughMount(mounted.mount, OverlayPath(origin, listedSize),
+                           PatternBytes(listedSize));
         break;
     case Origin::LowerCopiedUp:
-        (void)OpenWritableAndClose(mount, OverlayPath(origin, listedSize));
+        (void)OpenAndClose(mounted.mount, OverlayPath(origin, listedSize), kCopyUpAccess);
         break;
     case Origin::MetacopyShell:
-        StageShell(mount, listedSize);
+        StageShell(mounted, listedSize);
         break;
     case Origin::UpperBeforeMount:
     case Origin::Lower:
@@ -486,9 +578,10 @@ void RunMatrixFor(Origin origin) {
     TempLayerEnv env(1);
     StageBeforeMount(env, origin);
     LayerMountHolder mount = CreateLayerMount(env);
+    const MountedEnv mounted{env, mount.Get()};
 
     for (UINT64 listed : kSizes) {
-        StageThroughMount(mount.Get(), origin, listed);
+        StageThroughMount(mounted, origin, listed);
     }
 
     for (UINT64 listed : kSizes) {
@@ -499,7 +592,7 @@ void RunMatrixFor(Origin origin) {
                 Logger::WriteMessage(SkipLine(cell).c_str());
                 continue;
             }
-            const CellRecord rec = ReadCell(mount.Get(), cell, request);
+            const CellRecord rec = ReadCell(mounted, cell, request);
             Logger::WriteMessage(CellLine(cell, request, rec).c_str());
             AssertObservedBehavior(cell, request, rec);
         }
@@ -528,6 +621,61 @@ public:
 
     TEST_METHOD(Lower_ShortReadZeroFillsTailAndSizesAgree) {
         RunMatrixFor(Origin::Lower);
+    }
+
+    TEST_METHOD(MetacopyShell_ReadOnAttributeOnlyHandle_FailsAndKeepsShellSparse) {
+        constexpr UINT64 listed = 0;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        FileHandleHolder fh;
+        LM_FILE_INFO     info{};
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountOpenFile(mount.Get(),
+                OverlayPath(Origin::MetacopyShell, listed).c_str(),
+                kAttributeOnlyAccess,
+                /*createOptions*/ 0u, /*originatorPid*/ 0u,
+                fh.AddressOf(), &info),
+            L"attribute-only LayerMountOpenFile");
+        Assert::IsTrue((info.fileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0,
+                       L"the attribute-only open staged a metacopy shell");
+
+        std::vector<BYTE> buffer(static_cast<size_t>(kPageBytes), kSentinel);
+        UINT32            count = 0;
+        const HRESULT     hr    = ::LayerMountReadFile(fh.Get(), buffer.data(), /*offset*/ 0,
+            static_cast<UINT32>(kPageBytes), /*originatorPid*/ 0u, &count);
+        Assert::IsTrue(FAILED(hr),
+                       (L"a read on a handle with no read-data right fails, got " +
+                        Hex(static_cast<unsigned>(hr))).c_str());
+        AssertShellIsSparse(UpperPathOf(env, Origin::MetacopyShell, listed),
+                            StagedSize(Origin::MetacopyShell, listed),
+                            L"the read path does not fill the shell");
+    }
+
+    TEST_METHOD(MetacopyShell_OpenForReadWithOriginMissing_FailsAndReturnsNoHandle) {
+        constexpr UINT64 listed = 0;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+        StageShell(MountedEnv{env, mount.Get()}, listed);
+
+        Assert::IsTrue(
+            ::DeleteFileW(LowerPathOf(env, Origin::MetacopyShell, listed).c_str()) != FALSE,
+            L"the lower origin is removable");
+
+        LM_FILE_HANDLE fh = nullptr;
+        LM_FILE_INFO   info{};
+        const HRESULT  hr = ::LayerMountOpenFile(mount.Get(),
+            OverlayPath(Origin::MetacopyShell, listed).c_str(),
+            /*grantedAccess*/ GENERIC_READ,
+            /*createOptions*/ 0u, /*originatorPid*/ 0u, &fh, &info);
+        Assert::AreEqual<HRESULT>(kHrObjectNameNotFoundNt, hr,
+                                  L"the open for read data fails with the fill's status");
+        Assert::IsNull(fh, L"a failed open returns no handle");
+        AssertShellIsSparse(UpperPathOf(env, Origin::MetacopyShell, listed),
+                            StagedSize(Origin::MetacopyShell, listed),
+                            L"a failed fill leaves the shell sparse");
     }
 
     TEST_METHOD(Preallocation_AboveRounding_StaysVisibleOnHandle) {

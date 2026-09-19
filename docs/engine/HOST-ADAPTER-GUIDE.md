@@ -77,8 +77,9 @@ every bit its target actually supports and no more.
   dispatcher picks between the two backends and reads across them.
 - `LM_CAP_SPARSE_FILES`. Without it, metacopy for a file above the
   metacopy size threshold copies its data in full at copy-up time
-  (`CopyUpFile`) instead of copying metadata only and deferring data to
-  first read, because `FSCTL_SET_SPARSE` is not available on the upper.
+  (`CopyUpFile`), because `FSCTL_SET_SPARSE` is not available on the
+  upper. With it, the engine copies the metadata only and fills the data
+  at the first open that asks for data access.
 - `LM_CAP_REPARSE_POINTS`. Without it, renaming a directory whose
   source is a reparse point falls through to a full recursive copy that
   copies the link target's contents into a regular directory. The data
@@ -115,9 +116,13 @@ a new `LM_FILE_HANDLE` and its `LM_FILE_INFO`. `LayerMountCreateFile`
 (`LayerMount.CreateFile`) does the same for a path that does not yet
 exist, taking `fileAttributes` and an optional self-relative security
 descriptor; it returns `E_INVALIDARG` if that descriptor is non-NULL
-but not structurally valid. `LayerMountReadFile`
-(`LayerMountFile.Read`) completes a pending metacopy before reading, so
-a read against a metacopy shell always returns real data; it writes
+but not structurally valid. An open for data access (read data, write
+data, append data, or execute) fills a metacopy shell before it
+returns. An open for attributes, security, or delete keeps the shell
+sparse. A failed fill fails the open with the fill's status and
+returns no handle. `LayerMountReadFile` (`LayerMountFile.Read`) never
+copies a file up and never reopens the handle for a fill. The one reopen
+a read can do is the retarget after a rename. It writes
 `*bytesTransferred` even on failure. `LayerMountWriteFile`
 (`LayerMountFile.Write`) copies the file up into the upper layer first
 if it is not already there; `constrainedIo` rejects a write that would

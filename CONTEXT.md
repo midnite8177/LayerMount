@@ -52,7 +52,7 @@ The promotion of a file or directory from a lower into the upper on first write.
 _Avoid_: promote, promotion
 
 **Metacopy**:
-The copy-up mode in which metadata copies up at once and data copies up on first read or close.
+The copy-up mode in which metadata copies up at once and data copies up at the first open that asks for data access.
 _Avoid_: lazy copy-up
 
 **Metacopy shell**:

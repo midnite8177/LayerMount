@@ -63,7 +63,7 @@ For the deeper engine architecture (path resolution, whiteouts, copy-up flavors,
 ## Features
 
 - **Overlay semantics** — upper / lower / work paths with copy-up on first write, file and directory whiteouts, opaque-directory markers.
-- **Metacopy** — copies up metadata immediately and completes data copy on first read or close, keeping mount-time fast.
+- **Metacopy** — copies up metadata at once and copies the data at the first open that asks for data access, so a mount stays fast.
 - **VHD / VHDX layers** — attach a virtual disk at mount time and use its volume GUID as a high-priority lower. See [docs/engine/LAYER-SOURCES.md](docs/engine/LAYER-SOURCES.md) for how to create, attach, list, and clean these up.
 - **VSS snapshot layers** — take a Volume Shadow Copy at mount time and use it as a read-only lower without holding open file handles. See [docs/engine/LAYER-SOURCES.md](docs/engine/LAYER-SOURCES.md) for how to create, list, and clean these up.
 - **`.lmnt` layer images** — pack a directory tree into a portable zstd-compressed image with a SHA-256 checksum in the header; supports differential packs against a base directory and multi-image manifests. See [docs/engine/LAYER-IMAGE-FORMAT.md](docs/engine/LAYER-IMAGE-FORMAT.md) for the byte-level format.
