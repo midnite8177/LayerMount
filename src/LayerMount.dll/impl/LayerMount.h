@@ -280,6 +280,28 @@ struct InternalFileInfo {
     UINT32 EaSize;
 };
 
+inline UINT64 ComposeUInt64(DWORD high, DWORD low) {
+    return (static_cast<UINT64>(high) << 32) | low;
+}
+
+constexpr UINT64 kAllocationGranularityBytes = 4096;
+
+inline UINT64 AllocationSizeFor(UINT64 fileSize) {
+    return (fileSize + kAllocationGranularityBytes - 1) & ~(kAllocationGranularityBytes - 1);
+}
+
+// Every producer of file info reports this value, so it is never below the
+// file size.
+inline UINT64 AllocationSizeFor(UINT64 fileSize, UINT64 realAllocation) {
+    const UINT64 rounded = AllocationSizeFor(fileSize);
+    return realAllocation > rounded ? realAllocation : rounded;
+}
+
+struct ResolvedSizes {
+    UINT64 fileSize       = 0;
+    UINT64 allocationSize = 0;
+};
+
 // Single named-data-stream entry as observed against the resolved
 // physical path of a file. Engine-internal; translated to LM_STREAM_INFO
 // at the ABI boundary. Names carry NTFS's native form (e.g. ":mystream:$DATA").
@@ -309,6 +331,10 @@ public:
     const LayerMountStats& Stats() const { return stats_; }
 
     // --- Convenience methods used by callbacks ---
+
+    // Both sizes are zero for a directory, a whiteout, a path that does not
+    // exist, and a path the engine cannot stat.
+    ResolvedSizes SizesOf(const ResolvedPath& resolved) const;
 
     // Ensure a file is in the upper layer (copy-up if needed).
     // Updates FileContext on success.

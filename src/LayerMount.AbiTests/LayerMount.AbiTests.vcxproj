@@ -95,6 +95,7 @@
     <ClCompile Include="AbiDeleteOpenFileTests.cpp" />
     <ClCompile Include="AbiHostMountPointTests.cpp" />
     <ClCompile Include="AbiTransientLayerMountTests.cpp" />
+    <ClCompile Include="AbiPagingReadMatrixTests.cpp" />
   </ItemGroup>
 
   <ItemGroup>
