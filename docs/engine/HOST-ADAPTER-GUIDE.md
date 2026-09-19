@@ -4,13 +4,13 @@ A host adapter binds the engine to a filesystem host. It turns the
 filesystem host's create, read, write, and close requests into calls
 against `LM_HANDLE` and `LM_FILE_HANDLE`, and turns the engine's
 answers back into whatever shape the filesystem host expects. This
-document covers the seven rules a host adapter author needs that live
+document covers the eight rules a host adapter author needs that live
 only in the native header and its implementation: handle lifecycle and
 the host-attached flag, capability bits and their fallbacks, the mapping
-from driver-style I/O requests to the engine's file API, event callback
-threading, the two-call buffer pattern, the reserved HRESULT range, and
-HRESULT-to-NTSTATUS conversion. For layer sources (VHD/VHDX, VSS) and
-the `.lmnt` layer image format, see
+from driver-style I/O requests to the engine's file API, paging reads,
+event callback threading, the two-call buffer pattern, the reserved
+HRESULT range, and HRESULT-to-NTSTATUS conversion. For layer sources
+(VHD/VHDX, VSS) and the `.lmnt` layer image format, see
 [LAYER-SOURCES.md](LAYER-SOURCES.md) and
 [LAYER-IMAGE-FORMAT.md](LAYER-IMAGE-FORMAT.md) instead of repeating
 them here.
@@ -108,6 +108,7 @@ from the engine's exports. The mapping:
 | Create | `LayerMountCreateFile` |
 | Read | `LayerMountReadFile` |
 | Write | `LayerMountWriteFile` |
+| Cleanup | `LayerMountCleanupFile` |
 | Close | `LayerMountCloseFile` |
 
 `LayerMountOpenFile` (`LayerMount.OpenFile`) opens the file or directory
@@ -121,23 +122,80 @@ data, append data, or execute) fills a metacopy shell before it
 returns. An open for attributes, security, or delete keeps the shell
 sparse. A failed fill fails the open with the fill's status and
 returns no handle. `LayerMountReadFile` (`LayerMountFile.Read`) never
-copies a file up and never reopens the handle for a fill. The one reopen
-a read can do is the retarget after a rename. It writes
-`*bytesTransferred` even on failure. `LayerMountWriteFile`
-(`LayerMountFile.Write`) copies the file up into the upper layer first
-if it is not already there; `constrainedIo` rejects a write that would
-extend the file past its current allocation. `LayerMountCloseFile`
-(`LayerMountFile.Dispose`) releases the file handle's slot and
-decrements the parent overlay's open-file count. This is the call that
-eventually lets `LayerMountDestroy` succeed, per the handle lifecycle
-rule above.
+copies a file up and never reopens the handle for a fill. A read reopens
+the handle only after a rename or after a cleanup. It writes
+`*bytesTransferred` even on failure.
+`LayerMountWriteFile` (`LayerMountFile.Write`) copies the file up into
+the upper layer first if it is not already there; `constrainedIo`
+rejects a write that would extend the file past its current allocation.
+`LayerMountCleanupFile` (`LayerMountFile.Cleanup`) closes the NT handle
+and keeps the file handle's slot. It does not flush and does not change
+the open-file count. A second cleanup on a file handle with no open NT
+handle returns success and does nothing. A later read, write, overwrite, flush, or
+get-info on that handle reopens the file by its path with the granted
+access minus `DELETE`; a granted mask with `FILE_WRITE_DATA` or
+`FILE_APPEND_DATA` reopens with `FILE_READ_DATA` as well. On a deleted
+file that call fails with file not found. A later delete on that handle
+also works: a plain file deletes by its path, and a stream reopens by
+its path with `DELETE` access. `LayerMountCloseFile` (`LayerMountFile.Dispose`) releases the
+file handle's slot and decrements the parent overlay's open-file count.
+It is the only call that frees the slot. When the last slot is free,
+`LayerMountDestroy` can succeed, per the handle lifecycle rule above.
 
-All five, along with every other file primitive invoked from inside a
-host-adapter callback, take an `originatorPid` (LayerMount.h:699-707).
+Open, Create, Read, Write, and the other file primitives that a
+host-adapter callback invokes take an `originatorPid` (see the file
+primitives preamble in `LayerMount.h`). Cleanup and Close take only the
+file handle.
 Pass 0 to use the current process. A host adapter should instead read
 the true originating process ID off its own dispatch surface and pass
 that through, so process-tracker rules evaluate against the real
 requester rather than the dispatcher thread's PID.
+
+## Paging reads
+
+A paging read is a read that the memory manager sends on behalf of a
+mapped file or the system cache. It is page-aligned and often runs
+past the end of the file. It can arrive after the host adapter's
+cleanup, because a mapped section or the cache outlives the user
+handle. Four rules cover it.
+
+Keep the `LM_FILE_HANDLE` until the host adapter's close and call
+`LayerMountCloseFile` (`LayerMountFile.Dispose`) there. Or call
+`LayerMountCleanupFile` (`LayerMountFile.Cleanup`) at the host
+adapter's cleanup and `LayerMountCloseFile` at the host adapter's
+close. Never call `LayerMountCloseFile` at cleanup. A read after
+`LayerMountCleanupFile` reopens the file by its path, per the cleanup
+rule in the mapping section above, and then succeeds. On a deleted
+file that read fails with file not found. A handle whose granted mask
+has `FILE_WRITE_DATA` or `FILE_APPEND_DATA` also reads, before and
+after `LayerMountCleanupFile`. So the paging read that follows a
+truncation on a write-only handle succeeds. A handle granted only
+`DELETE` reopens with `FILE_READ_ATTRIBUTES`, so a read on it after
+`LayerMountCleanupFile` fails.
+
+Clamp the read length to the file size before the call, or treat the
+end-of-file status as a read of zero bytes. A read that starts inside
+the file and runs past its end returns the short count in
+`*bytesTransferred`. The engine then zero-fills the rest of the buffer
+up to the requested length. A read that starts at or past the end of
+the file returns the end-of-file status with `*bytesTransferred` set
+to zero. That status arrives as an HRESULT in one of two shapes: the
+NT inversion of `STATUS_END_OF_FILE`, or the Win32 wrap of
+`ERROR_HANDLE_EOF`. Call `LayerMountHResultToNtStatus`
+(`LayerMount.HResultToNtStatus`) and compare the result with
+`STATUS_END_OF_FILE`.
+
+Report the `allocationSize` the engine gives. Do not compute one. An
+open handle reports the real on-disk allocation when that is larger
+than the file size rounded up to 4 KiB, for example after a
+preallocation. A path query and a directory listing report the rounded
+size. Every producer reports a value that is never below the file
+size. A path query reports zero for a directory, a whiteout, and a
+path that does not exist.
+
+A file in the upper, a file in a lower, a file the engine copied up,
+and a metacopy shell all answer a paging read alike. The open and read
+rules in the mapping section above explain why.
 
 ## Event callback threading rules
 
@@ -233,7 +291,9 @@ Anything that matches none of the three maps to
 With this document, a host adapter author can build a complete
 mount/unmount and I/O bridge: create and tear down a handle in the
 right order, declare capabilities and know what each one changes,
-route driver requests to the right file call, install an event
-callback that will not deadlock, read every buffered output correctly
-on the first try, and turn any HRESULT the engine returns into the
-NTSTATUS a filesystem host expects, without opening `LayerMount.h`.
+route driver requests to the right file call, hold a file handle
+through cleanup and answer a paging read past the end of the file,
+install an event callback that will not deadlock, read every buffered
+output correctly on the first try, and turn any HRESULT the engine
+returns into the NTSTATUS a filesystem host expects, without opening
+`LayerMount.h`.

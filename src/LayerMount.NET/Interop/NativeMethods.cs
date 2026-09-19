@@ -129,6 +129,10 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(DllName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial int LayerMountCleanupFile(IntPtr file);
+
+    [LibraryImport(DllName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial int LayerMountReadFile(
         IntPtr file,
         void*  buffer,

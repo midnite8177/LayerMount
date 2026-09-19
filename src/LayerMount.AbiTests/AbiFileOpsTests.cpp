@@ -5,8 +5,6 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {
 
-// File-primitive round-trip (Create/Write/Read/Close) plus one error
-// path (Open a nonexistent file).
 TEST_CLASS(AbiFileOpsTests) {
 public:
     TEST_METHOD(CreateWriteReadClose_RoundTrip) {

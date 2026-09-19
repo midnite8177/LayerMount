@@ -724,6 +724,12 @@ LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
  * process for process-tracker rules; pass 0 to use the current process.
  * The returned handle pins its parent overlay until closed.
  *
+ * `grantedAccess` can carry generic rights (GENERIC_READ, GENERIC_WRITE,
+ * GENERIC_EXECUTE, GENERIC_ALL). The engine maps them to the file-specific
+ * rights before it decides whether a lower file copies up and whether a
+ * metacopy shell fills, so GENERIC_WRITE and FILE_GENERIC_WRITE behave
+ * the same.
+ *
  * When the file is a metacopy shell and `grantedAccess` asks for data
  * (read, write, append, or execute), the engine fills the shell before
  * it returns. *outInfo then reports the filled file. An open for
@@ -767,9 +773,26 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(
  * parent overlay's open-file count. */
 LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file);
 
+/* Closes the NT handle behind `file` and keeps the context and its
+ * handle-table slot. It does not flush, does not free the slot, and does
+ * not change the parent overlay's open-file count. A second call on a
+ * `file` with no open NT handle returns S_OK and does nothing. A later
+ * read, write, overwrite, flush, or get-info on `file` reopens the file
+ * by its path with the granted access minus DELETE, as the engine does
+ * after a rename. A `file` whose granted access has FILE_WRITE_DATA or
+ * FILE_APPEND_DATA reopens with FILE_READ_DATA as well, so a later read
+ * on it succeeds. A `file` that was granted only DELETE reopens with
+ * FILE_READ_ATTRIBUTES, so a later read on it fails. LayerMountCloseFile
+ * stays the only call that frees the slot. */
+LM_API HRESULT LM_CALL LayerMountCleanupFile(LM_FILE_HANDLE file);
+
 /* Reads up to `length` bytes at `offset` from `file` into `buffer`.
  * A read never copies a file up and never reopens the handle for a
- * fill. The one reopen a read can do is the retarget after a rename.
+ * fill. A read reopens the handle only after a rename or after
+ * LayerMountCleanupFile. A `file` whose granted access has
+ * FILE_WRITE_DATA or FILE_APPEND_DATA also reads, so a paging read on a
+ * write-only handle succeeds. A read on a handle with neither a
+ * read-data, a write-data, nor an append-data right fails.
  * `originatorPid` identifies the requesting process for process-tracker
  * rules; pass 0 to use the current process.
  * The engine always writes *bytesTransferred, also on failure.

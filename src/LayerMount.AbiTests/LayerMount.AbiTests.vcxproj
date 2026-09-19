@@ -93,9 +93,11 @@
     <ClCompile Include="AbiHResultToNtStatusTests.cpp" />
     <ClCompile Include="AbiCanDeleteOpenFileTests.cpp" />
     <ClCompile Include="AbiDeleteOpenFileTests.cpp" />
+    <ClCompile Include="AbiCleanupFileTests.cpp" />
     <ClCompile Include="AbiHostMountPointTests.cpp" />
     <ClCompile Include="AbiTransientLayerMountTests.cpp" />
     <ClCompile Include="AbiPagingReadMatrixTests.cpp" />
+    <ClCompile Include="AbiCopyUpOnOpenTests.cpp" />
   </ItemGroup>
 
   <ItemGroup>

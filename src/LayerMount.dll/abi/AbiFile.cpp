@@ -1,6 +1,4 @@
-// AbiFile.cpp -- File-primitive ABI entry points:
-// LayerMountOpenFile, LayerMountCreateFile, LayerMountCloseFile, plus Read / Write /
-// GetInfo / SetInfo / Delete / Rename / Security / MergeDirectory / Reparse.
+// AbiFile.cpp -- File-primitive ABI entry points.
 
 #include "../public/LayerMount.h"
 #include "AbiGuard.h"
@@ -17,6 +15,19 @@
 #include <utility>
 
 namespace {
+
+std::uint64_t DecodeFileHandle(LM_FILE_HANDLE file) {
+    return static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
+}
+
+// Returns null when the slot is free, stale, or has no engine or context.
+std::shared_ptr<::LayerMount::abi::FileHolder> ResolveFileHolder(LM_FILE_HANDLE file) {
+    auto holder = ::LayerMount::abi::Handles().file.Resolve(DecodeFileHandle(file));
+    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+        return nullptr;
+    }
+    return holder;
+}
 
 // InternalFileInfo (impl/) and LM_FILE_INFO (public/) carry the same
 // field set in the same order; the casing differs and the public struct
@@ -283,10 +294,8 @@ LM_API HRESULT LM_CALL LayerMountReadFile(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -323,10 +332,8 @@ LM_API HRESULT LM_CALL LayerMountWriteFile(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -363,10 +370,8 @@ LM_API HRESULT LM_CALL LayerMountOverwriteFile(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -396,10 +401,8 @@ LM_API HRESULT LM_CALL LayerMountFlushFile(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -428,13 +431,11 @@ LM_API HRESULT LM_CALL LayerMountGetFileInfo(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
-    if (holder->mount != nullptr && holder->ctx->ownerPid != 0) {
+    if (holder->ctx->ownerPid != 0) {
         if (auto tracker = holder->mount->Tracker()) {
             tracker->LogAccess(holder->ctx->ownerPid,
                 holder->ctx->relativePath, ::LayerMount::OperationType::GetInfo);
@@ -474,10 +475,8 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -852,10 +851,8 @@ LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(LM_FILE_HANDLE file)
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -877,10 +874,8 @@ LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(LM_FILE_HANDLE file)
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -935,10 +930,8 @@ LM_API HRESULT LM_CALL LayerMountUpdateOpenFilePath(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
     // UpdateContextPath rejects empty, drive-qualified, traversal, and
@@ -965,10 +958,8 @@ LM_API HRESULT LM_CALL LayerMountRenameOpenFile(LM_FILE_HANDLE file,
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-    auto holder = Handles().file.Resolve(encoded);
-    if (holder == nullptr || holder->mount == nullptr || holder->ctx == nullptr) {
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
         return E_HANDLE;
     }
 
@@ -1056,16 +1047,13 @@ LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file)
 
     LM_ABI_BEGIN();
 
-    const std::uint64_t encoded =
-        static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(file));
-
     // Free returns the shared_ptr<FileHolder> that was in the slot; we
     // still need to call CloseFile on the engine to close the NT handle
     // and decrement the active-handles stat before the holder
     // destructor releases storage. Decrement the parent's child count
     // after the close so LayerMountDestroy can observe the live child
     // until its resources have been returned.
-    auto holder = Handles().file.Free(encoded);
+    auto holder = Handles().file.Free(DecodeFileHandle(file));
     if (holder == nullptr) {
         return E_HANDLE;
     }
@@ -1080,4 +1068,26 @@ LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file)
     LM_ABI_END();
 }
 
-} // extern "C"
+LM_API HRESULT LM_CALL LayerMountCleanupFile(LM_FILE_HANDLE file)
+{
+    using namespace ::LayerMount::abi;
+
+    if (file == nullptr) return E_HANDLE;
+
+    LM_ABI_BEGIN();
+
+    auto holder = ResolveFileHolder(file);
+    if (holder == nullptr) {
+        return E_HANDLE;
+    }
+
+    NTSTATUS status = holder->mount->Cleanup(holder->ctx.get());
+    if (!NT_SUCCESS(status)) {
+        return HresultFromNtStatus(status);
+    }
+    return S_OK;
+
+    LM_ABI_END();
+}
+
+}

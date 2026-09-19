@@ -411,6 +411,14 @@ public:
     // holder in the handle table) owns the FileContext storage.
     void Close(FileContext* ctx);
 
+    // Close the NT handle inside ctx and keep ctx alive. The active-handles
+    // stat does not change. Each operation that calls EnsureHandleReady
+    // reopens the file by its path with the granted access minus DELETE;
+    // a granted mask with FILE_WRITE_DATA or FILE_APPEND_DATA reopens with
+    // FILE_READ_DATA as well. A second call on a ctx with no handle does
+    // nothing and succeeds.
+    NTSTATUS Cleanup(FileContext* ctx);
+
     // Read up to `length` bytes from the open file at the given absolute
     // offset. Returns STATUS_END_OF_FILE on read past EOF (with
     // *bytesTransferred = 0).
@@ -485,6 +493,9 @@ public:
     NTSTATUS Delete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS CanDelete(FileContext* ctx, DWORD callerPid);
     NTSTATUS Delete(FileContext* ctx, DWORD callerPid);
+    // Delete the alternate data stream that `ctx` opened. The host file
+    // and its other streams stay.
+    NTSTATUS DeleteStreamOnContext(FileContext* ctx);
 
     // Path-based rename: moves the entry within the overlay namespace.
     // Source is copied up if it lives only in lower; if lower retains a

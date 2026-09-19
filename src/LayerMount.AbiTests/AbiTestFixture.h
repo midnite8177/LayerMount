@@ -6,6 +6,8 @@
 
 #include "pch.h"
 
+#include <iterator>
+
 namespace LayerMountAbiTests {
 
 // The engine stages a metacopy shell only for a lower file larger than
@@ -82,6 +84,25 @@ private:
     std::wstring              work_;
     std::vector<std::wstring> lowers_;
 };
+
+// Read the whole file at `path` as bytes.
+inline std::string ReadAllBytes(const std::wstring& path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f),
+                       std::istreambuf_iterator<char>());
+}
+
+// Write a lower file above the metacopy threshold, filled with 'L', and
+// return its content. An open for data access of this file through the
+// mount stages a metacopy shell on the upper.
+inline std::string WriteLargeLowerFile(const TempLayerEnv& env,
+                                       size_t lowerIndex,
+                                       const std::wstring& relative) {
+    const std::string content(
+        static_cast<size_t>(kAboveMetacopyThresholdBytes), 'L');
+    env.WriteLowerFile(lowerIndex, relative, content);
+    return content;
+}
 
 // -----------------------------------------------------------------------------
 // ConfigBuilder -- owns the string storage that LM_CONFIG's PCWSTR fields
@@ -240,6 +261,46 @@ inline bool IsFileNotFoundHr(HRESULT hr) noexcept {
         || hr == static_cast<HRESULT>(0xD0000034L)
         // HRESULT_FROM_NT(STATUS_OBJECT_PATH_NOT_FOUND) == 0xD000003A
         || hr == static_cast<HRESULT>(0xD000003AL);
+}
+
+// Open `relativePath` through the C ABI with `grantedAccess` and no create
+// options. The test fails if the open does not return S_OK.
+inline LM_FILE_HANDLE OpenWithAccess(LM_HANDLE mount,
+                                     const wchar_t* relativePath,
+                                     UINT32 grantedAccess) {
+    LM_FILE_HANDLE fh = nullptr;
+    LM_FILE_INFO   info{};
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual<HRESULT>(S_OK,
+        ::LayerMountOpenFile(mount, relativePath, grantedAccess, 0u, 0u, &fh, &info));
+    return fh;
+}
+
+// Sets only the end of file; attributes, times, and allocation size pass
+// the ABI's leave-unchanged sentinels.
+inline HRESULT SetFileSize(LM_FILE_HANDLE fh, UINT64 size, LM_FILE_INFO* outInfo) {
+    return ::LayerMountSetFileInfo(
+        fh,
+        INVALID_FILE_ATTRIBUTES,
+        /*creationTime*/   0u,
+        /*lastAccessTime*/ 0u,
+        /*lastWriteTime*/  0u,
+        /*changeTime*/     0u,
+        /*allocationSize*/ UINT64_MAX,
+        /*fileSize*/       size,
+        outInfo);
+}
+
+// The test fails with `message` unless a read open of `relativePath`
+// reports file not found.
+inline void AssertOpenFailsNotFound(LM_HANDLE mount,
+                                    const wchar_t* relativePath,
+                                    const wchar_t* message) {
+    LM_FILE_HANDLE fh = nullptr;
+    LM_FILE_INFO   info{};
+    const HRESULT hr = ::LayerMountOpenFile(
+        mount, relativePath, GENERIC_READ, 0u, 0u, &fh, &info);
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
+        IsFileNotFoundHr(hr), message);
 }
 
 // -----------------------------------------------------------------------------
