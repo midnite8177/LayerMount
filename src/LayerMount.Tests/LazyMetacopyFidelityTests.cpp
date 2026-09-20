@@ -39,6 +39,33 @@ void GetTimes(const std::wstring& path,
     ::CloseHandle(h);
 }
 
+// While the object lives, a read of the second megabyte of the file fails.
+class LockPastFirstMegabyte {
+public:
+    explicit LockPastFirstMegabyte(const std::wstring& path)
+        : handle_(::CreateFileW(path.c_str(), GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, 0, nullptr)) {
+        Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, handle_,
+            L"LockPastFirstMegabyte: CreateFileW must succeed");
+        region_.Offset = 1024 * 1024;
+        Assert::IsTrue(::LockFileEx(handle_,
+                                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                                    0, 1, 0, &region_) != FALSE,
+            L"LockPastFirstMegabyte: LockFileEx must succeed");
+    }
+    ~LockPastFirstMegabyte() {
+        ::UnlockFileEx(handle_, 0, 1, 0, &region_);
+        ::CloseHandle(handle_);
+    }
+    LockPastFirstMegabyte(const LockPastFirstMegabyte&) = delete;
+    LockPastFirstMegabyte& operator=(const LockPastFirstMegabyte&) = delete;
+
+private:
+    HANDLE handle_;
+    OVERLAPPED region_{};
+};
+
 bool FileTimesEqual(const FILETIME& a, const FILETIME& b) {
     return a.dwLowDateTime == b.dwLowDateTime &&
            a.dwHighDateTime == b.dwHighDateTime;
@@ -208,6 +235,40 @@ public:
         Assert::IsTrue(FileTimesEqual(c, shellCreation),
             L"Upper creation time must keep the time set on the shell after "
             L"lazy completion");
+    }
+
+    TEST_METHOD(LazyCompletion_KeepsShellTimestampsWhenTheFillFails) {
+        LayerMountTests::TempLayerEnvironment env(1);
+        const std::string payload(2 * 1024 * 1024, 'F');
+        env.WriteFile(env.Lower(0), L"fail-ts.bin", payload);
+
+        CopyUpRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"fail-ts.bin")));
+
+        const std::wstring upperPath = env.Upper() + L"\\fail-ts.bin";
+        const FILETIME shellCreation = MakeFileTime(2020, 1, 10);
+        const FILETIME shellAccess   = MakeFileTime(2021, 1, 10);
+        const FILETIME shellWrite    = MakeFileTime(2022, 1, 10);
+        StampFile(upperPath, shellCreation, shellAccess, shellWrite);
+
+        NTSTATUS fillStatus = STATUS_SUCCESS;
+        {
+            LockPastFirstMegabyte lock(env.Lower(0) + L"\\fail-ts.bin");
+            fillStatus = rig.copyUp.CompleteLazyCopyUp(L"fail-ts.bin");
+        }
+
+        Assert::IsFalse(NT_SUCCESS(fillStatus),
+            L"The fill must fail when a read of the lower file fails");
+
+        FILETIME c{}, a{}, w{};
+        GetTimes(upperPath, &c, &a, &w);
+        Assert::IsTrue(FileTimesEqual(w, shellWrite),
+            L"Upper LastWriteTime must keep the time set on the shell after "
+            L"a failed fill");
+        Assert::IsTrue(FileTimesEqual(c, shellCreation),
+            L"Upper creation time must keep the time set on the shell after "
+            L"a failed fill");
     }
 
     // ------------------------------------------------------------------------

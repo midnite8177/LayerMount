@@ -14,6 +14,7 @@ namespace LayerMount {
 class PathResolver;
 class WhiteoutManager;
 class Cache;
+class FileBasicInfoGuard;
 
 // RAII wrapper for Win32 HANDLEs
 class ScopedHandle {
@@ -165,6 +166,71 @@ private:
     NTSTATUS ApplyPlaceholderCompressionOrAbort(ScopedHandle& dstHandle,
                                                 const std::wstring& workPath,
                                                 DWORD srcAttributes);
+
+    // A Win32 call that removes one upper entry by path: DeleteFileW for
+    // a file, RemoveDirectoryW for a directory.
+    using RemoveUpperEntryFn = BOOL (WINAPI*)(LPCWSTR);
+
+    // Copy a reparse-point source (symlink / junction) to the upper layer
+    // as a link, write the copy-up metadata, invalidate the cache, and
+    // record the copy-up. On a metadata failure, call removeUpperEntry
+    // on the staged link and return the failure status.
+    NTSTATUS CopyUpReparseEntry(const std::wstring& normalized,
+                                const ResolvedPath& source,
+                                RemoveUpperEntryFn removeUpperEntry);
+
+    // Stage a full copy of the source at workPath: create the work file,
+    // apply the sparse and compression layout, copy the data through
+    // srcHandle, close both handles, then apply the encrypted state and
+    // the security descriptor by path. On failure after the create,
+    // delete workPath and return the failure status.
+    NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
+                                ScopedHandle& srcHandle,
+                                DWORD srcAttrs,
+                                const std::wstring& workPath);
+
+    // Finish a committed upper file: copy the user alternate data
+    // streams, write the copy-up metadata, and restore the source
+    // timestamps and attributes through basicInfo. On failure, delete
+    // upperPath and return the failure status.
+    NTSTATUS FinishCommittedFile(const std::wstring& sourcePath,
+                                 const std::wstring& upperPath,
+                                 FileBasicInfoGuard& basicInfo);
+
+    // Stage a metacopy shell at workPath: create the file with the
+    // source attributes, mark it sparse, apply compression, set the
+    // source size without data, close the handle, then apply the
+    // encrypted state and the security descriptor by path. On failure
+    // after the create, delete workPath and return the failure status.
+    NTSTATUS StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
+                                         const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
+                                         const std::wstring& workPath);
+
+    // Copy the origin data through srcHandle into the shell at upperPath,
+    // clear the sparse attribute when the origin is not sparse, and close
+    // both handles. On failure, return the failure status and leave the
+    // shell in place with its metacopy flag set.
+    NTSTATUS FillMetacopyShell(ScopedHandle& srcHandle,
+                               const std::wstring& upperPath);
+
+    // Copy the user alternate data streams from the origin to the filled
+    // shell and clear the metacopy flag in metadata. On failure, return
+    // the failure status and leave the metacopy flag set so the next
+    // resolution retries the completion.
+    NTSTATUS FinishFilledShell(const std::wstring& upperPath,
+                               LayerMountMetadata& metadata);
+
+    // Apply the source directory's compression and encrypted state to
+    // the upper directory. A compression failure is silent; an encrypted
+    // state failure returns the failure status.
+    NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath,
+                                  DWORD srcAttrs);
+
+    // Copy the security descriptor and write the copy-up metadata on the
+    // upper directory. On failure, remove upperPath and return the
+    // failure status.
+    NTSTATUS SecureAndTagUpperDirectory(const std::wstring& sourcePath,
+                                        const std::wstring& upperPath);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;
