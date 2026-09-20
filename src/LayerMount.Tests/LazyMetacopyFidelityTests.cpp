@@ -1,34 +1,6 @@
-// Audit-driven coverage of properties that must survive the two-stage
-// metacopy → lazy-completion flow. CopyUp::CopyUpMetadataOnly stages a
-// sparse shell that preserves timestamps and size. CopyUp::CompleteLazyCopyUp
-// then streams data in on first read/write. The full-copy-up path
-// (CopyUp::CopyUpFile) takes care to copy ADS and re-apply timestamps after
-// the data write. The lazy path does not — three gaps result:
-//
-//   Gap #7 (timestamps): CompleteLazyCopyUp ends with
-//   MetadataADS::WriteLayerMountMetadata (CopyUp.cpp:593-594) and does NOT
-//   restore source timestamps afterwards. LastWriteTime is stomped by the
-//   data write plus the subsequent ADS write.
-//
-//   Gap #8 (ADS): CopyUpMetadataOnly never calls
-//   CopyUserAlternateDataStreams, and CompleteLazyCopyUp doesn't either, so
-//   a lower file that carried user ADS loses them entirely through the
-//   lazy path while the eager path preserves them (CopyUp.cpp:401).
-//
-//   Gap #9 (compression): CopyUpMetadataOnly creates a sparse shell with
-//   CreateFileW but never applies FSCTL_SET_COMPRESSION, so a compressed
-//   lower file ends up uncompressed in upper.
-//
-// All three tests call CopyUp directly (like CopyUpFailureTests) for
-// deterministic probing of these known-buggy paths.
-
 #include "pch.h"
 #include "TestFixture.h"
 
-#include "CopyUp.h"
-#include "PathResolver.h"
-#include "WhiteoutManager.h"
-#include "Cache.h"
 #include "MetadataADS.h"
 #include "LayerMount.h"
 
@@ -96,25 +68,48 @@ bool ADSExists(const std::wstring& basePath, const std::wstring& streamName) {
     return true;
 }
 
-bool IsCompressed(const std::wstring& path) {
+bool HasAttribute(const std::wstring& path, DWORD flag) {
     const DWORD attrs = ::GetFileAttributesW(path.c_str());
-    return attrs != INVALID_FILE_ATTRIBUTES &&
-           (attrs & FILE_ATTRIBUTE_COMPRESSED) != 0;
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
 }
 
-bool EnableCompression(const std::wstring& path) {
+bool IsCompressed(const std::wstring& path) {
+    return HasAttribute(path, FILE_ATTRIBUTE_COMPRESSED);
+}
+
+bool IsSparse(const std::wstring& path) {
+    return HasAttribute(path, FILE_ATTRIBUTE_SPARSE_FILE);
+}
+
+bool OpenAndIoctl(const std::wstring& path, DWORD controlCode,
+                  const void* input, DWORD inputSize) {
     HANDLE h = ::CreateFileW(path.c_str(),
                               GENERIC_READ | GENERIC_WRITE,
                               FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
-    USHORT fmt = COMPRESSION_FORMAT_DEFAULT;
     DWORD br = 0;
-    const BOOL ok = ::DeviceIoControl(h, FSCTL_SET_COMPRESSION,
-                                       &fmt, sizeof(fmt),
+    const BOOL ok = ::DeviceIoControl(h, controlCode,
+                                       const_cast<void*>(input), inputSize,
                                        nullptr, 0, &br, nullptr);
     ::CloseHandle(h);
     return ok != FALSE;
+}
+
+bool EnableCompression(const std::wstring& path) {
+    USHORT fmt = COMPRESSION_FORMAT_DEFAULT;
+    return OpenAndIoctl(path, FSCTL_SET_COMPRESSION, &fmt, sizeof(fmt));
+}
+
+bool MakeSparseWithHole(const std::wstring& path, LONGLONG holeBytes) {
+    FILE_SET_SPARSE_BUFFER sparse{TRUE};
+    if (!OpenAndIoctl(path, FSCTL_SET_SPARSE, &sparse, sizeof(sparse))) {
+        return false;
+    }
+    FILE_ZERO_DATA_INFORMATION hole{};
+    hole.FileOffset.QuadPart      = 0;
+    hole.BeyondFinalZero.QuadPart = holeBytes;
+    return OpenAndIoctl(path, FSCTL_SET_ZERO_DATA, &hole, sizeof(hole));
 }
 
 FILETIME MakeFileTime(WORD year, WORD month, WORD day) {
@@ -137,13 +132,6 @@ FILETIME MakeFileTime(WORD year, WORD month, WORD day) {
 
 TEST_CLASS(LazyMetacopyFidelityTests) {
 public:
-    // ------------------------------------------------------------------------
-    // Guards the CompleteLazyCopyUp timestamp-preservation fix. After the
-    // completer writes data and rewrites :overlay, it re-applies the
-    // captured source timestamps so the upper file looks byte-for-byte
-    // equivalent to the lower source — same invariant CopyUpFile provides
-    // for the eager path.
-    // ------------------------------------------------------------------------
     TEST_METHOD(LazyCompletion_PreservesSourceTimestamps) {
         // 2 MiB: above the 1 MiB metacopy threshold.
         LayerMountTests::TempLayerEnvironment env(1);
@@ -156,14 +144,9 @@ public:
         const FILETIME srcWrite    = MakeFileTime(2017, 6, 15);
         StampFile(srcPath, srcCreation, srcAccess, srcWrite);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"ts.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"ts.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\ts.bin";
 
@@ -178,20 +161,53 @@ public:
         }
 
         // Trigger lazy completion.
-        Assert::IsTrue(NT_SUCCESS(cu.CompleteLazyCopyUp(L"ts.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"ts.bin")));
 
         FILETIME c{}, a{}, w{};
         GetTimes(upperPath, &c, &a, &w);
 
-        // LazyCompletion restores all three source timestamps after the
-        // data write + ADS rewrite. Compare write time as the canonical
-        // check — it's the one most-often bumped by intermediate writes.
+        // An untouched shell carries the source's times, so the fill
+        // leaves them equal to the source. The write time is the one the
+        // data write and the metadata write change.
         Assert::IsTrue(FileTimesEqual(w, srcWrite),
             L"Upper LastWriteTime must match the source after lazy "
             L"completion, matching the eager-path invariant");
         Assert::IsTrue(FileTimesEqual(c, srcCreation),
             L"Upper creation time must match the source after lazy "
             L"completion");
+    }
+
+    TEST_METHOD(LazyCompletion_KeepsShellTimestampsSetAfterStaging) {
+        LayerMountTests::TempLayerEnvironment env(1);
+        const std::string payload(2 * 1024 * 1024, 'Q');
+        env.WriteFile(env.Lower(0), L"shell-ts.bin", payload);
+
+        const std::wstring srcPath = env.Lower(0) + L"\\shell-ts.bin";
+        StampFile(srcPath, MakeFileTime(2015, 6, 15), MakeFileTime(2016, 6, 15),
+                  MakeFileTime(2017, 6, 15));
+
+        CopyUpRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"shell-ts.bin")));
+
+        const std::wstring upperPath = env.Upper() + L"\\shell-ts.bin";
+        const FILETIME shellCreation = MakeFileTime(2020, 1, 10);
+        const FILETIME shellAccess   = MakeFileTime(2021, 1, 10);
+        const FILETIME shellWrite    = MakeFileTime(2022, 1, 10);
+        StampFile(upperPath, shellCreation, shellAccess, shellWrite);
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"shell-ts.bin")));
+
+        // A read of the file can update the access time, so the check
+        // covers creation and write time.
+        FILETIME c{}, a{}, w{};
+        GetTimes(upperPath, &c, &a, &w);
+        Assert::IsTrue(FileTimesEqual(w, shellWrite),
+            L"Upper LastWriteTime must keep the time set on the shell after "
+            L"lazy completion");
+        Assert::IsTrue(FileTimesEqual(c, shellCreation),
+            L"Upper creation time must keep the time set on the shell after "
+            L"lazy completion");
     }
 
     // ------------------------------------------------------------------------
@@ -213,15 +229,10 @@ public:
         Assert::IsTrue(ADSExists(srcPath, L"Zone.Identifier"),
             L"Preconditions: source ADS must be present");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"ads.bin")));
-        Assert::IsTrue(NT_SUCCESS(cu.CompleteLazyCopyUp(L"ads.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"ads.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"ads.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\ads.bin";
 
@@ -261,20 +272,42 @@ public:
         Assert::IsTrue(IsCompressed(srcPath),
             L"Preconditions: source file must report FILE_ATTRIBUTE_COMPRESSED");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"cmp.bin")));
-        Assert::IsTrue(NT_SUCCESS(cu.CompleteLazyCopyUp(L"cmp.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"cmp.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"cmp.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\cmp.bin";
         Assert::IsTrue(IsCompressed(upperPath),
             L"Compressed lower file must remain compressed in upper after "
             L"metacopy + lazy completion");
+    }
+
+    TEST_METHOD(MetacopyFill_KeepsSparseAttributeWhenSourceIsSparse) {
+        UNIT_SKIP_IF_NOT_NTFS();
+
+        LayerMountTests::TempLayerEnvironment env(1);
+        const std::string payload(2 * 1024 * 1024, 's');
+        env.WriteFile(env.Lower(0), L"sparse.bin", payload);
+
+        const std::wstring srcPath = env.Lower(0) + L"\\sparse.bin";
+        if (!MakeSparseWithHole(srcPath, 1024 * 1024)) {
+            Logger::WriteMessage(
+                L"[SKIP] NTFS refused FSCTL_SET_SPARSE on source. "
+                L"The volume does not support sparse files.");
+            return;
+        }
+        Assert::IsTrue(IsSparse(srcPath),
+            L"Preconditions: source file must report FILE_ATTRIBUTE_SPARSE_FILE");
+
+        CopyUpRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"sparse.bin")));
+
+        const std::wstring upperPath = env.Upper() + L"\\sparse.bin";
+        Assert::IsTrue(IsSparse(upperPath),
+            L"A filled shell of a sparse lower file stays sparse");
     }
 
     // ------------------------------------------------------------------------
@@ -297,14 +330,9 @@ public:
         const FILETIME srcWrite = MakeFileTime(2017, 6, 15);
         StampFile(srcPath, srcWrite, srcWrite, srcWrite);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"eager.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"eager.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\eager.bin";
 

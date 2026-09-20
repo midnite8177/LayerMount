@@ -61,6 +61,24 @@ A host adapter's teardown order follows from that rule: unmount, clear
 the host-attached flag, close every outstanding file handle, then call
 `LayerMountDestroy`.
 
+A filesystem host can merge handles. It reports only the first open
+and the last close of a file. It routes every later open through the
+first user handle, whatever access or process that open has. A host
+adapter must ask its filesystem host for an open callback and a close
+callback for every user handle. Each user handle then has its own
+`LM_FILE_HANDLE`. Under merged handles a second program's open of a
+file never reaches the engine. The engine's open-file count stays at
+one while two user handles are open.
+
+The engine records the granted access and the originator process ID
+per `LM_FILE_HANDLE`. `LayerMountOpenFile` (`LayerMount.OpenFile`)
+takes `grantedAccess` and `originatorPid`, and a reopen after cleanup
+uses the granted access of that handle. Under merged handles the first
+open's access and originator apply to every later open. The open-time
+rule and the close log use the first opener's process. An overwrite of
+a file whose first user handle sits between cleanup and close fails.
+The filesystem host rejects it before the engine sees it.
+
 ## Capability bits and fallbacks
 
 `LM_HOST_CAPABILITIES` (LayerMount.h:132-140) is a bitfield a host
@@ -119,9 +137,11 @@ exist, taking `fileAttributes` and an optional self-relative security
 descriptor; it returns `E_INVALIDARG` if that descriptor is non-NULL
 but not structurally valid. An open for data access (read data, write
 data, append data, or execute) fills a metacopy shell before it
-returns. An open for attributes, security, or delete keeps the shell
-sparse. A failed fill fails the open with the fill's status and
-returns no handle. `LayerMountReadFile` (`LayerMountFile.Read`) never
+returns. The fill takes the sparse attribute off unless the lower file
+is sparse, so a filled file has the allocation of a normal copy. An
+open for attributes, security, or delete keeps the shell sparse. A
+failed fill fails the open with the fill's status and returns no
+handle. `LayerMountReadFile` (`LayerMountFile.Read`) never
 copies a file up and never reopens the handle for a fill. A read reopens
 the handle only after a rename or after a cleanup. It writes
 `*bytesTransferred` even on failure.
@@ -163,7 +183,9 @@ Keep the `LM_FILE_HANDLE` until the host adapter's close and call
 `LayerMountCloseFile` (`LayerMountFile.Dispose`) there. Or call
 `LayerMountCleanupFile` (`LayerMountFile.Cleanup`) at the host
 adapter's cleanup and `LayerMountCloseFile` at the host adapter's
-close. Never call `LayerMountCloseFile` at cleanup. A read after
+close. Never call `LayerMountCloseFile` at cleanup. These rules assume
+one `LM_FILE_HANDLE` per user handle, per the handle lifecycle section
+above. A read after
 `LayerMountCleanupFile` reopens the file by its path, per the cleanup
 rule in the mapping section above, and then succeeds. On a deleted
 file that read fails with file not found. A handle whose granted mask

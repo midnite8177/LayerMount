@@ -3,6 +3,10 @@
 #include "pch.h"
 
 #include "LayerMount.h"
+#include "Cache.h"
+#include "CopyUp.h"
+#include "PathResolver.h"
+#include "WhiteoutManager.h"
 
 #include <exception>
 #include <functional>
@@ -245,6 +249,28 @@ private:
     std::wstring upper_;
     std::wstring work_;
     std::vector<std::wstring> lowers_;
+};
+
+// ---------------------------------------------------------------------------
+// A CopyUp with the objects it depends on, built in dependency order from
+// one config. The members hold `const LayerConfig&`, so the rig owns the
+// config they refer to.
+// ---------------------------------------------------------------------------
+struct CopyUpRig {
+    explicit CopyUpRig(LayerMount::LayerConfig layerConfig)
+        : config(std::move(layerConfig)),
+          cache(),
+          whiteouts(config, &cache),
+          resolver(config, whiteouts, cache),
+          stats(),
+          copyUp(config, resolver, whiteouts, cache, stats) {}
+
+    LayerMount::LayerConfig      config;
+    LayerMount::Cache            cache;
+    LayerMount::WhiteoutManager  whiteouts;
+    LayerMount::PathResolver     resolver;
+    LayerMount::LayerMountStats  stats;
+    LayerMount::CopyUp           copyUp;
 };
 
 // ---------------------------------------------------------------------------

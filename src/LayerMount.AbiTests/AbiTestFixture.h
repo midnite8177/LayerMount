@@ -290,6 +290,21 @@ inline HRESULT SetFileSize(LM_FILE_HANDLE fh, UINT64 size, LM_FILE_INFO* outInfo
         outInfo);
 }
 
+// Sets only the last write time; attributes, the other times, and both
+// sizes pass the ABI's leave-unchanged sentinels.
+inline HRESULT SetLastWriteTime(LM_FILE_HANDLE fh, UINT64 lastWriteTime, LM_FILE_INFO* outInfo) {
+    return ::LayerMountSetFileInfo(
+        fh,
+        INVALID_FILE_ATTRIBUTES,
+        /*creationTime*/   0u,
+        /*lastAccessTime*/ 0u,
+        lastWriteTime,
+        /*changeTime*/     0u,
+        /*allocationSize*/ UINT64_MAX,
+        /*fileSize*/       UINT64_MAX,
+        outInfo);
+}
+
 // The test fails with `message` unless a read open of `relativePath`
 // reports file not found.
 inline void AssertOpenFailsNotFound(LM_HANDLE mount,

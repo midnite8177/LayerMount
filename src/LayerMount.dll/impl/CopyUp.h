@@ -86,7 +86,8 @@ public:
     NTSTATUS CopyUpMetadataOnly(const std::wstring& relativePath);
 
     // Complete a metacopy by copying actual file data from the lower layer.
-    // Clears the metacopy ADS flag when done.
+    // Keeps the shell's timestamps, so a set-times on the sparse shell
+    // survives the fill. Clears the metacopy ADS flag when done.
     NTSTATUS CompleteLazyCopyUp(const std::wstring& relativePath);
 
     // --- Directory copy-up (3.4) ---

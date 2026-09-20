@@ -222,16 +222,7 @@ public:
         // of SetInfo.
         const UINT64 someValidFileTime = 132000000000000000ULL; // ~2019
         LM_FILE_INFO postSet{};
-        HRESULT hr = ::LayerMountSetFileInfo(
-            fhDel,
-            INVALID_FILE_ATTRIBUTES,   // don't touch attributes
-            /*creationTime*/   0,
-            /*lastAccessTime*/ 0,
-            /*lastWriteTime*/  someValidFileTime,
-            /*changeTime*/     0,
-            /*allocationSize*/ UINT64_MAX,
-            /*fileSize*/       UINT64_MAX,
-            &postSet);
+        HRESULT hr = SetLastWriteTime(fhDel, someValidFileTime, &postSet);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"SetFileInfo timestamps on a DELETE-only handle should not "
             L"return ACCESS_DENIED (0xD0000022)");

@@ -2757,19 +2757,11 @@ NTSTATUS SetContextEndOfFile(const FileContext& ctx, UINT64 fileSize) {
 }
 
 NTSTATUS LayerMount::SetInfo(FileContext* ctx,
-                            UINT32 fileAttributes,
-                            UINT64 creationTime,
-                            UINT64 lastAccessTime,
-                            UINT64 lastWriteTime,
-                            UINT64 changeTime,
-                            UINT64 allocationSize,
-                            UINT64 fileSize,
+                            const SetInfoRequest& request,
                             InternalFileInfo* outInfo) {
     if (ctx == nullptr) {
         return STATUS_INVALID_HANDLE;
     }
-    (void)changeTime; // ChangeTime is approximated as LastWriteTime in FillFileInfo.
-
     if (auto tracker = Tracker(); tracker && ctx->ownerPid != 0) {
         if (!tracker->CheckAccess(ctx->ownerPid, ctx->relativePath, OperationType::SetInfo)) {
             return STATUS_ACCESS_DENIED;
@@ -2785,36 +2777,47 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
     NTSTATUS ready = EnsureHandleReady(ctx);
     if (!NT_SUCCESS(ready)) return ready;
 
-    if (fileAttributes != INVALID_FILE_ATTRIBUTES) {
-        NTSTATUS s = SetContextAttributes(*ctx, fileAttributes);
-        if (!NT_SUCCESS(s)) return s;
-    }
-
-    if (creationTime || lastAccessTime || lastWriteTime) {
-        NTSTATUS s = SetContextTimes(*ctx, creationTime, lastAccessTime, lastWriteTime);
-        if (!NT_SUCCESS(s)) return s;
-    }
-
     constexpr UINT64 kUnchanged = UINT64_MAX;
+
     // FILE_ALLOCATION_INFO / FILE_END_OF_FILE_INFO take signed LONGLONG;
     // an unsigned size above LLONG_MAX becomes negative at the WinAPI
     // boundary and produces either undefined filesystem behavior or a
     // misleading STATUS_INVALID_PARAMETER far from the real fault. Reject
     // explicit sizes (kUnchanged stays as the unchanged sentinel).
     constexpr UINT64 kMaxSignedSize = static_cast<UINT64>(LLONG_MAX);
-    if (allocationSize != kUnchanged && allocationSize > kMaxSignedSize) {
+    if (request.allocationSize != kUnchanged && request.allocationSize > kMaxSignedSize) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (fileSize != kUnchanged && fileSize > kMaxSignedSize) {
+    if (request.fileSize != kUnchanged && request.fileSize > kMaxSignedSize) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (allocationSize != kUnchanged) {
-        NTSTATUS s = SetContextAllocationSize(*ctx, allocationSize);
+    // The fill sits after the size validation and before the time change.
+    // Before the validation, it would fill the shell for a size the call
+    // then rejects. After the time change, it would erase the caller's
+    // times, because the fill sets the origin's timestamps last.
+    if (request.allocationSize != kUnchanged || request.fileSize != kUnchanged) {
+        NTSTATUS metacopyStatus = EnsureMetacopyMaterialized(ctx);
+        if (!NT_SUCCESS(metacopyStatus)) return metacopyStatus;
+    }
+
+    if (request.fileAttributes != INVALID_FILE_ATTRIBUTES) {
+        NTSTATUS s = SetContextAttributes(*ctx, request.fileAttributes);
         if (!NT_SUCCESS(s)) return s;
     }
-    if (fileSize != kUnchanged) {
-        NTSTATUS s = SetContextEndOfFile(*ctx, fileSize);
+
+    if (request.creationTime || request.lastAccessTime || request.lastWriteTime) {
+        NTSTATUS s = SetContextTimes(*ctx, request.creationTime, request.lastAccessTime,
+                                     request.lastWriteTime);
+        if (!NT_SUCCESS(s)) return s;
+    }
+
+    if (request.allocationSize != kUnchanged) {
+        NTSTATUS s = SetContextAllocationSize(*ctx, request.allocationSize);
+        if (!NT_SUCCESS(s)) return s;
+    }
+    if (request.fileSize != kUnchanged) {
+        NTSTATUS s = SetContextEndOfFile(*ctx, request.fileSize);
         if (!NT_SUCCESS(s)) return s;
     }
 
