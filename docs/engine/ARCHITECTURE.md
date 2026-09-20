@@ -794,9 +794,12 @@ synchronously on the same handle.
   host lives in the host adapter, not in the engine.
 - CLI. A command-line surface (mount/vhd/vss/layer/stats/log) can exist
   as a separate process that links the engine via the C ABI.
-- IPC. Control-pipe protocols, JSON handshakes, and background-process
-  daemonization live above the engine. The engine answers HRESULTs and
-  emits events; everything else is policy in the host adapter.
+- IPC. Control-pipe protocols, the emission of the JSON handshake, and
+  background-process daemonization live above the engine. The engine
+  answers HRESULTs and emits events; everything else is policy in the
+  host adapter. The one exception is the parent-side handshake reader,
+  `HandshakeReader` in the managed wrapper, so that a host adapter and
+  the tests parse the line through one code path (ADR 0007).
 
 See [0001-engine-is-not-a-filesystem-driver.md](../adr/0001-engine-is-not-a-filesystem-driver.md)
 for why the engine draws this boundary.

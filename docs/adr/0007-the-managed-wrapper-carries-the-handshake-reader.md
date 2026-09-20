@@ -1,0 +1,3 @@
+# The managed wrapper carries the handshake reader
+
+A host adapter that mounts in the background starts a child process and reads one JSON handshake line from the child's stdout; the engine's own tests and every host adapter's tests read the same line. The parent-side reader (`HandshakeReader` and the `HandshakeResult` records) lives in `LayerMount.NET`, the packaged managed wrapper, and not in the test-shared library or in each host adapter. A host adapter's executable cannot reference a test library, and a copy per host adapter drifted from the shared one. Emitting the handshake, the control-pipe protocol and daemonization stay in the host adapter: the wrapper parses the line and does nothing else with it.
