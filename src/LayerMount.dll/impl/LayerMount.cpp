@@ -25,16 +25,10 @@ namespace LayerMount {
 namespace {
 NTSTATUS ReopenContextHandle(FileContext* ctx);
 
-// Opens a transient kernel handle to the upper-layer file at
-// <paramref name="path"/> with the requested access mask. Used by
-// SetInfo / Overwrite when the caller-supplied handle lacks the access
-// required by SetFileTime / SetFileInformationByHandle (e.g. a handle
-// opened with DELETE only — common for del-style flows). Returns an
-// invalid ScopedHandle on failure; callers fall back to surfacing the
-// original access-denied error. Directory status comes from the
-// caller's FileContext rather than a path-based query, which would
-// fail silently for DELETE_PENDING files and lose
-// FILE_FLAG_BACKUP_SEMANTICS.
+// Returns an invalid ScopedHandle on failure, and the caller then
+// reports its original error. The caller passes the directory status,
+// because a path-based query fails for a delete-pending file and would
+// drop FILE_FLAG_BACKUP_SEMANTICS.
 ScopedHandle OpenTransientWritableHandle(const std::wstring& path,
                                          DWORD desiredAccess,
                                          bool isDirectory) {
@@ -461,32 +455,22 @@ HRESULT LayerMount::SetProcessTrackerEnabled(bool enabled) {
     return S_OK;
 }
 
-// ---------------------------------------------------------------------------
-// EnsureInUpperLayer
-// ---------------------------------------------------------------------------
-
 NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
                                         FileContext* ctx) {
     if (!ctx) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Fast path: ctx already represents an upper-layer file with a valid,
-    // non-stale kernel handle. The handle itself is proof the file exists
-    // in upper; redoing the path-based ExistsInUpper check here is both
-    // redundant and incorrect when the upper-layer file is in
-    // DELETE_PENDING state from another handle (path-based queries report
-    // the file as missing once any handle has set FileDispositionInfo,
-    // even though existing handles are still valid). Callers that hold
-    // a valid handle should be able to continue mutating attributes /
-    // timestamps / sizes through it until they close.
+    // A valid, current handle proves the file exists in the upper. A
+    // path-based ExistsInUpper check would report the file as missing
+    // once another handle marks it delete-pending, although this handle
+    // stays valid until it closes.
     if (ctx->writable &&
         ctx->handle != INVALID_HANDLE_VALUE &&
         !ctx->handleNeedsReopen) {
         return STATUS_SUCCESS;
     }
 
-    // Already in upper layer — nothing to do
     std::wstring normalized = NormalizePath(relativePath);
     if (pathResolver_->ExistsInUpper(normalized)) {
         // Update context to point to upper path if it wasn't already.

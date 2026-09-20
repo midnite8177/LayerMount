@@ -24,7 +24,7 @@ public:
             /*originatorPid*/ 0u,
             &fh, &info);
         Assert::AreEqual<HRESULT>(S_OK, hr, L"LayerMountCreateFile");
-        Assert::IsNotNull(fh, L"file handle should be non-null");
+        Assert::IsNotNull(fh, L"file handle must be non-null");
 
         const char     payload[] = "hello overlay";
         const UINT32   payloadLen = static_cast<UINT32>(sizeof(payload) - 1);
@@ -36,7 +36,6 @@ public:
                                /*originatorPid*/ 0u, &written, &postWrite));
         Assert::AreEqual<UINT32>(payloadLen, written);
 
-        // Rewind-ish: LayerMountReadFile takes an explicit offset.
         char     readBuf[32] = {};
         UINT32   readCount   = 0;
         Assert::AreEqual<HRESULT>(S_OK,
@@ -44,11 +43,10 @@ public:
                               /*originatorPid*/ 0u, &readCount));
         Assert::AreEqual<UINT32>(payloadLen, readCount);
         Assert::IsTrue(std::memcmp(readBuf, payload, payloadLen) == 0,
-                       L"Readback should match writeback byte-for-byte");
+                       L"Readback must match writeback byte-for-byte");
 
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
 
-        // File should now be visible via ResolvePath in the upper layer.
         LM_RESOLVED_PATH rp{};
         std::vector<wchar_t> absBuf(MAX_PATH);
         rp.absolutePath      = absBuf.data();
@@ -69,7 +67,7 @@ public:
             /*grantedAccess*/ GENERIC_READ, /*createOptions*/ 0u,
             /*originatorPid*/ 0u, &fh, &info);
         Assert::IsTrue(IsFileNotFoundHr(hr),
-            L"Opening a non-existent file should surface as ERROR_FILE_NOT_FOUND "
+            L"An open of a non-existent file must surface as ERROR_FILE_NOT_FOUND "
             L"(Win32 or NT-status encoding)");
         Assert::IsNull(fh, L"out handle must remain null on failure");
     }
@@ -93,7 +91,6 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountDeleteFile(mount.Get(), path));
 
-        // Subsequent Open should fail.
         LM_FILE_HANDLE fh = nullptr;
         LM_FILE_INFO   info{};
         HRESULT hrOpen = ::LayerMountOpenFile(
@@ -102,20 +99,10 @@ public:
             L"Opening a deleted file must surface as FileNotFound");
     }
 
-    // Regression: SetFileInfo via a still-valid LayerMount handle must
-    // continue to work even when the upper-layer NTFS file has been
-    // placed in DELETE_PENDING by a separate handle. Path-based
-    // existence checks inside EnsureInUpperLayer otherwise report the
-    // file as missing the instant any handle sets
-    // FILE_DISPOSITION_INFORMATION::DeleteFile = TRUE, surfacing as
-    // HRESULT 0xD0000034 (STATUS_OBJECT_NAME_NOT_FOUND). Handles that
-    // were opened before the disposition was set remain valid kernel-
-    // side and should be usable.
-    TEST_METHOD(SetInfo_OnDeletePendingFile_DoesNotFailWithObjectNotFound) {
+    TEST_METHOD(SetInfo_OnDeletePendingRenamedFile_Succeeds) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Create \\a.txt and close.
         LM_FILE_HANDLE fhA = nullptr;
         LM_FILE_INFO   info{};
         Assert::AreEqual<HRESULT>(S_OK,
@@ -124,22 +111,16 @@ public:
                 FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fhA, &info));
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fhA));
 
-        // Rename a.txt -> b.txt so we're operating on a renamed file.
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountRenameFile(mount.Get(),
                 L"\\a.txt", L"\\b.txt", FALSE));
 
-        // Open b.txt via the engine and keep the handle live for the
-        // duration of the test. This is the handle SetInfo will run on.
         LM_FILE_HANDLE fhB = nullptr;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountOpenFile(mount.Get(), L"\\b.txt",
                 GENERIC_READ | GENERIC_WRITE | DELETE,
                 0u, 0u, &fhB, &info));
 
-        // Open a separate raw-Win32 handle and mark the upper-layer
-        // file DELETE_PENDING. Any path-based existence check from
-        // here on returns "not found" while this handle stays open.
         const std::wstring upperPath = env.Upper() + L"\\b.txt";
         HANDLE killHandle = ::CreateFileW(
             upperPath.c_str(),
@@ -152,6 +133,8 @@ public:
         Assert::IsTrue(killHandle != INVALID_HANDLE_VALUE,
             L"open b.txt for delete-pending setup");
 
+        // Until killHandle closes, a path-based existence check on b.txt
+        // reports it as missing.
         FILE_DISPOSITION_INFO disp{};
         disp.DeleteFile = TRUE;
         Assert::IsTrue(
@@ -159,8 +142,6 @@ public:
                                           &disp, sizeof(disp)) != FALSE,
             L"mark b.txt DELETE_PENDING");
 
-        // SetFileInfo through fhB must succeed even though the
-        // path-based check would say b.txt no longer exists.
         LM_FILE_INFO postSet{};
         HRESULT hr = ::LayerMountSetFileInfo(
             fhB,
@@ -173,31 +154,19 @@ public:
             /*fileSize*/       UINT64_MAX,
             &postSet);
         Assert::AreEqual<HRESULT>(S_OK, hr,
-            L"SetFileInfo on a DELETE_PENDING file via an already-open "
-            L"handle should not return STATUS_OBJECT_NAME_NOT_FOUND");
+            L"SetFileInfo through an open handle on a delete-pending file");
 
         ::LayerMountCloseFile(fhB);
-        ::CloseHandle(killHandle); // commits the actual delete
+        ::CloseHandle(killHandle);
     }
 
-    // Regression: SetFileInfo against a handle that does NOT carry
-    // FILE_WRITE_ATTRIBUTES access right must still be able to update
-    // timestamps. The kernel routes SET_INFORMATION calls through
-    // whichever open handle exists for the file, regardless of the
-    // access mask granted at open time. When a caller opens a file
-    // with only DELETE access (typical for a del-style operation),
-    // LayerMount's internal kernel handle inherits that access mask;
-    // the subsequent ::SetFileTime call inside SetInfo then fails with
-    // ERROR_ACCESS_DENIED (Win32 err 5 -> STATUS_ACCESS_DENIED ->
-    // HRESULT 0xD0000022). LayerMount must work around this so that
-    // attribute / timestamp updates work even for handles opened with
-    // minimal access.
-    TEST_METHOD(SetInfo_TimestampsOnDeleteOnlyHandle_DoesNotFailWithAccessDenied) {
+    // Windows sends a set-information request, and an overwrite, through
+    // whichever handle is open, regardless of the access mask granted at
+    // open. This test and the next one open the file with DELETE only.
+    TEST_METHOD(SetInfo_TimestampsOnDeleteOnlyHandle_Succeeds) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Seed: create the file with full access so the upper-layer
-        // entry exists, then close.
         LM_FILE_HANDLE fhSeed = nullptr;
         LM_FILE_INFO   info{};
         Assert::AreEqual<HRESULT>(S_OK,
@@ -206,42 +175,24 @@ public:
                 FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fhSeed, &info));
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fhSeed));
 
-        // Reopen with DELETE only — no read, no write, and crucially no
-        // FILE_WRITE_ATTRIBUTES. This is the access mask a "del" path
-        // typically carries.
         LM_FILE_HANDLE fhDel = nullptr;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountOpenFile(mount.Get(), L"\\target.txt",
                 DELETE, 0u, 0u, &fhDel, &info));
 
-        // Try SetFileInfo with a non-zero LastWriteTime. The kernel
-        // would issue this as part of a SET_INFORMATION pass with
-        // FILE_BASIC_INFORMATION carrying a real timestamp; FromDateTime
-        // in the caller converts a non-default DateTime to a non-zero
-        // FILETIME tick value, taking us into the SetFileTime branch
-        // of SetInfo.
-        const UINT64 someValidFileTime = 132000000000000000ULL; // ~2019
+        const UINT64 nonZeroLastWriteTime = 132000000000000000ULL;
         LM_FILE_INFO postSet{};
-        HRESULT hr = SetLastWriteTime(fhDel, someValidFileTime, &postSet);
+        HRESULT hr = SetLastWriteTime(fhDel, nonZeroLastWriteTime, &postSet);
         Assert::AreEqual<HRESULT>(S_OK, hr,
-            L"SetFileInfo timestamps on a DELETE-only handle should not "
-            L"return ACCESS_DENIED (0xD0000022)");
+            L"SetFileInfo timestamps through a DELETE-only handle");
 
         ::LayerMountCloseFile(fhDel);
     }
 
-    // Regression: Overwrite issues SetFileInformationByHandle(FileEndOfFileInfo
-    // / FileAllocationInfo) against ctx->handle. As with SetInfo, the kernel
-    // routes those through whichever handle is open, so an Overwrite arriving
-    // via a handle without FILE_WRITE_DATA would fail the bare call with
-    // ERROR_ACCESS_DENIED (HRESULT 0xD0000022). The engine must transparently
-    // fall back to a transient FILE_WRITE_DATA handle.
-    TEST_METHOD(Overwrite_OnInsufficientAccessHandle_DoesNotFailWithAccessDenied) {
+    TEST_METHOD(Overwrite_OnDeleteOnlyHandle_Truncates) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Seed: create the file with full access so the upper-layer entry
-        // exists, then close.
         LM_FILE_HANDLE fhSeed = nullptr;
         LM_FILE_INFO   info{};
         Assert::AreEqual<HRESULT>(S_OK,
@@ -249,18 +200,15 @@ public:
                 GENERIC_READ | GENERIC_WRITE | DELETE,
                 FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fhSeed, &info));
 
-        // Put some bytes in so the truncation is observable.
         const char payload[] = "before-overwrite";
         UINT32 written = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(fhSeed, payload, 0,
                                   static_cast<UINT32>(sizeof(payload) - 1),
                                   FALSE, FALSE, 0u, &written, nullptr));
+        Assert::AreEqual<UINT32>(static_cast<UINT32>(sizeof(payload) - 1), written);
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fhSeed));
 
-        // Reopen with DELETE only — no FILE_WRITE_DATA. Same minimal-access
-        // shape that triggered the SetInfo regression; the kernel routes
-        // Overwrite's SET_INFORMATION through this handle.
         LM_FILE_HANDLE fhDel = nullptr;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountOpenFile(mount.Get(), L"\\overwrite.bin",
@@ -275,15 +223,12 @@ public:
             /*originatorPid*/    0u,
             &postOverwrite);
         Assert::AreEqual<HRESULT>(S_OK, hr,
-            L"Overwrite via a handle without FILE_WRITE_DATA should not "
-            L"return ACCESS_DENIED (0xD0000022)");
+            L"Overwrite through a handle without FILE_WRITE_DATA");
+        Assert::AreEqual<UINT64>(0u, postOverwrite.fileSize,
+            L"Overwrite must truncate the file");
 
         ::LayerMountCloseFile(fhDel);
     }
-
-    // -----------------------------------------------------------------
-    // Stream enumeration (LayerMountEnumerateStreams)
-    // -----------------------------------------------------------------
 
     TEST_METHOD(EnumerateStreams_FileWithNoAds_ReturnsEmpty) {
         TempLayerEnv     env(0);
@@ -302,7 +247,7 @@ public:
             ::LayerMountEnumerateStreams(mount.Get(), L"\\plain.txt",
                 nullptr, 0, &count));
         Assert::AreEqual<UINT32>(0u, count,
-            L"A file with only ::$DATA should report zero user-visible streams");
+            L"A file with only ::$DATA must report zero user-visible streams");
     }
 
     TEST_METHOD(EnumerateStreams_NonexistentFile_ReturnsNotFound) {
@@ -313,7 +258,7 @@ public:
         HRESULT hr = ::LayerMountEnumerateStreams(
             mount.Get(), L"\\nope.txt", nullptr, 0, &count);
         Assert::IsTrue(IsFileNotFoundHr(hr),
-            L"Enumerate on a missing file should surface as NOT_FOUND");
+            L"Enumerate on a missing file must surface as NOT_FOUND");
         Assert::AreEqual<UINT32>(0u, count);
     }
 
@@ -321,7 +266,6 @@ public:
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Create the host file via the engine.
         LM_FILE_HANDLE fh = nullptr;
         LM_FILE_INFO   info{};
         Assert::AreEqual<HRESULT>(S_OK,
@@ -330,8 +274,6 @@ public:
                 FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
 
-        // Write two ADS via raw Win32 directly to the upper layer.
-        // Stream syntax is `<path>:<streamName>`.
         const std::wstring upper = env.Upper() + L"\\host.txt";
         auto writeStream = [](const std::wstring& path, const char* data, DWORD len) {
             HANDLE h = ::CreateFileW(path.c_str(),
@@ -347,7 +289,6 @@ public:
         writeStream(upper + L":secret",  "hush",   4);
         writeStream(upper + L":payload", "abcdef", 6);
 
-        // Size probe.
         UINT32 required = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountEnumerateStreams(mount.Get(), L"\\host.txt",
@@ -355,7 +296,6 @@ public:
         Assert::AreEqual<UINT32>(2u, required,
             L"two user-visible ADS expected (::$DATA filtered)");
 
-        // Fill.
         std::vector<LM_STREAM_INFO> buf(required);
         UINT32 written = 0;
         Assert::AreEqual<HRESULT>(S_OK,
@@ -367,7 +307,6 @@ public:
         bool sawPayload = false;
         for (UINT32 i = 0; i < written; ++i) {
             std::wstring name = buf[i].streamName;
-            // FindFirstStreamW returns names in the `:name:$DATA` form.
             if (name == L":secret:$DATA") {
                 sawSecret = true;
                 Assert::AreEqual<UINT64>(4u, buf[i].streamSize);
@@ -410,9 +349,6 @@ public:
             Assert::AreEqual<DWORD>(1u, written, L"WriteFile wrote single byte");
         }
 
-        // Buffer of size 1 against required 3 -> ERROR_MORE_DATA, but
-        // outCount still reports the required size so the caller can
-        // resize and retry.
         LM_STREAM_INFO oneSlot{};
         UINT32 count = 0;
         HRESULT hr = ::LayerMountEnumerateStreams(
@@ -422,4 +358,4 @@ public:
     }
 };
 
-} // namespace LayerMountAbiTests
+}

@@ -21,8 +21,6 @@
     <GenerateProgramFile>true</GenerateProgramFile>
   </PropertyGroup>
 
-  <!-- Migrated from MSTest 3.6.1 to xUnit 2.9.2 + Xunit.SkippableFact
-       1.4.13 so consumer C# test projects share a single framework. -->
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageReference Include="xunit" Version="2.9.3" />

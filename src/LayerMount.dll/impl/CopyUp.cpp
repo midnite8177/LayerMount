@@ -6,6 +6,7 @@
 #include "NtStatusUtil.h"
 
 #include <winioctl.h>
+#include <optional>
 #include <aclapi.h>
 
 #pragma comment(lib, "advapi32.lib")
@@ -126,16 +127,13 @@ bool TryGetStableIndexNumberFromPath(const std::wstring& path,
     return ok;
 }
 
-LayerMount::LayerMountMetadata MakeCopyUpMetadata(
-    const std::wstring& sourcePath,
-    HANDLE sourceHandle = INVALID_HANDLE_VALUE) {
+LayerMount::LayerMountMetadata MakeCopyUpMetadata(const std::wstring& sourcePath) {
     LayerMount::LayerMountMetadata metadata = {};
     ::GetSystemTimeAsFileTime(&metadata.copyUpTimestamp);
     metadata.originLayer = sourcePath;
 
     uint64_t stableIndexNumber = 0;
-    if (TryGetStableIndexNumberFromHandle(sourceHandle, stableIndexNumber) ||
-        TryGetStableIndexNumberFromPath(sourcePath, stableIndexNumber)) {
+    if (TryGetStableIndexNumberFromPath(sourcePath, stableIndexNumber)) {
         metadata.hasStableIndexNumber = true;
         metadata.stableIndexNumber = stableIndexNumber;
     }
@@ -357,28 +355,12 @@ private:
     std::wstring p_;
 };
 
-// Sets the three timestamps of the file or directory at `path` through
-// an attribute-only handle. Backup semantics honor SE_BACKUP_NAME and
-// SE_RESTORE_NAME when the caller holds them and let a directory open.
-// On failure the Win32 error is in GetLastError.
-bool ApplyFileTimes(const std::wstring& path, const FILETIME& creation,
-                    const FILETIME& access, const FILETIME& write) {
-    ::LayerMount::ScopedHandle handle(CreateFileW(
-        path.c_str(),
-        FILE_WRITE_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-    if (!handle.IsValid()) {
-        return false;
+// The attribute bits from GetFileAttributesW, or none when that call failed.
+std::optional<DWORD> AttributesOrNone(DWORD attributes) {
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return std::nullopt;
     }
-    if (!SetFileTime(handle.Get(), &creation, &access, &write)) {
-        const DWORD err = ::GetLastError();
-        handle.Reset();
-        ::SetLastError(err);
-        return false;
-    }
-    return true;
+    return attributes;
 }
 
 bool HasFileAttribute(DWORD attrs, DWORD flag) {
@@ -408,6 +390,92 @@ bool ClearSparseAndTrimAllocation(HANDLE handle) {
 } // namespace
 
 namespace LayerMount {
+
+// Captures the timestamps of a source, and attribute bits when the
+// caller gives them. Restore() writes them to the copy-up target. A data
+// write and a metadata stream write each change the target's
+// LastWriteTime, so Restore() runs after the last write to the target.
+// A zero time keeps the stored value, so a capture that failed and left
+// a time at zero restores nothing for that field.
+//
+// Restore() opens the target with FILE_FLAG_BACKUP_SEMANTICS. Path-based
+// SetFileAttributesW and a plain CreateFileW(FILE_WRITE_ATTRIBUTES) both
+// do DACL checks, so a lower file that inherited a DENY-WRITE from its
+// parent blocks the restore even though EnsureCopyUpPrivileges enabled
+// SE_BACKUP_NAME and SE_RESTORE_NAME. Backup semantics honor those
+// privileges and let a directory open. Restore() returns false with the
+// Win32 error in GetLastError.
+class FileBasicInfoGuard {
+public:
+    FileBasicInfoGuard(HANDLE source, std::optional<DWORD> attributes,
+                       std::wstring targetPath)
+        : attributes_(attributes), targetPath_(std::move(targetPath)) {
+        GetFileTime(source, &creation_, &access_, &write_);
+    }
+    FileBasicInfoGuard(const WIN32_FILE_ATTRIBUTE_DATA& source,
+                       std::optional<DWORD> attributes, std::wstring targetPath)
+        : creation_(source.ftCreationTime),
+          access_(source.ftLastAccessTime),
+          write_(source.ftLastWriteTime),
+          attributes_(attributes),
+          targetPath_(std::move(targetPath)) {}
+    // The result is discarded here. On a failure path the caller can have
+    // deleted the target already, and then the open in Restore() fails.
+    ~FileBasicInfoGuard() {
+        if (!restored_) {
+            Restore();
+        }
+    }
+    FileBasicInfoGuard(const FileBasicInfoGuard&) = delete;
+    FileBasicInfoGuard& operator=(const FileBasicInfoGuard&) = delete;
+
+    bool Restore() {
+        restored_ = true;
+        ::LayerMount::ScopedHandle handle(CreateFileW(
+            targetPath_.c_str(),
+            FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (!handle.IsValid()) {
+            return false;
+        }
+        BOOL ok = FALSE;
+        if (attributes_.has_value()) {
+            // One FileBasicInfo call writes the attribute bits and the
+            // times together.
+            FILE_BASIC_INFO basic{};
+            basic.CreationTime.LowPart    = creation_.dwLowDateTime;
+            basic.CreationTime.HighPart   = static_cast<LONG>(creation_.dwHighDateTime);
+            basic.LastAccessTime.LowPart  = access_.dwLowDateTime;
+            basic.LastAccessTime.HighPart = static_cast<LONG>(access_.dwHighDateTime);
+            basic.LastWriteTime.LowPart   = write_.dwLowDateTime;
+            basic.LastWriteTime.HighPart  = static_cast<LONG>(write_.dwHighDateTime);
+            // A ChangeTime of -1 keeps the stored value.
+            basic.ChangeTime.QuadPart     = -1;
+            basic.FileAttributes          = *attributes_;
+            ok = SetFileInformationByHandle(handle.Get(), FileBasicInfo,
+                                            &basic, sizeof(basic));
+        } else {
+            ok = SetFileTime(handle.Get(), &creation_, &access_, &write_);
+        }
+        if (!ok) {
+            const DWORD err = ::GetLastError();
+            handle.Reset();
+            ::SetLastError(err);
+            return false;
+        }
+        return true;
+    }
+
+private:
+    FILETIME creation_{};
+    FILETIME access_{};
+    FILETIME write_{};
+    std::optional<DWORD> attributes_;
+    std::wstring targetPath_;
+    bool restored_ = false;
+};
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -646,91 +714,41 @@ NTSTATUS CopyUp::WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
-    std::wstring normalized = NormalizePath(relativePath);
-
-    // Serialize concurrent copy-ups to the same path. The reservation blocks
-    // any second thread until ours completes; on wake-up the second thread
-    // re-checks ExistsInUpper below and short-circuits to STATUS_SUCCESS
-    // because our commit has already landed. Without serialization, racers
-    // would all fight at MoveFileExW commit time (losers see ACCESS_DENIED
-    // or sharing violations from the just-placed target).
-    PathReservation reservation(copyUpMutex_, copyUpCV_, inFlightCopyUps_,
-                                normalized);
-
-    // Check if already in upper layer (could have been copied by concurrent thread)
-    if (pathResolver_.ExistsInUpper(normalized)) {
-        return STATUS_SUCCESS;
+NTSTATUS CopyUp::CopyUpReparseEntry(const std::wstring& normalized,
+                                    const ResolvedPath& source,
+                                    RemoveUpperEntryFn removeUpperEntry) {
+    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
+    NTSTATUS reparseStatus =
+        CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
+    if (!NT_SUCCESS(reparseStatus)) {
+        return reparseStatus;
     }
 
-    // Resolve source in lower layers
-    ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
-    if (!source.Found()) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+    // Write bookkeeping metadata + cache invalidation + stats, mirroring
+    // the regular copy-up flow's tail. Timestamps/attrs are inherited by
+    // the link entry when FSCTL_SET_REPARSE_POINT lands. Metadata
+    // persistence is part of the copy-up transaction: without a valid
+    // origin/stable-id record, later resolution treats the reparse as a
+    // foreign creation, breaking rename-fanout and stable-file-id
+    // reporting. On failure, tear down the staged reparse point so the
+    // caller can retry from a clean state.
+    LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
+    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
+        const DWORD err = ::GetLastError();
+        removeUpperEntry(upperPath.c_str());
+        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
     }
 
-    // Ensure parent directories exist in upper layer
-    NTSTATUS status = EnsureParentDirectories(normalized);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
+    cache_.InvalidateWithAncestors(normalized);
+    RecordCopyUp(normalized);
 
-    // Reparse-point short-circuit: if the source carries a reparse tag, we
-    // want to carry the TAG up (preserving symlink/junction semantics), not
-    // copy the data behind the link. Regular file-data copy would follow the
-    // reparse point on Windows and land an opaque file full of target data.
-    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
-        NTSTATUS reparseStatus =
-            CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
-        if (!NT_SUCCESS(reparseStatus)) {
-            return reparseStatus;
-        }
+    return STATUS_SUCCESS;
+}
 
-        // Write bookkeeping metadata + cache invalidation + stats, mirroring
-        // the regular copy-up flow's tail. Timestamps/attrs are inherited by
-        // the link entry when FSCTL_SET_REPARSE_POINT lands. Metadata
-        // persistence is part of the copy-up transaction: without a valid
-        // origin/stable-id record, later resolution treats the reparse as a
-        // foreign creation, breaking rename-fanout and stable-file-id
-        // reporting. On failure, tear down the staged reparse point so the
-        // caller can retry from a clean state.
-        LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
-        if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
-            const DWORD err = ::GetLastError();
-            ::DeleteFileW(upperPath.c_str());
-            return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
-        }
-
-        cache_.InvalidateWithAncestors(normalized);
-        RecordCopyUp(normalized);
-
-        return STATUS_SUCCESS;
-    }
-
-    // Open source file
-    ScopedHandle srcHandle(CreateFileW(
-        source.absolutePath.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr));
-
-    if (!srcHandle.IsValid()) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
-    }
-
-    // Capture source attributes and timestamps once — re-applied at the very end
-    // so neither the work-dir create (which uses FILE_ATTRIBUTE_NORMAL) nor the
-    // ADS write (which updates NTFS LastWriteTime) can corrupt them.
-    DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
-    FILETIME srcCreation = {}, srcAccess = {}, srcWrite = {};
-    GetFileTime(srcHandle.Get(), &srcCreation, &srcAccess, &srcWrite);
-
-    // Generate work path and create temp file
-    std::wstring workPath = GenerateWorkPath();
+NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
+                                    ScopedHandle& srcHandle,
+                                    DWORD srcAttrs,
+                                    const std::wstring& workPath) {
     ScopedHandle dstHandle(CreateFileW(
         workPath.c_str(),
         GENERIC_READ | GENERIC_WRITE,
@@ -768,8 +786,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
                         nullptr, 0, &bytesReturned, nullptr);
     }
 
-    // Copy file data
-    status = CopyFileData(srcHandle.Get(), dstHandle.Get());
+    NTSTATUS status = CopyFileData(srcHandle.Get(), dstHandle.Get());
     if (!NT_SUCCESS(status)) {
         dstHandle.Reset();
         DeleteFileW(workPath.c_str());
@@ -791,19 +808,18 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     // default DACL can broaden access relative to the source, silently
     // changing access-control semantics after the first write. Tear down
     // the staged work-dir copy so the caller retries from a clean state.
-    if (!CopySecurityDescriptor(source.absolutePath, workPath)) {
+    if (!CopySecurityDescriptor(sourcePath, workPath)) {
         const DWORD err = ::GetLastError();
         ::DeleteFileW(workPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
-    // Atomic commit from work dir to upper layer
-    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
-    status = CommitFromWorkDir(workPath, upperPath);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
+    return STATUS_SUCCESS;
+}
 
+NTSTATUS CopyUp::FinishCommittedFile(const std::wstring& sourcePath,
+                                     const std::wstring& upperPath,
+                                     FileBasicInfoGuard& basicInfo) {
     // Copy user alternate data streams (zone.identifier, custom metadata, etc.)
     // Must run BEFORE WriteLayerMountMetadata so the overlay's own :overlay stream
     // is authoritative and not overwritten by whatever the lower file had.
@@ -812,69 +828,101 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     // app metadata that the source had — better to fail the copy-up so the
     // caller can retry or report than to commit a half-faithful copy. Tear
     // down the just-committed upper file so a retry starts fresh.
-    if (!CopyUserAlternateDataStreams(source.absolutePath, upperPath)) {
+    if (!CopyUserAlternateDataStreams(sourcePath, upperPath)) {
         DWORD adsErr = ::GetLastError();
         if (adsErr == 0) adsErr = ERROR_INVALID_DATA;
         ::DeleteFileW(upperPath.c_str());
         return ::LayerMount::NtStatusFromWin32(adsErr);
     }
 
-    LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath, srcHandle.Get());
+    LayerMountMetadata metadata = MakeCopyUpMetadata(sourcePath);
     NTSTATUS metadataStatus = WriteCopyUpMetadataOrAbort(upperPath, metadata);
     if (!NT_SUCCESS(metadataStatus)) {
         return metadataStatus;
     }
 
-    // Re-apply captured attributes + timestamps through a single handle
-    // opened with FILE_FLAG_BACKUP_SEMANTICS. Path-based SetFileAttributesW
-    // and a plain CreateFileW(FILE_WRITE_ATTRIBUTES) both do DACL checks,
-    // so a lower file that inherited a DENY-WRITE from its parent would
-    // block restoration even though EnsureCopyUpPrivileges already enabled
-    // SE_BACKUP_NAME / SE_RESTORE_NAME. Backup semantics honor those
-    // privileges and bypass the DACL check, matching the ADS copy helpers
-    // above. SetFileInformationByHandle(FileBasicInfo) writes the attribute
-    // bits and all four timestamps atomically.
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES) {
-        ScopedHandle mdHandle(CreateFileW(
-            upperPath.c_str(),
-            FILE_WRITE_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-        if (!mdHandle.IsValid()) {
-            const DWORD err = ::GetLastError();
-            ::DeleteFileW(upperPath.c_str());
-            return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-        }
-        FILE_BASIC_INFO basic{};
-        basic.CreationTime.LowPart    = srcCreation.dwLowDateTime;
-        basic.CreationTime.HighPart   = static_cast<LONG>(srcCreation.dwHighDateTime);
-        basic.LastAccessTime.LowPart  = srcAccess.dwLowDateTime;
-        basic.LastAccessTime.HighPart = static_cast<LONG>(srcAccess.dwHighDateTime);
-        basic.LastWriteTime.LowPart   = srcWrite.dwLowDateTime;
-        basic.LastWriteTime.HighPart  = static_cast<LONG>(srcWrite.dwHighDateTime);
-        // -1 is the documented "don't change" sentinel for FILE_BASIC_INFO
-        // time fields. Zero would write the Windows epoch (1601-01-01) and
-        // SetFileInformationByHandle rejects the whole call as invalid.
-        basic.ChangeTime.QuadPart     = -1;
-        basic.FileAttributes          = srcAttrs;
-        if (!SetFileInformationByHandle(mdHandle.Get(), FileBasicInfo,
-                                        &basic, sizeof(basic))) {
-            const DWORD err = ::GetLastError();
-            mdHandle.Reset();
-            ::DeleteFileW(upperPath.c_str());
-            return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-        }
-    } else if (!ApplyFileTimes(upperPath, srcCreation, srcAccess, srcWrite)) {
+    if (!basicInfo.Restore()) {
         const DWORD err = ::GetLastError();
         ::DeleteFileW(upperPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
-    // Invalidate cache
-    cache_.InvalidateWithAncestors(normalized);
+    return STATUS_SUCCESS;
+}
 
-    // Update stats
+NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
+    std::wstring normalized = NormalizePath(relativePath);
+
+    // Serialize concurrent copy-ups to the same path. The reservation blocks
+    // any second thread until ours completes; on wake-up the second thread
+    // re-checks ExistsInUpper below and short-circuits to STATUS_SUCCESS
+    // because our commit has already landed. Without serialization, racers
+    // would all fight at MoveFileExW commit time (losers see ACCESS_DENIED
+    // or sharing violations from the just-placed target).
+    PathReservation reservation(copyUpMutex_, copyUpCV_, inFlightCopyUps_,
+                                normalized);
+
+    // Check if already in upper layer (could have been copied by concurrent thread)
+    if (pathResolver_.ExistsInUpper(normalized)) {
+        return STATUS_SUCCESS;
+    }
+
+    // Resolve source in lower layers
+    ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
+    if (!source.Found()) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    // Ensure parent directories exist in upper layer
+    NTSTATUS status = EnsureParentDirectories(normalized);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    // Reparse-point short-circuit: if the source carries a reparse tag, we
+    // want to carry the TAG up (preserving symlink/junction semantics), not
+    // copy the data behind the link. Regular file-data copy would follow the
+    // reparse point on Windows and land an opaque file full of target data.
+    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return CopyUpReparseEntry(normalized, source, ::DeleteFileW);
+    }
+
+    // Open source file
+    ScopedHandle srcHandle(CreateFileW(
+        source.absolutePath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr));
+
+    if (!srcHandle.IsValid()) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+
+    DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
+    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
+    FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), upperPath);
+
+    std::wstring workPath = GenerateWorkPath();
+    status = StageFileInWorkDir(source.absolutePath, srcHandle, srcAttrs, workPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    // Atomic commit from work dir to upper layer
+    status = CommitFromWorkDir(workPath, upperPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = FinishCommittedFile(source.absolutePath, upperPath, basicInfo);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    cache_.InvalidateWithAncestors(normalized);
     RecordCopyUp(normalized);
 
     // Reservation released by RAII at scope exit; waiters then re-check
@@ -918,47 +966,9 @@ NTSTATUS CopyUp::ApplyPlaceholderCompressionOrAbort(ScopedHandle& dstHandle,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
-    std::wstring normalized = NormalizePath(relativePath);
-
-    // Fast-path: already committed before we even check the reservation.
-    if (pathResolver_.ExistsInUpper(normalized)) {
-        return STATUS_SUCCESS;
-    }
-
-    // Serialize concurrent metacopy stages on the same path. Without this,
-    // two threads can both stage a sparse shell into the work dir and race
-    // at MoveFileExW commit — the loser sees ACCESS_DENIED and leaves an
-    // orphaned work file behind, while the winner's metacopy can later be
-    // overwritten by an interleaved second commit. Same invariant CopyUpFile
-    // enforces.
-    PathReservation reservation(copyUpMutex_, copyUpCV_, inFlightCopyUps_,
-                                normalized);
-
-    // Re-check after acquiring the reservation — a winner may have committed
-    // while we waited, in which case there's nothing to do.
-    if (pathResolver_.ExistsInUpper(normalized)) {
-        return STATUS_SUCCESS;
-    }
-
-    ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
-    if (!source.Found()) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-
-    NTSTATUS status = EnsureParentDirectories(normalized);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    // Get source file info for size and timestamps
-    WIN32_FILE_ATTRIBUTE_DATA srcAttrs;
-    if (!GetFileAttributesExW(source.absolutePath.c_str(), GetFileExInfoStandard, &srcAttrs)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
-    }
-
-    // Create sparse file in work directory
-    std::wstring workPath = GenerateWorkPath();
+NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
+                                             const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
+                                             const std::wstring& workPath) {
     ScopedHandle dstHandle(CreateFileW(
         workPath.c_str(),
         GENERIC_READ | GENERIC_WRITE,
@@ -1003,16 +1013,68 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
-    // Copy security descriptor. Fatal on failure -- see CopyUpFile above
+    // Copy security descriptor. Fatal on failure -- see StageFileInWorkDir
     // for the reasoning. Tear down the staged work-dir copy on failure.
-    if (!CopySecurityDescriptor(source.absolutePath, workPath)) {
+    if (!CopySecurityDescriptor(sourcePath, workPath)) {
         const DWORD err = ::GetLastError();
         ::DeleteFileW(workPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
-    // Atomic commit
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
+    std::wstring normalized = NormalizePath(relativePath);
+
+    // Fast-path: already committed before we even check the reservation.
+    if (pathResolver_.ExistsInUpper(normalized)) {
+        return STATUS_SUCCESS;
+    }
+
+    // Serialize concurrent metacopy stages on the same path. Without this,
+    // two threads can both stage a sparse shell into the work dir and race
+    // at MoveFileExW commit. The loser sees ACCESS_DENIED and leaves an
+    // orphaned work file behind, while the winner's metacopy can later be
+    // overwritten by an interleaved second commit. Same invariant CopyUpFile
+    // enforces.
+    PathReservation reservation(copyUpMutex_, copyUpCV_, inFlightCopyUps_,
+                                normalized);
+
+    // Re-check after the reservation is held. A winner can have committed
+    // while we waited, in which case there's nothing to do.
+    if (pathResolver_.ExistsInUpper(normalized)) {
+        return STATUS_SUCCESS;
+    }
+
+    ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
+    if (!source.Found()) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    NTSTATUS status = EnsureParentDirectories(normalized);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    // Get source file info for size and timestamps
+    WIN32_FILE_ATTRIBUTE_DATA srcAttrs;
+    if (!GetFileAttributesExW(source.absolutePath.c_str(), GetFileExInfoStandard, &srcAttrs)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+
     std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
+    // CreateFileW below sets the attribute bits on the shell, so the guard
+    // carries the times only.
+    FileBasicInfoGuard basicInfo(srcAttrs, std::nullopt, upperPath);
+
+    std::wstring workPath = GenerateWorkPath();
+    status = StageMetacopyShellInWorkDir(source.absolutePath, srcAttrs, workPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    // Atomic commit
     status = CommitFromWorkDir(workPath, upperPath);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -1025,11 +1087,7 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return metacopyMetadataStatus;
     }
 
-    // Re-apply timestamps LAST — ADS write updates NTFS LastWriteTime, so
-    // timestamps must be the final operation to preserve source truth.
-    // (Attributes already correctly set by CreateFileW above.)
-    ApplyFileTimes(upperPath, srcAttrs.ftCreationTime, srcAttrs.ftLastAccessTime,
-                   srcAttrs.ftLastWriteTime);
+    basicInfo.Restore();
 
     cache_.InvalidateWithAncestors(normalized);
     RecordCopyUp(normalized);
@@ -1073,14 +1131,37 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
+    WIN32_FILE_ATTRIBUTE_DATA shellInfo{};
+    GetFileAttributesExW(upperPath.c_str(), GetFileExInfoStandard, &shellInfo);
+    // The write handle on the shell lives inside FillMetacopyShell, which
+    // returns before this guard is destroyed, so the handle closes first.
+    // The close of a written handle is the last write of LastWriteTime.
+    FileBasicInfoGuard basicInfo(shellInfo, std::nullopt, upperPath);
+
+    NTSTATUS status = FillMetacopyShell(srcHandle, upperPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = FinishFilledShell(upperPath, metadata);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    basicInfo.Restore();
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::FillMetacopyShell(ScopedHandle& srcHandle,
+                                   const std::wstring& upperPath) {
     // Open destination (upper layer file) for writing. Share modes must
     // include SHARE_READ | SHARE_WRITE | SHARE_DELETE so a caller that
     // already holds a writable handle on the file does not fail this open
-    // with a sharing violation. FILE_READ_ATTRIBUTES lets the timestamp
-    // capture below read from this handle.
+    // with a sharing violation.
     ScopedHandle dstHandle(CreateFileW(
         upperPath.c_str(),
-        GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+        GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_EXISTING,
@@ -1090,10 +1171,6 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     if (!dstHandle.IsValid()) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
-
-    // Captured before CopyFileData, which changes LastWriteTime.
-    FILETIME shellCreation{}, shellAccess{}, shellWrite{};
-    GetFileTime(dstHandle.Get(), &shellCreation, &shellAccess, &shellWrite);
 
     // Seek to beginning of both files
     LARGE_INTEGER zero = {};
@@ -1121,6 +1198,11 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     srcHandle.Reset();
     dstHandle.Reset();
 
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
+                                   LayerMountMetadata& metadata) {
     // Carry user alternate data streams (zone.identifier, custom metadata)
     // from the lower file up to the upper. The eager copy-up (CopyUpFile)
     // does this right after commit; the lazy path has to do it here because
@@ -1152,10 +1234,6 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         const DWORD err = ::GetLastError();
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
     }
-
-    // CopyFileData and WriteLayerMountMetadata each change the file's
-    // LastWriteTime through their own stream.
-    ApplyFileTimes(upperPath, shellCreation, shellAccess, shellWrite);
 
     return STATUS_SUCCESS;
 }
@@ -1189,52 +1267,26 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     // returns nothing, and any client expecting the upper to behave as a
     // junction (or attempting FSCTL_DELETE_REPARSE_POINT on it) sees
     // ERROR_NOT_A_REPARSE_POINT. The fix is to route directory-reparse
-    // sources through CopyUpReparsePointEntry, which preserves the tag +
+    // sources through CopyUpReparseEntry, which preserves the tag +
     // reparse data verbatim.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
-        NTSTATUS reparseStatus =
-            CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
-        if (!NT_SUCCESS(reparseStatus)) {
-            return reparseStatus;
-        }
-
-        // Metadata persistence is part of the copy-up transaction (see
-        // the file-reparse branch above). On failure, remove the staged
-        // reparse directory so the caller retries from a clean state.
-        LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
-        if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
-            const DWORD err = ::GetLastError();
-            ::RemoveDirectoryW(upperPath.c_str());
-            return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
-        }
-
-        cache_.InvalidateWithAncestors(normalized);
-        RecordCopyUp(normalized);
-        return STATUS_SUCCESS;
+        return CopyUpReparseEntry(normalized, source, ::RemoveDirectoryW);
     }
 
-    // Capture source directory attributes and timestamps once — re-applied at
-    // the very end so neither CreateDirectoryW (which doesn't take attrs) nor
-    // the ADS write (which updates NTFS LastWriteTime) can corrupt them.
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
-    FILETIME srcCreation = {}, srcAccess = {}, srcWrite = {};
-    {
-        ScopedHandle srcHandle(CreateFileW(
-            source.absolutePath.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
-            nullptr));
-        if (srcHandle.IsValid()) {
-            GetFileTime(srcHandle.Get(), &srcCreation, &srcAccess, &srcWrite);
-        }
-    }
+    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
+    ScopedHandle srcHandle(CreateFileW(
+        source.absolutePath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr));
+    FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), upperPath);
+    srcHandle.Reset();
 
     // Create directory in upper layer (no work-dir atomic rename for dirs)
-    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
     if (!CreateDirectoryW(upperPath.c_str(), nullptr)) {
         DWORD err = GetLastError();
         if (err != ERROR_ALREADY_EXISTS) {
@@ -1242,6 +1294,26 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         }
     }
 
+    status = ApplyDirectoryLayout(upperPath, srcAttrs);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = SecureAndTagUpperDirectory(source.absolutePath, upperPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    basicInfo.Restore();
+
+    cache_.InvalidateWithAncestors(normalized);
+    RecordCopyUp(normalized);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::ApplyDirectoryLayout(const std::wstring& upperPath,
+                                      DWORD srcAttrs) {
     // Propagate NTFS compression on the directory. NTFS dirs can carry the
     // COMPRESSED attribute, which sets the default layout for NEW children
     // created inside them. Without propagation, files created into a lower-
@@ -1266,13 +1338,18 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
 
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::SecureAndTagUpperDirectory(const std::wstring& sourcePath,
+                                            const std::wstring& upperPath) {
     // Copy security descriptor. Fatal on failure: the directory's DACL
     // is also the template for auto-inheritance onto children created
     // inside it, so silently dropping the source's DACL would broaden
     // or narrow access on every subsequently created child. Tear down
     // the staged upper directory so the caller retries from a clean
     // state.
-    if (!CopySecurityDescriptor(source.absolutePath, upperPath)) {
+    if (!CopySecurityDescriptor(sourcePath, upperPath)) {
         const DWORD err = ::GetLastError();
         ::RemoveDirectoryW(upperPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
@@ -1281,23 +1358,12 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     // Write ADS metadata. Fatal on failure: without origin/stable-id
     // the upper directory looks like a foreign creation and later
     // resolution can misbehave. Tear down the staged upper directory.
-    LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
+    LayerMountMetadata metadata = MakeCopyUpMetadata(sourcePath);
     if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
         const DWORD err = ::GetLastError();
         ::RemoveDirectoryW(upperPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
     }
-
-    // Re-apply captured attributes (CreateDirectoryW doesn't copy source attrs).
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES) {
-        SetFileAttributesW(upperPath.c_str(), srcAttrs);
-    }
-
-    // Re-apply captured timestamps LAST (ADS write updates NTFS LastWriteTime).
-    ApplyFileTimes(upperPath, srcCreation, srcAccess, srcWrite);
-
-    cache_.InvalidateWithAncestors(normalized);
-    RecordCopyUp(normalized);
 
     return STATUS_SUCCESS;
 }

@@ -9,10 +9,8 @@
        on Windows; we just don't advertise the Windows target-framework
        moniker. Consumers remain in charge of their own platform target.
 
-       NO test-framework package reference here. MSTest / xUnit / etc.
-       are the consumer's concern; keeping this library framework-clean
-       means any test project can pick a framework without dragging the
-       others along. -->
+       The library references Xunit.SkippableFact for ElevationHelper's
+       skip, so every consumer is an xUnit project. -->
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -38,6 +36,10 @@
          wrapper must be reachable. Pulled in by ProjectReference rather
          than PackageReference to match the rest of the solution. -->
     <ProjectReference Include="..\LayerMount.NET\LayerMount.NET.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.61" />
   </ItemGroup>
 
 </Project>
