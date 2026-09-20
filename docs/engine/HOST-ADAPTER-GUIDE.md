@@ -4,12 +4,13 @@ A host adapter binds the engine to a filesystem host. It turns the
 filesystem host's create, read, write, and close requests into calls
 against `LM_HANDLE` and `LM_FILE_HANDLE`, and turns the engine's
 answers back into whatever shape the filesystem host expects. This
-document covers the eight rules a host adapter author needs that live
+document covers the nine rules a host adapter author needs that live
 only in the native header and its implementation: handle lifecycle and
 the host-attached flag, capability bits and their fallbacks, the mapping
 from driver-style I/O requests to the engine's file API, paging reads,
 event callback threading, the two-call buffer pattern, the reserved
-HRESULT range, and HRESULT-to-NTSTATUS conversion. For layer sources
+HRESULT range, HRESULT-to-NTSTATUS conversion, and the mount handshake
+a background mount writes. For layer sources
 (VHD/VHDX, VSS) and the `.lmnt` layer image format, see
 [LAYER-SOURCES.md](LAYER-SOURCES.md) and
 [LAYER-IMAGE-FORMAT.md](LAYER-IMAGE-FORMAT.md) instead of repeating
@@ -319,3 +320,58 @@ install an event callback that will not deadlock, read every buffered
 output correctly on the first try, and turn any HRESULT the engine
 returns into the NTSTATUS a filesystem host expects, without opening
 `LayerMount.h`.
+
+---
+
+## The mount handshake
+
+A host adapter that mounts in the background starts a copy of itself as
+a child process with `--handshake-child` and waits for one JSON line on
+the child's stdout. The child writes the line after the mount succeeded
+or after it failed, and writes nothing else to stdout before it. The
+parent reads that line with `HandshakeReader.ReadLine` from the managed
+`LayerMount.NET` wrapper, which returns a `MountedHandshake`, a
+`FailedHandshake`, or an `UnknownHandshake`; the engine's tests and every
+host adapter's tests read the line through the same reader. Emitting the
+line, the control pipe it names, and the daemonization stay in the host
+adapter (ADR 0007).
+
+A mounted line:
+
+```json
+{"status":"mounted","instanceId":"...","mountPoint":"X:\\","controlPipe":"\\\\.\\pipe\\...","pid":4242,"processCreationTimeFiletime":133000000000000000,"processCreationTimeUtc":"2026-01-02T03:04:05.0000000Z","startedAtUtc":"2026-01-02T03:04:06.0000000Z","host":"..."}
+```
+
+A failed line:
+
+```json
+{"status":"failed","error":"mount_point_busy","message":"...","host":"..."}
+```
+
+Field rules:
+
+- `status` is `mounted` or `failed`. Any other value, or no value, parses
+  as `UnknownHandshake`, and the parent treats it as a failure.
+- `host` is on every line. It is an opaque identifier the host adapter
+  chooses for itself; the reader never checks it against a list. A line
+  with no `host` parses with an empty `Host`, and a parent treats that as
+  a malformed handshake.
+- `instanceId` is the id of the mounted overlay, as the host adapter
+  assigned it. `mountPoint` is the path the child mounted at.
+  `controlPipe` is the full name of the child's control pipe; the parent
+  strips the pipe prefix before it connects.
+- `pid` is the child's process id and `processCreationTimeFiletime` its
+  creation time as a Windows FILETIME.
+- `processCreationTimeUtc` and `startedAtUtc` are ISO-8601 UTC
+  timestamps. `startedAtUtc` is the time the child emitted the handshake,
+  after the mount succeeded. The reader parses both into
+  `DateTimeOffset?` and gives `null` for a value it cannot parse.
+- `error` and `message` are on a failed line only. `error` is a short
+  code the host adapter defines; `message` is for a person.
+- The reader tolerates a missing or mistyped field: a string field reads
+  as empty, a number as zero. Only a line that is not JSON throws.
+
+The read is bounded by a timeout. On a timeout the parent kills the
+child, because the reader's thread stays blocked in the read and the
+child's stdout is not readable again.
+

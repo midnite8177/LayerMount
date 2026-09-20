@@ -39,13 +39,6 @@
          managed wrapper is all we need for the native library. -->
     <ProjectReference Include="..\LayerMount.NET\LayerMount.NET.csproj" />
 
-    <!-- EndToEndMountTests consumes the handshake + control-pipe helpers
-         and the TempLayerEnvironment fixture from LayerMount.TestShared.
-         TestShared is plain net8.0 with no test-framework reference of
-         its own; both test projects now run on xUnit, but TestShared
-         stays framework-agnostic so future consumers (benchmarks,
-         tooling, third-party test projects) can still pick their own
-         framework. -->
     <ProjectReference Include="..\LayerMount.TestShared\LayerMount.TestShared.csproj" />
   </ItemGroup>
 

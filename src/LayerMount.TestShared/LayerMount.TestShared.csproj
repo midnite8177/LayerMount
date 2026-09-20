@@ -1,11 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Shared test-harness helpers consumed by any test project across
-       the engine and the host adapters. Holds framework-agnostic
-       building blocks:
-         * TempLayerEnvironment  - upper/work/lowerN temp tree
-         * HandshakeClient       - parses the mount handshake
-         * ControlPipeClient     - talks to the per-instance control pipe
+       the engine and the host adapters.
 
        Deliberately targets net8.0 (not net8.0-windows) so consumers
        targeting either TFM can reference it. Windows-only APIs
