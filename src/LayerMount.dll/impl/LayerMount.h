@@ -276,6 +276,20 @@ struct InternalFileInfo {
     UINT32 EaSize;
 };
 
+// The mutations one set-info call carries. Each field keeps the public
+// ABI's leave-unchanged sentinel: INVALID_FILE_ATTRIBUTES for the
+// attributes, 0 for a time, UINT64_MAX for a size.
+struct SetInfoRequest {
+    UINT32 fileAttributes;
+    UINT64 creationTime;
+    UINT64 lastAccessTime;
+    UINT64 lastWriteTime;
+    // Not applied: FillFileInfo reports the change time as the last write time.
+    UINT64 changeTime;
+    UINT64 allocationSize;
+    UINT64 fileSize;
+};
+
 inline UINT64 ComposeUInt64(DWORD high, DWORD low) {
     return (static_cast<UINT64>(high) << 32) | low;
 }
@@ -466,22 +480,12 @@ public:
 
     NTSTATUS EnsureHandleReady(FileContext* ctx);
 
-    // Apply attribute / timestamp / size mutations to an open file. The
-    // sentinel values in the public ABI map through here unchanged:
-    //   fileAttributes == INVALID_FILE_ATTRIBUTES -> leave unchanged
-    //   {creation,lastAccess,lastWrite,change}Time == 0 -> leave unchanged
-    //   allocationSize == UINT64_MAX -> leave unchanged
-    //   fileSize       == UINT64_MAX -> leave unchanged
-    // Triggers copy-up if the file is still in a lower layer. Fills
-    // outInfo with the post-mutation metadata when non-null.
+    // Apply the attribute, time, and size mutations in `request` to an
+    // open file; a field at its sentinel stays unchanged. Triggers copy-up
+    // if the file is still in a lower layer. Fills outInfo with the
+    // post-mutation metadata when non-null.
     NTSTATUS SetInfo(FileContext* ctx,
-                     UINT32 fileAttributes,
-                     UINT64 creationTime,
-                     UINT64 lastAccessTime,
-                     UINT64 lastWriteTime,
-                     UINT64 changeTime,
-                     UINT64 allocationSize,
-                     UINT64 fileSize,
+                     const SetInfoRequest& request,
                      InternalFileInfo* outInfo);
 
     // Path-based delete: remove the entry from the upper layer (or simply
@@ -656,9 +660,9 @@ private:
     // status on failure and clears ctx->isMetacopyOnly on success.
     NTSTATUS FillShell(const std::wstring& hostNorm, FileContext* ctx);
 
-    // Write guard. Only Write calls it, for a handle that was opened
-    // without data access and reached the write path on a shell. Fills
-    // the shell, then reopens the handle.
+    // Fills a shell that a handle without data access left sparse, then
+    // reopens the handle. The fill sets the origin's timestamps on the
+    // upper file as its last step.
     NTSTATUS EnsureMetacopyMaterialized(FileContext* ctx);
 
     // --- Members (declared in construction order) ---

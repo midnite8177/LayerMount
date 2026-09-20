@@ -357,6 +357,54 @@ private:
     std::wstring p_;
 };
 
+// Sets the three timestamps of the file or directory at `path` through
+// an attribute-only handle. Backup semantics honor SE_BACKUP_NAME and
+// SE_RESTORE_NAME when the caller holds them and let a directory open.
+// On failure the Win32 error is in GetLastError.
+bool ApplyFileTimes(const std::wstring& path, const FILETIME& creation,
+                    const FILETIME& access, const FILETIME& write) {
+    ::LayerMount::ScopedHandle handle(CreateFileW(
+        path.c_str(),
+        FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!handle.IsValid()) {
+        return false;
+    }
+    if (!SetFileTime(handle.Get(), &creation, &access, &write)) {
+        const DWORD err = ::GetLastError();
+        handle.Reset();
+        ::SetLastError(err);
+        return false;
+    }
+    return true;
+}
+
+bool HasFileAttribute(DWORD attrs, DWORD flag) {
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
+}
+
+bool ClearSparseAndTrimAllocation(HANDLE handle) {
+    FILE_SET_SPARSE_BUFFER sparseBuf{FALSE};
+    DWORD bytesReturned = 0;
+    if (!DeviceIoControl(handle, FSCTL_SET_SPARSE, &sparseBuf, sizeof(sparseBuf),
+                         nullptr, 0, &bytesReturned, nullptr)) {
+        return false;
+    }
+    LARGE_INTEGER fileSize{};
+    if (!GetFileSizeEx(handle, &fileSize)) {
+        return false;
+    }
+    // The clear alone keeps the clusters the volume gave the sparse file in
+    // 64 KiB units, so a handle still reports that allocation. The set-info
+    // frees the clusters past the file size.
+    FILE_ALLOCATION_INFO allocInfo{};
+    allocInfo.AllocationSize = fileSize;
+    return SetFileInformationByHandle(handle, FileAllocationInfo, &allocInfo,
+                                      sizeof(allocInfo)) != FALSE;
+}
+
 } // namespace
 
 namespace LayerMount {
@@ -700,8 +748,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     // writing data. Sparse state is a file-layout property, not something
     // SetFileAttributes can fix after the fact — the FSCTL must run on the
     // handle while the file is still empty.
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES &&
-        (srcAttrs & FILE_ATTRIBUTE_SPARSE_FILE) != 0) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE)) {
         DWORD bytesReturned = 0;
         FILE_SET_SPARSE_BUFFER sparseBuf{TRUE};
         DeviceIoControl(dstHandle.Get(), FSCTL_SET_SPARSE, &sparseBuf,
@@ -713,8 +760,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     // bytes get compressed in place. Without this, a compressed lower file
     // that occupies e.g. 2 MB expands to 10 MB in upper after copy-up —
     // silent storage inflation for every layered modification.
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES &&
-        (srcAttrs & FILE_ATTRIBUTE_COMPRESSED) != 0) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
         DWORD bytesReturned = 0;
         USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
         DeviceIoControl(dstHandle.Get(), FSCTL_SET_COMPRESSION,
@@ -819,25 +865,10 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
             ::DeleteFileW(upperPath.c_str());
             return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
         }
-    } else {
-        // No captured attributes — still need to apply timestamps.
-        ScopedHandle tsHandle(CreateFileW(
-            upperPath.c_str(),
-            FILE_WRITE_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-        if (!tsHandle.IsValid()) {
-            const DWORD err = ::GetLastError();
-            ::DeleteFileW(upperPath.c_str());
-            return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-        }
-        if (!SetFileTime(tsHandle.Get(), &srcCreation, &srcAccess, &srcWrite)) {
-            const DWORD err = ::GetLastError();
-            tsHandle.Reset();
-            ::DeleteFileW(upperPath.c_str());
-            return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-        }
+    } else if (!ApplyFileTimes(upperPath, srcCreation, srcAccess, srcWrite)) {
+        const DWORD err = ::GetLastError();
+        ::DeleteFileW(upperPath.c_str());
+        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
     // Invalidate cache
@@ -997,19 +1028,8 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
     // Re-apply timestamps LAST — ADS write updates NTFS LastWriteTime, so
     // timestamps must be the final operation to preserve source truth.
     // (Attributes already correctly set by CreateFileW above.)
-    {
-        ScopedHandle tsHandle(CreateFileW(
-            upperPath.c_str(),
-            FILE_WRITE_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr, OPEN_EXISTING, 0, nullptr));
-        if (tsHandle.IsValid()) {
-            SetFileTime(tsHandle.Get(),
-                        &srcAttrs.ftCreationTime,
-                        &srcAttrs.ftLastAccessTime,
-                        &srcAttrs.ftLastWriteTime);
-        }
-    }
+    ApplyFileTimes(upperPath, srcAttrs.ftCreationTime, srcAttrs.ftLastAccessTime,
+                   srcAttrs.ftLastWriteTime);
 
     cache_.InvalidateWithAncestors(normalized);
     RecordCopyUp(normalized);
@@ -1053,21 +1073,14 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
-    // Capture source timestamps NOW, before our own writes bump them on
-    // upper. CopyUpFile does the same in the eager path so the copy-up
-    // looks byte-for-byte equivalent to the source; the lazy path needs
-    // the same guarantee or consumers see the completion moment instead
-    // of the source write moment.
-    FILETIME srcCreation{}, srcAccess{}, srcWrite{};
-    GetFileTime(srcHandle.Get(), &srcCreation, &srcAccess, &srcWrite);
-
     // Open destination (upper layer file) for writing. Share modes must
     // include SHARE_READ | SHARE_WRITE | SHARE_DELETE so a caller that
     // already holds a writable handle on the file does not fail this open
-    // with a sharing violation.
+    // with a sharing violation. FILE_READ_ATTRIBUTES lets the timestamp
+    // capture below read from this handle.
     ScopedHandle dstHandle(CreateFileW(
         upperPath.c_str(),
-        GENERIC_WRITE,
+        GENERIC_WRITE | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_EXISTING,
@@ -1078,6 +1091,10 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
+    // Captured before CopyFileData, which changes LastWriteTime.
+    FILETIME shellCreation{}, shellAccess{}, shellWrite{};
+    GetFileTime(dstHandle.Get(), &shellCreation, &shellAccess, &shellWrite);
+
     // Seek to beginning of both files
     LARGE_INTEGER zero = {};
     SetFilePointerEx(srcHandle.Get(), zero, nullptr, FILE_BEGIN);
@@ -1087,6 +1104,18 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     NTSTATUS status = CopyFileData(srcHandle.Get(), dstHandle.Get());
     if (!NT_SUCCESS(status)) {
         return status;
+    }
+
+    // The shell must stay sparse while the data goes in, so the sparse
+    // attribute comes off after the copy, not before it as in CopyUpFile.
+    BY_HANDLE_FILE_INFORMATION originInfo{};
+    if (!GetFileInformationByHandle(srcHandle.Get(), &originInfo)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+    if (!HasFileAttribute(originInfo.dwFileAttributes, FILE_ATTRIBUTE_SPARSE_FILE) &&
+        !ClearSparseAndTrimAllocation(dstHandle.Get())) {
+        const DWORD err = ::GetLastError();
+        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
     srcHandle.Reset();
@@ -1124,20 +1153,9 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
     }
 
-    // Re-apply captured source timestamps LAST — both CopyFileData and
-    // WriteLayerMountMetadata bump NTFS LastWriteTime on their respective
-    // streams. Without this, a consumer that indexes by mtime would see
-    // the completion-moment stamp instead of the lower file's truth.
-    {
-        ScopedHandle tsHandle(CreateFileW(
-            upperPath.c_str(),
-            FILE_WRITE_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr, OPEN_EXISTING, 0, nullptr));
-        if (tsHandle.IsValid()) {
-            SetFileTime(tsHandle.Get(), &srcCreation, &srcAccess, &srcWrite);
-        }
-    }
+    // CopyFileData and WriteLayerMountMetadata each change the file's
+    // LastWriteTime through their own stream.
+    ApplyFileTimes(upperPath, shellCreation, shellAccess, shellWrite);
 
     return STATUS_SUCCESS;
 }
@@ -1228,8 +1246,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     // COMPRESSED attribute, which sets the default layout for NEW children
     // created inside them. Without propagation, files created into a lower-
     // compressed directory via the mount land uncompressed in upper.
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES &&
-        (srcAttrs & FILE_ATTRIBUTE_COMPRESSED) != 0) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
         HANDLE cmpH = CreateFileW(upperPath.c_str(),
                                     GENERIC_READ | GENERIC_WRITE,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1277,16 +1294,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     }
 
     // Re-apply captured timestamps LAST (ADS write updates NTFS LastWriteTime).
-    {
-        ScopedHandle tsHandle(CreateFileW(
-            upperPath.c_str(),
-            FILE_WRITE_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-        if (tsHandle.IsValid()) {
-            SetFileTime(tsHandle.Get(), &srcCreation, &srcAccess, &srcWrite);
-        }
-    }
+    ApplyFileTimes(upperPath, srcCreation, srcAccess, srcWrite);
 
     cache_.InvalidateWithAncestors(normalized);
     RecordCopyUp(normalized);
@@ -1609,8 +1617,7 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
 
     // Mark sparse BEFORE writing — sparse state is a layout property that
     // can only be set on an empty file.
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES &&
-        (srcAttrs & FILE_ATTRIBUTE_SPARSE_FILE) != 0) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE)) {
         DWORD br = 0;
         FILE_SET_SPARSE_BUFFER sb{TRUE};
         ::DeviceIoControl(dstH, FSCTL_SET_SPARSE, &sb, sizeof(sb),
@@ -1619,8 +1626,7 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
 
     // Same treatment for NTFS compression — must be applied BEFORE data so
     // the writes land compressed. See CopyUp::CopyUpFile for the rationale.
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES &&
-        (srcAttrs & FILE_ATTRIBUTE_COMPRESSED) != 0) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
         DWORD br = 0;
         USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
         ::DeviceIoControl(dstH, FSCTL_SET_COMPRESSION,
@@ -1824,8 +1830,7 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
     // SetFileAttributes silently ignores FILE_ATTRIBUTE_COMPRESSED — the
     // only way to set it is via FSCTL_SET_COMPRESSION. Propagate it so
     // children created under this directory inherit compression.
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES &&
-        (srcAttrs & FILE_ATTRIBUTE_COMPRESSED) != 0) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
         HANDLE cmpH = ::CreateFileW(dstAbs.c_str(),
                                       GENERIC_READ | GENERIC_WRITE,
                                       FILE_SHARE_READ | FILE_SHARE_WRITE,

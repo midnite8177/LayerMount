@@ -49,18 +49,17 @@ const wchar_t* OriginName(Origin origin) {
 struct OriginTraits {
     bool stagesOnUpper;
     bool isShell;
-    bool exactAllocation;
 };
 
 OriginTraits TraitsOf(Origin origin) {
     switch (origin) {
-    case Origin::UpperThroughMount: return {true, false, true};
-    case Origin::MetacopyShell:     return {true, true, false};
-    case Origin::LowerCopiedUp:     return {true, false, true};
-    case Origin::UpperBeforeMount:  return {true, false, true};
-    case Origin::Lower:             return {false, false, true};
+    case Origin::UpperThroughMount: return {true, false};
+    case Origin::MetacopyShell:     return {true, true};
+    case Origin::LowerCopiedUp:     return {true, false};
+    case Origin::UpperBeforeMount:  return {true, false};
+    case Origin::Lower:             return {false, false};
     }
-    return {false, false, true};
+    return {false, false};
 }
 
 enum class ReadShape { Inside, Straddle, AtEnd };
@@ -118,6 +117,15 @@ std::string PatternBytes(UINT64 size) {
     return bytes;
 }
 
+// True when the first `count` bytes of `buffer` are the pattern bytes
+// that start at file offset `offset`.
+bool MatchesPattern(const std::vector<BYTE>& buffer, UINT32 count, UINT64 offset) {
+    std::vector<BYTE> expected(count);
+    UINT64            index = offset;
+    std::generate(expected.begin(), expected.end(), [&] { return PatternByte(index++); });
+    return std::equal(buffer.begin(), buffer.begin() + count, expected.begin());
+}
+
 UINT64 StagedSize(Origin origin, UINT64 listedSize) {
     return origin == Origin::MetacopyShell ? kAboveMetacopyThresholdBytes + listedSize
                                            : listedSize;
@@ -143,8 +151,10 @@ std::wstring LowerPathOf(const TempLayerEnv& env, Origin origin, UINT64 listedSi
     return env.Lower(0) + L"\\" + FileName(origin, listedSize);
 }
 
-// The volume allocates a sparse file's clusters when cached writes reach
-// the disk, so the probe flushes the file first.
+// The shell probes measure a sparse file, and the volume allocates a sparse
+// file's clusters only when cached writes reach the disk, so the probe
+// flushes the file first. For a file that is not sparse and not compressed
+// the volume reports the file size, not the cluster-rounded allocation.
 UINT64 FlushAndMeasureAllocation(const std::wstring& path) {
     HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -157,6 +167,18 @@ UINT64 FlushAndMeasureAllocation(const std::wstring& path) {
     Assert::IsTrue(low != INVALID_FILE_SIZE || ::GetLastError() == NO_ERROR,
                    (L"GetCompressedFileSizeW " + path).c_str());
     return (static_cast<UINT64>(high) << 32) | low;
+}
+
+struct UpperProbe {
+    UINT64 allocation = 0;
+    UINT32 attributes = INVALID_FILE_ATTRIBUTES;
+};
+
+UpperProbe ProbeUpper(const std::wstring& upperPath) {
+    UpperProbe probe;
+    probe.allocation = FlushAndMeasureAllocation(upperPath);
+    probe.attributes = ::GetFileAttributesW(upperPath.c_str());
+    return probe;
 }
 
 class FileHandleHolder {
@@ -338,7 +360,7 @@ struct CellRecord {
     bool           tailUntouched = false;
     LM_FILE_INFO   openInfo{};
     LM_FILE_INFO   handleInfo{};
-    UINT64         upperAllocationBeforeRead = 0;
+    UpperProbe     upperBeforeRead;
     DirectoryEntry dirEntry;
     PathQuery      path;
 };
@@ -361,8 +383,8 @@ CellRecord ReadCell(const MountedEnv& mounted, const MatrixCell& cell,
         ::LayerMountGetFileInfo(fh.Get(), &rec.handleInfo),
         (L"LayerMountGetFileInfo before read " + overlayPath).c_str());
     if (TraitsOf(cell.origin).stagesOnUpper) {
-        rec.upperAllocationBeforeRead =
-            FlushAndMeasureAllocation(UpperPathOf(mounted.env, cell.origin, cell.listedSize));
+        rec.upperBeforeRead =
+            ProbeUpper(UpperPathOf(mounted.env, cell.origin, cell.listedSize));
     }
 
     std::vector<BYTE> buffer(request.length, kSentinel);
@@ -371,11 +393,7 @@ CellRecord ReadCell(const MountedEnv& mounted, const MatrixCell& cell,
     fh.Reset();
 
     const UINT32 got = (std::min)(rec.count, request.length);
-    std::vector<BYTE> expected(got);
-    UINT64 index = request.offset;
-    std::generate(expected.begin(), expected.end(), [&] { return PatternByte(index++); });
-    rec.contentMatch = rec.hr == S_OK &&
-                       std::equal(buffer.begin(), buffer.begin() + got, expected.begin());
+    rec.contentMatch = rec.hr == S_OK && MatchesPattern(buffer, got, request.offset);
     rec.tailZeroed    = TailIsAll(buffer, got, 0);
     rec.tailUntouched = TailIsAll(buffer, got, kSentinel);
 
@@ -417,7 +435,7 @@ std::wstring CellLine(const MatrixCell& cell, const ReadRequest& request,
     line += rec.hr == S_OK ? (rec.contentMatch ? L"1" : L"0") : L"-";
     line += L" tail-zeroed=" + std::to_wstring(rec.tailZeroed ? 1 : 0);
     line += L" tail-untouched=" + std::to_wstring(rec.tailUntouched ? 1 : 0);
-    line += L" alloc-upper-pre-read=" + std::to_wstring(rec.upperAllocationBeforeRead);
+    line += L" alloc-upper-pre-read=" + std::to_wstring(rec.upperBeforeRead.allocation);
     AppendSizeFields(line, SizesOf(rec));
     line += L" source=" + std::to_wstring(static_cast<int>(rec.path.source));
     line += L" attrs=" + Hex(rec.path.attributes);
@@ -479,11 +497,6 @@ struct ReportedAllocation {
     const wchar_t* producer;
 };
 
-// The matrix stages no preallocation, so the rounded file size is the exact
-// value every producer must report. A filled shell keeps the sparse
-// attribute, so every producer reports at or above the rounded size. The
-// producers do not have to agree: a producer with a handle reports the
-// volume's real allocation, and a listing reports the rounded size.
 void AssertOneAllocation(const MatrixCell& cell, const CellRecord& rec) {
     const UINT64             expected   = RoundUpToPage(cell.stagedSize);
     const ReportedAllocation reported[] = {
@@ -492,17 +505,8 @@ void AssertOneAllocation(const MatrixCell& cell, const CellRecord& rec) {
         {rec.dirEntry.info.allocationSize, L"directory allocation size"},
         {rec.path.allocationSize, L"path query allocation size"},
     };
-    if (TraitsOf(cell.origin).exactAllocation) {
-        for (const ReportedAllocation& r : reported) {
-            Assert::AreEqual<UINT64>(expected, r.value, FailMessage(cell, r.producer).c_str());
-        }
-        return;
-    }
     for (const ReportedAllocation& r : reported) {
-        Assert::IsTrue(r.value >= expected,
-                       (FailMessage(cell, r.producer) + L" reports " +
-                        std::to_wstring(r.value) + L", rounded size " +
-                        std::to_wstring(expected)).c_str());
+        Assert::AreEqual<UINT64>(expected, r.value, FailMessage(cell, r.producer).c_str());
     }
 }
 
@@ -518,8 +522,13 @@ void AssertPathResolves(const MatrixCell& cell, const CellRecord& rec) {
 
 void AssertShellFilledAtOpen(const MatrixCell& cell, const CellRecord& rec) {
     if (!TraitsOf(cell.origin).isShell) return;
-    Assert::IsTrue(rec.upperAllocationBeforeRead >= cell.stagedSize,
+    Assert::IsTrue(rec.upperBeforeRead.allocation >= cell.stagedSize,
                    FailMessage(cell, L"upper allocation before the read").c_str());
+    Assert::IsTrue((rec.openInfo.fileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) == 0,
+                   FailMessage(cell, L"open for read reports no sparse attribute").c_str());
+    Assert::IsTrue(rec.upperBeforeRead.attributes != INVALID_FILE_ATTRIBUTES &&
+                   (rec.upperBeforeRead.attributes & FILE_ATTRIBUTE_SPARSE_FILE) == 0,
+                   FailMessage(cell, L"upper path has no sparse attribute").c_str());
 }
 
 void AssertObservedBehavior(const MatrixCell& cell, const ReadRequest& request,
@@ -538,6 +547,23 @@ void AssertShellIsSparse(const std::wstring& upperPath, UINT64 fileSize, const w
                     L" of " + std::to_wstring(fileSize)).c_str());
 }
 
+// Sets the end of file on `fh` and fails the test unless the call
+// succeeds and reports the new size; `what` names the handle in the
+// failure message.
+void SetSizeOrFail(LM_FILE_HANDLE fh, UINT64 newSize, const wchar_t* what) {
+    LM_FILE_INFO postSet{};
+    Assert::AreEqual<HRESULT>(S_OK, SetFileSize(fh, newSize, &postSet),
+                              (L"a set-size on the " + std::wstring(what) + L" handle").c_str());
+    Assert::AreEqual<UINT64>(newSize, postSet.fileSize,
+                             L"the set-info result reports the new size");
+}
+
+void AssertLowerKeepsStagedSize(const TempLayerEnv& env, UINT64 listedSize) {
+    Assert::AreEqual<UINT64>(StagedSize(Origin::MetacopyShell, listedSize),
+        ReadAllBytes(LowerPathOf(env, Origin::MetacopyShell, listedSize)).size(),
+        L"the lower file keeps its size");
+}
+
 void SetSizeThenReadEndPage(const MountedEnv& mounted, Origin origin, UINT64 listedSize,
                             UINT64 newSize) {
     const std::wstring overlayPath = OverlayPath(origin, listedSize);
@@ -545,12 +571,7 @@ void SetSizeThenReadEndPage(const MountedEnv& mounted, Origin origin, UINT64 lis
     FileHandleHolder   fh;
     LM_FILE_INFO       info{};
     OpenOrFail(mounted.mount, overlayPath, GENERIC_WRITE, L"write-only", fh, &info);
-
-    LM_FILE_INFO postSet{};
-    Assert::AreEqual<HRESULT>(S_OK, SetFileSize(fh.Get(), newSize, &postSet),
-                              L"a set-size on the write-only handle");
-    Assert::AreEqual<UINT64>(newSize, postSet.fileSize,
-                             L"the set-info result reports the new size");
+    SetSizeOrFail(fh.Get(), newSize, L"write-only");
 
     const UINT64      pageStart = (newSize / kPageBytes) * kPageBytes;
     std::vector<BYTE> buffer(static_cast<size_t>(kPageBytes), kSentinel);
@@ -705,9 +726,106 @@ public:
 
         SetSizeThenReadEndPage(MountedEnv{env, mount.Get()}, Origin::MetacopyShell,
                                listed, newSize);
-        Assert::AreEqual<UINT64>(StagedSize(Origin::MetacopyShell, listed),
-            ReadAllBytes(LowerPathOf(env, Origin::MetacopyShell, listed)).size(),
-            L"the lower file keeps its size");
+        AssertLowerKeepsStagedSize(env, listed);
+    }
+
+    TEST_METHOD(MetacopyShell_SetSizeOnAttributeOnlyHandle_FillsAndReadOpenSeesNewSize) {
+        constexpr UINT64 listed  = kPageBytes + 1;
+        constexpr UINT64 newSize = kPageBytes + 1;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring overlayPath = OverlayPath(Origin::MetacopyShell, listed);
+
+        FileHandleHolder fh;
+        LM_FILE_INFO     info{};
+        OpenOrFail(mount.Get(), overlayPath, kAttributeOnlyAccess, L"attribute-only", fh, &info);
+        Assert::IsTrue((info.fileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0,
+                       L"the attribute-only open staged a metacopy shell");
+
+        SetSizeOrFail(fh.Get(), newSize, L"attribute-only");
+        fh.Reset();
+
+        FileHandleHolder reader;
+        LM_FILE_INFO     readInfo{};
+        OpenOrFail(mount.Get(), overlayPath, GENERIC_READ, L"read", reader, &readInfo);
+        Assert::AreEqual<UINT64>(newSize, readInfo.fileSize,
+                                 L"the open for read reports the new size");
+        std::vector<BYTE> buffer(static_cast<size_t>(2 * kPageBytes), kSentinel);
+        UINT32            count = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountReadFile(reader.Get(), buffer.data(), /*offset*/ 0,
+                static_cast<UINT32>(buffer.size()), /*originatorPid*/ 0u, &count),
+            L"a read on the reopened handle");
+        Assert::AreEqual<UINT32>(static_cast<UINT32>(newSize), count,
+                                 L"the read returns the bytes up to the new end of file");
+        Assert::IsTrue(MatchesPattern(buffer, count, /*offset*/ 0),
+                       L"the read returns the lower's bytes up to the new end of file");
+        reader.Reset();
+
+        Assert::AreEqual<UINT64>(newSize,
+            ReadAllBytes(UpperPathOf(env, Origin::MetacopyShell, listed)).size(),
+            L"the upper file on disk holds the new size");
+        AssertLowerKeepsStagedSize(env, listed);
+    }
+
+    TEST_METHOD(MetacopyShell_SetTimesOnAttributeOnlyHandle_KeepsShellSparse) {
+        constexpr UINT64 listed = kPageBytes + 1;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        FileHandleHolder fh;
+        LM_FILE_INFO     info{};
+        OpenOrFail(mount.Get(), OverlayPath(Origin::MetacopyShell, listed),
+                   kAttributeOnlyAccess, L"attribute-only", fh, &info);
+
+        constexpr UINT64 lastWriteTime = 132000000000000000ull;
+        LM_FILE_INFO     postSet{};
+        Assert::AreEqual<HRESULT>(S_OK, SetLastWriteTime(fh.Get(), lastWriteTime, &postSet),
+                                  L"a set-times on the attribute-only handle");
+        Assert::AreEqual<UINT64>(lastWriteTime, postSet.lastWriteTime,
+                                 L"the set-info result reports the new time");
+        fh.Reset();
+
+        AssertShellIsSparse(UpperPathOf(env, Origin::MetacopyShell, listed),
+                            StagedSize(Origin::MetacopyShell, listed),
+                            L"a set-times keeps the shell sparse");
+    }
+
+    TEST_METHOD(MetacopyShell_SetTimesOnAttributeOnlyHandle_ReadOpenFillsAndKeepsSetTime) {
+        constexpr UINT64 listed = kPageBytes + 1;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring overlayPath = OverlayPath(Origin::MetacopyShell, listed);
+
+        FileHandleHolder fh;
+        LM_FILE_INFO     info{};
+        OpenOrFail(mount.Get(), overlayPath, kAttributeOnlyAccess, L"attribute-only", fh, &info);
+
+        constexpr UINT64 lastWriteTime = 132000000000000000ull;
+        LM_FILE_INFO     postSet{};
+        Assert::AreEqual<HRESULT>(S_OK, SetLastWriteTime(fh.Get(), lastWriteTime, &postSet),
+                                  L"a set-times on the attribute-only handle");
+        Assert::AreEqual<UINT64>(lastWriteTime, postSet.lastWriteTime,
+                                 L"the set-info result reports the new time");
+        fh.Reset();
+
+        FileHandleHolder reader;
+        LM_FILE_INFO     readInfo{};
+        OpenOrFail(mount.Get(), overlayPath, GENERIC_READ, L"read", reader, &readInfo);
+        Assert::AreEqual<UINT64>(lastWriteTime, readInfo.lastWriteTime,
+                                 L"the open for read reports the set write time, not the lower's");
+        reader.Reset();
+
+        const UINT64      stagedSize = StagedSize(Origin::MetacopyShell, listed);
+        const std::string onDisk = ReadAllBytes(UpperPathOf(env, Origin::MetacopyShell, listed));
+        Assert::AreEqual<UINT64>(stagedSize, onDisk.size(),
+                                 L"the upper file on disk holds the staged size");
+        Assert::IsTrue(onDisk == PatternBytes(stagedSize),
+                       L"the open for read filled the shell with the lower's bytes");
+        AssertLowerKeepsStagedSize(env, listed);
     }
 
     TEST_METHOD(MetacopyShell_OpenForReadWithOriginMissing_FailsAndReturnsNoHandle) {

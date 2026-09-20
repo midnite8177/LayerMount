@@ -480,10 +480,11 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(LM_FILE_HANDLE file,
         return E_HANDLE;
     }
 
-    ::LayerMount::InternalFileInfo internalInfo{};
-    NTSTATUS status = holder->mount->SetInfo(holder->ctx.get(),
+    const ::LayerMount::SetInfoRequest request{
         fileAttributes, creationTime, lastAccessTime, lastWriteTime,
-        changeTime, allocationSize, fileSize,
+        changeTime, allocationSize, fileSize};
+    ::LayerMount::InternalFileInfo internalInfo{};
+    NTSTATUS status = holder->mount->SetInfo(holder->ctx.get(), request,
         outInfo != nullptr ? &internalInfo : nullptr);
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);

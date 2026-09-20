@@ -421,7 +421,9 @@ upper layer instead of a full data copy:
 The shell fills at the first open that asks for data: read data, write
 data, append data, or execute. `Open` calls `CompleteLazyCopyUp` before
 it opens the handle. The call streams the data from the recorded origin
-into the upper sparse skeleton and clears the metacopy flag. An open for
+into the upper sparse skeleton and clears the metacopy flag. The fill
+takes the sparse attribute off unless the lower file is sparse, so a
+filled file has the allocation of a normal copy. An open for
 attributes, security, or delete keeps the shell sparse. A failed fill
 fails the open with the fill's status and returns no handle. `Read`
 never copies a file up and never reopens the handle for a fill. The one
