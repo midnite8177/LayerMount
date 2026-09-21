@@ -14,7 +14,7 @@
 // LayerMount-static and keeps impl-header access.
 //
 // Short-write detection is not directly testable without an injection shim —
-// the fix is a hardening check in CopyUp::CopyFileData that verifies
+// the copy checks in its write helper that
 // bytesWritten == bytesRead. The multi-buffer exact-fidelity regression
 // test in this file guards against a regression that reintroduces the bug.
 
@@ -249,7 +249,7 @@ public:
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\lazy.bin";
-        LayerMountMetadata before = MetadataADS::ReadLayerMountMetadata(upperPath);
+        LayerMountMetadata before = MetadataADS::ReadLayerMountMetadata(upperPath, nullptr);
         Assert::IsTrue(before.metacopy, L"Preconditions: upper is a metacopy");
 
         // Yank the origin source out from under the lazy completer.
@@ -264,13 +264,13 @@ public:
         // silently "completed" zero-padded file. Any subsequent read-path
         // will re-observe the failure, which is the correct behavior (fail
         // loud, not corrupt silently).
-        LayerMountMetadata after = MetadataADS::ReadLayerMountMetadata(upperPath);
+        LayerMountMetadata after = MetadataADS::ReadLayerMountMetadata(upperPath, nullptr);
         Assert::IsTrue(after.metacopy,
             L"metacopy flag must not be cleared on failed lazy completion");
     }
 
     // ------------------------------------------------------------------------
-    // CopyFileData short-write hardening regression test.
+    // Short-write regression test for the data copy.
     //
     // We can't inject a short write from user code without a mocking layer,
     // but we can verify the invariant the hardening check protects: the

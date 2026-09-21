@@ -1,10 +1,4 @@
-// Unit tests for metadata preservation during copy-up. These exercise what
-// CopyUp::CopyUpFile / CopyUpDirectory preserves beyond the basics already
-// covered in CopyUpTests (file size, timestamps, READONLY, HIDDEN). Scenarios
-// surfaced by a coverage-gap investigation:
-//   - Sparse files (sparse attribute + allocation size semantics)
-//   - User alternate data streams on regular files (file.txt:zone.identifier)
-//   - Less common file attributes (SYSTEM, TEMPORARY)
+// Unit tests for metadata preservation during copy-up.
 
 #include "pch.h"
 #include "TestFixture.h"
@@ -42,6 +36,29 @@ LONGLONG MakeSparse(const std::wstring& path, LONGLONG logicalBytes) {
     ::SetEndOfFile(h);
     ::CloseHandle(h);
     return logicalBytes;
+}
+
+void MakeSparseWithDataRange(const std::wstring& path, LONGLONG logicalBytes,
+                             LONGLONG dataOffset, const std::string& data) {
+    MakeSparse(path, logicalBytes);
+    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+    Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, h,
+        L"MakeSparseWithDataRange: open failed");
+    LARGE_INTEGER pos{};
+    pos.QuadPart = dataOffset;
+    Assert::IsTrue(::SetFilePointerEx(h, pos, nullptr, FILE_BEGIN) != FALSE);
+    DWORD w = 0;
+    Assert::IsTrue(::WriteFile(h, data.data(), static_cast<DWORD>(data.size()),
+                               &w, nullptr) != FALSE);
+    Assert::AreEqual<DWORD>(static_cast<DWORD>(data.size()), w);
+    ::CloseHandle(h);
+}
+
+::LayerMount::abi::CapabilityGate GateWithoutSparseFiles() {
+    return ::LayerMount::abi::CapabilityGate(
+        LM_CAP_ADS | LM_CAP_REPARSE_POINTS | LM_CAP_MULTIPLE_STREAMS |
+        LM_CAP_NTFS_ACLS);
 }
 
 bool HasSparseAttribute(const std::wstring& path) {
@@ -92,9 +109,6 @@ public:
         AssertTempIsNTFS();
     }
 
-    // ---------------------------------------------------------------
-    // Sparse files
-    // ---------------------------------------------------------------
 
     TEST_METHOD(CopyUpFile_PreservesSparseAttribute) {
         TempLayerEnvironment env(1);
@@ -135,20 +149,142 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"sparse.bin")));
 
-        HANDLE h = ::CreateFileW((env.Upper() + L"\\sparse.bin").c_str(),
-                                  GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                  OPEN_EXISTING, 0, nullptr);
-        Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, h);
-        LARGE_INTEGER sz{};
-        ::GetFileSizeEx(h, &sz);
-        ::CloseHandle(h);
-        Assert::AreEqual(logical, sz.QuadPart,
+        Assert::AreEqual(logical,
+                         LayerMountTests::LogicalBytes(env.Upper() + L"\\sparse.bin"),
             L"Logical end-of-file size should match source");
     }
 
-    // ---------------------------------------------------------------
-    // User alternate data streams
-    // ---------------------------------------------------------------
+    TEST_METHOD(CopyUpFile_KeepsHolesOfSparseSource) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sparse.bin", "");
+        const std::wstring srcPath = env.Lower(0) + L"\\sparse.bin";
+        const LONGLONG logical = 4LL * 1024 * 1024;
+        const LONGLONG dataOffset = 1LL * 1024 * 1024;
+        const std::string data(64 * 1024, 'd');
+        MakeSparseWithDataRange(srcPath, logical, dataOffset, data);
+        Assert::IsTrue(LayerMountTests::AllocatedBytes(srcPath) < dataOffset,
+            L"Precondition: the lower file allocates only its data range");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+        LayerMountStats stats;
+        CopyUp cu(config, resolver, wm, cache, stats);
+
+        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"sparse.bin")));
+
+        const std::wstring upPath = env.Upper() + L"\\sparse.bin";
+        Assert::IsTrue(HasSparseAttribute(upPath),
+            L"The upper copy keeps FILE_ATTRIBUTE_SPARSE_FILE");
+        Assert::AreEqual(logical, LayerMountTests::LogicalBytes(upPath),
+            L"The upper copy has the logical size of the source");
+        Assert::IsTrue(LayerMountTests::AllocatedBytes(upPath) < dataOffset,
+            L"The upper copy allocates its data range only, not its holes");
+        Assert::AreEqual(data,
+                         LayerMountTests::ReadRange(upPath, dataOffset,
+                                                    static_cast<DWORD>(data.size())),
+            L"The data range of the upper copy matches the source");
+        Assert::AreEqual(std::string(64 * 1024, '\0'),
+                         LayerMountTests::ReadRange(upPath, 0, 64 * 1024),
+            L"A hole of the upper copy reads as zeros");
+    }
+
+    TEST_METHOD(CopyUpFile_GivesDenseCopyOfSparseSourceWithoutSparseCapability) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sparse.bin", "");
+        const std::wstring srcPath = env.Lower(0) + L"\\sparse.bin";
+        MakeSparse(srcPath, 64 * 1024);
+        Assert::IsTrue(HasSparseAttribute(srcPath),
+            L"Precondition: lower file must be sparse");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+        LayerMountStats stats;
+        CopyUp cu(config, resolver, wm, cache, stats);
+        cu.SetCapabilityGate(GateWithoutSparseFiles());
+
+        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"sparse.bin")));
+
+        Assert::IsFalse(HasSparseAttribute(env.Upper() + L"\\sparse.bin"),
+            L"Without the sparse capability the upper copy is dense");
+    }
+
+    TEST_METHOD(DirectoryRename_GivesDenseCopyOfSparseChildWithoutSparseCapability) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        env.WriteFile(env.Lower(0), L"tree\\sparse.bin", "");
+        const std::wstring srcPath = env.Lower(0) + L"\\tree\\sparse.bin";
+        MakeSparse(srcPath, 64 * 1024);
+        Assert::IsTrue(HasSparseAttribute(srcPath),
+            L"Precondition: lower file must be sparse");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+        LayerMountStats stats;
+        CopyUp cu(config, resolver, wm, cache, stats);
+        cu.SetCapabilityGate(GateWithoutSparseFiles());
+
+        Assert::IsTrue(NT_SUCCESS(cu.HandleDirectoryRename(L"tree", L"moved", true)));
+
+        Assert::IsTrue(env.FileExists(env.Upper(), L"moved\\sparse.bin"));
+        Assert::IsFalse(HasSparseAttribute(env.Upper() + L"\\moved\\sparse.bin"),
+            L"Without the sparse capability the tree copy is dense");
+    }
+
+    TEST_METHOD(DirectoryRename_PreservesSparseAttributeOfChild) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        env.WriteFile(env.Lower(0), L"tree\\sparse.bin", "");
+        const std::wstring srcPath = env.Lower(0) + L"\\tree\\sparse.bin";
+        MakeSparse(srcPath, 64 * 1024);
+        Assert::IsTrue(HasSparseAttribute(srcPath),
+            L"Precondition: lower file must be sparse");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+        LayerMountStats stats;
+        CopyUp cu(config, resolver, wm, cache, stats);
+
+        Assert::IsTrue(NT_SUCCESS(cu.HandleDirectoryRename(L"tree", L"moved", true)));
+
+        Assert::IsTrue(HasSparseAttribute(env.Upper() + L"\\moved\\sparse.bin"),
+            L"With the sparse capability the tree copy keeps FILE_ATTRIBUTE_SPARSE_FILE");
+    }
+
+    TEST_METHOD(DirectoryRename_PreservesCompressionOfChild) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        const std::string payload(64 * 1024, 'c');
+        env.WriteFile(env.Lower(0), L"tree\\cmp.bin", payload);
+        const std::wstring srcPath = env.Lower(0) + L"\\tree\\cmp.bin";
+        if (!EnableCompression(srcPath)) {
+            Logger::WriteMessage(L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the lower file");
+            return;
+        }
+        Assert::IsTrue(HasAttribute(srcPath, FILE_ATTRIBUTE_COMPRESSED),
+            L"Precondition: lower file must be compressed");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+        LayerMountStats stats;
+        CopyUp cu(config, resolver, wm, cache, stats);
+
+        Assert::IsTrue(NT_SUCCESS(cu.HandleDirectoryRename(L"tree", L"moved", true)));
+
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved\\cmp.bin", FILE_ATTRIBUTE_COMPRESSED),
+            L"The tree copy keeps FILE_ATTRIBUTE_COMPRESSED on a compressed child");
+        Assert::AreEqual(payload, env.ReadFile(env.Upper(), L"moved\\cmp.bin"));
+    }
+
 
     TEST_METHOD(CopyUpFile_PreservesUserAlternateDataStreams) {
         TempLayerEnvironment env(1);
@@ -190,7 +326,7 @@ public:
         // Plant a fake bookkeeping stream in lower.
         LayerMountMetadata fake;
         fake.originLayer = L"bogus";
-        MetadataADS::WriteLayerMountMetadata(env.Lower(0) + L"\\book.txt", fake);
+        MetadataADS::WriteLayerMountMetadata(env.Lower(0) + L"\\book.txt", fake, nullptr);
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -204,14 +340,11 @@ public:
         // Upper's :overlay metadata should reflect copy-up truth, not the
         // fabricated value from lower.
         LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(
-            env.Upper() + L"\\book.txt");
+            env.Upper() + L"\\book.txt", nullptr);
         Assert::AreNotEqual(std::wstring(L"bogus"), md.originLayer,
             L"Upper's bookkeeping ADS must be written by copy-up, not inherited");
     }
 
-    // ---------------------------------------------------------------
-    // Less common file attributes
-    // ---------------------------------------------------------------
 
     TEST_METHOD(CopyUpFile_PreservesSystemAttribute) {
         TempLayerEnvironment env(1);

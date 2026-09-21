@@ -11,6 +11,7 @@
 #include <exception>
 #include <functional>
 #include <rpc.h> // UuidCreate / UuidToStringW / RpcStringFreeW (Rpcrt4.lib — linked via vcxproj)
+#include <winioctl.h>
 
 namespace LayerMountTests {
 
@@ -250,6 +251,118 @@ private:
     std::wstring work_;
     std::vector<std::wstring> lowers_;
 };
+
+// A FILETIME for noon UTC on the given day.
+inline FILETIME MakeFileTime(WORD year, WORD month, WORD day) {
+    SYSTEMTIME st{};
+    st.wYear = year;
+    st.wMonth = month;
+    st.wDay = day;
+    st.wHour = 12;
+    FILETIME ft{};
+    ::SystemTimeToFileTime(&st, &ft);
+    return ft;
+}
+
+// Sets the three file times through an attribute-only handle.
+inline void StampFile(const std::wstring& path,
+                      const FILETIME& creation,
+                      const FILETIME& access,
+                      const FILETIME& write) {
+    HANDLE h = ::CreateFileW(path.c_str(),
+                              FILE_WRITE_ATTRIBUTES,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreNotEqual<HANDLE>(
+        INVALID_HANDLE_VALUE, h, L"StampFile: CreateFileW must succeed");
+    ::SetFileTime(h, &creation, &access, &write);
+    ::CloseHandle(h);
+}
+
+inline void GetTimes(const std::wstring& path,
+                     FILETIME* creation, FILETIME* access, FILETIME* write) {
+    HANDLE h = ::CreateFileW(path.c_str(),
+                              FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreNotEqual<HANDLE>(
+        INVALID_HANDLE_VALUE, h, L"GetTimes: CreateFileW must succeed");
+    ::GetFileTime(h, creation, access, write);
+    ::CloseHandle(h);
+}
+
+inline bool FileTimesEqual(const FILETIME& a, const FILETIME& b) {
+    return a.dwLowDateTime == b.dwLowDateTime &&
+           a.dwHighDateTime == b.dwHighDateTime;
+}
+
+inline LONGLONG LogicalBytes(const std::wstring& path) {
+    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreNotEqual<HANDLE>(
+        INVALID_HANDLE_VALUE, h, L"LogicalBytes: open failed");
+    LARGE_INTEGER sz{};
+    ::GetFileSizeEx(h, &sz);
+    ::CloseHandle(h);
+    return sz.QuadPart;
+}
+
+// The bytes the volume allocated for the file. GetCompressedFileSizeW
+// reports the allocation of a sparse file, holes excluded. The flush before
+// the query makes the report include the data still in the cache.
+inline LONGLONG AllocatedBytes(const std::wstring& path) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+    Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, h, L"AllocatedBytes: open failed");
+    Assert::IsTrue(::FlushFileBuffers(h) != FALSE, L"AllocatedBytes: flush failed");
+    ::CloseHandle(h);
+    DWORD high = 0;
+    const DWORD low = ::GetCompressedFileSizeW(path.c_str(), &high);
+    Assert::IsTrue(low != INVALID_FILE_SIZE || ::GetLastError() == NO_ERROR,
+        L"AllocatedBytes: GetCompressedFileSizeW failed");
+    return (static_cast<LONGLONG>(high) << 32) | low;
+}
+
+// True when the file or directory at path carries the attribute flag.
+inline bool HasAttribute(const std::wstring& path, DWORD flag) {
+    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
+}
+
+// Set NTFS compression on the file or directory at path. Returns false when
+// the open or the FSCTL fails.
+inline bool EnableCompression(const std::wstring& path) {
+    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                             OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    USHORT format = COMPRESSION_FORMAT_DEFAULT;
+    DWORD bytesReturned = 0;
+    const BOOL ok = ::DeviceIoControl(h, FSCTL_SET_COMPRESSION, &format, sizeof(format),
+                                      nullptr, 0, &bytesReturned, nullptr);
+    ::CloseHandle(h);
+    return ok != FALSE;
+}
+
+// Read length bytes at offset from the file at path. The result is shorter
+// when the file ends inside the range.
+inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD length) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+    Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, h, L"ReadRange: open failed");
+    LARGE_INTEGER pos{};
+    pos.QuadPart = offset;
+    Assert::IsTrue(::SetFilePointerEx(h, pos, nullptr, FILE_BEGIN) != FALSE);
+    std::string buf(length, '\0');
+    DWORD r = 0;
+    Assert::IsTrue(::ReadFile(h, buf.data(), length, &r, nullptr) != FALSE);
+    ::CloseHandle(h);
+    buf.resize(r);
+    return buf;
+}
 
 // ---------------------------------------------------------------------------
 // A CopyUp with the objects it depends on, built in dependency order from

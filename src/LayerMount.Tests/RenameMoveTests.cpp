@@ -312,7 +312,7 @@ public:
         // Stage the metacopy, then rename in-upper.
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin")));
         Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(
-                           env.Upper() + L"\\lazy.bin").metacopy);
+                           env.Upper() + L"\\lazy.bin", nullptr).metacopy);
 
         // Now upper-to-upper rename (source already in upper after metacopy).
         const std::wstring oldUpper = resolver.GetUpperPath(L"lazy.bin");
@@ -323,7 +323,7 @@ public:
 
         // Metacopy flag and logical size must survive the move.
         LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(
-            env.Upper() + L"\\renamed.bin");
+            env.Upper() + L"\\renamed.bin", nullptr);
         Assert::IsTrue(md.metacopy, L"metacopy flag must survive MoveFileExW");
         Assert::IsFalse(md.originLayer.empty(),
             L"originLayer must survive MoveFileExW");
@@ -397,7 +397,7 @@ public:
         LayerMountMetadata md;
         md.redirect = L"loop";
         Assert::IsTrue(MetadataADS::WriteLayerMountMetadata(
-                           env.Upper() + L"\\loop", md));
+                           env.Upper() + L"\\loop", md, nullptr));
 
         auto config = env.MakeConfig();
         Cache cache;

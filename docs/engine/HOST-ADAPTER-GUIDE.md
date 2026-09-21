@@ -98,7 +98,10 @@ every bit its target actually supports and no more.
   metacopy size threshold copies its data in full at copy-up time
   (`CopyUpFile`), because `FSCTL_SET_SPARSE` is not available on the
   upper. With it, the engine copies the metadata only and fills the data
-  at the first open that asks for data access.
+  at the first open that asks for data access. The bit also applies to
+  a copy-up of a sparse lower file. With it, the upper copy is sparse,
+  or the copy-up fails with the volume's error. Without it, the upper
+  copy is dense.
 - `LM_CAP_REPARSE_POINTS`. Without it, renaming a directory whose
   source is a reparse point falls through to a full recursive copy that
   copies the link target's contents into a regular directory. The data
@@ -115,6 +118,14 @@ every bit its target actually supports and no more.
   bit currently gates any engine fallback; clearing it records the
   limitation for whatever reads `hostCapabilities` back, and nothing
   more.
+
+NTFS compression has no capability bit. A copy-up of a compressed lower
+file sets compression on the upper copy and ignores a refusal, on every
+copy-up path. On an upper volume that cannot compress, the upper copy is
+dense and the copy-up succeeds, which is what a Windows copy of a
+compressed file to such a volume does. The sparse rule above is
+different because the host adapter declares the sparse capability, so a
+refusal there is a real error.
 
 ## Driver I/O request to engine file API mapping
 
@@ -220,8 +231,8 @@ Report the `allocationSize` the engine gives. Do not compute one. An
 open handle reports the real on-disk allocation when that is larger
 than the file size rounded up to 4 KiB, for example after a
 preallocation. A path query and a directory listing report the rounded
-size. Every producer reports a value that is never below the file
-size. A path query reports zero for a directory, a whiteout, and a
+size. A stream listing reports each stream's size rounded up to 4 KiB.
+Every producer reports a value that is never below the file size. A path query reports zero for a directory, a whiteout, and a
 path that does not exist.
 
 A file in the upper, a file in a lower, a file the engine copied up,

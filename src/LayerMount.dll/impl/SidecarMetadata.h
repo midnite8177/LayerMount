@@ -28,14 +28,8 @@ public:
     // Read the sidecar JSON for `filePath` (an absolute path under
     // `upperRoot`). Returns default-constructed `LayerMountMetadata` if the
     // sidecar is absent or unreadable; never throws.
-    //
-    // If `corrupted` is non-null it is set to true when a sidecar appeared
-    // to exist but could not be read or parsed. Callers whose correctness
-    // depends on metadata fidelity should treat `*corrupted == true` as a
-    // failure instead of accepting the default return value.
     static LayerMountMetadata Read(const std::wstring& filePath,
-                                const std::wstring& upperRoot,
-                                bool* corrupted = nullptr);
+                                const std::wstring& upperRoot);
 
     // Write the sidecar JSON. Creates `<upper>\.overlay\` if it does not
     // exist. Returns false on I/O failure.

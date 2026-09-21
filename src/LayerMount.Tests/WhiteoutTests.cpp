@@ -282,7 +282,7 @@ public:
         Assert::IsTrue(wm.SetOpaque(L"sub"));
 
         std::wstring dirPath = env.Upper() + L"\\sub";
-        Assert::IsTrue(MetadataADS::HasOpaqueADS(dirPath),
+        Assert::IsTrue(MetadataADS::HasOpaqueADS(dirPath, nullptr),
             L"SetOpaque should write :overlay.opaque ADS");
     }
 
@@ -307,7 +307,7 @@ public:
         env.CreateDir(env.Upper(), L"sub");
 
         std::wstring dirPath = env.Upper() + L"\\sub";
-        Assert::IsTrue(MetadataADS::SetOpaqueADS(dirPath));
+        Assert::IsTrue(MetadataADS::SetOpaqueADS(dirPath, nullptr));
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -351,7 +351,7 @@ public:
 
         // Set opaque on upper/sub, NOT on lower/sub
         std::wstring upperDir = env.Upper() + L"\\sub";
-        MetadataADS::SetOpaqueADS(upperDir);
+        MetadataADS::SetOpaqueADS(upperDir, nullptr);
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -375,7 +375,7 @@ public:
         Assert::IsTrue(wm.RemoveOpaque(L"sub"));
 
         std::wstring dirPath = env.Upper() + L"\\sub";
-        Assert::IsFalse(MetadataADS::HasOpaqueADS(dirPath), L"ADS should be removed");
+        Assert::IsFalse(MetadataADS::HasOpaqueADS(dirPath, nullptr), L"the opaque marker is gone");
 
         std::wstring marker = env.Upper() + L"\\sub\\.wh..wh..opq";
         Assert::AreEqual(INVALID_FILE_ATTRIBUTES,

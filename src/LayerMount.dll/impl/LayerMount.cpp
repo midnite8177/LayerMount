@@ -651,7 +651,7 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
     fileInfo->IndexNumber    = MakeIndexNumber(info);
 
     if (pathHint && !pathHint->empty()) {
-        const LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(*pathHint);
+        const LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(*pathHint, nullptr);
         if (metadata.hasStableIndexNumber) {
             fileInfo->IndexNumber = metadata.stableIndexNumber;
         }
@@ -3010,12 +3010,9 @@ NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
         InternalStreamInfo info;
         info.name = findData.cStreamName;
         info.streamSize = static_cast<UINT64>(findData.StreamSize.QuadPart);
-        // WIN32_FIND_STREAM_DATA exposes only the logical size; the
-        // physical on-disk allocation is not reported by this query
-        // form. Treat the two as identical at this layer — callers that
-        // need precise allocation accounting should open the stream and
-        // query via NtQueryInformationFile(FILE_STANDARD_INFORMATION).
-        info.allocationSize = info.streamSize;
+        // The find-stream data carries no allocation size, so the rounded
+        // stream size is the only value this producer can report.
+        info.allocationSize = AllocationSizeFor(info.streamSize);
         out.push_back(std::move(info));
     } while (::FindNextStreamW(h, &findData));
 

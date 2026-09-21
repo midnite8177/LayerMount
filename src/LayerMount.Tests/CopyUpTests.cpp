@@ -577,7 +577,7 @@ public:
         cu.CopyUpMetadataOnly(L"m.txt");
 
         std::wstring upPath = env.Upper() + L"\\m.txt";
-        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(upPath);
+        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(upPath, nullptr);
         Assert::IsTrue(md.metacopy, L"metacopy flag should be set");
         Assert::IsFalse(md.originLayer.empty(), L"originLayer should be set");
     }
@@ -673,10 +673,10 @@ public:
 
         cu.CopyUpMetadataOnly(L"mc.txt");
         std::wstring upPath = env.Upper() + L"\\mc.txt";
-        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(upPath).metacopy);
+        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(upPath, nullptr).metacopy);
 
         cu.CompleteLazyCopyUp(L"mc.txt");
-        Assert::IsFalse(MetadataADS::ReadLayerMountMetadata(upPath).metacopy,
+        Assert::IsFalse(MetadataADS::ReadLayerMountMetadata(upPath, nullptr).metacopy,
             L"metacopy flag should be cleared after completion");
     }
 

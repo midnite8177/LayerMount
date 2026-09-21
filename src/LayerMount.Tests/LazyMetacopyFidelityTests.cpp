@@ -11,34 +11,6 @@ namespace LayerMountTests {
 
 namespace {
 
-// Force three distinct timestamps so a bug that zeroes ANY of them is
-// caught. Year 2015 for creation, 2016 for access, 2017 for write.
-// Cast to 64-bit dwHighDateTime explicitly to dodge warning.
-void StampFile(const std::wstring& path,
-                const FILETIME& creation,
-                const FILETIME& access,
-                const FILETIME& write) {
-    HANDLE h = ::CreateFileW(path.c_str(),
-                              FILE_WRITE_ATTRIBUTES,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              nullptr, OPEN_EXISTING, 0, nullptr);
-    Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, h,
-        L"StampFile: CreateFileW must succeed");
-    ::SetFileTime(h, &creation, &access, &write);
-    ::CloseHandle(h);
-}
-
-void GetTimes(const std::wstring& path,
-              FILETIME* creation, FILETIME* access, FILETIME* write) {
-    HANDLE h = ::CreateFileW(path.c_str(),
-                              FILE_READ_ATTRIBUTES,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr, OPEN_EXISTING, 0, nullptr);
-    Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, h);
-    ::GetFileTime(h, creation, access, write);
-    ::CloseHandle(h);
-}
-
 // While the object lives, a read of the second megabyte of the file fails.
 class LockPastFirstMegabyte {
 public:
@@ -66,11 +38,6 @@ private:
     OVERLAPPED region_{};
 };
 
-bool FileTimesEqual(const FILETIME& a, const FILETIME& b) {
-    return a.dwLowDateTime == b.dwLowDateTime &&
-           a.dwHighDateTime == b.dwHighDateTime;
-}
-
 void WriteADS(const std::wstring& basePath, const std::wstring& streamName,
               const std::string& content) {
     const std::wstring adsPath = basePath + L":" + streamName;
@@ -93,11 +60,6 @@ bool ADSExists(const std::wstring& basePath, const std::wstring& streamName) {
     if (h == INVALID_HANDLE_VALUE) return false;
     ::CloseHandle(h);
     return true;
-}
-
-bool HasAttribute(const std::wstring& path, DWORD flag) {
-    const DWORD attrs = ::GetFileAttributesW(path.c_str());
-    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
 }
 
 bool IsCompressed(const std::wstring& path) {
@@ -123,11 +85,6 @@ bool OpenAndIoctl(const std::wstring& path, DWORD controlCode,
     return ok != FALSE;
 }
 
-bool EnableCompression(const std::wstring& path) {
-    USHORT fmt = COMPRESSION_FORMAT_DEFAULT;
-    return OpenAndIoctl(path, FSCTL_SET_COMPRESSION, &fmt, sizeof(fmt));
-}
-
 bool MakeSparseWithHole(const std::wstring& path, LONGLONG holeBytes) {
     FILE_SET_SPARSE_BUFFER sparse{TRUE};
     if (!OpenAndIoctl(path, FSCTL_SET_SPARSE, &sparse, sizeof(sparse))) {
@@ -139,23 +96,7 @@ bool MakeSparseWithHole(const std::wstring& path, LONGLONG holeBytes) {
     return OpenAndIoctl(path, FSCTL_SET_ZERO_DATA, &hole, sizeof(hole));
 }
 
-FILETIME MakeFileTime(WORD year, WORD month, WORD day) {
-    SYSTEMTIME st{};
-    st.wYear = year;
-    st.wMonth = month;
-    st.wDay = day;
-    st.wHour = 12;
-    FILETIME ft{};
-    ::SystemTimeToFileTime(&st, &ft);
-    return ft;
-}
-
 } // namespace
-
-// ============================================================================
-// LazyMetacopyFidelityTests — properties that must survive metacopy + lazy
-// completion on oversized files.
-// ============================================================================
 
 TEST_CLASS(LazyMetacopyFidelityTests) {
 public:
@@ -271,11 +212,6 @@ public:
             L"a failed fill");
     }
 
-    // ------------------------------------------------------------------------
-    // Guards the CompleteLazyCopyUp ADS-preservation fix. After data copy,
-    // the completer calls CopyUserAlternateDataStreams(origin, upper) so
-    // Zone.Identifier and custom ADS survive — matching the eager path.
-    // ------------------------------------------------------------------------
     TEST_METHOD(LazyCompletion_PreservesUserADS) {
         UNIT_SKIP_IF_NOT_NTFS();
 
@@ -298,7 +234,7 @@ public:
         const std::wstring upperPath = env.Upper() + L"\\ads.bin";
 
         // The overlay's own :overlay stream should exist (metacopy cleared).
-        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(upperPath);
+        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(upperPath, nullptr);
         Assert::IsFalse(md.metacopy,
             L"metacopy flag must clear after successful lazy completion");
 
@@ -309,25 +245,18 @@ public:
             L"Custom user ADS must survive lazy metacopy + completion");
     }
 
-    // ------------------------------------------------------------------------
-    // Guards the CopyUpMetadataOnly compression fix. The metacopy shell is
-    // created with FSCTL_SET_COMPRESSION when the source was compressed, so
-    // the compression attribute survives lazy completion.
-    // ------------------------------------------------------------------------
     TEST_METHOD(LazyCompletion_PreservesCompression) {
         UNIT_SKIP_IF_NOT_NTFS();
 
         LayerMountTests::TempLayerEnvironment env(1);
-        // Highly-compressible payload so the attribute actually applies
-        // meaningful compression (avoids NTFS deciding it can't help).
+        // 2 MiB puts the file above the metacopy threshold.
         const std::string payload(2 * 1024 * 1024, 'c');
         env.WriteFile(env.Lower(0), L"cmp.bin", payload);
 
         const std::wstring srcPath = env.Lower(0) + L"\\cmp.bin";
         if (!EnableCompression(srcPath)) {
             Logger::WriteMessage(
-                L"[SKIP] NTFS refused FSCTL_SET_COMPRESSION on source — "
-                L"volume likely does not support compression");
+                L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the source");
             return;
         }
         Assert::IsTrue(IsCompressed(srcPath),
@@ -371,11 +300,46 @@ public:
             L"A filled shell of a sparse lower file stays sparse");
     }
 
-    // ------------------------------------------------------------------------
-    // Control case: the EAGER path (CopyUpFile) preserves all three
-    // properties. Demonstrates the gaps are LAZY-specific, not a general
-    // copy-up deficiency — and guards against regression in the eager path.
-    // ------------------------------------------------------------------------
+    TEST_METHOD(MetacopyFill_KeepsHolesOfSparseSource) {
+        UNIT_SKIP_IF_NOT_NTFS();
+
+        LayerMountTests::TempLayerEnvironment env(1);
+        const LONGLONG logical = 3LL * 1024 * 1024;
+        const LONGLONG holeBytes = 2LL * 1024 * 1024;
+        const std::string payload(static_cast<size_t>(logical), 's');
+        env.WriteFile(env.Lower(0), L"sparse.bin", payload);
+
+        const std::wstring srcPath = env.Lower(0) + L"\\sparse.bin";
+        if (!MakeSparseWithHole(srcPath, holeBytes)) {
+            Logger::WriteMessage(
+                L"[SKIP] NTFS refused FSCTL_SET_SPARSE on source. "
+                L"The volume does not support sparse files.");
+            return;
+        }
+        Assert::IsTrue(LayerMountTests::AllocatedBytes(srcPath) < holeBytes,
+            L"Precondition: the source allocates only the bytes past the hole");
+
+        CopyUpRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"sparse.bin")));
+
+        const std::wstring upperPath = env.Upper() + L"\\sparse.bin";
+        Assert::IsTrue(IsSparse(upperPath),
+            L"A filled shell of a sparse lower file stays sparse");
+        Assert::AreEqual(logical, LayerMountTests::LogicalBytes(upperPath),
+            L"The filled file has the logical size of the source");
+        Assert::IsTrue(LayerMountTests::AllocatedBytes(upperPath) < holeBytes,
+            L"The filled file allocates its data range only, not its hole");
+        const DWORD tail = 1024 * 1024;
+        Assert::AreEqual(std::string(tail, 's'),
+                         LayerMountTests::ReadRange(upperPath, holeBytes, tail),
+            L"The data past the hole matches the source");
+        Assert::AreEqual(std::string(64 * 1024, '\0'),
+                         LayerMountTests::ReadRange(upperPath, 0, 64 * 1024),
+            L"The hole of the filled file reads as zeros");
+    }
+
     TEST_METHOD(EagerCopyUp_PreservesTimestampsADSAndCompression) {
         UNIT_SKIP_IF_NOT_NTFS();
 
@@ -405,17 +369,8 @@ public:
             L"Eager copy-up must preserve user ADS");
 
         if (compressed) {
-            // Surprising finding: the EAGER path DOES preserve compression
-            // (CopyUpFile's commit stage applies FSCTL_SET_COMPRESSION on
-            // the upper before data flows), which makes the lazy path's
-            // loss of compression a pure asymmetry rather than a
-            // codebase-wide miss. Document that and guard against a
-            // regression.
             Assert::IsTrue(IsCompressed(upperPath),
-                L"Eager copy-up must preserve FILE_ATTRIBUTE_COMPRESSED. "
-                L"This is the PRESERVED behavior the lazy path currently "
-                L"fails to match — see "
-                L"LazyCompletion_CompressionAttributeLost_DocumentedGap.");
+                L"Eager copy-up must preserve FILE_ATTRIBUTE_COMPRESSED");
         }
     }
 };

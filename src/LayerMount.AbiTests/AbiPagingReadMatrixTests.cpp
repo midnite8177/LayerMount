@@ -780,7 +780,7 @@ public:
 
         constexpr UINT64 lastWriteTime = 132000000000000000ull;
         LM_FILE_INFO     postSet{};
-        Assert::AreEqual<HRESULT>(S_OK, SetLastWriteTime(fh.Get(), lastWriteTime, &postSet),
+        Assert::AreEqual<HRESULT>(S_OK, SetFileTimes(fh.Get(), 0u, lastWriteTime, &postSet),
                                   L"a set-times on the attribute-only handle");
         Assert::AreEqual<UINT64>(lastWriteTime, postSet.lastWriteTime,
                                  L"the set-info result reports the new time");
@@ -792,38 +792,23 @@ public:
     }
 
     TEST_METHOD(MetacopyShell_SetTimesOnAttributeOnlyHandle_ReadOpenFillsAndKeepsSetTime) {
-        constexpr UINT64 listed = kPageBytes + 1;
-        TempLayerEnv     env(1);
-        StageBeforeMount(env, Origin::MetacopyShell);
-        LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring overlayPath = OverlayPath(Origin::MetacopyShell, listed);
-
-        FileHandleHolder fh;
-        LM_FILE_INFO     info{};
-        OpenOrFail(mount.Get(), overlayPath, kAttributeOnlyAccess, L"attribute-only", fh, &info);
-
         constexpr UINT64 lastWriteTime = 132000000000000000ull;
-        LM_FILE_INFO     postSet{};
-        Assert::AreEqual<HRESULT>(S_OK, SetLastWriteTime(fh.Get(), lastWriteTime, &postSet),
-                                  L"a set-times on the attribute-only handle");
-        Assert::AreEqual<UINT64>(lastWriteTime, postSet.lastWriteTime,
-                                 L"the set-info result reports the new time");
-        fh.Reset();
+        AssertSetTimeOnAttributeOnlyHandleSurvivesReadOpen(
+            [](LM_FILE_HANDLE fh, LM_FILE_INFO* outInfo) {
+                return SetFileTimes(fh, 0u, lastWriteTime, outInfo);
+            },
+            &LM_FILE_INFO::lastWriteTime, lastWriteTime,
+            L"the open for read reports the set write time, not the lower's");
+    }
 
-        FileHandleHolder reader;
-        LM_FILE_INFO     readInfo{};
-        OpenOrFail(mount.Get(), overlayPath, GENERIC_READ, L"read", reader, &readInfo);
-        Assert::AreEqual<UINT64>(lastWriteTime, readInfo.lastWriteTime,
-                                 L"the open for read reports the set write time, not the lower's");
-        reader.Reset();
-
-        const UINT64      stagedSize = StagedSize(Origin::MetacopyShell, listed);
-        const std::string onDisk = ReadAllBytes(UpperPathOf(env, Origin::MetacopyShell, listed));
-        Assert::AreEqual<UINT64>(stagedSize, onDisk.size(),
-                                 L"the upper file on disk holds the staged size");
-        Assert::IsTrue(onDisk == PatternBytes(stagedSize),
-                       L"the open for read filled the shell with the lower's bytes");
-        AssertLowerKeepsStagedSize(env, listed);
+    TEST_METHOD(MetacopyShell_SetAccessTimeOnAttributeOnlyHandle_ReadOpenFillsAndKeepsSetTime) {
+        constexpr UINT64 lastAccessTime = 132000000000000000ull;
+        AssertSetTimeOnAttributeOnlyHandleSurvivesReadOpen(
+            [](LM_FILE_HANDLE fh, LM_FILE_INFO* outInfo) {
+                return SetFileTimes(fh, lastAccessTime, 0u, outInfo);
+            },
+            &LM_FILE_INFO::lastAccessTime, lastAccessTime,
+            L"the open for read reports the set access time, not the read moment");
     }
 
     TEST_METHOD(MetacopyShell_OpenWithMaximumAllowed_FillsAndReadReturnsLowerBytes) {
@@ -933,6 +918,48 @@ public:
 
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
     }
+
+private:
+    // Stages a sparse shell, sets one time on an attribute-only handle,
+    // closes, and opens for read. The open fills the shell with the
+    // lower's bytes and reports the set time, and the lower keeps its size.
+    static void AssertSetTimeOnAttributeOnlyHandleSurvivesReadOpen(
+        const std::function<HRESULT(LM_FILE_HANDLE, LM_FILE_INFO*)>& setTime,
+        UINT64 LM_FILE_INFO::* reported,
+        UINT64 expected,
+        const wchar_t* readMessage) {
+        constexpr UINT64 listed = kPageBytes + 1;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring overlayPath = OverlayPath(Origin::MetacopyShell, listed);
+
+        FileHandleHolder fh;
+        LM_FILE_INFO     info{};
+        OpenOrFail(mount.Get(), overlayPath, kAttributeOnlyAccess, L"attribute-only", fh, &info);
+
+        LM_FILE_INFO postSet{};
+        Assert::AreEqual<HRESULT>(S_OK, setTime(fh.Get(), &postSet),
+                                  L"a set-times on the attribute-only handle");
+        Assert::AreEqual<UINT64>(expected, postSet.*reported,
+                                 L"the set-info result reports the new time");
+        fh.Reset();
+
+        FileHandleHolder reader;
+        LM_FILE_INFO     readInfo{};
+        OpenOrFail(mount.Get(), overlayPath, GENERIC_READ, L"read", reader, &readInfo);
+        Assert::AreEqual<UINT64>(expected, readInfo.*reported, readMessage);
+        reader.Reset();
+
+        const UINT64      stagedSize = StagedSize(Origin::MetacopyShell, listed);
+        const std::string onDisk = ReadAllBytes(UpperPathOf(env, Origin::MetacopyShell, listed));
+        Assert::AreEqual<UINT64>(stagedSize, onDisk.size(),
+                                 L"the upper file on disk holds the staged size");
+        Assert::IsTrue(onDisk == PatternBytes(stagedSize),
+                       L"the open for read filled the shell with the lower's bytes");
+        AssertLowerKeepsStagedSize(env, listed);
+    }
+
 };
 
 }

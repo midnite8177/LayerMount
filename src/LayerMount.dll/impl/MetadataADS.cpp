@@ -99,36 +99,54 @@ inline bool IsDefaultMetadata(const LayerMountMetadata& m) {
         && m.stableIndexNumber == 0;
 }
 
-LayerMountMetadata ReadAdsOnly(const std::wstring& filePath, bool* corrupted) {
-    if (corrupted != nullptr) *corrupted = false;
-    std::wstring adsPath = filePath + kLayerMountADSStream;
-
-    // Permissive share mode: the base file may already be open with
-    // GENERIC_WRITE or FILE_SHARE_DELETE from the overlay engine, and
-    // ADS opens inherit the base's sharing constraints. A restrictive
-    // share here would make ReadLayerMountMetadata spuriously observe the
-    // metadata as absent (returns defaults) whenever the base file is
-    // being concurrently written or marked for delete.
-    // FILE_FLAG_BACKUP_SEMANTICS honors SE_BACKUP_NAME so a DENY-READ
-    // inherited ACE on the base file can't hide overlay metadata the
-    // engine itself wrote. Symmetric with WriteAdsOnly below.
-    HANDLE h = CreateFileW(
+// Opens the metadata stream for read. The share mode is permissive
+// because the engine can hold the base file open with GENERIC_WRITE or
+// FILE_SHARE_DELETE, and an ADS open inherits the base's sharing
+// constraints. A restrictive share here makes ReadLayerMountMetadata
+// see the metadata as absent and return defaults while another handle
+// writes the base file or marks it for delete.
+// FILE_FLAG_BACKUP_SEMANTICS honors SE_BACKUP_NAME so a DENY-READ
+// inherited ACE on the base file cannot hide overlay metadata the
+// engine itself wrote.
+HANDLE OpenAdsForRead(const std::wstring& adsPath, DWORD desiredAccess) {
+    return CreateFileW(
         adsPath.c_str(),
-        GENERIC_READ,
+        desiredAccess,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr);
+}
+
+// SetFileTime with a last access time of -1 tells NTFS to not update
+// the file's last access time for operations on that handle (the
+// SetFileTime remarks). A volume or an ACL can refuse the
+// FILE_WRITE_ATTRIBUTES access the mark needs. The read then falls back
+// to a plain open, because a refused read would make the engine see its
+// own metadata as absent.
+HANDLE OpenAdsForReadWithAccessTimeKeptWhereAllowed(const std::wstring& adsPath) {
+    HANDLE h = OpenAdsForRead(adsPath, GENERIC_READ | FILE_WRITE_ATTRIBUTES);
+    if (h != INVALID_HANDLE_VALUE) {
+        const FILETIME keepAccessTime{0xFFFFFFFF, 0xFFFFFFFF};
+        SetFileTime(h, nullptr, &keepAccessTime, nullptr);
+        return h;
+    }
+    const DWORD err = ::GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+        return INVALID_HANDLE_VALUE;
+    }
+    return OpenAdsForRead(adsPath, GENERIC_READ);
+}
+
+LayerMountMetadata ReadAdsOnly(const std::wstring& filePath, bool* corrupted) {
+    if (corrupted != nullptr) *corrupted = false;
+    std::wstring adsPath = filePath + kLayerMountADSStream;
+
+    HANDLE h = OpenAdsForReadWithAccessTimeKeptWhereAllowed(adsPath);
 
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD err = ::GetLastError();
-        // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND mean the metadata stream
-        // legitimately isn't there -- benign, caller should see defaults.
-        // Any other error (sharing violation, ACL denial, etc.) is a real
-        // corruption-class failure: the stream may exist but we cannot read
-        // it. Callers that care (resolution-critical paths) can check the
-        // corrupted out-param and treat defaults as unsafe.
         if (corrupted != nullptr &&
             err != ERROR_FILE_NOT_FOUND &&
             err != ERROR_PATH_NOT_FOUND) {
@@ -186,7 +204,7 @@ LayerMountMetadata ReadAdsOnly(const std::wstring& filePath, bool* corrupted) {
 bool WriteAdsOnly(const std::wstring& filePath, const LayerMountMetadata& metadata) {
     std::wstring adsPath = filePath + kLayerMountADSStream;
 
-    // Permissive share mode -- see ReadAdsOnly for rationale.
+    // Permissive share mode; see OpenAdsForRead for the reason.
     // FILE_FLAG_BACKUP_SEMANTICS honors SE_BACKUP_NAME / SE_RESTORE_NAME
     // (enabled in EnsureCopyUpPrivileges). Without it, an upper file that
     // inherited a DENY-WRITE ACE from its parent would refuse the
@@ -233,7 +251,7 @@ bool HasOpaqueAdsOnly(const std::wstring& directoryPath) {
 bool SetOpaqueAdsOnly(const std::wstring& directoryPath) {
     std::wstring adsPath = directoryPath + kOpaqueADSStream;
 
-    // Permissive share mode -- see ReadAdsOnly for rationale.
+    // Permissive share mode; see OpenAdsForRead for the reason.
     HANDLE h = CreateFileW(
         adsPath.c_str(),
         GENERIC_WRITE,
@@ -277,9 +295,7 @@ bool RemoveOpaqueAdsOnly(const std::wstring& directoryPath) {
 // ---------------------------------------------------------------------------
 
 LayerMountMetadata MetadataADS::ReadLayerMountMetadata(const std::wstring& filePath,
-                                                 const LayerConfig* config,
-                                                 bool* corrupted) {
-    if (corrupted != nullptr) *corrupted = false;
+                                                 const LayerConfig* config) {
     bool adsCorrupted = false;
     LayerMountMetadata fromAds = ReadAdsOnly(filePath, &adsCorrupted);
 
@@ -293,7 +309,6 @@ LayerMountMetadata MetadataADS::ReadLayerMountMetadata(const std::wstring& fileP
     // i.e., the cooperative dispatcher case where a host flipped from
     // sidecar to ADS and we want to honor prior state.
     if (adsCorrupted) {
-        if (corrupted != nullptr) *corrupted = true;
         return fromAds;
     }
 
@@ -306,11 +321,7 @@ LayerMountMetadata MetadataADS::ReadLayerMountMetadata(const std::wstring& fileP
     // ADS genuinely absent (not corrupted) -- try sidecar transparently.
     // This holds even when LM_CAP_ADS is set: a host that flipped from
     // sidecar to ADS still gets prior state honored.
-    bool sidecarCorrupted = false;
-    LayerMountMetadata fromSidecar = SidecarMetadata::Read(
-        filePath, config->upperPath, &sidecarCorrupted);
-    if (sidecarCorrupted && corrupted != nullptr) *corrupted = true;
-    return fromSidecar;
+    return SidecarMetadata::Read(filePath, config->upperPath);
 }
 
 bool MetadataADS::WriteLayerMountMetadata(const std::wstring& filePath,

@@ -33,18 +33,6 @@ HRESULT CreateThroughEngine(LM_HANDLE mount, PCWSTR path,
     return hr;
 }
 
-void WriteRawStream(const std::wstring& path, const char* data, DWORD len) {
-    HANDLE h = ::CreateFileW(path.c_str(),
-        GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    Assert::IsTrue(h != INVALID_HANDLE_VALUE,
-        L"raw CreateFileW for stream write should succeed");
-    DWORD written = 0;
-    ::WriteFile(h, data, len, &written, nullptr);
-    ::CloseHandle(h);
-    Assert::AreEqual<DWORD>(len, written, L"WriteFile short-write");
-}
-
 std::string ReadRawStream(const std::wstring& path) {
     HANDLE h = ::CreateFileW(path.c_str(),
         GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,

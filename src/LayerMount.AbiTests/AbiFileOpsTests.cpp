@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
 
+#include <algorithm>
+
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {
@@ -182,7 +184,7 @@ public:
 
         const UINT64 nonZeroLastWriteTime = 132000000000000000ULL;
         LM_FILE_INFO postSet{};
-        HRESULT hr = SetLastWriteTime(fhDel, nonZeroLastWriteTime, &postSet);
+        HRESULT hr = SetFileTimes(fhDel, 0u, nonZeroLastWriteTime, &postSet);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"SetFileInfo timestamps through a DELETE-only handle");
 
@@ -274,19 +276,8 @@ public:
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
 
         const std::wstring upper = env.Upper() + L"\\host.txt";
-        auto writeStream = [](const std::wstring& path, const char* data, DWORD len) {
-            HANDLE h = ::CreateFileW(path.c_str(),
-                GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            Assert::IsTrue(h != INVALID_HANDLE_VALUE, L"open ADS for write");
-            DWORD written = 0;
-            BOOL ok = ::WriteFile(h, data, len, &written, nullptr);
-            ::CloseHandle(h);
-            Assert::IsTrue(ok != FALSE,        L"WriteFile to ADS succeeded");
-            Assert::AreEqual<DWORD>(len, written, L"WriteFile wrote full payload");
-        };
-        writeStream(upper + L":secret",  "hush",   4);
-        writeStream(upper + L":payload", "abcdef", 6);
+        WriteRawStream(upper + L":secret",  "hush",   4);
+        WriteRawStream(upper + L":payload", "abcdef", 6);
 
         UINT32 required = 0;
         Assert::AreEqual<HRESULT>(S_OK,
@@ -323,6 +314,52 @@ public:
         Assert::IsTrue(sawPayload, L":payload stream missing from results");
     }
 
+    TEST_METHOD(EnumerateStreams_Allocation_IsStreamSizeRoundedUp) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        LM_FILE_HANDLE fh = nullptr;
+        LM_FILE_INFO   info{};
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCreateFile(mount.Get(), L"\\host.txt", 0u,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+
+        const std::wstring upper = env.Upper() + L"\\host.txt";
+        const std::vector<char> onePage(4096, 'x');
+        WriteRawStream(upper + L":secret", "hush", 4);
+        WriteRawStream(upper + L":page",   onePage.data(), static_cast<DWORD>(onePage.size()));
+
+        UINT32 required = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnumerateStreams(mount.Get(), L"\\host.txt",
+                nullptr, 0, &required));
+        Assert::AreEqual<UINT32>(2u, required);
+
+        std::vector<LM_STREAM_INFO> buf(required);
+        UINT32 written = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnumerateStreams(mount.Get(), L"\\host.txt",
+                buf.data(), required, &written));
+        Assert::AreEqual<UINT32>(2u, written);
+
+        auto findStream = [&](const wchar_t* name) -> const LM_STREAM_INFO& {
+            auto it = std::find_if(buf.begin(), buf.end(),
+                [&](const LM_STREAM_INFO& s) { return std::wstring(s.streamName) == name; });
+            Assert::IsTrue(it != buf.end(), L"stream missing from results");
+            return *it;
+        };
+        const LM_STREAM_INFO& secret = findStream(L":secret:$DATA");
+        Assert::AreEqual<UINT64>(4u, secret.streamSize);
+        Assert::AreEqual<UINT64>(4096u, secret.allocationSize,
+            L"a 4-byte stream reports one 4 KiB allocation unit");
+        const LM_STREAM_INFO& page = findStream(L":page:$DATA");
+        Assert::AreEqual<UINT64>(4096u, page.streamSize);
+        Assert::AreEqual<UINT64>(4096u, page.allocationSize,
+            L"a stream of exactly 4 KiB reports 4 KiB, not a second unit");
+    }
+
     TEST_METHOD(EnumerateStreams_BufferTooSmall_ReturnsMoreData) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
@@ -337,15 +374,7 @@ public:
 
         const std::wstring upper = env.Upper() + L"\\multi.txt";
         for (const wchar_t* s : { L":a", L":b", L":c" }) {
-            HANDLE h = ::CreateFileW((upper + s).c_str(),
-                GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL, nullptr);
-            Assert::IsTrue(h != INVALID_HANDLE_VALUE, L"open ADS for write");
-            DWORD written = 0;
-            BOOL ok = ::WriteFile(h, "x", 1, &written, nullptr);
-            ::CloseHandle(h);
-            Assert::IsTrue(ok != FALSE,        L"WriteFile to ADS succeeded");
-            Assert::AreEqual<DWORD>(1u, written, L"WriteFile wrote single byte");
+            WriteRawStream(upper + s, "x", 1);
         }
 
         LM_STREAM_INFO oneSlot{};
