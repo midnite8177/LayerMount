@@ -115,7 +115,7 @@ The managed wrapper lives in the `LayerMount` namespace; the native C ABI is `sr
 |---|---|
 | `LayerMount` | Top-level overlay handle. Static factories `Create(LayerMountConfig)` and `CreateTransient(workDir)`; instance methods for path/file ops, stats, volume info; `Event` for diagnostics. |
 | `LayerMountConfig` | Construction parameters: `UpperPath`, `WorkDirPath`, `LowerPaths`, `Capabilities`, process-tracking knobs. |
-| `LayerMountFile` | Handle returned by `OpenFile` / `CreateFile`. `Read` / `Write` accept managed `Span<byte>` and an originator PID. |
+| `LayerMountFile` | Handle returned by `OpenFile` / `CreateFile`. `Read` / `Write` accept managed `Span<byte>`. |
 | `LayerMount.Vhd` | `Create` / `Open` VHD/VHDX layer files; `ListLayers` against a manifest directory. |
 | `LayerMount.Vss` | `CreateSnapshot` / `DeleteSnapshot` / `ListSnapshots` / `Cleanup`. Admin required. |
 | `LayerMount.Images` | `Pack`, `PackDifferential`, `Unpack`, `Validate`, `GetMetadata`; `CreateManifest` / `GetManifest` for multi-image bundles. |

@@ -62,7 +62,7 @@
        public C ABI is self-sufficient. -->
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\include;$(VendorDir);..\LayerMount.dll\public;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\include;$(VendorDir);..\LayerMount.dll\public;..\LayerMount.TestShared\native;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
     </ClCompile>
@@ -98,6 +98,9 @@
     <ClCompile Include="AbiTransientLayerMountTests.cpp" />
     <ClCompile Include="AbiPagingReadMatrixTests.cpp" />
     <ClCompile Include="AbiCopyUpOnOpenTests.cpp" />
+    <ClCompile Include="AbiMaximumAllowedTests.cpp" />
+    <ClCompile Include="AbiTrackerOpenerTests.cpp" />
+    <ClCompile Include="AbiCreateRollbackTests.cpp" />
   </ItemGroup>
 
   <ItemGroup>

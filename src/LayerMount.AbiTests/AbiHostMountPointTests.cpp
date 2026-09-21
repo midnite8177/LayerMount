@@ -1,11 +1,6 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
 
-#pragma warning(push)
-#pragma warning(disable: 4005)   // STATUS_* macro redefinition between winnt.h and ntstatus.h
-#include <ntstatus.h>
-#pragma warning(pop)
-
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {

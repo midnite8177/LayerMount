@@ -564,7 +564,10 @@ Invalidation is explicit at every mutation:
 
 `ProcessTracker` is optional and off by default. When enabled (via
 `LayerMountProcessTrackerEnable` or the `enableProcessTracking` config bit),
-every file primitive that takes a `callerPid` consults it.
+every path primitive consults it with the caller's `callerPid`. Read,
+Write, Overwrite, Flush, and the handle-form delete pair consult it with
+the `ownerPid` the open recorded on the `FileContext`. The handle-form
+rename still consults it with the caller's pid.
 
 ### Per-PID resolution cache
 

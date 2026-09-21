@@ -25,6 +25,6 @@
     <AssemblyVersion>$(LayerMountVersionMajor).0.0.0</AssemblyVersion>
     <FileVersion>$(LayerMountVersion).0</FileVersion>
     <InformationalVersion>$(LayerMountVersionFull)</InformationalVersion>
-    <LayerMountAbiVersion>3</LayerMountAbiVersion>
+    <LayerMountAbiVersion>4</LayerMountAbiVersion>
   </PropertyGroup>
 </Project>

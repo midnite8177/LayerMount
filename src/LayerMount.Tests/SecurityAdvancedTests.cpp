@@ -19,6 +19,8 @@
 #include "WhiteoutManager.h"
 #include "Cache.h"
 
+#include "AclTestHelpers.h"
+
 #include <aclapi.h>
 #include <sddl.h>
 
@@ -26,6 +28,8 @@
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::AddInheritableDenyAce;
+using LayerMountTestShared::EveryoneSid;
 
 namespace LayerMountTests {
 
@@ -113,17 +117,6 @@ bool HasInheritedAceForSid(const std::wstring& path, PSID target) {
     return false;
 }
 
-// RAII wrapper to free an "Everyone" SID.
-struct EveryoneSid {
-    PSID sid = nullptr;
-    EveryoneSid() {
-        SID_IDENTIFIER_AUTHORITY world = SECURITY_WORLD_SID_AUTHORITY;
-        ::AllocateAndInitializeSid(&world, 1, SECURITY_WORLD_RID,
-                                     0, 0, 0, 0, 0, 0, 0, &sid);
-    }
-    ~EveryoneSid() { if (sid) ::FreeSid(sid); }
-};
-
 } // namespace
 
 // ============================================================================
@@ -198,27 +191,9 @@ public:
         // inherit it automatically. SetNamedSecurityInfo will push the
         // inheritable ACE down to existing children when
         // PROTECTED_DACL_SECURITY_INFORMATION is not set.
-        EXPLICIT_ACCESSW ea{};
-        ea.grfAccessPermissions = FILE_GENERIC_WRITE;
-        ea.grfAccessMode = DENY_ACCESS;
-        ea.grfInheritance =
-            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
-        ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-        ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
-        ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(everyone.sid);
-
-        PACL newDacl = nullptr;
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            ::SetEntriesInAclW(1, &ea, nullptr, &newDacl));
-
         const std::wstring lowerDir = env.Lower(0) + L"\\secured";
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            ::SetNamedSecurityInfoW(const_cast<LPWSTR>(lowerDir.c_str()),
-                                       SE_FILE_OBJECT,
-                                       DACL_SECURITY_INFORMATION |
-                                           UNPROTECTED_DACL_SECURITY_INFORMATION,
-                                       nullptr, nullptr, newDacl, nullptr));
-        ::LocalFree(newDacl);
+        AddInheritableDenyAce(lowerDir, FILE_GENERIC_WRITE,
+                              OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
 
         const std::wstring lowerChild = env.Lower(0) + L"\\secured\\child.txt";
         // Verify child actually inherited the deny (pre-copy-up baseline).

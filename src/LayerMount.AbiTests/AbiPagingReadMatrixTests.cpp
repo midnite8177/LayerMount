@@ -15,13 +15,8 @@ constexpr UINT64 kStraddleReadBytes = 8192;
 
 constexpr UINT32 kCopyUpAccess = GENERIC_READ | GENERIC_WRITE;
 
-// HRESULT_FROM_NT(STATUS_END_OF_FILE), the form the ABI returns for a read
-// at or past the end of the file.
-constexpr HRESULT kHrEndOfFileNt = static_cast<HRESULT>(0xD0000011);
-
-// HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND), the form the ABI returns
-// when a fill finds no origin file.
-constexpr HRESULT kHrObjectNameNotFoundNt = static_cast<HRESULT>(0xD0000034);
+constexpr HRESULT kHrEndOfFileNt = HRESULT_FROM_NT(STATUS_END_OF_FILE);
+constexpr HRESULT kHrObjectNameNotFoundNt = HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND);
 
 constexpr BYTE kSentinel = 0xCD;
 
@@ -139,6 +134,9 @@ std::wstring OverlayPath(Origin origin, UINT64 listedSize) {
     return L"\\" + FileName(origin, listedSize);
 }
 
+// Every engine read path reports a read at or past the end as
+// STATUS_END_OF_FILE. The predicate accepts the Win32 encoding too, so the
+// matrix pins the condition and not the boundary that reported it.
 bool IsEndOfFileHr(HRESULT hr) {
     return hr == kHrEndOfFileNt || hr == HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
 }
@@ -315,7 +313,7 @@ void CreateThroughMount(LM_HANDLE mount, const std::wstring& overlayPath,
         ::LayerMountWriteFile(fh.Get(), bytes.data(), /*offset*/ 0,
             static_cast<UINT32>(bytes.size()),
             /*writeToEnd*/ FALSE, /*constrainedIo*/ FALSE,
-            /*originatorPid*/ 0u, &written, &postWrite),
+            &written, &postWrite),
         (L"LayerMountWriteFile " + overlayPath).c_str());
     Assert::AreEqual<UINT32>(static_cast<UINT32>(bytes.size()), written,
         (L"write count " + overlayPath).c_str());
@@ -389,7 +387,7 @@ CellRecord ReadCell(const MountedEnv& mounted, const MatrixCell& cell,
 
     std::vector<BYTE> buffer(request.length, kSentinel);
     rec.hr = ::LayerMountReadFile(fh.Get(), buffer.data(), request.offset,
-                                  request.length, /*originatorPid*/ 0u, &rec.count);
+                                  request.length, &rec.count);
     fh.Reset();
 
     const UINT32 got = (std::min)(rec.count, request.length);
@@ -577,7 +575,7 @@ void SetSizeThenReadEndPage(const MountedEnv& mounted, Origin origin, UINT64 lis
     std::vector<BYTE> buffer(static_cast<size_t>(kPageBytes), kSentinel);
     UINT32            count = 0;
     const HRESULT     hr    = ::LayerMountReadFile(fh.Get(), buffer.data(), pageStart,
-        static_cast<UINT32>(kPageBytes), /*originatorPid*/ 0u, &count);
+        static_cast<UINT32>(kPageBytes), &count);
     Assert::AreEqual<HRESULT>(S_OK, hr,
         (L"a read of the page at the new end of file on the write-only handle, got " +
          Hex(static_cast<unsigned>(hr))).c_str());
@@ -696,7 +694,7 @@ public:
         std::vector<BYTE> buffer(static_cast<size_t>(kPageBytes), kSentinel);
         UINT32            count = 0;
         const HRESULT     hr    = ::LayerMountReadFile(fh.Get(), buffer.data(), /*offset*/ 0,
-            static_cast<UINT32>(kPageBytes), /*originatorPid*/ 0u, &count);
+            static_cast<UINT32>(kPageBytes), &count);
         Assert::IsTrue(FAILED(hr),
                        (L"a read on a handle with no read-data right fails, got " +
                         Hex(static_cast<unsigned>(hr))).c_str());
@@ -755,7 +753,7 @@ public:
         UINT32            count = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountReadFile(reader.Get(), buffer.data(), /*offset*/ 0,
-                static_cast<UINT32>(buffer.size()), /*originatorPid*/ 0u, &count),
+                static_cast<UINT32>(buffer.size()), &count),
             L"a read on the reopened handle");
         Assert::AreEqual<UINT32>(static_cast<UINT32>(newSize), count,
                                  L"the read returns the bytes up to the new end of file");
@@ -828,6 +826,42 @@ public:
         AssertLowerKeepsStagedSize(env, listed);
     }
 
+    TEST_METHOD(MetacopyShell_OpenWithMaximumAllowed_FillsAndReadReturnsLowerBytes) {
+        constexpr UINT64 listed = kPageBytes + 1;
+        TempLayerEnv     env(1);
+        StageBeforeMount(env, Origin::MetacopyShell);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring overlayPath = OverlayPath(Origin::MetacopyShell, listed);
+        StageShell(MountedEnv{env, mount.Get()}, listed);
+
+        const UINT64     stagedSize = StagedSize(Origin::MetacopyShell, listed);
+        FileHandleHolder fh;
+        LM_FILE_INFO     info{};
+        OpenOrFail(mount.Get(), overlayPath, MAXIMUM_ALLOWED, L"maximum-allowed", fh, &info);
+        Assert::IsTrue((info.fileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) == 0,
+                       L"the open reports no sparse attribute");
+        Assert::AreEqual<UINT64>(RoundUpToPage(stagedSize), info.allocationSize,
+                                 L"the open reports the filled allocation");
+
+        constexpr UINT64  readOffset    = 0;
+        constexpr UINT32  readLength    = static_cast<UINT32>(kPageBytes);
+        std::vector<BYTE> buffer(readLength, kSentinel);
+        UINT32            count = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountReadFile(fh.Get(), buffer.data(), readOffset, readLength,
+                                 &count),
+            L"a read on the maximum-allowed handle");
+        Assert::AreEqual<UINT32>(readLength, count, L"the read returns a full page");
+        Assert::IsTrue(MatchesPattern(buffer, count, readOffset),
+                       L"the read returns the lower's bytes, not the shell's zeros");
+        fh.Reset();
+
+        const std::string onDisk = ReadAllBytes(UpperPathOf(env, Origin::MetacopyShell, listed));
+        Assert::IsTrue(onDisk == PatternBytes(stagedSize),
+                       L"the open filled the shell with the lower's bytes");
+        AssertLowerKeepsStagedSize(env, listed);
+    }
+
     TEST_METHOD(MetacopyShell_OpenForReadWithOriginMissing_FailsAndReturnsNoHandle) {
         constexpr UINT64 listed = 0;
         TempLayerEnv     env(1);
@@ -869,7 +903,7 @@ public:
         UINT32       written    = 0;
         LM_FILE_INFO postWrite{};
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, payload, 0, payloadLen, FALSE, FALSE, 0u,
+            ::LayerMountWriteFile(fh, payload, 0, payloadLen, FALSE, FALSE,
                                   &written, &postWrite));
 
         const UINT64 requested = 64u * 1024u;

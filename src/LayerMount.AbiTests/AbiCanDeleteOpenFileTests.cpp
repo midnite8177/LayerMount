@@ -1,11 +1,6 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
 
-#pragma warning(push)
-#pragma warning(disable: 4005)
-#include <ntstatus.h>
-#pragma warning(pop)
-
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {

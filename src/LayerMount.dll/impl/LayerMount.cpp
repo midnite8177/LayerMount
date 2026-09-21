@@ -6,6 +6,7 @@
 #include "CopyUp.h"
 #include "ProcessTracker.h"
 #include "NtStatusUtil.h"
+#include "NtdllExport.h"
 #include "vhd/VHDLayerManager.h"
 #include "vss/VSSManager.h"
 #include "image/LayerImageManager.h"
@@ -25,13 +26,36 @@ namespace LayerMount {
 namespace {
 NTSTATUS ReopenContextHandle(FileContext* ctx);
 
-// Returns an invalid ScopedHandle on failure, and the caller then
-// reports its original error. The caller passes the directory status,
-// because a path-based query fails for a delete-pending file and would
-// drop FILE_FLAG_BACKUP_SEMANTICS.
-ScopedHandle OpenTransientWritableHandle(const std::wstring& path,
-                                         DWORD desiredAccess,
-                                         bool isDirectory) {
+// Removes the directory at `path` on scope exit while armed. A create
+// arms it after CreateDirectoryW makes the directory and disarms it once
+// the handle is open, so a failure in between removes only what the
+// create made.
+class DirectoryRollback {
+public:
+    explicit DirectoryRollback(const std::wstring& path) : path_(path) {}
+    ~DirectoryRollback() {
+        if (armed_) {
+            ::RemoveDirectoryW(path_.c_str());
+        }
+    }
+    DirectoryRollback(const DirectoryRollback&) = delete;
+    DirectoryRollback& operator=(const DirectoryRollback&) = delete;
+
+    void Arm() { armed_ = true; }
+    void Disarm() { armed_ = false; }
+
+private:
+    const std::wstring& path_;
+    bool armed_ = false;
+};
+
+// Opens a short-lived handle to a physical path. Returns an invalid
+// ScopedHandle on failure and leaves GetLastError set. The caller passes
+// the directory status, because a path-based query fails for a
+// delete-pending file and would drop FILE_FLAG_BACKUP_SEMANTICS.
+ScopedHandle OpenTransientHandle(const std::wstring& path,
+                                 DWORD desiredAccess,
+                                 bool isDirectory) {
     DWORD flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0;
     HANDLE h = ::CreateFileW(
         path.c_str(),
@@ -64,7 +88,7 @@ NTSTATUS SetInfoWithTransientRetry(const FileContext& ctx,
         firstErr != ERROR_SHARING_VIOLATION) {
         return NtStatusFromWin32(firstErr);
     }
-    ScopedHandle transient = OpenTransientWritableHandle(
+    ScopedHandle transient = OpenTransientHandle(
         ctx.actualPath, transientAccess, ctx.isDirectory);
     if (!transient.IsValid()) {
         return NtStatusFromWin32(firstErr);
@@ -875,6 +899,65 @@ UINT32 ComputePhysicalHandleAccess(UINT32 grantedAccess) {
     return access;
 }
 
+typedef NTSTATUS(NTAPI* NtQueryObjectFn)(
+    HANDLE Handle,
+    OBJECT_INFORMATION_CLASS ObjectInformationClass,
+    PVOID ObjectInformation,
+    ULONG ObjectInformationLength,
+    PULONG ReturnLength);
+
+NtQueryObjectFn GetNtQueryObject() {
+    static NtQueryObjectFn fn = LoadNtdllExport<NtQueryObjectFn>("NtQueryObject");
+    return fn;
+}
+
+// The kernel resolves MAXIMUM_ALLOWED with an access check before a
+// filesystem sees the request, so only a direct caller of the engine can
+// pass the bit. A handle opened with MAXIMUM_ALLOWED carries the kernel's
+// answer as its granted access.
+NTSTATUS ResolveMaximumAllowedFromHandle(HANDLE handle,
+                                         UINT32 requestedAccess,
+                                         UINT32* resolvedAccess) {
+    if ((requestedAccess & MAXIMUM_ALLOWED) == 0) {
+        *resolvedAccess = requestedAccess;
+        return STATUS_SUCCESS;
+    }
+    NtQueryObjectFn queryObject = GetNtQueryObject();
+    if (queryObject == nullptr) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    PUBLIC_OBJECT_BASIC_INFORMATION info{};
+    ULONG returnLength = 0;
+    NTSTATUS status = queryObject(handle, ObjectBasicInformation,
+                                  &info, sizeof(info), &returnLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    *resolvedAccess =
+        (requestedAccess & ~static_cast<UINT32>(MAXIMUM_ALLOWED)) | info.GrantedAccess;
+    return STATUS_SUCCESS;
+}
+
+// A probe open with MAXIMUM_ALLOWED gets the same answer from the same
+// kernel check, under the same token as the real open. An AccessCheck
+// call against the file's DACL would need an impersonation token and
+// would repeat the kernel's work.
+NTSTATUS ResolveMaximumAllowed(const std::wstring& physicalPath,
+                               bool isDirectory,
+                               UINT32 requestedAccess,
+                               UINT32* resolvedAccess) {
+    if ((requestedAccess & MAXIMUM_ALLOWED) == 0) {
+        *resolvedAccess = requestedAccess;
+        return STATUS_SUCCESS;
+    }
+    ScopedHandle probe =
+        OpenTransientHandle(physicalPath, MAXIMUM_ALLOWED, isDirectory);
+    if (!probe.IsValid()) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+    return ResolveMaximumAllowedFromHandle(probe.Get(), requestedAccess, resolvedAccess);
+}
+
 UINT32 ComputeHandleReopenAccess(const FileContext& ctx) {
     UINT32 reopenAccess =
         ComputePhysicalHandleAccess(ctx.grantedAccess) & ~static_cast<UINT32>(DELETE);
@@ -897,6 +980,18 @@ void CloseContextHandle(FileContext* ctx) {
         ::CloseHandle(ctx->handle);
         ctx->handle = INVALID_HANDLE_VALUE;
     }
+}
+
+// Replaces MAXIMUM_ALLOWED in the context's granted access with the
+// rights the kernel granted to its handle. On failure the handle closes;
+// the caller removes what it made.
+NTSTATUS ResolveContextMaximumAllowed(FileContext* ctx, UINT32 requestedAccess) {
+    NTSTATUS status = ResolveMaximumAllowedFromHandle(
+        ctx->handle, requestedAccess, &ctx->grantedAccess);
+    if (!NT_SUCCESS(status)) {
+        CloseContextHandle(ctx);
+    }
+    return status;
 }
 
 NTSTATUS CleanupContextHandle(FileContext* ctx) {
@@ -979,35 +1074,8 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         }
     }
 
-    auto ctx = std::make_unique<FileContext>();
-
-    // Root directory: open the upper layer directly.
     if (normalized.empty()) {
-        ctx->relativePath = normalized;
-        ctx->actualPath = config_.upperPath;
-        ctx->isDirectory = true;
-        ctx->writable = true;
-        ctx->ownerPid = callerPid;
-        ctx->grantedAccess = grantedAccess;
-        ctx->createOptions = createOptions;
-
-        ctx->handle = ::CreateFileW(config_.upperPath.c_str(),
-            ComputePhysicalHandleAccess(grantedAccess),
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (ctx->handle == INVALID_HANDLE_VALUE) {
-            return NtStatusFromWin32(::GetLastError());
-        }
-
-        NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
-        if (!NT_SUCCESS(status)) {
-            ::CloseHandle(ctx->handle);
-            return status;
-        }
-
-        stats_.activeHandles.fetch_add(1, std::memory_order_relaxed);
-        *outCtx = std::move(ctx);
-        return STATUS_SUCCESS;
+        return OpenRoot(grantedAccess, createOptions, callerPid, outCtx, outInfo);
     }
 
     ResolvedPath resolved = pathResolver_->ResolvePath(hostNorm);
@@ -1024,57 +1092,30 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         return STATUS_FILE_IS_A_DIRECTORY;
     }
 
+    UINT32 resolvedAccess = 0;
+    NTSTATUS resolveStatus = ResolveMaximumAllowed(
+        resolved.absolutePath, hostIsDirectory, grantedAccess, &resolvedAccess);
+    if (!NT_SUCCESS(resolveStatus)) {
+        return resolveStatus;
+    }
+
+    auto ctx = std::make_unique<FileContext>();
     ctx->relativePath = hostNorm;
     ctx->streamSuffix = streamSuffix;
     ctx->isDirectory = hostIsDirectory;
     ctx->ownerPid = callerPid;
-    ctx->grantedAccess = grantedAccess;
+    ctx->grantedAccess = resolvedAccess;
     ctx->createOptions = createOptions;
 
-    // Lower-layer + write-intent: copy-up first.
-    if (resolved.source == LayerSource::Lower && HasWriteAccess(grantedAccess)) {
-        NTSTATUS status;
-        if (ctx->isDirectory) {
-            status = copyUp_->CopyUpDirectory(hostNorm);
-        } else if (!streamSuffix.empty()) {
-            // A metacopy shell has no lower streams until it fills, and a
-            // stream-only handle never fills it.
-            status = copyUp_->CopyUpFile(hostNorm);
-        } else {
-            constexpr LONGLONG kMetacopyThresholdBytes = 1LL * 1024 * 1024;
-            LARGE_INTEGER srcSize{};
-            if (resolved.attributes != INVALID_FILE_ATTRIBUTES &&
-                (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-                WIN32_FILE_ATTRIBUTE_DATA fad{};
-                if (::GetFileAttributesExW(resolved.absolutePath.c_str(),
-                                            GetFileExInfoStandard, &fad)) {
-                    srcSize.LowPart = fad.nFileSizeLow;
-                    srcSize.HighPart = static_cast<LONG>(fad.nFileSizeHigh);
-                }
-            }
-            // Capability gate: metacopy stages
-            // a sparse skeleton in upper. When the host's upper layer
-            // doesn't support sparse files, the FSCTL_SET_SPARSE inside
-            // CopyUpMetadataOnly fails and the file ends up as a dense
-            // zero-filled stub -- worst of both worlds. Force a full data
-            // copy when sparse is unavailable.
-            if (srcSize.QuadPart > kMetacopyThresholdBytes &&
-                capabilities_.HasSparseFiles()) {
-                status = copyUp_->CopyUpMetadataOnly(hostNorm);
-                if (NT_SUCCESS(status)) {
-                    ctx->isMetacopyOnly = true;
-                }
-            } else {
-                status = copyUp_->CopyUpFile(hostNorm);
-            }
-        }
+    if (resolved.source == LayerSource::Lower && HasWriteAccess(resolvedAccess)) {
+        NTSTATUS status = CopyUpForWriteOpen(hostNorm, resolved, ctx.get());
         if (!NT_SUCCESS(status)) {
             return status;
         }
         ctx->actualPath = pathResolver_->GetUpperPath(hostNorm) + streamSuffix;
         ctx->writable = true;
     } else if (resolved.source == LayerSource::Upper &&
-               HasWriteAccess(grantedAccess) &&
+               HasWriteAccess(resolvedAccess) &&
                !streamSuffix.empty()) {
         // A later fill would copy the lower's streams over the stream this
         // open writes, so the shell fills first.
@@ -1104,7 +1145,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         ctx->isMetacopyOnly = metadata.metacopy;
     }
 
-    if (ctx->isMetacopyOnly && !ctx->isDirectory && HasFileDataAccess(grantedAccess)) {
+    if (ctx->isMetacopyOnly && !ctx->isDirectory && HasFileDataAccess(resolvedAccess)) {
         NTSTATUS fillStatus = FillShell(hostNorm, ctx.get());
         if (!NT_SUCCESS(fillStatus)) {
             return fillStatus;
@@ -1116,7 +1157,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         flags |= FILE_FLAG_OPEN_REPARSE_POINT;
     }
     ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
-        ComputePhysicalHandleAccess(grantedAccess),
+        ComputePhysicalHandleAccess(resolvedAccess),
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, flags, nullptr);
     if (ctx->handle == INVALID_HANDLE_VALUE) {
@@ -1132,6 +1173,78 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     stats_.activeHandles.fetch_add(1, std::memory_order_relaxed);
     *outCtx = std::move(ctx);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS LayerMount::OpenRoot(UINT32 grantedAccess,
+                             UINT32 createOptions,
+                             DWORD callerPid,
+                             std::unique_ptr<FileContext>* outCtx,
+                             InternalFileInfo* outInfo) {
+    auto ctx = std::make_unique<FileContext>();
+    ctx->actualPath = config_.upperPath;
+    ctx->isDirectory = true;
+    ctx->writable = true;
+    ctx->ownerPid = callerPid;
+    ctx->createOptions = createOptions;
+
+    ctx->handle = ::CreateFileW(config_.upperPath.c_str(),
+        ComputePhysicalHandleAccess(grantedAccess),
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (ctx->handle == INVALID_HANDLE_VALUE) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+
+    NTSTATUS resolveStatus = ResolveContextMaximumAllowed(ctx.get(), grantedAccess);
+    if (!NT_SUCCESS(resolveStatus)) {
+        return resolveStatus;
+    }
+
+    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+    if (!NT_SUCCESS(status)) {
+        ::CloseHandle(ctx->handle);
+        return status;
+    }
+
+    stats_.activeHandles.fetch_add(1, std::memory_order_relaxed);
+    *outCtx = std::move(ctx);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm,
+                                       const ResolvedPath& resolved,
+                                       FileContext* ctx) {
+    if (ctx->isDirectory) {
+        return copyUp_->CopyUpDirectory(hostNorm);
+    }
+    if (!ctx->streamSuffix.empty()) {
+        // A metacopy shell has no lower streams until it fills, and a
+        // stream-only handle never fills it.
+        return copyUp_->CopyUpFile(hostNorm);
+    }
+
+    constexpr LONGLONG kMetacopyThresholdBytes = 1LL * 1024 * 1024;
+    LARGE_INTEGER srcSize{};
+    if (resolved.attributes != INVALID_FILE_ATTRIBUTES &&
+        (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (::GetFileAttributesExW(resolved.absolutePath.c_str(),
+                                    GetFileExInfoStandard, &fad)) {
+            srcSize.LowPart = fad.nFileSizeLow;
+            srcSize.HighPart = static_cast<LONG>(fad.nFileSizeHigh);
+        }
+    }
+    // A metacopy shell needs a sparse upper file. When the upper layer has
+    // no sparse support, the shell becomes a dense file of zeros, so the
+    // copy-up copies the data instead.
+    if (srcSize.QuadPart > kMetacopyThresholdBytes && capabilities_.HasSparseFiles()) {
+        NTSTATUS status = copyUp_->CopyUpMetadataOnly(hostNorm);
+        if (NT_SUCCESS(status)) {
+            ctx->isMetacopyOnly = true;
+        }
+        return status;
+    }
+    return copyUp_->CopyUpFile(hostNorm);
 }
 
 NTSTATUS LayerMount::Create(const std::wstring& relativePath,
@@ -1221,168 +1334,16 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
     ctx->isDirectory = isDirectory;
     ctx->writable = true;
     ctx->ownerPid = callerPid;
-    ctx->grantedAccess = grantedAccess;
     ctx->createOptions = createOptions;
 
-    if (isDirectory) {
-        bool dirCreatedByUs = false;
-        if (!::CreateDirectoryW(upperPath.c_str(), nullptr)) {
-            DWORD err = ::GetLastError();
-            if (err != ERROR_ALREADY_EXISTS) {
-                return NtStatusFromWin32(err);
-            }
-        } else {
-            dirCreatedByUs = true;
-        }
-
-        // If the opaque marker cannot be persisted, the new directory
-        // would leak lower children on lookup. Fail loudly and roll
-        // back the create when we were the one who made the directory.
-        if (existsInLower && lowerIsDir) {
-            if (!whiteoutMgr_->SetOpaque(normalized)) {
-                DWORD err = ::GetLastError();
-                if (dirCreatedByUs) {
-                    ::RemoveDirectoryW(upperPath.c_str());
-                }
-                return NtStatusFromWin32(err != ERROR_SUCCESS ? err : ERROR_ACCESS_DENIED);
-            }
-        }
-
-        // Caller-supplied security descriptor must actually take effect;
-        // silently falling back to inherited ACLs would violate Windows
-        // create semantics and could produce an over-permissive object.
-        //
-        // Apply via SetKernelObjectSecurity on a backup-semantics handle
-        // rather than path-based SetFileSecurityW. SetFileSecurityW does
-        // its own DACL check (requires WRITE_DAC/WRITE_OWNER on the
-        // object) -- which a freshly-created child under a PROTECTED
-        // parent DACL that does not grant those bits will fail with
-        // ACCESS_DENIED. A backup-semantics handle honors SE_RESTORE_NAME
-        // (enabled in EnsureCopyUpPrivileges via CopyUp construction),
-        // which lets the overlay write any ACL on an object it just
-        // created even under a restrictive inherited DACL.
-        if (securityDescriptor) {
-            HANDLE sh = ::CreateFileW(upperPath.c_str(),
-                READ_CONTROL | WRITE_DAC | WRITE_OWNER,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-            if (sh == INVALID_HANDLE_VALUE) {
-                DWORD err = ::GetLastError();
-                if (dirCreatedByUs) {
-                    ::RemoveDirectoryW(upperPath.c_str());
-                }
-                return NtStatusFromWin32(err);
-            }
-            SECURITY_INFORMATION sinfo = OWNER_SECURITY_INFORMATION |
-                                         GROUP_SECURITY_INFORMATION |
-                                         DACL_SECURITY_INFORMATION;
-            BOOL sdOk = ::SetKernelObjectSecurity(sh, sinfo, securityDescriptor);
-            DWORD sdErr = sdOk ? 0 : ::GetLastError();
-            ::CloseHandle(sh);
-            if (!sdOk) {
-                if (dirCreatedByUs) {
-                    ::RemoveDirectoryW(upperPath.c_str());
-                }
-                return NtStatusFromWin32(sdErr);
-            }
-        }
-
-        ctx->handle = ::CreateFileW(upperPath.c_str(),
-            ComputePhysicalHandleAccess(grantedAccess),
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    } else {
-        if (fileAttributes == 0) {
-            fileAttributes = FILE_ATTRIBUTE_NORMAL;
-        }
-
-        // A shell fills before a stream attaches, so the lower's streams
-        // cannot land over the new one.
-        if (!streamSuffix.empty()) {
-            if (existsInLower && !lowerIsDir &&
-                !pathResolver_->ExistsInUpper(hostNorm)) {
-                NTSTATUS cpStatus = copyUp_->CopyUpFile(hostNorm);
-                if (!NT_SUCCESS(cpStatus)) {
-                    return cpStatus;
-                }
-                upperPath = pathResolver_->GetUpperPath(hostNorm);
-                ctx->actualPath = upperPath + streamSuffix;
-            } else if (pathResolver_->ExistsInUpper(hostNorm)) {
-                const std::wstring upperHostPath =
-                    pathResolver_->GetUpperPath(hostNorm);
-                const LayerMountMetadata metadata =
-                    MetadataADS::ReadLayerMountMetadata(upperHostPath, &config_);
-                if (metadata.metacopy) {
-                    NTSTATUS cpStatus = FillShell(hostNorm, ctx.get());
-                    if (!NT_SUCCESS(cpStatus)) {
-                        return cpStatus;
-                    }
-                }
-                upperPath = upperHostPath;
-                ctx->actualPath = upperPath + streamSuffix;
-            }
-        }
-
-        ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
-            ComputePhysicalHandleAccess(grantedAccess),
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, CREATE_NEW, fileAttributes, nullptr);
-
-        if (ctx->handle == INVALID_HANDLE_VALUE) {
-            return NtStatusFromWin32(::GetLastError());
-        }
-
-        // SD and allocationSize apply to the host file, not to an ADS.
-        // Streams inherit the host's security descriptor and have their
-        // own logical size; skip both branches when attaching a stream.
-        if (streamSuffix.empty()) {
-            // Same reasoning as the directory branch: use SetKernelObjectSecurity
-            // on a backup-semantics handle so SE_RESTORE_NAME lets us write the
-            // caller's SD onto a file that inherits a restrictive DACL from its
-            // parent (e.g. PROTECTED Everyone-only, no WRITE_DAC).
-            if (securityDescriptor) {
-                HANDLE sh = ::CreateFileW(upperPath.c_str(),
-                    READ_CONTROL | WRITE_DAC | WRITE_OWNER,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-                if (sh == INVALID_HANDLE_VALUE) {
-                    DWORD err = ::GetLastError();
-                    ::CloseHandle(ctx->handle);
-                    ctx->handle = INVALID_HANDLE_VALUE;
-                    ::DeleteFileW(upperPath.c_str());
-                    return NtStatusFromWin32(err);
-                }
-                SECURITY_INFORMATION sinfo = OWNER_SECURITY_INFORMATION |
-                                             GROUP_SECURITY_INFORMATION |
-                                             DACL_SECURITY_INFORMATION;
-                BOOL sdOk = ::SetKernelObjectSecurity(sh, sinfo, securityDescriptor);
-                DWORD sdErr = sdOk ? 0 : ::GetLastError();
-                ::CloseHandle(sh);
-                if (!sdOk) {
-                    ::CloseHandle(ctx->handle);
-                    ctx->handle = INVALID_HANDLE_VALUE;
-                    ::DeleteFileW(upperPath.c_str());
-                    return NtStatusFromWin32(sdErr);
-                }
-            }
-
-            if (allocationSize > 0) {
-                FILE_ALLOCATION_INFO allocInfo;
-                allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
-                if (!::SetFileInformationByHandle(ctx->handle, FileAllocationInfo,
-                                                   &allocInfo, sizeof(allocInfo))) {
-                    DWORD err = ::GetLastError();
-                    ::CloseHandle(ctx->handle);
-                    ctx->handle = INVALID_HANDLE_VALUE;
-                    ::DeleteFileW(upperPath.c_str());
-                    return NtStatusFromWin32(err);
-                }
-            }
-        }
-    }
-
-    if (ctx->handle == INVALID_HANDLE_VALUE) {
-        return NtStatusFromWin32(::GetLastError());
+    const NTSTATUS createStatus = isDirectory
+        ? CreateDirectoryInUpper(normalized, upperPath, lowerIsDir,
+                                 grantedAccess, securityDescriptor, ctx.get())
+        : CreateFileInUpper(hostNorm, streamSuffix, upperPath, existsInLower,
+                            lowerIsDir, grantedAccess, fileAttributes,
+                            securityDescriptor, allocationSize, ctx.get());
+    if (!NT_SUCCESS(createStatus)) {
+        return createStatus;
     }
 
     if (hadWhiteout) {
@@ -1399,6 +1360,188 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
 
     stats_.activeHandles.fetch_add(1, std::memory_order_relaxed);
     *outCtx = std::move(ctx);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS LayerMount::CreateDirectoryInUpper(const std::wstring& normalized,
+                                            const std::wstring& upperPath,
+                                            bool lowerIsDirectory,
+                                            UINT32 grantedAccess,
+                                            PSECURITY_DESCRIPTOR securityDescriptor,
+                                            FileContext* ctx) {
+    DirectoryRollback rollback(upperPath);
+    if (!::CreateDirectoryW(upperPath.c_str(), nullptr)) {
+        DWORD err = ::GetLastError();
+        if (err != ERROR_ALREADY_EXISTS) {
+            return NtStatusFromWin32(err);
+        }
+    } else {
+        rollback.Arm();
+    }
+
+    // If the opaque marker cannot be persisted, the new directory
+    // would leak lower children on lookup. Fail loudly and roll
+    // back the create when we were the one who made the directory.
+    if (lowerIsDirectory) {
+        if (!whiteoutMgr_->SetOpaque(normalized)) {
+            DWORD err = ::GetLastError();
+            return NtStatusFromWin32(err != ERROR_SUCCESS ? err : ERROR_ACCESS_DENIED);
+        }
+    }
+
+    // Caller-supplied security descriptor must actually take effect;
+    // silently falling back to inherited ACLs would violate Windows
+    // create semantics and could produce an over-permissive object.
+    //
+    // Apply via SetKernelObjectSecurity on a backup-semantics handle
+    // rather than path-based SetFileSecurityW. SetFileSecurityW does
+    // its own DACL check (requires WRITE_DAC/WRITE_OWNER on the
+    // object) -- which a freshly-created child under a PROTECTED
+    // parent DACL that does not grant those bits will fail with
+    // ACCESS_DENIED. A backup-semantics handle honors SE_RESTORE_NAME
+    // (enabled in EnsureCopyUpPrivileges via CopyUp construction),
+    // which lets the overlay write any ACL on an object it just
+    // created even under a restrictive inherited DACL.
+    if (securityDescriptor) {
+        HANDLE sh = ::CreateFileW(upperPath.c_str(),
+            READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (sh == INVALID_HANDLE_VALUE) {
+            DWORD err = ::GetLastError();
+            return NtStatusFromWin32(err);
+        }
+        SECURITY_INFORMATION sinfo = OWNER_SECURITY_INFORMATION |
+                                     GROUP_SECURITY_INFORMATION |
+                                     DACL_SECURITY_INFORMATION;
+        BOOL sdOk = ::SetKernelObjectSecurity(sh, sinfo, securityDescriptor);
+        DWORD sdErr = sdOk ? 0 : ::GetLastError();
+        ::CloseHandle(sh);
+        if (!sdOk) {
+            return NtStatusFromWin32(sdErr);
+        }
+    }
+
+    ctx->handle = ::CreateFileW(upperPath.c_str(),
+        ComputePhysicalHandleAccess(grantedAccess),
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (ctx->handle == INVALID_HANDLE_VALUE) {
+        DWORD err = ::GetLastError();
+        return NtStatusFromWin32(err);
+    }
+    NTSTATUS resolveStatus = ResolveContextMaximumAllowed(ctx, grantedAccess);
+    if (!NT_SUCCESS(resolveStatus)) {
+        return resolveStatus;
+    }
+    rollback.Disarm();
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS LayerMount::CreateFileInUpper(const std::wstring& hostNorm,
+                                       const std::wstring& streamSuffix,
+                                       std::wstring upperPath,
+                                       bool existsInLower,
+                                       bool lowerIsDirectory,
+                                       UINT32 grantedAccess,
+                                       UINT32 fileAttributes,
+                                       PSECURITY_DESCRIPTOR securityDescriptor,
+                                       UINT64 allocationSize,
+                                       FileContext* ctx) {
+    if (fileAttributes == 0) {
+        fileAttributes = FILE_ATTRIBUTE_NORMAL;
+    }
+
+    // A shell fills before a stream attaches, so the lower's streams
+    // cannot land over the new one.
+    if (!streamSuffix.empty()) {
+        if (existsInLower && !lowerIsDirectory &&
+            !pathResolver_->ExistsInUpper(hostNorm)) {
+            NTSTATUS cpStatus = copyUp_->CopyUpFile(hostNorm);
+            if (!NT_SUCCESS(cpStatus)) {
+                return cpStatus;
+            }
+            upperPath = pathResolver_->GetUpperPath(hostNorm);
+            ctx->actualPath = upperPath + streamSuffix;
+        } else if (pathResolver_->ExistsInUpper(hostNorm)) {
+            const std::wstring upperHostPath =
+                pathResolver_->GetUpperPath(hostNorm);
+            const LayerMountMetadata metadata =
+                MetadataADS::ReadLayerMountMetadata(upperHostPath, &config_);
+            if (metadata.metacopy) {
+                NTSTATUS cpStatus = FillShell(hostNorm, ctx);
+                if (!NT_SUCCESS(cpStatus)) {
+                    return cpStatus;
+                }
+            }
+            upperPath = upperHostPath;
+            ctx->actualPath = upperPath + streamSuffix;
+        }
+    }
+
+    ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
+        ComputePhysicalHandleAccess(grantedAccess),
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, CREATE_NEW, fileAttributes, nullptr);
+
+    if (ctx->handle == INVALID_HANDLE_VALUE) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+
+    NTSTATUS resolveStatus = ResolveContextMaximumAllowed(ctx, grantedAccess);
+    if (!NT_SUCCESS(resolveStatus)) {
+        // DeleteFileW on a file:stream path removes only the stream.
+        ::DeleteFileW(ctx->actualPath.c_str());
+        return resolveStatus;
+    }
+
+    // SD and allocationSize apply to the host file, not to an ADS.
+    // Streams inherit the host's security descriptor and have their
+    // own logical size; skip both branches when attaching a stream.
+    if (streamSuffix.empty()) {
+        // Same reasoning as the directory branch: use SetKernelObjectSecurity
+        // on a backup-semantics handle so SE_RESTORE_NAME lets us write the
+        // caller's SD onto a file that inherits a restrictive DACL from its
+        // parent (e.g. PROTECTED Everyone-only, no WRITE_DAC).
+        if (securityDescriptor) {
+            HANDLE sh = ::CreateFileW(upperPath.c_str(),
+                READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+            if (sh == INVALID_HANDLE_VALUE) {
+                DWORD err = ::GetLastError();
+                ::CloseHandle(ctx->handle);
+                ctx->handle = INVALID_HANDLE_VALUE;
+                ::DeleteFileW(upperPath.c_str());
+                return NtStatusFromWin32(err);
+            }
+            SECURITY_INFORMATION sinfo = OWNER_SECURITY_INFORMATION |
+                                         GROUP_SECURITY_INFORMATION |
+                                         DACL_SECURITY_INFORMATION;
+            BOOL sdOk = ::SetKernelObjectSecurity(sh, sinfo, securityDescriptor);
+            DWORD sdErr = sdOk ? 0 : ::GetLastError();
+            ::CloseHandle(sh);
+            if (!sdOk) {
+                ::CloseHandle(ctx->handle);
+                ctx->handle = INVALID_HANDLE_VALUE;
+                ::DeleteFileW(upperPath.c_str());
+                return NtStatusFromWin32(sdErr);
+            }
+        }
+
+        if (allocationSize > 0) {
+            FILE_ALLOCATION_INFO allocInfo;
+            allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(allocationSize);
+            if (!::SetFileInformationByHandle(ctx->handle, FileAllocationInfo,
+                                               &allocInfo, sizeof(allocInfo))) {
+                DWORD err = ::GetLastError();
+                ::CloseHandle(ctx->handle);
+                ctx->handle = INVALID_HANDLE_VALUE;
+                ::DeleteFileW(upperPath.c_str());
+                return NtStatusFromWin32(err);
+            }
+        }
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1462,7 +1605,6 @@ NTSTATUS LayerMount::Read(FileContext* ctx,
                          void* buffer,
                          UINT64 offset,
                          ULONG length,
-                         DWORD callerPid,
                          PULONG bytesTransferred) {
     // A paging read can arrive here. A copy-up or a handle reopen for a
     // fill inside this call breaks the mapping the memory manager holds.
@@ -1473,9 +1615,8 @@ NTSTATUS LayerMount::Read(FileContext* ctx,
         return STATUS_INVALID_PARAMETER;
     }
 
-    const DWORD pid = callerPid != 0 ? callerPid : ctx->ownerPid;
-    if (auto tracker = Tracker(); tracker && pid != 0) {
-        if (!tracker->CheckAccess(pid, ctx->relativePath, OperationType::Read)) {
+    if (auto tracker = Tracker(); tracker && ctx->ownerPid != 0) {
+        if (!tracker->CheckAccess(ctx->ownerPid, ctx->relativePath, OperationType::Read)) {
             return STATUS_ACCESS_DENIED;
         }
     }
@@ -1511,7 +1652,6 @@ NTSTATUS LayerMount::Write(FileContext* ctx,
                           ULONG length,
                           BOOLEAN writeToEnd,
                           BOOLEAN constrainedIo,
-                          DWORD callerPid,
                           PULONG bytesTransferred,
                           InternalFileInfo* outInfo) {
     if (ctx == nullptr) return STATUS_INVALID_HANDLE;
@@ -1521,9 +1661,8 @@ NTSTATUS LayerMount::Write(FileContext* ctx,
         return STATUS_INVALID_PARAMETER;
     }
 
-    const DWORD pid = callerPid != 0 ? callerPid : ctx->ownerPid;
-    if (auto tracker = Tracker(); tracker && pid != 0) {
-        if (!tracker->CheckAccess(pid, ctx->relativePath, OperationType::Write)) {
+    if (auto tracker = Tracker(); tracker && ctx->ownerPid != 0) {
+        if (!tracker->CheckAccess(ctx->ownerPid, ctx->relativePath, OperationType::Write)) {
             return STATUS_ACCESS_DENIED;
         }
     }
@@ -1648,15 +1787,13 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
                               UINT32 fileAttributes,
                               BOOLEAN replaceAttributes,
                               UINT64 allocationSize,
-                              DWORD callerPid,
                               InternalFileInfo* outInfo) {
     if (ctx == nullptr) return STATUS_INVALID_HANDLE;
     NTSTATUS ready = EnsureHandleReady(ctx);
     if (!NT_SUCCESS(ready)) return ready;
 
-    const DWORD pid = callerPid != 0 ? callerPid : ctx->ownerPid;
-    if (auto tracker = Tracker(); tracker && pid != 0) {
-        if (!tracker->CheckAccess(pid, ctx->relativePath, OperationType::Overwrite)) {
+    if (auto tracker = Tracker(); tracker && ctx->ownerPid != 0) {
+        if (!tracker->CheckAccess(ctx->ownerPid, ctx->relativePath, OperationType::Overwrite)) {
             return STATUS_ACCESS_DENIED;
         }
     }
@@ -1729,15 +1866,13 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
 }
 
 NTSTATUS LayerMount::Flush(FileContext* ctx,
-                          DWORD callerPid,
                           InternalFileInfo* outInfo) {
     if (ctx == nullptr) return STATUS_INVALID_HANDLE;
     NTSTATUS ready = EnsureHandleReady(ctx);
     if (!NT_SUCCESS(ready)) return ready;
 
-    const DWORD pid = callerPid != 0 ? callerPid : ctx->ownerPid;
-    if (auto tracker = Tracker(); tracker && pid != 0) {
-        if (!tracker->CheckAccess(pid, ctx->relativePath, OperationType::Read)) {
+    if (auto tracker = Tracker(); tracker && ctx->ownerPid != 0) {
+        if (!tracker->CheckAccess(ctx->ownerPid, ctx->relativePath, OperationType::Read)) {
             return STATUS_ACCESS_DENIED;
         }
     }
@@ -1805,7 +1940,7 @@ NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::CanDelete(FileContext* ctx, DWORD callerPid) {
+NTSTATUS LayerMount::CanDelete(FileContext* ctx) {
     if (ctx == nullptr) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -1815,8 +1950,8 @@ NTSTATUS LayerMount::CanDelete(FileContext* ctx, DWORD callerPid) {
     // before storing). No re-parsing needed.
     std::wstring normalized = NormalizePath(ctx->relativePath);
 
-    if (auto tracker = Tracker(); tracker && callerPid != 0) {
-        if (!tracker->CheckAccess(callerPid, normalized, OperationType::Delete)) {
+    if (auto tracker = Tracker(); tracker && ctx->ownerPid != 0) {
+        if (!tracker->CheckAccess(ctx->ownerPid, normalized, OperationType::Delete)) {
             return STATUS_ACCESS_DENIED;
         }
     }
@@ -1980,12 +2115,12 @@ NTSTATUS LayerMount::DeleteStreamOnContext(FileContext* ctx) {
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::Delete(FileContext* ctx, DWORD callerPid) {
+NTSTATUS LayerMount::Delete(FileContext* ctx) {
     if (ctx == nullptr) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    NTSTATUS canDelete = CanDelete(ctx, callerPid);
+    NTSTATUS canDelete = CanDelete(ctx);
     if (!NT_SUCCESS(canDelete)) {
         return canDelete;
     }

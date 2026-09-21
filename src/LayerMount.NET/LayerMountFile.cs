@@ -38,7 +38,7 @@ public sealed class LayerMountFile : IDisposable
     /// <exception cref="LayerMountException">
     /// If the underlying native call returns a non-success HRESULT.
     /// </exception>
-    public unsafe uint Read(long offset, Span<byte> buffer, uint originatorPid = 0)
+    public unsafe uint Read(long offset, Span<byte> buffer)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         if (buffer.IsEmpty) return 0;
@@ -47,7 +47,7 @@ public sealed class LayerMountFile : IDisposable
         fixed (byte* p = buffer)
         {
             int hr = NativeMethods.LayerMountReadFile(
-                lease.Handle, p, (ulong)offset, (uint)buffer.Length, originatorPid, &bytesRead);
+                lease.Handle, p, (ulong)offset, (uint)buffer.Length, &bytesRead);
             HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountReadFile));
         }
         return bytesRead;
@@ -66,8 +66,7 @@ public sealed class LayerMountFile : IDisposable
         long offset,
         ReadOnlySpan<byte> buffer,
         bool writeToEnd = false,
-        bool constrainedIo = false,
-        uint originatorPid = 0)
+        bool constrainedIo = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         using var lease = new SafeHandleLease(_handle);
@@ -78,7 +77,7 @@ public sealed class LayerMountFile : IDisposable
             int hr = NativeMethods.LayerMountWriteFile(
                 lease.Handle, p, (ulong)offset, (uint)buffer.Length,
                 writeToEnd ? 1 : 0, constrainedIo ? 1 : 0,
-                originatorPid, &bytesWritten, &info);
+                &bytesWritten, &info);
             HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountWriteFile));
         }
         Info = FileInfoSnapshot.From(info);
@@ -96,14 +95,13 @@ public sealed class LayerMountFile : IDisposable
     public unsafe void Overwrite(
         uint fileAttributes,
         bool replaceAttributes,
-        ulong allocationSize,
-        uint originatorPid = 0)
+        ulong allocationSize)
     {
         using var lease = new SafeHandleLease(_handle);
         LM_FILE_INFO info = default;
         int hr = NativeMethods.LayerMountOverwriteFile(
             lease.Handle, fileAttributes, replaceAttributes ? 1 : 0,
-            allocationSize, originatorPid, &info);
+            allocationSize, &info);
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountOverwriteFile));
         Info = FileInfoSnapshot.From(info);
     }
@@ -115,11 +113,11 @@ public sealed class LayerMountFile : IDisposable
     /// <exception cref="LayerMountException">
     /// If the underlying native call returns a non-success HRESULT.
     /// </exception>
-    public unsafe void Flush(uint originatorPid = 0)
+    public unsafe void Flush()
     {
         using var lease = new SafeHandleLease(_handle);
         LM_FILE_INFO info = default;
-        int hr = NativeMethods.LayerMountFlushFile(lease.Handle, originatorPid, &info);
+        int hr = NativeMethods.LayerMountFlushFile(lease.Handle, &info);
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountFlushFile));
         Info = FileInfoSnapshot.From(info);
     }

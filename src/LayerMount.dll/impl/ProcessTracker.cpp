@@ -8,6 +8,7 @@
 #include <sstream>
 #include <sddl.h>
 #include <winternl.h>
+#include "NtdllExport.h"
 
 #include <nlohmann/json.hpp>
 
@@ -137,24 +138,10 @@ typedef NTSTATUS(NTAPI* NtQueryInformationProcessFn)(
     PULONG ReturnLength);
 
 static NtQueryInformationProcessFn GetNtQueryInformationProcess() {
-    // C++11 magic statics: initialization of a function-local static is
-    // guaranteed thread-safe and runs exactly once. The previous version
-    // used two separate statics (`fn` + `loaded`) plus an unsynchronized
-    // body, so two threads racing into the body could both observe
-    // `loaded == false`, both call GetModuleHandleW + GetProcAddress, and
-    // race on the assignment to `fn` -- benign in practice (idempotent),
-    // but undefined-behavior-prone and visible to TSAN. Folding the load
-    // into a single immediately-invoked-lambda initializer makes the
-    // race-free init explicit.
-    static NtQueryInformationProcessFn fn = []() -> NtQueryInformationProcessFn {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        if (!ntdll) return nullptr;
-#pragma warning(push)
-#pragma warning(disable: 4191) // unsafe function pointer cast
-        return reinterpret_cast<NtQueryInformationProcessFn>(
-            GetProcAddress(ntdll, "NtQueryInformationProcess"));
-#pragma warning(pop)
-    }();
+    // A function-local static loads the export once; the language makes
+    // that initialization thread-safe.
+    static NtQueryInformationProcessFn fn =
+        LoadNtdllExport<NtQueryInformationProcessFn>("NtQueryInformationProcess");
     return fn;
 }
 

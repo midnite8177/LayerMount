@@ -1,21 +1,6 @@
 #pragma once
 
-// NTSTATUS constants (STATUS_SUCCESS, STATUS_OBJECT_NAME_*, etc.).
-// WIN32_NO_STATUS stops <windows.h> from importing the ~16 basic
-// STATUS_* macros so <ntstatus.h> can provide the full set. A handful
-// of newer codes (STATUS_ASSERTION_FAILURE, STATUS_ENCLAVE_VIOLATION,
-// STATUS_INTERRUPTED, STATUS_THREAD_NOT_RUNNING, STATUS_ALREADY_REGISTERED,
-// STATUS_SXS_EARLY_DEACTIVATION, STATUS_SXS_INVALID_DEACTIVATION) are
-// still declared unconditionally by winnt.h, which collides with
-// ntstatus.h. Suppress C4005 around the include to keep /WX clean.
-#define WIN32_NO_STATUS
-#include <windows.h>
-#undef WIN32_NO_STATUS
-#include <winternl.h>
-#pragma warning(push)
-#pragma warning(disable: 4005) // macro redefinition (STATUS_* known conflicts)
-#include <ntstatus.h>
-#pragma warning(pop)
+#include "WindowsNtStatus.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -378,9 +363,11 @@ public:
     // --- File-handle primitives ---
     //
     // Host-agnostic open / create / close. The C ABI shims in
-    // abi/AbiFile.cpp are thin translators on top of these. callerPid is
-    // used for ProcessTracker checks; pass 0 to skip tracking for this
-    // call.
+    // abi/AbiFile.cpp are thin translators on top of these. Open and
+    // Create take a callerPid for the ProcessTracker check and record it
+    // as ctx->ownerPid; pass 0 to skip tracking for that call. A
+    // primitive that takes a FileContext checks the tracker against
+    // ctx->ownerPid, the process that opened the handle.
     //
     // Method names are deliberately Open/Create/Close rather than
     // OpenFile/CreateFile/CloseFile: <windows.h> defines `CreateFile` and
@@ -436,28 +423,27 @@ public:
     // Read up to `length` bytes from the open file at the given absolute
     // offset. Returns STATUS_END_OF_FILE on read past EOF (with
     // *bytesTransferred = 0).
-    // callerPid: 0 = use ctx->ownerPid (opener's PID) for access check;
-    // non-zero = use this PID instead (host adapters thread the
-    // originator PID in from their dispatch surface).
+    // The process tracker checks the read against ctx->ownerPid, the
+    // process that opened the handle, not against the caller. A paging
+    // read arrives from the system process and passes the opener's rules.
     NTSTATUS Read(FileContext* ctx,
                   void* buffer,
                   UINT64 offset,
                   ULONG length,
-                  DWORD callerPid,
                   PULONG bytesTransferred);
 
     // Write `length` bytes to the open file. Triggers copy-up if the file
     // is still in a lower layer. writeToEnd=TRUE appends regardless of
     // offset; constrainedIo=TRUE truncates the write to whatever fits in
     // the current EOF (no extension). Fills outInfo with the post-write
-    // file metadata when non-null. callerPid semantics as for Read.
+    // file metadata when non-null. The process tracker checks the write
+    // against ctx->ownerPid, as for Read.
     NTSTATUS Write(FileContext* ctx,
                    const void* buffer,
                    UINT64 offset,
                    ULONG length,
                    BOOLEAN writeToEnd,
                    BOOLEAN constrainedIo,
-                   DWORD callerPid,
                    PULONG bytesTransferred,
                    InternalFileInfo* outInfo);
 
@@ -465,17 +451,18 @@ public:
     // entry up to the upper layer if needed, deletes non-overlay ADS
     // streams (user content under CREATE_ALWAYS is destroyed but our
     // :overlay* bookkeeping survives), truncates to zero, applies
-    // allocation, and either replaces or ORs the file attributes.
+    // allocation, and either replaces or ORs the file attributes. The
+    // process tracker checks the overwrite against ctx->ownerPid, as for
+    // Read.
     NTSTATUS Overwrite(FileContext* ctx,
                        UINT32 fileAttributes,
                        BOOLEAN replaceAttributes,
                        UINT64 allocationSize,
-                       DWORD callerPid,
                        InternalFileInfo* outInfo);
 
-    // Flush buffered writes for the open file.
+    // Flush buffered writes for the open file. The process tracker checks
+    // the flush against ctx->ownerPid with the read rule, as for Read.
     NTSTATUS Flush(FileContext* ctx,
-                   DWORD callerPid,
                    InternalFileInfo* outInfo);
 
     NTSTATUS EnsureHandleReady(FileContext* ctx);
@@ -495,8 +482,8 @@ public:
     // has it.
     NTSTATUS CanDelete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS Delete(const std::wstring& relativePath, DWORD callerPid);
-    NTSTATUS CanDelete(FileContext* ctx, DWORD callerPid);
-    NTSTATUS Delete(FileContext* ctx, DWORD callerPid);
+    NTSTATUS CanDelete(FileContext* ctx);
+    NTSTATUS Delete(FileContext* ctx);
     // Delete the alternate data stream that `ctx` opened. The host file
     // and its other streams stay.
     NTSTATUS DeleteStreamOnContext(FileContext* ctx);
@@ -656,6 +643,50 @@ public:
     HRESULT SetProcessTrackerEnabled(bool enabled);
 
 private:
+    // Opens the root directory on the upper layer's own path. The root
+    // has no lower origin, so no copy-up and no fill apply.
+    NTSTATUS OpenRoot(UINT32 grantedAccess,
+                      UINT32 createOptions,
+                      DWORD callerPid,
+                      std::unique_ptr<FileContext>* outCtx,
+                      InternalFileInfo* outInfo);
+
+    // The directory half of Create. Makes the directory in the upper,
+    // marks it opaque when lowerIsDirectory, applies the caller's
+    // security descriptor, and opens ctx->handle. A failure after
+    // CreateDirectoryW made the directory removes it again; a directory
+    // that already existed stays.
+    NTSTATUS CreateDirectoryInUpper(const std::wstring& normalized,
+                                    const std::wstring& upperPath,
+                                    bool lowerIsDirectory,
+                                    UINT32 grantedAccess,
+                                    PSECURITY_DESCRIPTOR securityDescriptor,
+                                    FileContext* ctx);
+
+    // The file half of Create. Creates the file, or the stream named by
+    // streamSuffix on its host file, in the upper and opens ctx->handle.
+    // A stream on a lower-only host copies the host up first; a stream on
+    // a metacopy shell fills the shell first. The security descriptor and
+    // allocationSize apply to a host file, never to a stream. A failure
+    // after CreateFileW made the entry deletes it again.
+    NTSTATUS CreateFileInUpper(const std::wstring& hostNorm,
+                               const std::wstring& streamSuffix,
+                               std::wstring upperPath,
+                               bool existsInLower,
+                               bool lowerIsDirectory,
+                               UINT32 grantedAccess,
+                               UINT32 fileAttributes,
+                               PSECURITY_DESCRIPTOR securityDescriptor,
+                               UINT64 allocationSize,
+                               FileContext* ctx);
+
+    // Copies a lower file or directory up for a write-capable open and
+    // chooses between a full copy and a metacopy shell. Sets
+    // ctx->isMetacopyOnly when it stages a shell.
+    NTSTATUS CopyUpForWriteOpen(const std::wstring& hostNorm,
+                                const ResolvedPath& resolved,
+                                FileContext* ctx);
+
     // Fill a metacopy shell from its recorded origin. Returns the fill's
     // status on failure and clears ctx->isMetacopyOnly on success.
     NTSTATUS FillShell(const std::wstring& hostNorm, FileContext* ctx);

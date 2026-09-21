@@ -6,17 +6,7 @@
 
 #pragma once
 
-// See LayerMount.h for the WIN32_NO_STATUS / ntstatus.h / C4005 dance.
-// This helper is included from translation units that don't include
-// LayerMount.h directly, so we repeat the same include pattern here.
-#define WIN32_NO_STATUS
-#include <windows.h>
-#undef WIN32_NO_STATUS
-#include <winternl.h>
-#pragma warning(push)
-#pragma warning(disable: 4005)
-#include <ntstatus.h>
-#pragma warning(pop)
+#include "WindowsNtStatus.h"
 
 namespace LayerMount {
 

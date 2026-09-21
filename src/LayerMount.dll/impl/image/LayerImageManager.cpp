@@ -1,3 +1,4 @@
+#include "../WindowsNtStatus.h"
 #include "LayerImageManager.h"
 
 #include "nlohmann/json.hpp"
@@ -22,22 +23,13 @@ namespace fs = std::filesystem;
 // Status code mapping — BCrypt returns NTSTATUS, we return DWORD
 // ===========================================================================
 
-// BCrypt NTSTATUS values we care about. Defined here to avoid including
-// <ntstatus.h>, which conflicts with <windows.h> without careful ordering.
-namespace {
-constexpr NTSTATUS kStatusSuccess          = 0x00000000L;
-constexpr NTSTATUS kStatusInvalidParameter = static_cast<NTSTATUS>(0xC000000DL);
-constexpr NTSTATUS kStatusInvalidHandle    = static_cast<NTSTATUS>(0xC0000008L);
-constexpr NTSTATUS kStatusNoMemory         = static_cast<NTSTATUS>(0xC0000017L);
-}
-
 static DWORD NtStatusToDword(NTSTATUS status) {
-    if (status == kStatusSuccess) return ERROR_SUCCESS;
+    if (status == STATUS_SUCCESS) return ERROR_SUCCESS;
     switch (status) {
-        case kStatusInvalidParameter: return ERROR_INVALID_PARAMETER;
-        case kStatusInvalidHandle:    return ERROR_INVALID_HANDLE;
-        case kStatusNoMemory:         return ERROR_NOT_ENOUGH_MEMORY;
-        default:                      return ERROR_INVALID_FUNCTION;
+        case STATUS_INVALID_PARAMETER: return ERROR_INVALID_PARAMETER;
+        case STATUS_INVALID_HANDLE:    return ERROR_INVALID_HANDLE;
+        case STATUS_NO_MEMORY:         return ERROR_NOT_ENOUGH_MEMORY;
+        default:                       return ERROR_INVALID_FUNCTION;
     }
 }
 
@@ -129,21 +121,21 @@ struct BcryptHashContext {
 static DWORD InitBcryptSha256(BcryptHashContext& ctx) {
     NTSTATUS status = ::BCryptOpenAlgorithmProvider(
         &ctx.hAlg, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    if (status != kStatusSuccess) return NtStatusToDword(status);
+    if (status != STATUS_SUCCESS) return NtStatusToDword(status);
 
     DWORD hashObjSize = 0;
     DWORD cbData      = 0;
     status = ::BCryptGetProperty(ctx.hAlg, BCRYPT_OBJECT_LENGTH,
                                  reinterpret_cast<PUCHAR>(&hashObjSize),
                                  sizeof(hashObjSize), &cbData, 0);
-    if (status != kStatusSuccess) return NtStatusToDword(status);
+    if (status != STATUS_SUCCESS) return NtStatusToDword(status);
 
     ctx.hashObject.resize(hashObjSize);
 
     status = ::BCryptCreateHash(ctx.hAlg, &ctx.hHash,
                                 ctx.hashObject.data(), hashObjSize,
                                 nullptr, 0, 0);
-    if (status != kStatusSuccess) return NtStatusToDword(status);
+    if (status != STATUS_SUCCESS) return NtStatusToDword(status);
 
     return ERROR_SUCCESS;
 }
@@ -174,7 +166,7 @@ static DWORD ComputeSHA256Stream(const std::wstring& filePath,
         }
         NTSTATUS status = ::BCryptHashData(
             ctx.hHash, buffer.data(), static_cast<ULONG>(chunk), 0);
-        if (status != kStatusSuccess) return NtStatusToDword(status);
+        if (status != STATUS_SUCCESS) return NtStatusToDword(status);
         remaining -= chunk;
     }
 
@@ -199,7 +191,7 @@ static DWORD WriteDataWithHash(std::ofstream& output,
 
         NTSTATUS status = ::BCryptHashData(
             ctx.hHash, const_cast<PUCHAR>(ptr), static_cast<ULONG>(chunk), 0);
-        if (status != kStatusSuccess) return NtStatusToDword(status);
+        if (status != STATUS_SUCCESS) return NtStatusToDword(status);
 
         output.write(reinterpret_cast<const char*>(ptr),
                      static_cast<std::streamsize>(chunk));

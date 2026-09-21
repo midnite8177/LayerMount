@@ -708,13 +708,20 @@ LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
 /* ---- File primitives ---- */
 
 /*
- * File primitives that can be invoked inside a host-adapter callback
- * accept an `originatorPid`. A host adapter is expected to read the
- * originating process ID from its kernel/dispatch surface and thread it
- * through so process-tracker rules match the actual requester
- * rather than the dispatcher-thread PID. Pass 0 when the calling code is
- * its own originator (unmounted CLI / tests / direct P/Invoke); the DLL
- * will fall back to GetCurrentProcessId().
+ * LayerMountOpenFile and LayerMountCreateFile accept an `originatorPid`.
+ * A host adapter reads the originating process ID from its dispatch
+ * context and passes it, so process-tracker rules match the requester
+ * and not the dispatcher thread. Pass 0 when the calling code is its
+ * own originator (a CLI, a test, a direct P/Invoke); the engine then
+ * uses GetCurrentProcessId(). A path call without an `originatorPid`
+ * checks the process that calls the engine.
+ *
+ * A call that takes an open LM_FILE_HANDLE (read, write, overwrite,
+ * flush, and the handle-form delete pair) takes no originator. The
+ * process tracker checks it against the process that opened the handle,
+ * as NT checks access at open. A paging read arrives with the system
+ * process as its originator; the engine checks it against the opener,
+ * so a rule set that denies the system process does not fail it.
  */
 
 /*
@@ -722,13 +729,19 @@ LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
  * under `createOptions`, returning a new LM_FILE_HANDLE in *outFile and
  * its metadata in *outInfo. `originatorPid` identifies the requesting
  * process for process-tracker rules; pass 0 to use the current process.
+ * A later handle call is checked against this process (see the file
+ * primitives preamble).
  * The returned handle pins its parent overlay until closed.
  *
  * `grantedAccess` can carry generic rights (GENERIC_READ, GENERIC_WRITE,
  * GENERIC_EXECUTE, GENERIC_ALL). The engine maps them to the file-specific
  * rights before it decides whether a lower file copies up and whether a
  * metacopy shell fills, so GENERIC_WRITE and FILE_GENERIC_WRITE behave
- * the same.
+ * the same. MAXIMUM_ALLOWED resolves against the caller's rights on the
+ * physical file, as a kernel open does, before the same decisions. A
+ * failed probe fails the open with the probe's status and returns no
+ * handle. The process tracker treats an open with MAXIMUM_ALLOWED as an
+ * Open operation, not a Write.
  *
  * When the file is a metacopy shell and `grantedAccess` asks for data
  * (read, write, append, or execute), the engine fills the shell before
@@ -751,6 +764,14 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(
  * `securityDescriptorBytes`. Returns a new LM_FILE_HANDLE in *outFile and
  * its metadata in *outInfo. `originatorPid` identifies the requesting
  * process for process-tracker rules; pass 0 to use the current process.
+ * A later handle call is checked against this process (see the file
+ * primitives preamble).
+ *
+ * MAXIMUM_ALLOWED in `grantedAccess` resolves against the caller's rights
+ * on the created file or directory. The handle's stored access holds the
+ * resolved set. A failed resolution removes the file, directory, or
+ * stream the create made and fails the create with the resolution's
+ * status.
  *
  * Returns E_INVALIDARG if `securityDescriptor` is non-NULL but is not a
  * structurally valid self-relative descriptor fitting within
@@ -793,8 +814,6 @@ LM_API HRESULT LM_CALL LayerMountCleanupFile(LM_FILE_HANDLE file);
  * FILE_WRITE_DATA or FILE_APPEND_DATA also reads, so a paging read on a
  * write-only handle succeeds. A read on a handle with neither a
  * read-data, a write-data, nor an append-data right fails.
- * `originatorPid` identifies the requesting process for process-tracker
- * rules; pass 0 to use the current process.
  * The engine always writes *bytesTransferred, also on failure.
  *
  * A read that starts inside the file and runs past its end succeeds with
@@ -806,7 +825,6 @@ LM_API HRESULT LM_CALL LayerMountReadFile(
     void*           buffer,
     UINT64          offset,
     UINT32          length,
-    DWORD           originatorPid,         /* 0 = use current process */
     UINT32*         bytesTransferred);
 
 /*
@@ -814,9 +832,8 @@ LM_API HRESULT LM_CALL LayerMountReadFile(
  * current end-of-file when `writeToEnd` is TRUE), copying the file up
  * into the upper layer first if it is not already there.
  * `constrainedIo` rejects a write that would extend the file past its
- * current allocation. `originatorPid` identifies the requesting process
- * for process-tracker rules; pass 0 to use the current process. Fills
- * `outInfo` with post-write metadata when non-NULL.
+ * current allocation. Fills `outInfo` with post-write metadata when
+ * non-NULL.
  */
 LM_API HRESULT LM_CALL LayerMountWriteFile(
     LM_FILE_HANDLE file,
@@ -825,7 +842,6 @@ LM_API HRESULT LM_CALL LayerMountWriteFile(
     UINT32          length,
     BOOL            writeToEnd,
     BOOL            constrainedIo,
-    DWORD           originatorPid,         /* 0 = use current process */
     UINT32*         bytesTransferred,
     LM_FILE_INFO*  outInfo);
 
@@ -840,16 +856,15 @@ LM_API HRESULT LM_CALL LayerMountOverwriteFile(
     UINT32          fileAttributes,
     BOOL            replaceAttributes,
     UINT64          allocationSize,
-    DWORD           originatorPid,         /* 0 = use current process */
     LM_FILE_INFO*  outInfo);
 
 /*
- * Flush buffered writes for an open file. Fills `outInfo` with
- * post-flush metadata when non-NULL.
+ * Flush buffered writes for an open file. The process tracker gates a
+ * flush by the opener's read rule. Fills `outInfo` with post-flush
+ * metadata when non-NULL.
  */
 LM_API HRESULT LM_CALL LayerMountFlushFile(
     LM_FILE_HANDLE file,
-    DWORD           originatorPid,         /* 0 = use current process */
     LM_FILE_INFO*  outInfo);
 
 /* Fills `outInfo` with the current metadata of the open `file`. The

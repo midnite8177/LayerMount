@@ -1,10 +1,5 @@
 #include "pch.h"
 
-#pragma warning(push)
-#pragma warning(disable: 4005)   // macro redefinition (windows.h already defines a few)
-#include <ntstatus.h>
-#pragma warning(pop)
-
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {

@@ -13,15 +13,9 @@ namespace LayerMountAbiTests {
 
 namespace {
 
-// HRESULT_FROM_NT(STATUS_OBJECT_NAME_INVALID) == 0xD0000033
-constexpr HRESULT kHrObjectNameInvalid =
-    static_cast<HRESULT>(0xD0000033L);
-// HRESULT_FROM_NT(STATUS_INVALID_PARAMETER) == 0xD000000D
-constexpr HRESULT kHrInvalidParameter =
-    static_cast<HRESULT>(0xD000000DL);
-// HRESULT_FROM_NT(STATUS_FILE_IS_A_DIRECTORY) == 0xD00000BA
-constexpr HRESULT kHrFileIsADirectory =
-    static_cast<HRESULT>(0xD00000BAL);
+constexpr HRESULT kHrObjectNameInvalid = HRESULT_FROM_NT(STATUS_OBJECT_NAME_INVALID);
+constexpr HRESULT kHrInvalidParameter = HRESULT_FROM_NT(STATUS_INVALID_PARAMETER);
+constexpr HRESULT kHrFileIsADirectory = HRESULT_FROM_NT(STATUS_FILE_IS_A_DIRECTORY);
 
 HRESULT CreateThroughEngine(LM_HANDLE mount, PCWSTR path,
                             UINT32 access = GENERIC_READ | GENERIC_WRITE,
@@ -173,7 +167,7 @@ public:
         UINT32 written = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(fh, payload, 0, payloadLen,
-                FALSE, FALSE, 0u, &written, nullptr));
+                FALSE, FALSE, &written, nullptr));
         Assert::AreEqual<UINT32>(payloadLen, written);
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
 
@@ -203,7 +197,7 @@ public:
         char buf[16] = {};
         UINT32 read = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountReadFile(fh, buf, 0, sizeof(buf), 0u, &read));
+            ::LayerMountReadFile(fh, buf, 0, sizeof(buf), &read));
         Assert::AreEqual<UINT32>(6u, read);
         Assert::IsTrue(std::memcmp(buf, "preset", 6) == 0,
             L"pre-existing stream content must read back");
@@ -240,7 +234,7 @@ public:
         char buf[16] = {};
         UINT32 read = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountReadFile(fh, buf, 0, sizeof(buf), 0u, &read));
+            ::LayerMountReadFile(fh, buf, 0, sizeof(buf), &read));
         Assert::AreEqual<UINT32>(9u, read);
         Assert::IsTrue(std::memcmp(buf, "lower-ads", 9) == 0);
         ::LayerMountCloseFile(fh);
@@ -273,7 +267,7 @@ public:
         UINT32 addedWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(fh, "added", 0, 5,
-                FALSE, FALSE, 0u, &addedWritten, nullptr));
+                FALSE, FALSE, &addedWritten, nullptr));
         Assert::AreEqual<UINT32>(5u, addedWritten);
         ::LayerMountCloseFile(fh);
 
@@ -331,7 +325,7 @@ public:
         UINT32 userWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(streamFh, "USER-DATA", 0, 9,
-                FALSE, FALSE, 0u, &userWritten, nullptr));
+                FALSE, FALSE, &userWritten, nullptr));
         Assert::AreEqual<UINT32>(9u, userWritten);
         ::LayerMountCloseFile(streamFh);
 
@@ -352,7 +346,7 @@ public:
         UINT32 mainWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(mainFh, "MAIN", 0, 4,
-                FALSE, FALSE, 0u, &mainWritten, nullptr));
+                FALSE, FALSE, &mainWritten, nullptr));
         Assert::AreEqual<UINT32>(4u, mainWritten);
         ::LayerMountCloseFile(mainFh);
 
@@ -384,11 +378,11 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountOverwriteFile(fh, FILE_ATTRIBUTE_NORMAL,
                 /*replaceAttributes*/ FALSE, /*allocationSize*/ 0u,
-                /*originatorPid*/ 0u, nullptr));
+                nullptr));
         UINT32 tinyWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(fh, "tiny", 0, 4,
-                FALSE, FALSE, 0u, &tinyWritten, nullptr));
+                FALSE, FALSE, &tinyWritten, nullptr));
         Assert::AreEqual<UINT32>(4u, tinyWritten);
         ::LayerMountCloseFile(fh);
 
@@ -488,7 +482,7 @@ public:
         UINT32 postWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(fh, "post", 0, 4,
-                FALSE, FALSE, 0u, &postWritten, nullptr));
+                FALSE, FALSE, &postWritten, nullptr));
         Assert::AreEqual<UINT32>(4u, postWritten);
         ::LayerMountCloseFile(fh);
 

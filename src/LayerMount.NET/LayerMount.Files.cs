@@ -24,6 +24,7 @@ public sealed partial class LayerMount
     /// <param name="createOptions">Win32 create-options flags (e.g. <c>FILE_DIRECTORY_FILE</c>).</param>
     /// <param name="originatorPid">
     /// Requesting process ID for process-tracker rules; 0 uses the current process.
+    /// A later call on the returned file is checked against this process.
     /// </param>
     /// <returns>A handle-bound <see cref="LayerMountFile"/> with its initial metadata.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
@@ -69,6 +70,7 @@ public sealed partial class LayerMount
     /// </param>
     /// <param name="originatorPid">
     /// Requesting process ID for process-tracker rules; 0 uses the current process.
+    /// A later call on the returned file is checked against this process.
     /// </param>
     /// <returns>A handle-bound <see cref="LayerMountFile"/> with its initial metadata.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
