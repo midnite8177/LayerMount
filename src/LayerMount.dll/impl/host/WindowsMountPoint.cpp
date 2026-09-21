@@ -4,14 +4,8 @@
 // Lives inside the DLL so every host adapter shares one canonical
 // directory-ownership implementation rather than duplicating it.
 
-#define WIN32_NO_STATUS
+#include "../WindowsNtStatus.h"
 #include "WindowsMountPoint.h"
-#undef WIN32_NO_STATUS
-
-#pragma warning(push)
-#pragma warning(disable: 4005)   // STATUS_* macro redefinition between winnt.h and ntstatus.h
-#include <ntstatus.h>
-#pragma warning(pop)
 
 #include <cwctype>
 #include <cstring>

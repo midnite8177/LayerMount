@@ -138,7 +138,6 @@ internal static unsafe partial class NativeMethods
         void*  buffer,
         ulong  offset,
         uint   length,
-        uint   originatorPid,
         uint*  bytesTransferred);
 
     [LibraryImport(DllName)]
@@ -150,7 +149,6 @@ internal static unsafe partial class NativeMethods
         uint           length,
         int            writeToEnd,
         int            constrainedIo,
-        uint           originatorPid,
         uint*          bytesTransferred,
         LM_FILE_INFO* outInfo);
 
@@ -161,14 +159,12 @@ internal static unsafe partial class NativeMethods
         uint           fileAttributes,
         int            replaceAttributes,
         ulong          allocationSize,
-        uint           originatorPid,
         LM_FILE_INFO* outInfo);
 
     [LibraryImport(DllName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial int LayerMountFlushFile(
         IntPtr         file,
-        uint           originatorPid,
         LM_FILE_INFO* outInfo);
 
     [LibraryImport(DllName)]

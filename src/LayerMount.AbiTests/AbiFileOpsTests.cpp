@@ -33,14 +33,14 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(fh, payload, /*offset*/ 0, payloadLen,
                                /*writeToEnd*/ FALSE, /*constrainedIo*/ FALSE,
-                               /*originatorPid*/ 0u, &written, &postWrite));
+                               &written, &postWrite));
         Assert::AreEqual<UINT32>(payloadLen, written);
 
         char     readBuf[32] = {};
         UINT32   readCount   = 0;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountReadFile(fh, readBuf, /*offset*/ 0, sizeof(readBuf),
-                              /*originatorPid*/ 0u, &readCount));
+                              &readCount));
         Assert::AreEqual<UINT32>(payloadLen, readCount);
         Assert::IsTrue(std::memcmp(readBuf, payload, payloadLen) == 0,
                        L"Readback must match writeback byte-for-byte");
@@ -205,7 +205,7 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountWriteFile(fhSeed, payload, 0,
                                   static_cast<UINT32>(sizeof(payload) - 1),
-                                  FALSE, FALSE, 0u, &written, nullptr));
+                                  FALSE, FALSE, &written, nullptr));
         Assert::AreEqual<UINT32>(static_cast<UINT32>(sizeof(payload) - 1), written);
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fhSeed));
 
@@ -220,7 +220,6 @@ public:
             /*fileAttributes*/   FILE_ATTRIBUTE_NORMAL,
             /*replaceAttributes*/ FALSE,
             /*allocationSize*/   4096u,
-            /*originatorPid*/    0u,
             &postOverwrite);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"Overwrite through a handle without FILE_WRITE_DATA");

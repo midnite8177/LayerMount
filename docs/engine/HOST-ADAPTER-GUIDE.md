@@ -163,14 +163,14 @@ file handle's slot and decrements the parent overlay's open-file count.
 It is the only call that frees the slot. When the last slot is free,
 `LayerMountDestroy` can succeed, per the handle lifecycle rule above.
 
-Open, Create, Read, Write, and the other file primitives that a
-host-adapter callback invokes take an `originatorPid` (see the file
-primitives preamble in `LayerMount.h`). Cleanup and Close take only the
-file handle.
-Pass 0 to use the current process. A host adapter should instead read
-the true originating process ID off its own dispatch surface and pass
-that through, so process-tracker rules evaluate against the real
-requester rather than the dispatcher thread's PID.
+Only Open and Create take an `originatorPid` (see the file primitives
+preamble in `LayerMount.h`). Pass 0 to use the current process. A host
+adapter must read the originating process ID from its own dispatch
+context and pass that, so process-tracker rules match the requester and
+not the dispatcher thread. A call that takes an open file handle (Read,
+Write, Overwrite, Flush, and the handle-form delete pair) takes no
+originator. The process tracker checks it against the process that
+opened the handle, as NT checks access at open.
 
 ## Paging reads
 
@@ -178,7 +178,15 @@ A paging read is a read that the memory manager sends on behalf of a
 mapped file or the system cache. It is page-aligned and often runs
 past the end of the file. It can arrive after the host adapter's
 cleanup, because a mapped section or the cache outlives the user
-handle. Four rules cover it.
+handle.
+
+A paging read arrives with the system process as its originator, not
+the program that mapped the file. The engine checks the read against
+the process that opened the handle, so a rule set that denies the
+system process does not fail a paging read, and a rule set that allows
+the opener applies to it.
+
+Four rules cover a paging read.
 
 Keep the `LM_FILE_HANDLE` until the host adapter's close and call
 `LayerMountCloseFile` (`LayerMountFile.Dispose`) there. Or call

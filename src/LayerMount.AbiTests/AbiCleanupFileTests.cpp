@@ -6,13 +6,6 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 namespace LayerMountAbiTests {
 namespace {
 
-std::string ReadAll(LM_FILE_HANDLE fh, HRESULT* outHr) {
-    char   buffer[64] = {};
-    UINT32 transferred = 0;
-    *outHr = ::LayerMountReadFile(fh, buffer, 0, sizeof(buffer), 0u, &transferred);
-    return std::string(buffer, transferred);
-}
-
 UINT64 ActiveHandles(LM_HANDLE mount) {
     LM_STATS stats{};
     Assert::AreEqual<HRESULT>(S_OK, ::LayerMountGetStats(mount, &stats));
@@ -33,7 +26,7 @@ public:
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCleanupFile(fh));
 
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadAll(fh, &hrRead);
+        const std::string bytes = ReadThroughHandle(fh, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead);
         Assert::AreEqual(std::string("upper bytes"), bytes);
 
@@ -50,7 +43,7 @@ public:
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCleanupFile(fh));
 
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadAll(fh, &hrRead);
+        const std::string bytes = ReadThroughHandle(fh, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead,
             L"A read on a write-only handle after cleanup succeeds");
         Assert::AreEqual(std::string("write-only bytes"), bytes);
@@ -68,7 +61,7 @@ public:
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCleanupFile(fh));
 
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadAll(fh, &hrRead);
+        const std::string bytes = ReadThroughHandle(fh, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead);
         Assert::AreEqual(std::string("lower bytes"), bytes);
 
@@ -92,7 +85,7 @@ public:
             L"A set-size on a reopened shell after cleanup of the first handle must succeed");
 
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadAll(second, &hrRead);
+        const std::string bytes = ReadThroughHandle(second, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead);
         Assert::AreEqual(lowerContent.substr(0, static_cast<size_t>(newSize)), bytes,
             L"A read on the second handle returns the lower bytes up to the new size");
@@ -116,7 +109,7 @@ public:
 
         LM_FILE_HANDLE second = OpenWithAccess(mount.Get(), L"\\shrink.txt", GENERIC_READ);
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadAll(second, &hrRead);
+        const std::string bytes = ReadThroughHandle(second, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead);
         Assert::AreEqual(std::string("twelve"), bytes,
             L"A read on a fresh handle returns the bytes up to the new size");
@@ -143,7 +136,7 @@ public:
         Assert::IsTrue(::DeleteFileW(upperPath.c_str()) != FALSE);
 
         HRESULT hrRead = S_OK;
-        (void)ReadAll(fh, &hrRead);
+        (void)ReadThroughHandle(fh, &hrRead);
         Assert::IsTrue(IsFileNotFoundHr(hrRead),
             L"A read after cleanup on a deleted file must fail with file not found");
 
@@ -176,7 +169,7 @@ public:
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCleanupFile(fh));
 
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadAll(fh, &hrRead);
+        const std::string bytes = ReadThroughHandle(fh, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead);
         Assert::AreEqual(std::string("twice"), bytes);
 
@@ -200,7 +193,7 @@ public:
         Assert::AreEqual<HRESULT>(E_HANDLE, ::LayerMountCleanupFile(fh),
             L"The slot is free after close, so a later cleanup must reject the handle");
         HRESULT hrRead = S_OK;
-        (void)ReadAll(fh, &hrRead);
+        (void)ReadThroughHandle(fh, &hrRead);
         Assert::AreEqual<HRESULT>(E_HANDLE, hrRead,
             L"The slot is free after close, so a later read must reject the handle");
     }

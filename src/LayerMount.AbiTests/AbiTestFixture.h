@@ -92,6 +92,25 @@ inline std::string ReadAllBytes(const std::wstring& path) {
                        std::istreambuf_iterator<char>());
 }
 
+// Read the first 64 bytes of `fh` through the ABI and return them; the
+// read's HRESULT lands in *outHr.
+inline std::string ReadThroughHandle(LM_FILE_HANDLE fh, HRESULT* outHr) {
+    char   buffer[64] = {};
+    UINT32 transferred = 0;
+    *outHr = ::LayerMountReadFile(fh, buffer, 0, sizeof(buffer), &transferred);
+    return std::string(buffer, transferred);
+}
+
+// Write `rulesJson` as the process-tracker rules file under the
+// environment root and return its path.
+inline std::wstring WriteTrackerRules(const TempLayerEnv& env,
+                                      const std::string& rulesJson) {
+    const std::wstring rulesPath = env.Root() + L"\\rules.json";
+    std::ofstream f(rulesPath, std::ios::binary | std::ios::trunc);
+    f.write(rulesJson.data(), static_cast<std::streamsize>(rulesJson.size()));
+    return rulesPath;
+}
+
 // Write a lower file above the metacopy threshold, filled with 'L', and
 // return its content. An open for data access of this file through the
 // mount stages a metacopy shell on the upper.
@@ -257,10 +276,8 @@ inline bool IsProcessElevated() {
 inline bool IsFileNotFoundHr(HRESULT hr) noexcept {
     return hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
         || hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)
-        // HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND) == 0xD0000034
-        || hr == static_cast<HRESULT>(0xD0000034L)
-        // HRESULT_FROM_NT(STATUS_OBJECT_PATH_NOT_FOUND) == 0xD000003A
-        || hr == static_cast<HRESULT>(0xD000003AL);
+        || hr == HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND)
+        || hr == HRESULT_FROM_NT(STATUS_OBJECT_PATH_NOT_FOUND);
 }
 
 // Open `relativePath` through the C ABI with `grantedAccess` and no create

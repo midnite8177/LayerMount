@@ -152,8 +152,7 @@ public sealed class LayerMountFileTests
             file.Overwrite(
                 fileAttributes: FILE_ATTRIBUTE_NORMAL,
                 replaceAttributes: true,
-                allocationSize: 0,
-                originatorPid: 0);
+                allocationSize: 0);
             FileInfoSnapshot info = file.GetFileInfo();
             Assert.Equal(0UL, info.FileSize);
         }
@@ -192,8 +191,7 @@ public sealed class LayerMountFileTests
             file.Overwrite(
                 fileAttributes: FILE_ATTRIBUTE_NORMAL,
                 replaceAttributes: true,
-                allocationSize: 0,
-                originatorPid: 0);
+                allocationSize: 0);
             FileInfoSnapshot info = file.GetFileInfo();
             Assert.Equal(0UL, info.FileSize);
         }

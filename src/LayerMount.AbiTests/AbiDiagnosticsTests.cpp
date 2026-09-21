@@ -27,7 +27,7 @@ public:
         UINT32 written = 0;
         LM_FILE_INFO postWrite{};
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, "hello", 0, 5, FALSE, FALSE, 0u,
+            ::LayerMountWriteFile(fh, "hello", 0, 5, FALSE, FALSE,
                                &written, &postWrite));
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
 

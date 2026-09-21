@@ -58,7 +58,7 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\include;$(VendorDir);..\LayerMount.dll\impl;..\LayerMount.dll\impl\vhd;..\LayerMount.dll\impl\vss;..\LayerMount.dll\impl\image;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\include;$(VendorDir);..\LayerMount.dll\impl;..\LayerMount.dll\impl\vhd;..\LayerMount.dll\impl\vss;..\LayerMount.dll\impl\image;..\LayerMount.TestShared\native;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <!-- LAYERMOUNT_INTERNAL opens the #error guards in impl headers. The
            unit-test project is a legitimate internal consumer since it
            links LayerMount-static.lib and tests the engine's C++ classes
@@ -90,6 +90,7 @@
     <ClCompile Include="CreateOverWhiteoutTests.cpp" />
     <ClCompile Include="DeleteTests.cpp" />
     <ClCompile Include="LazyMetacopyFidelityTests.cpp" />
+    <ClCompile Include="MaximumAllowedTests.cpp" />
     <ClCompile Include="MetadataADSTests.cpp" />
     <ClCompile Include="PathResolverTests.cpp" />
     <ClCompile Include="PathTraversalTests.cpp" />

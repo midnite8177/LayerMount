@@ -53,6 +53,7 @@
        a shared elevation check. PathUtil.{h,cpp} gives them a shared
        path-string helper. -->
   <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\WindowsNtStatus.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\NtStatusUtil.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\NtStatusUtil.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\ElevationUtil.h" />

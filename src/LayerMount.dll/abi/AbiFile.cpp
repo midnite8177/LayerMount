@@ -281,7 +281,6 @@ LM_API HRESULT LM_CALL LayerMountReadFile(LM_FILE_HANDLE file,
                                          void*           buffer,
                                          UINT64          offset,
                                          UINT32          length,
-                                         DWORD           originatorPid,
                                          UINT32*         bytesTransferred)
 {
     using namespace ::LayerMount::abi;
@@ -302,7 +301,7 @@ LM_API HRESULT LM_CALL LayerMountReadFile(LM_FILE_HANDLE file,
     ULONG transferred = 0;
     NTSTATUS status = holder->mount->Read(holder->ctx.get(),
                                              buffer, offset, length,
-                                             originatorPid, &transferred);
+                                             &transferred);
     *bytesTransferred = static_cast<UINT32>(transferred);
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);
@@ -318,7 +317,6 @@ LM_API HRESULT LM_CALL LayerMountWriteFile(LM_FILE_HANDLE file,
                                           UINT32          length,
                                           BOOL            writeToEnd,
                                           BOOL            constrainedIo,
-                                          DWORD           originatorPid,
                                           UINT32*         bytesTransferred,
                                           LM_FILE_INFO*  outInfo)
 {
@@ -343,7 +341,7 @@ LM_API HRESULT LM_CALL LayerMountWriteFile(LM_FILE_HANDLE file,
                                               buffer, offset, length,
                                               writeToEnd != FALSE,
                                               constrainedIo != FALSE,
-                                              originatorPid, &transferred,
+                                              &transferred,
                                               outInfo != nullptr ? &internalInfo : nullptr);
     *bytesTransferred = static_cast<UINT32>(transferred);
     if (!NT_SUCCESS(status)) {
@@ -361,7 +359,6 @@ LM_API HRESULT LM_CALL LayerMountOverwriteFile(LM_FILE_HANDLE file,
                                               UINT32          fileAttributes,
                                               BOOL            replaceAttributes,
                                               UINT64          allocationSize,
-                                              DWORD           originatorPid,
                                               LM_FILE_INFO*  outInfo)
 {
     using namespace ::LayerMount::abi;
@@ -378,7 +375,6 @@ LM_API HRESULT LM_CALL LayerMountOverwriteFile(LM_FILE_HANDLE file,
     ::LayerMount::InternalFileInfo internalInfo{};
     NTSTATUS status = holder->mount->Overwrite(holder->ctx.get(),
         fileAttributes, replaceAttributes != FALSE, allocationSize,
-        originatorPid,
         outInfo != nullptr ? &internalInfo : nullptr);
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);
@@ -392,7 +388,6 @@ LM_API HRESULT LM_CALL LayerMountOverwriteFile(LM_FILE_HANDLE file,
 }
 
 LM_API HRESULT LM_CALL LayerMountFlushFile(LM_FILE_HANDLE file,
-                                          DWORD           originatorPid,
                                           LM_FILE_INFO*  outInfo)
 {
     using namespace ::LayerMount::abi;
@@ -408,7 +403,6 @@ LM_API HRESULT LM_CALL LayerMountFlushFile(LM_FILE_HANDLE file,
 
     ::LayerMount::InternalFileInfo internalInfo{};
     NTSTATUS status = holder->mount->Flush(holder->ctx.get(),
-        originatorPid,
         outInfo != nullptr ? &internalInfo : nullptr);
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);
@@ -857,8 +851,7 @@ LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(LM_FILE_HANDLE file)
         return E_HANDLE;
     }
 
-    NTSTATUS status = holder->mount->CanDelete(
-        holder->ctx.get(), ::GetCurrentProcessId());
+    NTSTATUS status = holder->mount->CanDelete(holder->ctx.get());
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);
     }
@@ -880,8 +873,7 @@ LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(LM_FILE_HANDLE file)
         return E_HANDLE;
     }
 
-    NTSTATUS status = holder->mount->Delete(
-        holder->ctx.get(), ::GetCurrentProcessId());
+    NTSTATUS status = holder->mount->Delete(holder->ctx.get());
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);
     }
