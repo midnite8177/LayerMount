@@ -156,9 +156,7 @@ LayerMountMetadata JsonToMetadata(const nlohmann::json& j) {
 } // namespace
 
 LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
-                                      const std::wstring& upperRoot,
-                                      bool* corrupted) {
-    if (corrupted != nullptr) *corrupted = false;
+                                      const std::wstring& upperRoot) {
     std::wstring base = SidecarBase(filePath, upperRoot);
     if (base.empty()) return {};
     std::wstring path = base + kMetaSuffix;
@@ -166,15 +164,6 @@ LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
     HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        const DWORD err = ::GetLastError();
-        // Benign absence: legitimately no sidecar present.
-        // Anything else (sharing violation, ACL, etc.) is a real failure on
-        // an apparently-existing sidecar.
-        if (corrupted != nullptr &&
-            err != ERROR_FILE_NOT_FOUND &&
-            err != ERROR_PATH_NOT_FOUND) {
-            *corrupted = true;
-        }
         return {};
     }
 
@@ -184,7 +173,6 @@ LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
     LARGE_INTEGER liSize{};
     if (!::GetFileSizeEx(h, &liSize)) {
         ::CloseHandle(h);
-        if (corrupted != nullptr) *corrupted = true;
         return {};
     }
     if (liSize.QuadPart == 0) {
@@ -194,7 +182,6 @@ LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
     }
     if (liSize.QuadPart > 0xFFFFFFFFLL) {
         ::CloseHandle(h);
-        if (corrupted != nullptr) *corrupted = true;
         return {};
     }
     const DWORD size = static_cast<DWORD>(liSize.QuadPart);
@@ -204,7 +191,6 @@ LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
     BOOL ok = ::ReadFile(h, buffer.data(), size, &bytesRead, nullptr);
     ::CloseHandle(h);
     if (!ok || bytesRead == 0) {
-        if (corrupted != nullptr) *corrupted = true;
         return {};
     }
     buffer.resize(bytesRead);
@@ -212,7 +198,6 @@ LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
     try {
         return JsonToMetadata(nlohmann::json::parse(buffer));
     } catch (const nlohmann::json::exception&) {
-        if (corrupted != nullptr) *corrupted = true;
         return {};
     }
 }
@@ -225,14 +210,11 @@ bool SidecarMetadata::Write(const std::wstring& filePath,
     if (base.empty()) return false;
     std::wstring path = base + kMetaSuffix;
 
-    // Atomic write: stream to a unique sibling tmp file, then rename onto
-    // the final path with MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
-    // The previous CREATE_ALWAYS-in-place pattern left a window where a
-    // crash mid-write produced a partial / zero-byte sidecar visible to
-    // SidecarMetadata::Read, which then reported the slot as corrupted
-    // and (via the MetadataADS fallback / engine) could either drop or
-    // resurrect the wrong metadata. The pid/tid suffix ensures concurrent
-    // writers in the same process do not collide on the temp name.
+    // The write goes to a unique sibling temp file, and a rename with
+    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH puts it on the
+    // final path. An in-place write that a crash cuts short leaves a
+    // partial or zero-byte sidecar, which Read returns as defaults. The
+    // pid and tid suffix keeps concurrent writers in one process apart.
     std::wstring tempPath = path + L".tmp." +
                             std::to_wstring(::GetCurrentProcessId()) + L"." +
                             std::to_wstring(::GetCurrentThreadId());

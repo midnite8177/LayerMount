@@ -26,39 +26,6 @@ using namespace LayerMount;
 
 namespace LayerMountTests {
 
-namespace {
-
-// Mark a file as NTFS-compressed. Returns 0 on success or Win32 error.
-// Compression state is a file-layout property set via DeviceIoControl;
-// SetFileAttributes with FILE_ATTRIBUTE_COMPRESSED is explicitly rejected
-// by Windows — the FSCTL is the only way.
-DWORD SetNtfsCompression(const std::wstring& path, USHORT format) {
-    HANDLE h = ::CreateFileW(path.c_str(),
-                               GENERIC_READ | GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                               OPEN_EXISTING,
-                               FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return ::GetLastError();
-    DWORD ret = 0;
-    const BOOL ok = ::DeviceIoControl(h, FSCTL_SET_COMPRESSION,
-                                        &format, sizeof(format),
-                                        nullptr, 0, &ret, nullptr);
-    const DWORD err = ok ? 0 : ::GetLastError();
-    ::CloseHandle(h);
-    return err;
-}
-
-bool HasAttr(const std::wstring& path, DWORD flag) {
-    const DWORD a = ::GetFileAttributesW(path.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & flag) != 0;
-}
-
-} // namespace
-
-// ============================================================================
-// CompressionPropagationTests — NTFS compression state through copy-up.
-// ============================================================================
-
 TEST_CLASS(CompressionPropagationTests) {
 public:
     TEST_METHOD(CopyUp_CompressedLowerFile_UpperIsAlsoCompressed) {
@@ -71,16 +38,11 @@ public:
         env.WriteFile(env.Lower(0), L"z.bin", payload);
 
         const std::wstring lowerPath = env.Lower(0) + L"\\z.bin";
-        const DWORD cmpRc = SetNtfsCompression(lowerPath, COMPRESSION_FORMAT_LZNT1);
-        if (cmpRc != 0) {
-            wchar_t msg[128];
-            swprintf_s(msg, L"[SKIP] FSCTL_SET_COMPRESSION on lower failed "
-                            L"with error %lu — volume may not support compression",
-                       cmpRc);
-            Logger::WriteMessage(msg);
+        if (!EnableCompression(lowerPath)) {
+            Logger::WriteMessage(L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the lower file");
             return;
         }
-        Assert::IsTrue(HasAttr(lowerPath, FILE_ATTRIBUTE_COMPRESSED),
+        Assert::IsTrue(HasAttribute(lowerPath, FILE_ATTRIBUTE_COMPRESSED),
             L"Precondition: lower file must be marked compressed");
 
         auto config = env.MakeConfig();
@@ -93,11 +55,8 @@ public:
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"z.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\z.bin";
-        Assert::IsTrue(HasAttr(upperPath, FILE_ATTRIBUTE_COMPRESSED),
-            L"KNOWN GAP: upper copy should be compressed to preserve storage "
-            L"characteristics. If this assertion fails, copy-up needs to "
-            L"issue FSCTL_SET_COMPRESSION on the work-dir temp before data "
-            L"transfer (compression is a layout property, like sparse).");
+        Assert::IsTrue(HasAttribute(upperPath, FILE_ATTRIBUTE_COMPRESSED),
+            L"The copy-up of a compressed file gives a compressed upper copy");
 
         Assert::AreEqual(payload, env.ReadFile(env.Upper(), L"z.bin"));
     }
@@ -107,12 +66,11 @@ public:
         env.CreateDir(env.Lower(0), L"cmpdir");
 
         const std::wstring lowerDir = env.Lower(0) + L"\\cmpdir";
-        const DWORD cmpRc = SetNtfsCompression(lowerDir, COMPRESSION_FORMAT_LZNT1);
-        if (cmpRc != 0) {
+        if (!EnableCompression(lowerDir)) {
             Logger::WriteMessage(L"[SKIP] Cannot compress directory on this volume");
             return;
         }
-        Assert::IsTrue(HasAttr(lowerDir, FILE_ATTRIBUTE_COMPRESSED),
+        Assert::IsTrue(HasAttribute(lowerDir, FILE_ATTRIBUTE_COMPRESSED),
             L"Precondition: lower dir must carry compressed attribute");
 
         auto config = env.MakeConfig();
@@ -125,16 +83,10 @@ public:
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpDirectory(L"cmpdir")));
 
         const std::wstring upperDir = env.Upper() + L"\\cmpdir";
-        Assert::IsTrue(HasAttr(upperDir, FILE_ATTRIBUTE_COMPRESSED),
-            L"KNOWN GAP: upper directory should inherit compressed state so "
-            L"new child files land compressed by default. Fix: CopyUpDirectory "
-            L"must issue FSCTL_SET_COMPRESSION on the upper dir after create.");
+        Assert::IsTrue(HasAttribute(upperDir, FILE_ATTRIBUTE_COMPRESSED),
+            L"The copy-up of a compressed directory gives a compressed upper directory");
     }
 };
-
-// ============================================================================
-// EncryptionPropagationTests — NTFS EFS state through copy-up.
-// ============================================================================
 
 TEST_CLASS(EncryptionPropagationTests) {
 public:
@@ -151,7 +103,7 @@ public:
             Logger::WriteMessage(msg);
             return;
         }
-        Assert::IsTrue(HasAttr(lowerPath, FILE_ATTRIBUTE_ENCRYPTED),
+        Assert::IsTrue(HasAttribute(lowerPath, FILE_ATTRIBUTE_ENCRYPTED),
             L"Precondition: lower must be encrypted");
 
         auto config = env.MakeConfig();
@@ -166,7 +118,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(cuStatus),
             L"Copy-up of encrypted lower content must succeed when EFS is available");
-        Assert::IsTrue(HasAttr(upperPath, FILE_ATTRIBUTE_ENCRYPTED),
+        Assert::IsTrue(HasAttribute(upperPath, FILE_ATTRIBUTE_ENCRYPTED),
             L"Encrypted lower content must remain encrypted after copy-up");
     }
 
@@ -183,7 +135,7 @@ public:
             Logger::WriteMessage(msg);
             return;
         }
-        Assert::IsTrue(HasAttr(lowerDir, FILE_ATTRIBUTE_ENCRYPTED),
+        Assert::IsTrue(HasAttribute(lowerDir, FILE_ATTRIBUTE_ENCRYPTED),
             L"Precondition: lower directory must be encrypted");
 
         auto config = env.MakeConfig();
@@ -197,11 +149,11 @@ public:
         const std::wstring upperDir = env.Upper() + L"\\secret-dir";
         Assert::IsTrue(NT_SUCCESS(cuStatus),
             L"Copy-up of encrypted lower directory must succeed when EFS is available");
-        Assert::IsTrue(HasAttr(upperDir, FILE_ATTRIBUTE_ENCRYPTED),
+        Assert::IsTrue(HasAttribute(upperDir, FILE_ATTRIBUTE_ENCRYPTED),
             L"Encrypted lower directory must remain encrypted after copy-up");
 
         env.WriteFile(env.Upper(), L"secret-dir\\child.txt", "encrypted-child");
-        Assert::IsTrue(HasAttr(upperDir + L"\\child.txt", FILE_ATTRIBUTE_ENCRYPTED),
+        Assert::IsTrue(HasAttribute(upperDir + L"\\child.txt", FILE_ATTRIBUTE_ENCRYPTED),
             L"Children created under an encrypted copied-up directory must inherit EFS");
     }
 };

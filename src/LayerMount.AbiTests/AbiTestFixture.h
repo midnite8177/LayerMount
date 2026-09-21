@@ -85,6 +85,21 @@ private:
     std::vector<std::wstring> lowers_;
 };
 
+// Write `len` bytes to the named data stream at `path` on the host file,
+// outside the engine.
+inline void WriteRawStream(const std::wstring& path, const char* data, DWORD len) {
+    HANDLE h = ::CreateFileW(path.c_str(),
+        GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    Assert::IsTrue(h != INVALID_HANDLE_VALUE, L"open ADS for write");
+    DWORD written = 0;
+    BOOL ok = ::WriteFile(h, data, len, &written, nullptr);
+    ::CloseHandle(h);
+    Assert::IsTrue(ok != FALSE,        L"WriteFile to ADS succeeded");
+    Assert::AreEqual<DWORD>(len, written, L"WriteFile wrote full payload");
+}
+
 // Read the whole file at `path` as bytes.
 inline std::string ReadAllBytes(const std::wstring& path) {
     std::ifstream f(path, std::ios::binary);
@@ -292,8 +307,6 @@ inline LM_FILE_HANDLE OpenWithAccess(LM_HANDLE mount,
     return fh;
 }
 
-// Sets only the end of file; attributes, times, and allocation size pass
-// the ABI's leave-unchanged sentinels.
 inline HRESULT SetFileSize(LM_FILE_HANDLE fh, UINT64 size, LM_FILE_INFO* outInfo) {
     return ::LayerMountSetFileInfo(
         fh,
@@ -307,14 +320,15 @@ inline HRESULT SetFileSize(LM_FILE_HANDLE fh, UINT64 size, LM_FILE_INFO* outInfo
         outInfo);
 }
 
-// Sets only the last write time; attributes, the other times, and both
-// sizes pass the ABI's leave-unchanged sentinels.
-inline HRESULT SetLastWriteTime(LM_FILE_HANDLE fh, UINT64 lastWriteTime, LM_FILE_INFO* outInfo) {
+// Sets the last access time and the last write time; a zero time keeps
+// the stored value, as the ABI defines.
+inline HRESULT SetFileTimes(LM_FILE_HANDLE fh, UINT64 lastAccessTime, UINT64 lastWriteTime,
+                            LM_FILE_INFO* outInfo) {
     return ::LayerMountSetFileInfo(
         fh,
         INVALID_FILE_ATTRIBUTES,
         /*creationTime*/   0u,
-        /*lastAccessTime*/ 0u,
+        lastAccessTime,
         lastWriteTime,
         /*changeTime*/     0u,
         /*allocationSize*/ UINT64_MAX,

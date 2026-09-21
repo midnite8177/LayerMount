@@ -11,56 +11,51 @@ namespace LayerMount {
 //   * SidecarMetadata JSON files under `<upper>\.overlay\` when ADS is
 //     unavailable (the !LM_CAP_ADS fallback).
 //
-// Each method takes an optional `const LayerConfig*`. When nullptr, the
-// methods behave as ADS-only -- this preserves the test surface and any
-// caller that hasn't been taught about the gate. When provided, reads
-// transparently fall through to the sidecar if ADS yields nothing, and
-// writes pick the store based on `LM_CAP_ADS`. Removes clean both
-// stores so a host can flip
-// capabilities without leaving stale entries behind.
+// Each method takes a `const LayerConfig*`. A null config means
+// ADS-only, so the method touches the `:overlay` streams and nothing else.
+// With a config, a read falls through to the sidecar when ADS has
+// nothing, and a write picks the store from `LM_CAP_ADS`. A remove
+// cleans both stores so a host can change capabilities and leave no
+// stale entry behind.
 class MetadataADS {
 public:
     // Read `:overlay` (then sidecar if config present and ADS empty).
-    // Returns default `LayerMountMetadata` if neither store has it.
-    //
-    // If `corrupted` is non-null it is set to true when a metadata stream
-    // appeared to exist but could not be read or parsed (sharing/ACL/JSON
-    // failure). Callers whose resolution correctness depends on metadata
-    // fidelity should treat `*corrupted == true` as a failure rather than
-    // accepting the default return value. A legitimately-absent stream
-    // leaves `*corrupted == false`.
+    // Returns default `LayerMountMetadata` if neither store has it, and
+    // also when the stream exists but the read or the parse fails.
+    // A read does not change the file's last access time, unless the
+    // volume or an ACL refuses the marked open and the read falls back
+    // to a plain open.
     static LayerMountMetadata ReadLayerMountMetadata(
         const std::wstring& filePath,
-        const LayerConfig* config = nullptr,
-        bool* corrupted = nullptr);
+        const LayerConfig* config);
 
     // Write the metadata. With `config` and `!LM_CAP_ADS`: writes the
     // sidecar. Otherwise: writes the `:overlay` ADS.
     static bool WriteLayerMountMetadata(
         const std::wstring& filePath,
         const LayerMountMetadata& metadata,
-        const LayerConfig* config = nullptr);
+        const LayerConfig* config);
 
     // Delete from both stores when `config` is provided (best-effort);
     // ADS-only otherwise.
     static bool RemoveLayerMountMetadata(
         const std::wstring& filePath,
-        const LayerConfig* config = nullptr);
+        const LayerConfig* config);
 
     // Check `:overlay.opaque` (then sidecar opaque marker if config given).
     static bool HasOpaqueADS(
         const std::wstring& directoryPath,
-        const LayerConfig* config = nullptr);
+        const LayerConfig* config);
 
     // Set the opaque marker. Routing same as Write.
     static bool SetOpaqueADS(
         const std::wstring& directoryPath,
-        const LayerConfig* config = nullptr);
+        const LayerConfig* config);
 
     // Remove the opaque marker from both stores when config is given.
     static bool RemoveOpaqueADS(
         const std::wstring& directoryPath,
-        const LayerConfig* config = nullptr);
+        const LayerConfig* config);
 };
 
 } // namespace LayerMount

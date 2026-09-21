@@ -139,9 +139,6 @@ private:
     // Copy timestamps from one file/dir handle to another.
     bool CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle);
 
-    // Copy file data in chunks.
-    NTSTATUS CopyFileData(HANDLE srcHandle, HANDLE dstHandle);
-
     // Write the copy-up bookkeeping metadata to upperPath. On failure,
     // delete upperPath and return the failure status. Without this
     // metadata the upper file looks like a foreign creation to later
@@ -157,16 +154,6 @@ private:
     NTSTATUS MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
                                           const std::wstring& workPath);
 
-    // Apply NTFS compression to dstHandle when srcAttributes marks the
-    // source compressed, so a compressed lower file does not balloon
-    // uncompressed in the upper layer. Returns STATUS_SUCCESS immediately
-    // if the source is not compressed. On failure, close dstHandle, delete
-    // workPath, and return the failure status: a metacopy shell that skips
-    // this diverges from its source in allocation semantics.
-    NTSTATUS ApplyPlaceholderCompressionOrAbort(ScopedHandle& dstHandle,
-                                                const std::wstring& workPath,
-                                                DWORD srcAttributes);
-
     // A Win32 call that removes one upper entry by path: DeleteFileW for
     // a file, RemoveDirectoryW for a directory.
     using RemoveUpperEntryFn = BOOL (WINAPI*)(LPCWSTR);
@@ -179,11 +166,8 @@ private:
                                 const ResolvedPath& source,
                                 RemoveUpperEntryFn removeUpperEntry);
 
-    // Stage a full copy of the source at workPath: create the work file,
-    // apply the sparse and compression layout, copy the data through
-    // srcHandle, close both handles, then apply the encrypted state and
-    // the security descriptor by path. On failure after the create,
-    // delete workPath and return the failure status.
+    // Stage a full copy of the source at workPath. On failure after the
+    // create, delete workPath and return the failure status.
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
                                 ScopedHandle& srcHandle,
                                 DWORD srcAttrs,
@@ -197,11 +181,8 @@ private:
                                  const std::wstring& upperPath,
                                  FileBasicInfoGuard& basicInfo);
 
-    // Stage a metacopy shell at workPath: create the file with the
-    // source attributes, mark it sparse, apply compression, set the
-    // source size without data, close the handle, then apply the
-    // encrypted state and the security descriptor by path. On failure
-    // after the create, delete workPath and return the failure status.
+    // Stage a metacopy shell at workPath. On failure after the create,
+    // delete workPath and return the failure status.
     NTSTATUS StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
                                          const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
                                          const std::wstring& workPath);
@@ -219,12 +200,6 @@ private:
     // resolution retries the completion.
     NTSTATUS FinishFilledShell(const std::wstring& upperPath,
                                LayerMountMetadata& metadata);
-
-    // Apply the source directory's compression and encrypted state to
-    // the upper directory. A compression failure is silent; an encrypted
-    // state failure returns the failure status.
-    NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath,
-                                  DWORD srcAttrs);
 
     // Copy the security descriptor and write the copy-up metadata on the
     // upper directory. On failure, remove upperPath and return the
@@ -255,8 +230,6 @@ private:
     std::mutex copyUpMutex_;
     std::condition_variable copyUpCV_;
     std::unordered_set<std::wstring> inFlightCopyUps_;
-
-    static constexpr DWORD kCopyBufferSize = 64 * 1024; // 64KB
 };
 
 } // namespace LayerMount

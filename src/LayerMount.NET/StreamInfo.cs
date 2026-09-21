@@ -17,11 +17,8 @@ namespace LayerMount;
 /// </param>
 /// <param name="StreamSize">Logical end-of-file in bytes.</param>
 /// <param name="AllocationSize">
-/// On-disk allocation in bytes. The underlying <c>FindFirstStreamW</c>
-/// query does not distinguish logical and allocated size, so this
-/// currently mirrors <paramref name="StreamSize"/>; precise allocation
-/// accounting would require opening the stream and querying
-/// <c>FILE_STANDARD_INFORMATION</c>.
+/// <paramref name="StreamSize"/> rounded up to 4 KiB, never below it.
+/// The same rule gives the allocation of a file.
 /// </param>
 public readonly record struct StreamInfo(
     string Name,

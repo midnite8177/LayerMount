@@ -31,7 +31,7 @@ public:
         TempLayerEnvironment env(0);
         std::wstring path = CreateTestFile(env, L"empty.txt");
 
-        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::IsFalse(md.opaque);
         Assert::IsFalse(md.metacopy);
         Assert::IsTrue(md.redirect.empty());
@@ -39,6 +39,30 @@ public:
         // copyUpTimestamp defaults to zero FILETIME
         Assert::AreEqual(DWORD{0}, md.copyUpTimestamp.dwLowDateTime);
         Assert::AreEqual(DWORD{0}, md.copyUpTimestamp.dwHighDateTime);
+    }
+
+    TEST_METHOD(ReadLayerMountMetadata_KeepsLastAccessTime) {
+        TempLayerEnvironment env(0);
+        std::wstring path = CreateTestFile(env, L"atime.txt");
+
+        LayerMountMetadata input;
+        input.metacopy = true;
+        Assert::IsTrue(MetadataADS::WriteLayerMountMetadata(path, input, nullptr));
+
+        FILETIME creation{}, access{}, write{};
+        GetTimes(path, &creation, &access, &write);
+        const FILETIME setAccess = MakeFileTime(2019, 6, 15);
+        StampFile(path, creation, setAccess, write);
+        GetTimes(path, &creation, &access, &write);
+        Assert::IsTrue(FileTimesEqual(setAccess, access),
+                       L"the stamp put the access time in place before the read");
+
+        LayerMountMetadata output = MetadataADS::ReadLayerMountMetadata(path, nullptr);
+        Assert::IsTrue(output.metacopy);
+
+        GetTimes(path, &creation, &access, &write);
+        Assert::IsTrue(FileTimesEqual(setAccess, access),
+                       L"the metadata read kept the set access time");
     }
 
     TEST_METHOD(WriteThenRead_AllFields_RoundTrip) {
@@ -55,9 +79,9 @@ public:
         input.hasStableIndexNumber = true;
         input.stableIndexNumber = 0x1122334455667788ull;
 
-        Assert::IsTrue(MetadataADS::WriteLayerMountMetadata(path, input));
+        Assert::IsTrue(MetadataADS::WriteLayerMountMetadata(path, input, nullptr));
 
-        LayerMountMetadata output = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata output = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::AreEqual(input.opaque, output.opaque);
         Assert::AreEqual(input.metacopy, output.metacopy);
         Assert::AreEqual(input.redirect, output.redirect);
@@ -74,13 +98,13 @@ public:
 
         LayerMountMetadata a;
         a.originLayer = L"first";
-        MetadataADS::WriteLayerMountMetadata(path, a);
+        MetadataADS::WriteLayerMountMetadata(path, a, nullptr);
 
         LayerMountMetadata b;
         b.originLayer = L"second";
-        MetadataADS::WriteLayerMountMetadata(path, b);
+        MetadataADS::WriteLayerMountMetadata(path, b, nullptr);
 
-        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::AreEqual(std::wstring(L"second"), got.originLayer);
     }
 
@@ -90,9 +114,9 @@ public:
 
         LayerMountMetadata md;
         md.opaque = true;
-        MetadataADS::WriteLayerMountMetadata(path, md);
+        MetadataADS::WriteLayerMountMetadata(path, md, nullptr);
 
-        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(path).opaque);
+        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(path, nullptr).opaque);
     }
 
     TEST_METHOD(WriteLayerMountMetadata_PersistsMetacopyBool) {
@@ -101,9 +125,9 @@ public:
 
         LayerMountMetadata md;
         md.metacopy = true;
-        MetadataADS::WriteLayerMountMetadata(path, md);
+        MetadataADS::WriteLayerMountMetadata(path, md, nullptr);
 
-        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(path).metacopy);
+        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(path, nullptr).metacopy);
     }
 
     TEST_METHOD(WriteLayerMountMetadata_PersistsRedirectWide) {
@@ -113,9 +137,9 @@ public:
         LayerMountMetadata md;
         // Unicode content (Greek alpha, Chinese character)
         md.redirect = L"\u03b1\\\u4e2d\\target.txt";
-        MetadataADS::WriteLayerMountMetadata(path, md);
+        MetadataADS::WriteLayerMountMetadata(path, md, nullptr);
 
-        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::AreEqual(md.redirect, got.redirect);
     }
 
@@ -126,9 +150,9 @@ public:
         LayerMountMetadata md;
         md.copyUpTimestamp.dwLowDateTime = 0xCAFEBABE;
         md.copyUpTimestamp.dwHighDateTime = 0x87654321;
-        MetadataADS::WriteLayerMountMetadata(path, md);
+        MetadataADS::WriteLayerMountMetadata(path, md, nullptr);
 
-        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::AreEqual(DWORD{0xCAFEBABE}, got.copyUpTimestamp.dwLowDateTime);
         Assert::AreEqual(DWORD{0x87654321}, got.copyUpTimestamp.dwHighDateTime);
     }
@@ -139,9 +163,9 @@ public:
 
         LayerMountMetadata md;
         md.originLayer = L"D:\\some\\lower\\layer\\path";
-        MetadataADS::WriteLayerMountMetadata(path, md);
+        MetadataADS::WriteLayerMountMetadata(path, md, nullptr);
 
-        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::AreEqual(md.originLayer, got.originLayer);
     }
 
@@ -152,9 +176,9 @@ public:
         LayerMountMetadata md;
         md.hasStableIndexNumber = true;
         md.stableIndexNumber = 0x8877665544332211ull;
-        MetadataADS::WriteLayerMountMetadata(path, md);
+        MetadataADS::WriteLayerMountMetadata(path, md, nullptr);
 
-        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::IsTrue(got.hasStableIndexNumber);
         Assert::AreEqual(md.stableIndexNumber, got.stableIndexNumber);
     }
@@ -165,11 +189,11 @@ public:
 
         LayerMountMetadata md;
         md.originLayer = L"exists";
-        MetadataADS::WriteLayerMountMetadata(path, md);
+        MetadataADS::WriteLayerMountMetadata(path, md, nullptr);
 
-        Assert::IsTrue(MetadataADS::RemoveLayerMountMetadata(path));
+        Assert::IsTrue(MetadataADS::RemoveLayerMountMetadata(path, nullptr));
 
-        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path);
+        LayerMountMetadata got = MetadataADS::ReadLayerMountMetadata(path, nullptr);
         Assert::IsTrue(got.originLayer.empty(),
             L"After remove, read should return defaults");
     }
@@ -178,7 +202,7 @@ public:
         TempLayerEnvironment env(0);
         std::wstring path = CreateTestFile(env, L"nostream.txt");
 
-        Assert::IsTrue(MetadataADS::RemoveLayerMountMetadata(path),
+        Assert::IsTrue(MetadataADS::RemoveLayerMountMetadata(path, nullptr),
             L"Remove should be idempotent");
     }
 
@@ -189,7 +213,7 @@ public:
         env.CreateDir(env.Upper(), L"od");
         std::wstring dir = env.Upper() + L"\\od";
 
-        Assert::IsFalse(MetadataADS::HasOpaqueADS(dir));
+        Assert::IsFalse(MetadataADS::HasOpaqueADS(dir, nullptr));
     }
 
     TEST_METHOD(SetOpaqueADS_ThenHasOpaqueADS_ReturnsTrue) {
@@ -197,8 +221,8 @@ public:
         env.CreateDir(env.Upper(), L"od");
         std::wstring dir = env.Upper() + L"\\od";
 
-        Assert::IsTrue(MetadataADS::SetOpaqueADS(dir));
-        Assert::IsTrue(MetadataADS::HasOpaqueADS(dir));
+        Assert::IsTrue(MetadataADS::SetOpaqueADS(dir, nullptr));
+        Assert::IsTrue(MetadataADS::HasOpaqueADS(dir, nullptr));
     }
 
     TEST_METHOD(RemoveOpaqueADS_ThenHasOpaqueADS_ReturnsFalse) {
@@ -206,11 +230,11 @@ public:
         env.CreateDir(env.Upper(), L"od");
         std::wstring dir = env.Upper() + L"\\od";
 
-        MetadataADS::SetOpaqueADS(dir);
-        Assert::IsTrue(MetadataADS::HasOpaqueADS(dir));
+        MetadataADS::SetOpaqueADS(dir, nullptr);
+        Assert::IsTrue(MetadataADS::HasOpaqueADS(dir, nullptr));
 
-        Assert::IsTrue(MetadataADS::RemoveOpaqueADS(dir));
-        Assert::IsFalse(MetadataADS::HasOpaqueADS(dir));
+        Assert::IsTrue(MetadataADS::RemoveOpaqueADS(dir, nullptr));
+        Assert::IsFalse(MetadataADS::HasOpaqueADS(dir, nullptr));
     }
 
     // Note: a previously-planned test `WriteLayerMountMetadata_FileDoesNotExist_ReturnsFalse`

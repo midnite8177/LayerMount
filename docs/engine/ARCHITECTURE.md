@@ -389,7 +389,17 @@ unavailable. Steps:
 4. Generate a unique work-dir path under `workDirPath`.
 5. Stream data from the lower handle into the work-dir handle in 64 KB
    chunks. Open the source with `FILE_FLAG_BACKUP_SEMANTICS` so
-   `SE_BACKUP_NAME` can read past restrictive DACLs.
+   `SE_BACKUP_NAME` can read past restrictive DACLs. With the sparse
+   capability, a sparse lower file gives a sparse upper copy, or the
+   copy-up fails with the volume's error. The copy reads only the
+   allocated ranges of a sparse source, so its holes stay holes in the
+   upper copy and the upper allocation matches the lower one. Without
+   the capability, the upper copy is dense. A compressed lower file
+   gives a compressed upper copy when the upper volume can compress.
+   The engine sets compression before the data copy and ignores a
+   refusal, so on a volume that cannot compress the upper copy is dense
+   and the copy-up succeeds. Compression has no capability bit. This
+   matches a Windows copy of a compressed file to such a volume.
 6. Mirror metadata: file attributes, all three timestamps, security
    descriptor (DACL/SACL/owner/group), and every alternate data stream
    except the reserved `:overlay*` namespace.
@@ -410,7 +420,11 @@ For files larger than 1 MiB on host adapters that support sparse files
 upper layer instead of a full data copy:
 
 1. Create the upper file as a sparse file (`FSCTL_SET_SPARSE`) of the
-   correct logical size, with no allocated data blocks.
+   correct logical size, with no allocated data blocks. A compressed
+   lower file gives a compressed shell, under the same rule as the eager
+   copy-up. A refused `FSCTL_SET_COMPRESSION` leaves the shell dense and
+   never fails the metacopy, so a small file and a large file give the
+   same result.
 2. Mirror security, attributes, and timestamps. The lower's streams
    arrive with the fill, together with the data.
 3. Write the `:overlay` metadata with `metacopy = true` and the origin

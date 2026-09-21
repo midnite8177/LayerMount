@@ -6,8 +6,10 @@
 #include "NtStatusUtil.h"
 
 #include <winioctl.h>
-#include <optional>
 #include <aclapi.h>
+#include <climits>
+#include <iterator>
+#include <optional>
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -222,13 +224,6 @@ bool CopyAlternateStream(const std::wstring& srcPath,
 }
 
 // Enumerate user-visible alternate data streams on srcPath and copy each to
-// dstPath. Skips the main `::$DATA` stream (that one is carried by the normal
-// file-data copy) and the overlay's reserved `:overlay*` bookkeeping streams.
-// Returns true iff every stream copied successfully. A failure to enumerate
-// (FindFirstStreamW) when the source has no streams returns true; otherwise
-// any per-stream copy failure surfaces here so callers don't silently lose
-// Zone.Identifier or app-specific ADS during copy-up.
-// Enumerate user-visible alternate data streams on srcPath and copy each to
 // dstPath. Skips the main `::$DATA` stream (carried by the normal file-data
 // copy) and the overlay's reserved `:overlay*` bookkeeping streams.
 //
@@ -367,6 +362,65 @@ bool HasFileAttribute(DWORD attrs, DWORD flag) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
 }
 
+bool SetSparse(HANDLE handle) {
+    FILE_SET_SPARSE_BUFFER sparseBuf{TRUE};
+    DWORD bytesReturned = 0;
+    return DeviceIoControl(handle, FSCTL_SET_SPARSE, &sparseBuf, sizeof(sparseBuf),
+                           nullptr, 0, &bytesReturned, nullptr) != FALSE;
+}
+
+// The status of a refused FSCTL_SET_SPARSE, read right after the call. A
+// failed DeviceIoControl can leave the last error at 0, and a plain mapping
+// of 0 is STATUS_SUCCESS, so the fallback keeps the refusal an error.
+NTSTATUS SparseRefusalStatus() {
+    const DWORD err = ::GetLastError();
+    return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+}
+
+// Set NTFS compression on the handle. A refusal is ignored: a Windows copy
+// of a compressed file to a volume that cannot compress gives a dense file
+// and no error. Call it before the data copy; after it, NTFS rewrites the
+// file to compress it.
+void SetCompressed(HANDLE handle) {
+    USHORT format = COMPRESSION_FORMAT_DEFAULT;
+    DWORD bytesReturned = 0;
+    DeviceIoControl(handle, FSCTL_SET_COMPRESSION, &format, sizeof(format),
+                    nullptr, 0, &bytesReturned, nullptr);
+}
+
+void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
+        SetCompressed(handle);
+    }
+}
+
+void SetCompressedDirectory(const std::wstring& path) {
+    HANDLE handle = CreateFileW(path.c_str(),
+                                GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    SetCompressed(handle);
+    CloseHandle(handle);
+}
+
+// SetFileAttributes ignores FILE_ATTRIBUTE_COMPRESSED; only the FSCTL sets
+// it on a directory. Without the FSCTL on the upper directory, a file
+// created inside it through the mount lands dense. A failed encrypted state
+// returns the failure status.
+NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, DWORD srcAttrs) {
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
+        SetCompressedDirectory(upperPath);
+    }
+    if (!ApplyEncryptedStateIfNeeded(upperPath, srcAttrs)) {
+        return ::LayerMount::NtStatusFromWin32(::GetLastError());
+    }
+    return STATUS_SUCCESS;
+}
+
 bool ClearSparseAndTrimAllocation(HANDLE handle) {
     FILE_SET_SPARSE_BUFFER sparseBuf{FALSE};
     DWORD bytesReturned = 0;
@@ -385,6 +439,198 @@ bool ClearSparseAndTrimAllocation(HANDLE handle) {
     allocInfo.AllocationSize = fileSize;
     return SetFileInformationByHandle(handle, FileAllocationInfo, &allocInfo,
                                       sizeof(allocInfo)) != FALSE;
+}
+
+constexpr DWORD kCopyBufferSize = 64 * 1024;
+
+// Write length bytes to dstHandle. WriteFile returns success with a count
+// below length on a full quota, on a network volume and on some raw
+// devices; that write fails with ERROR_WRITE_FAULT. A failed call with no
+// last error set maps to the same status, never to success.
+NTSTATUS WriteChunk(HANDLE dstHandle, const BYTE* buffer, DWORD length) {
+    DWORD bytesWritten = 0;
+    if (!WriteFile(dstHandle, buffer, length, &bytesWritten, nullptr)) {
+        const DWORD err = GetLastError();
+        return ::LayerMount::NtStatusFromWin32(err != 0 ? err : ERROR_WRITE_FAULT);
+    }
+    if (bytesWritten != length) {
+        return ::LayerMount::NtStatusFromWin32(ERROR_WRITE_FAULT);
+    }
+    return STATUS_SUCCESS;
+}
+
+// Copy up to limit bytes from the file pointer of srcHandle to the file
+// pointer of dstHandle. bytesCopied is below limit when the source ended
+// first. Every byte goes through the buffer, so a hole of the source
+// becomes written zeros.
+NTSTATUS CopyBytes(HANDLE srcHandle, HANDLE dstHandle, LONGLONG limit,
+                   LONGLONG& bytesCopied) {
+    BYTE buffer[kCopyBufferSize];
+    bytesCopied = 0;
+    while (bytesCopied < limit) {
+        const LONGLONG left = limit - bytesCopied;
+        const DWORD chunk = left < kCopyBufferSize ? static_cast<DWORD>(left)
+                                                   : kCopyBufferSize;
+        DWORD bytesRead = 0;
+        if (!ReadFile(srcHandle, buffer, chunk, &bytesRead, nullptr)) {
+            return ::LayerMount::NtStatusFromWin32(GetLastError());
+        }
+        if (bytesRead == 0) {
+            break;
+        }
+        const NTSTATUS status = WriteChunk(dstHandle, buffer, bytesRead);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        bytesCopied += bytesRead;
+    }
+    return STATUS_SUCCESS;
+}
+
+// Copy from the file pointer of srcHandle to its end of file.
+NTSTATUS CopyBytesToEnd(HANDLE srcHandle, HANDLE dstHandle) {
+    LONGLONG bytesCopied = 0;
+    return CopyBytes(srcHandle, dstHandle, LLONG_MAX, bytesCopied);
+}
+
+// Copy every byte of srcHandle from offset zero. A range copied before the
+// call is written again at the same offset.
+NTSTATUS CopyBytesFromStart(HANDLE srcHandle, HANDLE dstHandle) {
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(srcHandle, zero, nullptr, FILE_BEGIN) ||
+        !SetFilePointerEx(dstHandle, zero, nullptr, FILE_BEGIN)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+    return CopyBytesToEnd(srcHandle, dstHandle);
+}
+
+// Copy one allocated range of srcHandle to the same offset of dstHandle.
+// bytesCopied is below the range length when the source ended inside it.
+NTSTATUS CopyAllocatedRange(HANDLE srcHandle, HANDLE dstHandle,
+                            const FILE_ALLOCATED_RANGE_BUFFER& range,
+                            LONGLONG& bytesCopied) {
+    if (!SetFilePointerEx(srcHandle, range.FileOffset, nullptr, FILE_BEGIN) ||
+        !SetFilePointerEx(dstHandle, range.FileOffset, nullptr, FILE_BEGIN)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+    return CopyBytes(srcHandle, dstHandle, range.Length.QuadPart, bytesCopied);
+}
+
+enum class RangeQuery { Complete, More, Refused };
+
+// Ask srcHandle for the allocated ranges inside query. count receives the
+// number of ranges written to ranges. More means the source has ranges
+// past the last one returned.
+RangeQuery QueryAllocatedRanges(HANDLE srcHandle,
+                                FILE_ALLOCATED_RANGE_BUFFER& query,
+                                FILE_ALLOCATED_RANGE_BUFFER* ranges,
+                                DWORD capacity, DWORD& count) {
+    DWORD bytesReturned = 0;
+    const BOOL ok = DeviceIoControl(srcHandle, FSCTL_QUERY_ALLOCATED_RANGES,
+                                    &query, sizeof(query),
+                                    ranges, capacity * sizeof(ranges[0]),
+                                    &bytesReturned, nullptr);
+    count = bytesReturned / sizeof(ranges[0]);
+    if (ok) {
+        return RangeQuery::Complete;
+    }
+    return ::GetLastError() == ERROR_MORE_DATA ? RangeQuery::More
+                                               : RangeQuery::Refused;
+}
+
+// Copy the allocated ranges of srcHandle to the same offsets of dstHandle,
+// in order, until the ranges end or the source ends. When the volume
+// refuses the range query, rangesRefused is set and the copy stops.
+NTSTATUS CopyAllocatedRanges(HANDLE srcHandle, HANDLE dstHandle,
+                             LONGLONG srcSize, bool& rangesRefused) {
+    rangesRefused = false;
+    FILE_ALLOCATED_RANGE_BUFFER query{};
+    query.FileOffset.QuadPart = 0;
+    query.Length.QuadPart = srcSize;
+    while (query.FileOffset.QuadPart < srcSize) {
+        FILE_ALLOCATED_RANGE_BUFFER ranges[64];
+        DWORD count = 0;
+        const RangeQuery result = QueryAllocatedRanges(
+            srcHandle, query, ranges, static_cast<DWORD>(std::size(ranges)), count);
+        if (result == RangeQuery::Refused) {
+            rangesRefused = true;
+            return STATUS_SUCCESS;
+        }
+        for (DWORD i = 0; i < count; ++i) {
+            LONGLONG bytesCopied = 0;
+            const NTSTATUS status =
+                CopyAllocatedRange(srcHandle, dstHandle, ranges[i], bytesCopied);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            if (bytesCopied < ranges[i].Length.QuadPart) {
+                return STATUS_SUCCESS;
+            }
+        }
+        if (result == RangeQuery::Complete || count == 0) {
+            return STATUS_SUCCESS;
+        }
+        query.FileOffset.QuadPart = ranges[count - 1].FileOffset.QuadPart +
+                                    ranges[count - 1].Length.QuadPart;
+        query.Length.QuadPart = srcSize - query.FileOffset.QuadPart;
+    }
+    return STATUS_SUCCESS;
+}
+
+// Set the end of file of dstHandle to size when it differs. A metacopy
+// shell already has the source size and can be open elsewhere for write,
+// so its size is left alone; a fresh work file ends at its last written
+// byte, so a trailing hole needs the extension.
+NTSTATUS ExtendToSize(HANDLE dstHandle, LARGE_INTEGER size) {
+    LARGE_INTEGER dstSize{};
+    if (!GetFileSizeEx(dstHandle, &dstSize)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+    if (dstSize.QuadPart == size.QuadPart) {
+        return STATUS_SUCCESS;
+    }
+    if (!SetFilePointerEx(dstHandle, size, nullptr, FILE_BEGIN) ||
+        !SetEndOfFile(dstHandle)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+    return STATUS_SUCCESS;
+}
+
+// A refused attribute query counts as dense, so the copy takes the byte
+// path and the saving is lost, never the data.
+bool IsSparseHandle(HANDLE handle) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    return GetFileInformationByHandle(handle, &info) &&
+           HasFileAttribute(info.dwFileAttributes, FILE_ATTRIBUTE_SPARSE_FILE);
+}
+
+// Copy the data of srcHandle to dstHandle. When both files are sparse, the
+// copy reads the allocated ranges of the source and writes only those, so a
+// hole of the source stays a hole in the destination: NTFS allocates
+// clusters for written zeros, but not for a region the file pointer skips
+// (Windows file system documentation, "Sparse Files"). The destination end
+// of file becomes the source size, so a trailing hole keeps the logical
+// size.
+NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
+    if (!IsSparseHandle(srcHandle) || !IsSparseHandle(dstHandle)) {
+        return CopyBytesToEnd(srcHandle, dstHandle);
+    }
+
+    LARGE_INTEGER srcSize{};
+    if (!GetFileSizeEx(srcHandle, &srcSize)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+
+    bool rangesRefused = false;
+    const NTSTATUS status =
+        CopyAllocatedRanges(srcHandle, dstHandle, srcSize.QuadPart, rangesRefused);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (rangesRefused) {
+        return CopyBytesFromStart(srcHandle, dstHandle);
+    }
+    return ExtendToSize(dstHandle, srcSize);
 }
 
 } // namespace
@@ -762,31 +1008,19 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
-    // If the source is a sparse file, mark the destination sparse BEFORE
-    // writing data. Sparse state is a file-layout property, not something
-    // SetFileAttributes can fix after the fact — the FSCTL must run on the
-    // handle while the file is still empty.
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE)) {
-        DWORD bytesReturned = 0;
-        FILE_SET_SPARSE_BUFFER sparseBuf{TRUE};
-        DeviceIoControl(dstHandle.Get(), FSCTL_SET_SPARSE, &sparseBuf,
-                        sizeof(sparseBuf), nullptr, 0, &bytesReturned, nullptr);
+    // SetFileAttributes cannot set FILE_ATTRIBUTE_SPARSE_FILE. Only FSCTL_SET_SPARSE can.
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
+        capabilities_.HasSparseFiles() &&
+        !SetSparse(dstHandle.Get())) {
+        const NTSTATUS status = SparseRefusalStatus();
+        dstHandle.Reset();
+        ::DeleteFileW(workPath.c_str());
+        return status;
     }
 
-    // Propagate NTFS compression. Like sparse, compression is a file-layout
-    // property and must be applied BEFORE data is written so the written
-    // bytes get compressed in place. Without this, a compressed lower file
-    // that occupies e.g. 2 MB expands to 10 MB in upper after copy-up —
-    // silent storage inflation for every layered modification.
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
-        DWORD bytesReturned = 0;
-        USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
-        DeviceIoControl(dstHandle.Get(), FSCTL_SET_COMPRESSION,
-                        &cmpFormat, sizeof(cmpFormat),
-                        nullptr, 0, &bytesReturned, nullptr);
-    }
+    SetCompressedIfSource(dstHandle.Get(), srcAttrs);
 
-    NTSTATUS status = CopyFileData(srcHandle.Get(), dstHandle.Get());
+    NTSTATUS status = CopyFileDataKeepingHoles(srcHandle.Get(), dstHandle.Get());
     if (!NT_SUCCESS(status)) {
         dstHandle.Reset();
         DeleteFileW(workPath.c_str());
@@ -936,32 +1170,11 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
 
 NTSTATUS CopyUp::MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
                                               const std::wstring& workPath) {
-    DWORD bytesReturned = 0;
-    if (!DeviceIoControl(dstHandle.Get(), FSCTL_SET_SPARSE, nullptr, 0,
-                         nullptr, 0, &bytesReturned, nullptr)) {
-        DWORD err = ::GetLastError();
+    if (!SetSparse(dstHandle.Get())) {
+        const NTSTATUS status = SparseRefusalStatus();
         dstHandle.Reset();
         ::DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-    }
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS CopyUp::ApplyPlaceholderCompressionOrAbort(ScopedHandle& dstHandle,
-                                                    const std::wstring& workPath,
-                                                    DWORD srcAttributes) {
-    if ((srcAttributes & FILE_ATTRIBUTE_COMPRESSED) == 0) {
-        return STATUS_SUCCESS;
-    }
-    USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
-    DWORD bytesReturned = 0;
-    if (!DeviceIoControl(dstHandle.Get(), FSCTL_SET_COMPRESSION,
-                         &cmpFormat, sizeof(cmpFormat),
-                         nullptr, 0, &bytesReturned, nullptr)) {
-        DWORD err = ::GetLastError();
-        dstHandle.Reset();
-        ::DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+        return status;
     }
     return STATUS_SUCCESS;
 }
@@ -987,16 +1200,9 @@ NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
         return sparseStatus;
     }
 
-    // NTFS compression is a per-file FSCTL, not a CreateFileW attribute flag.
-    // srcAttrs.dwFileAttributes passed at CreateFileW above is silently
-    // ignored for FILE_ATTRIBUTE_COMPRESSED. Apply it here, before
-    // SetEndOfFile and any data writes (same invariant
-    // CopyFilePreservingMetadata relies on).
-    NTSTATUS compressionStatus =
-        ApplyPlaceholderCompressionOrAbort(dstHandle, workPath, srcAttrs.dwFileAttributes);
-    if (!NT_SUCCESS(compressionStatus)) {
-        return compressionStatus;
-    }
+    // CreateFileW ignores FILE_ATTRIBUTE_COMPRESSED in its attributes, so
+    // the shell sets compression here.
+    SetCompressedIfSource(dstHandle.Get(), srcAttrs.dwFileAttributes);
 
     // Set file size without allocating disk space
     LARGE_INTEGER fileSize;
@@ -1101,7 +1307,7 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
 
     // Serialize concurrent completions on the same path. Without this, two
     // callers on the same path can both enter here and both copy lower
-    // bytes into the same upper file. The loser's still-running CopyFileData
+    // bytes into the same upper file. The loser's still-running data copy
     // can clobber a user-write that landed between the two completions, or
     // simply duplicate writes onto the same handle range. Reservation makes
     // the second caller wait, then re-check `metacopy` and short-circuit.
@@ -1178,7 +1384,7 @@ NTSTATUS CopyUp::FillMetacopyShell(ScopedHandle& srcHandle,
     SetFilePointerEx(dstHandle.Get(), zero, nullptr, FILE_BEGIN);
 
     // Copy all data
-    NTSTATUS status = CopyFileData(srcHandle.Get(), dstHandle.Get());
+    NTSTATUS status = CopyFileDataKeepingHoles(srcHandle.Get(), dstHandle.Get());
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1227,7 +1433,7 @@ NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
     // is the correct retry shape. Do NOT delete upperPath here -- the
     // data has been copied, and another handle may already be holding it
     // open; tearing it down would clobber user writes that may have
-    // landed between CopyFileData and here. Surface the failure so the
+    // landed between the data copy and here. Surface the failure so the
     // caller sees the completion did not commit.
     metadata.metacopy = false;
     if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
@@ -1308,35 +1514,6 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
 
     cache_.InvalidateWithAncestors(normalized);
     RecordCopyUp(normalized);
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS CopyUp::ApplyDirectoryLayout(const std::wstring& upperPath,
-                                      DWORD srcAttrs) {
-    // Propagate NTFS compression on the directory. NTFS dirs can carry the
-    // COMPRESSED attribute, which sets the default layout for NEW children
-    // created inside them. Without propagation, files created into a lower-
-    // compressed directory via the mount land uncompressed in upper.
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
-        HANDLE cmpH = CreateFileW(upperPath.c_str(),
-                                    GENERIC_READ | GENERIC_WRITE,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                    nullptr, OPEN_EXISTING,
-                                    FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (cmpH != INVALID_HANDLE_VALUE) {
-            DWORD bytesReturned = 0;
-            USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
-            DeviceIoControl(cmpH, FSCTL_SET_COMPRESSION,
-                            &cmpFormat, sizeof(cmpFormat),
-                            nullptr, 0, &bytesReturned, nullptr);
-            CloseHandle(cmpH);
-        }
-    }
-
-    if (!ApplyEncryptedStateIfNeeded(upperPath, srcAttrs)) {
-        return ::LayerMount::NtStatusFromWin32(::GetLastError());
-    }
 
     return STATUS_SUCCESS;
 }
@@ -1554,12 +1731,7 @@ NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
                         continue;
                     }
 
-                    // Real upper shadow file/dir: overlay on top of the lower
-                    // copy. If a child copy fails (e.g., file-over-directory
-                    // type conflict), the rename cannot complete cleanly —
-                    // tear down the half-built destination tree and surface
-                    // the error. Previously (void)-cast; that let a rename
-                    // "succeed" with corrupt state.
+                    // A real upper shadow file or directory overlays the lower copy.
                     NTSTATUS childStatus = STATUS_SUCCESS;
                     if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
                         DWORD targetAttrs = ::GetFileAttributesW(childDst.c_str());
@@ -1618,14 +1790,6 @@ NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
         // Check if old location was opaque
         bool wasOpaque = whiteoutMgr_.IsOpaque(oldNorm);
 
-        // Honor replaceIfExists. Previously this path hard-coded
-        // MOVEFILE_REPLACE_EXISTING, which silently overwrote a pre-existing
-        // destination directory even when the caller requested
-        // rename-without-replace. The merged-view collision check above
-        // already rejected the no-replace case where the destination
-        // exists, so reaching this point with replaceIfExists==false means
-        // no destination exists and the flag is a no-op — but it stays
-        // consistent with the caller's intent.
         DWORD flags = replaceIfExists ? MOVEFILE_REPLACE_EXISTING : 0;
         if (!MoveFileExW(oldUpperPath.c_str(), newUpperPath.c_str(), flags)) {
             return ::LayerMount::NtStatusFromWin32(GetLastError());
@@ -1651,14 +1815,16 @@ NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
 
 namespace {
 
-// Copy a single regular file preserving sparse state + ADS. Mirrors the tail
+// Copy a single regular file with its ADS, and its sparse state when the
+// host adapter has the sparse capability. Mirrors the tail
 // half of CopyUpFile but without the work-dir atomic-commit dance, because
 // the caller is already operating inside a new upper-layer subtree and
 // doesn't need crash-safety against the destination appearing half-formed
 // (the whole subtree gets removed on failure at a higher level).
 NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
                                      const std::wstring& dstAbs,
-                                     const LayerConfig* config) {
+                                     const LayerConfig* config,
+                                     ::LayerMount::abi::CapabilityGate capabilities) {
     HANDLE srcH = ::CreateFileW(srcAbs.c_str(), GENERIC_READ,
                                   FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                   FILE_FLAG_SEQUENTIAL_SCAN |
@@ -1669,6 +1835,11 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
     }
 
     DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
+    if (srcAttrs == INVALID_FILE_ATTRIBUTES) {
+        DWORD err = ::GetLastError();
+        ::CloseHandle(srcH);
+        return ::LayerMount::NtStatusFromWin32(err);
+    }
     FILETIME ftCreate{}, ftAccess{}, ftWrite{};
     ::GetFileTime(srcH, &ftCreate, &ftAccess, &ftWrite);
 
@@ -1681,43 +1852,23 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
         return ::LayerMount::NtStatusFromWin32(err);
     }
 
-    // Mark sparse BEFORE writing — sparse state is a layout property that
-    // can only be set on an empty file.
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE)) {
-        DWORD br = 0;
-        FILE_SET_SPARSE_BUFFER sb{TRUE};
-        ::DeviceIoControl(dstH, FSCTL_SET_SPARSE, &sb, sizeof(sb),
-                          nullptr, 0, &br, nullptr);
+    // SetFileAttributes cannot set FILE_ATTRIBUTE_SPARSE_FILE. Only FSCTL_SET_SPARSE can.
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
+        capabilities.HasSparseFiles() &&
+        !SetSparse(dstH)) {
+        const NTSTATUS status = SparseRefusalStatus();
+        ::CloseHandle(srcH);
+        ::CloseHandle(dstH);
+        return status;
     }
 
-    // Same treatment for NTFS compression — must be applied BEFORE data so
-    // the writes land compressed. See CopyUp::CopyUpFile for the rationale.
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
-        DWORD br = 0;
-        USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
-        ::DeviceIoControl(dstH, FSCTL_SET_COMPRESSION,
-                          &cmpFormat, sizeof(cmpFormat),
-                          nullptr, 0, &br, nullptr);
-    }
+    SetCompressedIfSource(dstH, srcAttrs);
 
-    // Copy data.
-    BYTE buf[64 * 1024];
-    for (;;) {
-        DWORD r = 0;
-        if (!::ReadFile(srcH, buf, sizeof(buf), &r, nullptr)) {
-            DWORD err = ::GetLastError();
-            ::CloseHandle(srcH);
-            ::CloseHandle(dstH);
-            return ::LayerMount::NtStatusFromWin32(err);
-        }
-        if (r == 0) break;
-        DWORD w = 0;
-        if (!::WriteFile(dstH, buf, r, &w, nullptr) || w != r) {
-            DWORD err = ::GetLastError();
-            ::CloseHandle(srcH);
-            ::CloseHandle(dstH);
-            return ::LayerMount::NtStatusFromWin32(err);
-        }
+    const NTSTATUS dataStatus = CopyFileDataKeepingHoles(srcH, dstH);
+    if (!NT_SUCCESS(dataStatus)) {
+        ::CloseHandle(srcH);
+        ::CloseHandle(dstH);
+        return dataStatus;
     }
 
     ::CloseHandle(srcH);
@@ -1846,9 +1997,7 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
     // Re-apply attributes + timestamps last (both are perturbed by ADS writes
     // on NTFS: WriteFile bumps LastWrite, and the dest was created with
     // FILE_ATTRIBUTE_NORMAL).
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES) {
-        ::SetFileAttributesW(dstAbs.c_str(), srcAttrs);
-    }
+    ::SetFileAttributesW(dstAbs.c_str(), srcAttrs);
     HANDLE tsH = ::CreateFileW(dstAbs.c_str(), FILE_WRITE_ATTRIBUTES,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                 OPEN_EXISTING, 0, nullptr);
@@ -1893,27 +2042,9 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
         ::SetFileAttributesW(dstAbs.c_str(), srcAttrs);
     }
 
-    // SetFileAttributes silently ignores FILE_ATTRIBUTE_COMPRESSED — the
-    // only way to set it is via FSCTL_SET_COMPRESSION. Propagate it so
-    // children created under this directory inherit compression.
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
-        HANDLE cmpH = ::CreateFileW(dstAbs.c_str(),
-                                      GENERIC_READ | GENERIC_WRITE,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                      nullptr, OPEN_EXISTING,
-                                      FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (cmpH != INVALID_HANDLE_VALUE) {
-            DWORD br = 0;
-            USHORT cmpFormat = COMPRESSION_FORMAT_DEFAULT;
-            ::DeviceIoControl(cmpH, FSCTL_SET_COMPRESSION,
-                              &cmpFormat, sizeof(cmpFormat),
-                              nullptr, 0, &br, nullptr);
-            ::CloseHandle(cmpH);
-        }
-    }
-
-    if (!ApplyEncryptedStateIfNeeded(dstAbs, srcAttrs)) {
-        return ::LayerMount::NtStatusFromWin32(::GetLastError());
+    const NTSTATUS layoutStatus = ApplyDirectoryLayout(dstAbs, srcAttrs);
+    if (!NT_SUCCESS(layoutStatus)) {
+        return layoutStatus;
     }
 
     // Copy security descriptor on the directory itself so inheritable
@@ -2038,7 +2169,7 @@ NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
     // Top-level regular file: copy directly.
     if (topAttrs != INVALID_FILE_ATTRIBUTES &&
         (topAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        return CopyFilePreservingMetadata(srcAbs, dstAbs, &config_);
+        return CopyFilePreservingMetadata(srcAbs, dstAbs, &config_, capabilities_);
     }
 
     // Top-level directory: ensure dst exists, then recurse.
@@ -2062,11 +2193,6 @@ NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
         const std::wstring childSrc = srcAbs + L"\\" + fd.cFileName;
         const std::wstring childDst = dstAbs + L"\\" + fd.cFileName;
 
-        // Capture child-copy status. Previously return values were dropped;
-        // a type conflict (file-over-dir) or I/O error on a single descendant
-        // left the tree in a partial state while the caller saw success. Now
-        // we propagate the first failure so HandleDirectoryRename (or any
-        // other caller) can tear down the half-built destination.
         NTSTATUS childStatus = STATUS_SUCCESS;
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             childStatus = CopyUpReparsePointEntry(childSrc, childDst,
@@ -2074,7 +2200,8 @@ NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
         } else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             childStatus = CopyTreePreservingMetadata(childSrc, childDst);
         } else {
-            childStatus = CopyFilePreservingMetadata(childSrc, childDst, &config_);
+            childStatus = CopyFilePreservingMetadata(childSrc, childDst, &config_,
+                                                     capabilities_);
         }
         if (!NT_SUCCESS(childStatus)) {
             walkStatus = childStatus;
@@ -2164,34 +2291,6 @@ bool CopyUp::CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle) {
         return false;
     }
     return SetFileTime(dstHandle, &creation, &access, &write) != FALSE;
-}
-
-NTSTATUS CopyUp::CopyFileData(HANDLE srcHandle, HANDLE dstHandle) {
-    BYTE buffer[kCopyBufferSize];
-    DWORD bytesRead, bytesWritten;
-
-    for (;;) {
-        if (!ReadFile(srcHandle, buffer, kCopyBufferSize, &bytesRead, nullptr)) {
-            return ::LayerMount::NtStatusFromWin32(GetLastError());
-        }
-        if (bytesRead == 0) {
-            break; // EOF
-        }
-        // Check BOTH the API-success bit AND a full-count write. WriteFile can
-        // succeed with bytesWritten < bytesRead on ENOSPC near the quota wall
-        // (write returns partial), on network volumes, and on some raw-device
-        // targets. A silent short write here previously would produce a
-        // truncated upper file committed atomically — data loss hidden by a
-        // "successful" copy-up.
-        if (!WriteFile(dstHandle, buffer, bytesRead, &bytesWritten, nullptr) ||
-            bytesWritten != bytesRead) {
-            DWORD err = ::GetLastError();
-            if (err == 0) err = ERROR_WRITE_FAULT; // short write w/ no error
-            return ::LayerMount::NtStatusFromWin32(err);
-        }
-    }
-
-    return STATUS_SUCCESS;
 }
 
 } // namespace LayerMount

@@ -262,9 +262,9 @@ typedef struct LM_FILE_INFO {
 #define LM_STREAM_NAME_MAX 296
 
 typedef struct LM_STREAM_INFO {
-    WCHAR  streamName[LM_STREAM_NAME_MAX];  /* 295 chars + NUL — fits any NTFS stream name */
+    WCHAR  streamName[LM_STREAM_NAME_MAX];
     UINT64 streamSize;                      /* logical end-of-file in bytes */
-    UINT64 allocationSize;                  /* on-disk allocation in bytes */
+    UINT64 allocationSize;                  /* streamSize rounded up to a 4 KiB multiple */
 } LM_STREAM_INFO;
 
 /* -------------------------------------------------------------------------
