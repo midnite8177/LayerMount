@@ -41,12 +41,13 @@ public:
         wchar_t devBuf[MAX_PATH]= {};
         SIZE_T  idReq = 0, devReq = 0;
 
+        constexpr BOOL persistent = FALSE;
         HRESULT hr = OnFreshThread([&] {
             return ::LayerMountVssCreateSnapshot(
-                mount.Get(), L"Z:\\does_not_exist", /*persistent*/ FALSE,
+                mount.Get(), L"Z:\\does_not_exist", persistent,
                 &snap,
-                idBuf, 64, &idReq,
-                devBuf, MAX_PATH, &devReq);
+                idBuf, std::size(idBuf), &idReq,
+                devBuf, std::size(devBuf), &devReq);
         });
         Assert::AreNotEqual<HRESULT>(S_OK, hr,
             L"CreateSnapshot on a nonexistent volume must fail");

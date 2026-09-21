@@ -17,15 +17,9 @@ void DenyDeleteChildInChildDirectories(const std::wstring& path) {
 }
 
 HRESULT CreateDirectoryForReadAndDeleteChild(LayerMountHolder& mount, PCWSTR relativePath,
-                                       LM_FILE_HANDLE* outHandle) {
-    LM_FILE_INFO info{};
-    return ::LayerMountCreateFile(mount.Get(), relativePath,
-                                  FILE_DIRECTORY_FILE,
-                                  GENERIC_READ | FILE_DELETE_CHILD,
-                                  FILE_ATTRIBUTE_DIRECTORY,
-                                  /*securityDescriptor*/ nullptr, 0u,
-                                  /*allocationSize*/ 0u, /*originatorPid*/ 0u,
-                                  outHandle, &info);
+                                             OpenedFile& out) {
+    return CreateOverlayFile(mount.Get(), relativePath, GENERIC_READ | FILE_DELETE_CHILD,
+                             FILE_DIRECTORY_FILE, FILE_ATTRIBUTE_DIRECTORY, out);
 }
 
 }
@@ -40,12 +34,12 @@ public:
         DenyDeleteChildInChildDirectories(parent);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        const HRESULT  hr = CreateDirectoryForReadAndDeleteChild(mount, L"\\denied\\newdir", &fh);
+        OpenedFile    created;
+        const HRESULT hr = CreateDirectoryForReadAndDeleteChild(mount, L"\\denied\\newdir", created);
         Assert::IsTrue(FAILED(hr), L"the directory create fails");
         Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED), hr,
                                   L"the directory create reports access denied");
-        Assert::IsNull(fh, L"the failed create returns no handle");
+        Assert::IsNull(created.handle, L"the failed create returns no handle");
 
         const std::wstring newDir = env.Upper() + L"\\denied\\newdir";
         const DWORD attrs = ::GetFileAttributesW(newDir.c_str());
@@ -64,10 +58,10 @@ public:
                        L"CreateDirectoryW makes the existing directory in the upper");
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        const HRESULT  hr = CreateDirectoryForReadAndDeleteChild(mount, L"\\denied\\existing", &fh);
+        OpenedFile    created;
+        const HRESULT hr = CreateDirectoryForReadAndDeleteChild(mount, L"\\denied\\existing", created);
         Assert::IsTrue(FAILED(hr), L"the directory create fails");
-        Assert::IsNull(fh, L"the failed create returns no handle");
+        Assert::IsNull(created.handle, L"the failed create returns no handle");
 
         const DWORD attrs = ::GetFileAttributesW(existing.c_str());
         Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES, attrs,

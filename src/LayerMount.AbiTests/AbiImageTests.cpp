@@ -27,11 +27,11 @@ public:
 
         const std::wstring imagePath  = env.Root() + L"\\out.lmnt";
         LM_IMAGE_HANDLE   img        = nullptr;
+        constexpr INT32   compressionLevel = 3;
+        const LM_IMAGE_PACK_OPTIONS* const noPackOptions = nullptr;
         HRESULT hr = ::LayerMountImagePack(
             mount.Get(), srcDir.c_str(), imagePath.c_str(),
-            /*compressionLevel*/ 3,
-            /*options*/ nullptr,
-            &img);
+            compressionLevel, noPackOptions, &img);
         Assert::AreEqual<HRESULT>(S_OK, hr, L"ImagePack");
         Assert::IsNotNull(img);
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountImageClose(img));
@@ -41,9 +41,10 @@ public:
 
         const std::wstring dstDir = env.Root() + L"\\dst";
         std::filesystem::create_directories(dstDir);
+        constexpr BOOL verifyChecksum = TRUE;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountImageUnpack(mount.Get(), imagePath.c_str(),
-                                 dstDir.c_str(), /*verifyChecksum*/ TRUE));
+                                 dstDir.c_str(), verifyChecksum));
 
         // Byte-compare the two files round-tripped.
         Assert::AreEqual<std::string>(
@@ -62,9 +63,11 @@ public:
 
         const std::wstring imagePath = env.Root() + L"\\broken.lmnt";
         LM_IMAGE_HANDLE   img       = nullptr;
+        constexpr INT32   compressionLevel = 1;
+        const LM_IMAGE_PACK_OPTIONS* const noPackOptions = nullptr;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountImagePack(mount.Get(), srcDir.c_str(),
-                               imagePath.c_str(), 1, nullptr, &img));
+                               imagePath.c_str(), compressionLevel, noPackOptions, &img));
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountImageClose(img));
 
         // Truncate the image on disk so the checksum fails.

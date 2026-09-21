@@ -55,15 +55,14 @@ public:
         LayerMountHolder mount = CreateLayerMount(env);
 
         std::filesystem::create_directory(env.Upper() + L"\\emptydir");
-        LM_FILE_HANDLE dh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile directory;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\emptydir",
-                GENERIC_READ | DELETE, FILE_DIRECTORY_FILE, 0u, &dh, &info));
+            OpenOverlayFile(mount.Get(), L"\\emptydir",
+                GENERIC_READ | DELETE, FILE_DIRECTORY_FILE, directory));
 
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountDeleteOpenFile(dh));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(dh));
+            ::LayerMountDeleteOpenFile(directory.handle));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(directory.handle));
 
         Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\emptydir"),
             L"Empty directory must be removed after LayerMountDeleteOpenFile");

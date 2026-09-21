@@ -17,18 +17,14 @@ constexpr HRESULT kHrObjectNameInvalid = HRESULT_FROM_NT(STATUS_OBJECT_NAME_INVA
 constexpr HRESULT kHrInvalidParameter = HRESULT_FROM_NT(STATUS_INVALID_PARAMETER);
 constexpr HRESULT kHrFileIsADirectory = HRESULT_FROM_NT(STATUS_FILE_IS_A_DIRECTORY);
 
-HRESULT CreateThroughEngine(LM_HANDLE mount, PCWSTR path,
-                            UINT32 access = GENERIC_READ | GENERIC_WRITE,
-                            UINT32 createOptions = 0u,
-                            UINT32 attrs = FILE_ATTRIBUTE_NORMAL) {
-    LM_FILE_HANDLE fh = nullptr;
-    LM_FILE_INFO   info{};
-    HRESULT hr = ::LayerMountCreateFile(mount, path,
-        createOptions, access, attrs,
-        /*sd*/ nullptr, /*sdBytes*/ 0u, /*allocationSize*/ 0u,
-        /*originatorPid*/ 0u, &fh, &info);
+HRESULT CreateThroughEngine(LM_HANDLE mount, PCWSTR path) {
+    constexpr UINT32 readWriteAccess = GENERIC_READ | GENERIC_WRITE;
+    constexpr UINT32 normalFile      = FILE_ATTRIBUTE_NORMAL;
+    OpenedFile opened;
+    HRESULT hr = CreateOverlayFile(mount, path, readWriteAccess, kNoCreateOptions,
+                                   normalFile, opened);
     if (SUCCEEDED(hr)) {
-        ::LayerMountCloseFile(fh);
+        ::LayerMountCloseFile(opened.handle);
     }
     return hr;
 }
@@ -138,26 +134,22 @@ public:
         TempLayerEnv env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Host first.
         Assert::AreEqual<HRESULT>(S_OK,
             CreateThroughEngine(mount.Get(), L"\\host.txt"));
 
-        // Stream via the engine.
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\host.txt:secret", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
+            CreateOverlayFile(mount.Get(), L"\\host.txt:secret",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
 
         const char payload[] = "stream-content";
         const UINT32 payloadLen = static_cast<UINT32>(sizeof(payload) - 1);
         UINT32 written = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, payload, 0, payloadLen,
-                FALSE, FALSE, &written, nullptr));
+            WriteFromStart(opened.handle, payload, payloadLen, &written, nullptr));
         Assert::AreEqual<UINT32>(payloadLen, written);
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         // Read back via raw Win32 to confirm the stream landed on the
         // upper-layer host file.
@@ -176,20 +168,19 @@ public:
             CreateThroughEngine(mount.Get(), L"\\host.txt"));
         WriteRawStream(env.Upper() + L"\\host.txt:already", "preset", 6);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\host.txt:already",
-                GENERIC_READ, 0u, 0u, &fh, &info));
+            OpenOverlayFile(mount.Get(), L"\\host.txt:already",
+                GENERIC_READ, kNoCreateOptions, opened));
 
         char buf[16] = {};
         UINT32 read = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountReadFile(fh, buf, 0, sizeof(buf), &read));
+            ReadFromStart(opened.handle, buf, sizeof(buf), &read));
         Assert::AreEqual<UINT32>(6u, read);
         Assert::IsTrue(std::memcmp(buf, "preset", 6) == 0,
             L"pre-existing stream content must read back");
-        ::LayerMountCloseFile(fh);
+        ::LayerMountCloseFile(opened.handle);
     }
 
     TEST_METHOD(CreateFile_StreamTypeSuffix_Accepted) {
@@ -213,19 +204,18 @@ public:
 
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\host.txt:hidden",
-                GENERIC_READ, 0u, 0u, &fh, &info));
+            OpenOverlayFile(mount.Get(), L"\\host.txt:hidden",
+                GENERIC_READ, kNoCreateOptions, opened));
 
         char buf[16] = {};
         UINT32 read = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountReadFile(fh, buf, 0, sizeof(buf), &read));
+            ReadFromStart(opened.handle, buf, sizeof(buf), &read));
         Assert::AreEqual<UINT32>(9u, read);
         Assert::IsTrue(std::memcmp(buf, "lower-ads", 9) == 0);
-        ::LayerMountCloseFile(fh);
+        ::LayerMountCloseFile(opened.handle);
 
         // Read-only opens against a lower-only host must NOT trigger
         // copy-up. The host must still live only in lower.
@@ -246,18 +236,16 @@ public:
 
         // Writable stream create on a lower-only host: forces a full
         // copy-up (never metacopy) so the lower ADS is preserved.
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\host.txt:new-stream", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
+            CreateOverlayFile(mount.Get(), L"\\host.txt:new-stream",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
         UINT32 addedWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, "added", 0, 5,
-                FALSE, FALSE, &addedWritten, nullptr));
+            WriteFromStart(opened.handle, "added", 5, &addedWritten, nullptr));
         Assert::AreEqual<UINT32>(5u, addedWritten);
-        ::LayerMountCloseFile(fh);
+        ::LayerMountCloseFile(opened.handle);
 
         // Upper now has the host with BOTH streams.
         DWORD upperAttrs = ::GetFileAttributesW(
@@ -286,12 +274,10 @@ public:
 
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE hostFh = nullptr;
-        LM_FILE_INFO   hostInfo{};
+        OpenedFile host;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\big.bin",
-                kAttributeOnlyAccess, 0u, 0u,
-                &hostFh, &hostInfo));
+            OpenOverlayFile(mount.Get(), L"\\big.bin",
+                kAttributeOnlyAccess, kNoCreateOptions, host));
 
         const std::wstring upperHost = env.Upper() + L"\\big.bin";
         Assert::IsTrue(std::filesystem::exists(upperHost),
@@ -301,21 +287,18 @@ public:
         // have been carried up yet (still a metacopy shell).
         Assert::IsFalse(StreamExistsOnDisk(upperHost + L":keep-me"),
             L":keep-me must not be on upper yet -- metacopy shell only");
-        ::LayerMountCloseFile(hostFh);
+        ::LayerMountCloseFile(host.handle);
 
-        LM_FILE_HANDLE streamFh = nullptr;
-        LM_FILE_INFO   streamInfo{};
+        OpenedFile userStream;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\big.bin:user-stream", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u,
-                &streamFh, &streamInfo));
+            CreateOverlayFile(mount.Get(), L"\\big.bin:user-stream",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, userStream));
         UINT32 userWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(streamFh, "USER-DATA", 0, 9,
-                FALSE, FALSE, &userWritten, nullptr));
+            WriteFromStart(userStream.handle, "USER-DATA", 9, &userWritten, nullptr));
         Assert::AreEqual<UINT32>(9u, userWritten);
-        ::LayerMountCloseFile(streamFh);
+        ::LayerMountCloseFile(userStream.handle);
 
         Assert::IsTrue(StreamExistsOnDisk(upperHost + L":keep-me"),
             L"the stream Create carries the lower ADS up; a later "
@@ -325,18 +308,15 @@ public:
         Assert::AreEqual<std::string>("USER-DATA",
             ReadRawStream(upperHost + L":user-stream"));
 
-        LM_FILE_HANDLE mainFh = nullptr;
-        LM_FILE_INFO   mainInfo{};
+        OpenedFile mainStream;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\big.bin",
-                GENERIC_READ | GENERIC_WRITE, 0u, 0u,
-                &mainFh, &mainInfo));
+            OpenOverlayFile(mount.Get(), L"\\big.bin",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, mainStream));
         UINT32 mainWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(mainFh, "MAIN", 0, 4,
-                FALSE, FALSE, &mainWritten, nullptr));
+            WriteFromStart(mainStream.handle, "MAIN", 4, &mainWritten, nullptr));
         Assert::AreEqual<UINT32>(4u, mainWritten);
-        ::LayerMountCloseFile(mainFh);
+        ::LayerMountCloseFile(mainStream.handle);
 
         Assert::AreEqual<std::string>("USER-DATA",
             ReadRawStream(upperHost + L":user-stream"),
@@ -358,21 +338,19 @@ public:
         // Open :a with FILE_OVERWRITE_IF semantics. A host adapter can
         // chain this into an Open followed by an Overwrite; this test
         // drives that sequence explicitly to mirror that flow.
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\host.txt:a",
-                GENERIC_READ | GENERIC_WRITE, 0u, 0u, &fh, &info));
+            OpenOverlayFile(mount.Get(), L"\\host.txt:a",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, opened));
+        constexpr UINT64 allocationSize = 0u;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOverwriteFile(fh, FILE_ATTRIBUTE_NORMAL,
-                /*replaceAttributes*/ FALSE, /*allocationSize*/ 0u,
-                nullptr));
+            OverwriteAddingAttributes(opened.handle, FILE_ATTRIBUTE_NORMAL,
+                                      allocationSize, nullptr));
         UINT32 tinyWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, "tiny", 0, 4,
-                FALSE, FALSE, &tinyWritten, nullptr));
+            WriteFromStart(opened.handle, "tiny", 4, &tinyWritten, nullptr));
         Assert::AreEqual<UINT32>(4u, tinyWritten);
-        ::LayerMountCloseFile(fh);
+        ::LayerMountCloseFile(opened.handle);
 
         // :a should now contain "tiny"; :b must be UNTOUCHED.
         Assert::AreEqual<std::string>("tiny",
@@ -423,17 +401,18 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             CreateThroughEngine(mount.Get(), L"\\host.txt"));
         WriteRawStream(env.Upper() + L"\\host.txt:s1", "one", 3);
+        constexpr BOOL replaceIfExists = FALSE;
 
         // Stream-qualified source.
         Assert::AreEqual<HRESULT>(kHrInvalidParameter,
             ::LayerMountRenameFile(mount.Get(),
-                L"\\host.txt:s1", L"\\host.txt:s2", FALSE),
+                L"\\host.txt:s1", L"\\host.txt:s2", replaceIfExists),
             L"rename with stream-qualified source must return INVALID_PARAMETER");
 
         // Stream-qualified destination.
         Assert::AreEqual<HRESULT>(kHrInvalidParameter,
             ::LayerMountRenameFile(mount.Get(),
-                L"\\host.txt", L"\\host.txt:streamname", FALSE),
+                L"\\host.txt", L"\\host.txt:streamname", replaceIfExists),
             L"rename with stream-qualified destination must return INVALID_PARAMETER");
     }
 
@@ -447,32 +426,31 @@ public:
         // Open the stream, then rebind its path through UpdateOpenFilePath
         // to simulate a host that just renamed `\host.txt -> \host2.txt`
         // and is walking its open-handle table.
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\host.txt:s1",
-                GENERIC_READ | GENERIC_WRITE, 0u, 0u, &fh, &info));
+            OpenOverlayFile(mount.Get(), L"\\host.txt:s1",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, opened));
 
         // Engine-level rename of the host file. (We close the stream
         // handle's underlying NT handle here by going through
         // UpdateOpenFilePath, which closes + marks for reopen, so the
         // rename below isn't blocked by a sharing conflict on s1.)
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountUpdateOpenFilePath(fh, L"\\host2.txt:s1"),
+            ::LayerMountUpdateOpenFilePath(opened.handle, L"\\host2.txt:s1"),
             L"UpdateOpenFilePath must accept a stream-qualified rebind");
+        constexpr BOOL replaceIfExists = FALSE;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountRenameFile(mount.Get(),
-                L"\\host.txt", L"\\host2.txt", FALSE),
+                L"\\host.txt", L"\\host2.txt", replaceIfExists),
             L"host rename must succeed even with an open stream handle");
 
         // After the rename + rebind, write to the open handle and confirm
         // the new physical path carries the content.
         UINT32 postWritten = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, "post", 0, 4,
-                FALSE, FALSE, &postWritten, nullptr));
+            WriteFromStart(opened.handle, "post", 4, &postWritten, nullptr));
         Assert::AreEqual<UINT32>(4u, postWritten);
-        ::LayerMountCloseFile(fh);
+        ::LayerMountCloseFile(opened.handle);
 
         Assert::AreEqual<std::string>("post",
             ReadRawStream(env.Upper() + L"\\host2.txt:s1"),
@@ -486,25 +464,21 @@ public:
         LayerMountHolder mount = CreateLayerMount(env);
 
         // Create a directory through the engine.
-        LM_FILE_HANDLE dh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile directory;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\subdir",
-                FILE_DIRECTORY_FILE,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_DIRECTORY,
-                nullptr, 0u, 0u, 0u, &dh, &info));
-        ::LayerMountCloseFile(dh);
+            CreateOverlayFile(mount.Get(), L"\\subdir",
+                GENERIC_READ | GENERIC_WRITE, FILE_DIRECTORY_FILE,
+                FILE_ATTRIBUTE_DIRECTORY, directory));
+        ::LayerMountCloseFile(directory.handle);
 
-        // CreateFile with a stream qualifier against a directory.
         Assert::AreEqual<HRESULT>(kHrFileIsADirectory,
             CreateThroughEngine(mount.Get(), L"\\subdir:s"),
             L"ADS on a directory must be rejected with STATUS_FILE_IS_A_DIRECTORY");
 
         // OpenFile on the same path takes the equivalent reject branch.
-        LM_FILE_HANDLE fh = nullptr;
-        HRESULT hrOpen = ::LayerMountOpenFile(mount.Get(), L"\\subdir:s",
-            GENERIC_READ, 0u, 0u, &fh, &info);
+        OpenedFile opened;
+        HRESULT hrOpen = OpenOverlayFile(mount.Get(), L"\\subdir:s",
+            GENERIC_READ, kNoCreateOptions, opened);
         Assert::AreEqual<HRESULT>(kHrFileIsADirectory, hrOpen,
             L"Open of ADS on a directory must also be rejected");
     }

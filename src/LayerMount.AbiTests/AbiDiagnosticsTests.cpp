@@ -18,18 +18,16 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountGetStats(mount.Get(), &before));
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\stats.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL,
-                nullptr, 0u, 0u, 0u, &fh, &info));
+            CreateOverlayFile(mount.Get(), L"\\stats.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
         UINT32 written = 0;
         LM_FILE_INFO postWrite{};
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, "hello", 0, 5, FALSE, FALSE,
-                               &written, &postWrite));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+            WriteFromStart(opened.handle, "hello", 5, &written, &postWrite));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         LM_STATS after{};
         Assert::AreEqual<HRESULT>(S_OK,
@@ -45,17 +43,17 @@ public:
         TempLayerEnv  env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
+        constexpr BOOL enable = TRUE;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountProcessTrackerEnable(mount.Get(), TRUE));
+            ::LayerMountProcessTrackerEnable(mount.Get(), enable));
 
         // Touch a file so the tracker has at least one event.
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\tracked.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL,
-                nullptr, 0u, 0u, 0u, &fh, &info));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+            CreateOverlayFile(mount.Get(), L"\\tracked.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         // Sizing call.
         SIZE_T required = 0;
@@ -86,8 +84,9 @@ public:
 
         // ExportCsv requires the tracker to be enabled; without it the ABI
         // returns E_ILLEGAL_METHOD_CALL.
+        constexpr BOOL enable = TRUE;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountProcessTrackerEnable(mount.Get(), TRUE));
+            ::LayerMountProcessTrackerEnable(mount.Get(), enable));
 
         SIZE_T required = 0;
         Assert::AreEqual<HRESULT>(S_OK,
