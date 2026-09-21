@@ -55,9 +55,10 @@ public:
         LayerMountHolder mount = CreateLayerMount(env);
         CreateJunction(env, mount, L"\\probe", env.Root() + L"\\target");
 
+        constexpr SIZE_T sizingProbeBytes = 0;
         SIZE_T required = 0;
         HRESULT hr = ::LayerMountGetReparsePoint(
-            mount.Get(), L"\\probe", nullptr, 0, &required);
+            mount.Get(), L"\\probe", nullptr, sizingProbeBytes, &required);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"A null-buffer probe must report the size, not fail");
         Assert::IsTrue(required > 0,
@@ -69,9 +70,11 @@ public:
         LayerMountHolder mount = CreateLayerMount(env);
         CreateJunction(env, mount, L"\\short", env.Root() + L"\\target");
 
+        constexpr SIZE_T sizingProbeBytes = 0;
         SIZE_T required = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountGetReparsePoint(mount.Get(), L"\\short", nullptr, 0, &required));
+            ::LayerMountGetReparsePoint(mount.Get(), L"\\short", nullptr,
+                                        sizingProbeBytes, &required));
         Assert::IsTrue(required > 1);
 
         std::vector<BYTE> tooSmall(required - 1);
@@ -89,9 +92,11 @@ public:
         LayerMountHolder mount = CreateLayerMount(env);
         CreateJunction(env, mount, L"\\oversized", env.Root() + L"\\target");
 
+        constexpr SIZE_T sizingProbeBytes = 0;
         SIZE_T required = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountGetReparsePoint(mount.Get(), L"\\oversized", nullptr, 0, &required));
+            ::LayerMountGetReparsePoint(mount.Get(), L"\\oversized", nullptr,
+                                        sizingProbeBytes, &required));
         Assert::IsTrue(required < MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
 
         std::vector<BYTE> ceiling(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);

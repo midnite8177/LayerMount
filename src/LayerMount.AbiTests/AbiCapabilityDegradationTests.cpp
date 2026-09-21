@@ -140,9 +140,9 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountSetEventCallback(mount.Get(), &SinkEvent, &sink));
 
-        // Rename the reparse-source directory.
+        constexpr BOOL replaceIfExists = FALSE;
         HRESULT hr = ::LayerMountRenameFile(
-            mount.Get(), L"\\link", L"\\link-renamed", /*replaceIfExists*/ FALSE);
+            mount.Get(), L"\\link", L"\\link-renamed", replaceIfExists);
         // Clear callback before asserting (covers both success and failure).
         (void)::LayerMountSetEventCallback(mount.Get(), nullptr, nullptr);
 

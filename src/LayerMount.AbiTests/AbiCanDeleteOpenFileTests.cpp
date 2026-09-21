@@ -11,15 +11,12 @@ namespace LayerMountAbiTests {
 TEST_CLASS(AbiCanDeleteOpenFileTests) {
 public:
     static LM_FILE_HANDLE OpenDir(LM_HANDLE mount, const wchar_t* path) {
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
-        const HRESULT hr = ::LayerMountOpenFile(mount, path,
-            /*grantedAccess*/ GENERIC_READ | DELETE,
-            /*createOptions*/ FILE_DIRECTORY_FILE,
-            /*originatorPid*/ 0u, &fh, &info);
+        OpenedFile opened;
+        const HRESULT hr = OpenOverlayFile(mount, path, GENERIC_READ | DELETE,
+                                           FILE_DIRECTORY_FILE, opened);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"LayerMountOpenFile on directory should succeed");
-        return fh;
+        return opened.handle;
     }
 
     TEST_METHOD(EmptyDirectory_CanDelete_ReturnsSOk) {

@@ -24,8 +24,10 @@ public:
         CreatePlainFile(mount, L"\\probe.txt");
 
         SIZE_T required = 0;
+        constexpr SIZE_T sizingProbeBytes = 0;
         HRESULT hr = ::LayerMountGetSecurity(
-            mount.Get(), L"\\probe.txt", kFullSecInfo, nullptr, nullptr, 0, &required);
+            mount.Get(), L"\\probe.txt", kFullSecInfo, nullptr, nullptr,
+            sizingProbeBytes, &required);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"A null-buffer probe must report the size, not fail");
         Assert::IsTrue(required > 0,
@@ -119,9 +121,12 @@ public:
         LayerMountHolder mount = CreateLayerMount(env);
         CreatePlainFile(mount, L"\\zero.txt");
 
+        constexpr UINT32 noSecurityInformation = 0u;
+        constexpr SIZE_T sizingProbeBytes      = 0;
         SIZE_T required = 0xDEADBEEF;
         HRESULT hr = ::LayerMountGetSecurity(
-            mount.Get(), L"\\zero.txt", 0u, nullptr, nullptr, 0, &required);
+            mount.Get(), L"\\zero.txt", noSecurityInformation, nullptr, nullptr,
+            sizingProbeBytes, &required);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"A zero request is not an error");
         Assert::AreEqual<SIZE_T>(0, required,
@@ -185,14 +190,13 @@ public:
 
 private:
     static void CreatePlainFile(LayerMountHolder& mount, PCWSTR path) {
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), path, 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info),
+            CreateOverlayFile(mount.Get(), path,
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened),
             L"setup: LayerMountCreateFile");
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
     }
 
     static void SetDaclFromSddl(const std::wstring& path, PCWSTR sddl) {
@@ -209,9 +213,11 @@ private:
 
     static SIZE_T ProbeSecuritySize(
         LayerMountHolder& mount, PCWSTR path, UINT32 secInfo) {
+        constexpr SIZE_T sizingProbeBytes = 0;
         SIZE_T required = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountGetSecurity(mount.Get(), path, secInfo, nullptr, nullptr, 0, &required));
+            ::LayerMountGetSecurity(mount.Get(), path, secInfo, nullptr, nullptr,
+                                    sizingProbeBytes, &required));
         Assert::IsTrue(required > 0);
         return required;
     }

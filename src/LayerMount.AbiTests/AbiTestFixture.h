@@ -107,12 +107,98 @@ inline std::string ReadAllBytes(const std::wstring& path) {
                        std::istreambuf_iterator<char>());
 }
 
+constexpr DWORD kCurrentProcessOriginator = 0u;
+
+constexpr UINT32 kNoCreateOptions = 0u;
+
+constexpr UINT32 kKeepStoredAttributes = INVALID_FILE_ATTRIBUTES;
+constexpr UINT64 kKeepStoredTime       = 0u;
+constexpr UINT64 kKeepStoredSize       = UINT64_MAX;
+
+struct OpenedFile {
+    LM_FILE_HANDLE handle = nullptr;
+    LM_FILE_INFO   info{};
+};
+
+inline HRESULT OpenOverlayFileAs(LM_HANDLE mount, PCWSTR relativePath,
+                                 UINT32 grantedAccess, UINT32 createOptions,
+                                 DWORD originatorPid, OpenedFile& out) {
+    return ::LayerMountOpenFile(mount, relativePath, grantedAccess, createOptions,
+                                originatorPid, &out.handle, &out.info);
+}
+
+inline HRESULT OpenOverlayFile(LM_HANDLE mount, PCWSTR relativePath,
+                               UINT32 grantedAccess, UINT32 createOptions,
+                               OpenedFile& out) {
+    return OpenOverlayFileAs(mount, relativePath, grantedAccess, createOptions,
+                             kCurrentProcessOriginator, out);
+}
+
+inline HRESULT CreateOverlayFile(LM_HANDLE mount, PCWSTR relativePath,
+                                 UINT32 grantedAccess, UINT32 createOptions,
+                                 UINT32 fileAttributes, OpenedFile& out) {
+    const BYTE*      securityDescriptor      = nullptr;
+    constexpr SIZE_T securityDescriptorBytes = 0u;
+    constexpr UINT64 allocationSize          = 0u;
+    return ::LayerMountCreateFile(mount, relativePath, createOptions, grantedAccess,
+                                  fileAttributes, securityDescriptor,
+                                  securityDescriptorBytes, allocationSize,
+                                  kCurrentProcessOriginator, &out.handle, &out.info);
+}
+
+inline HRESULT ReadFromStart(LM_FILE_HANDLE fh, void* buffer, UINT32 length,
+                             UINT32* outCount) {
+    constexpr UINT64 offset = 0u;
+    return ::LayerMountReadFile(fh, buffer, offset, length, outCount);
+}
+
+inline HRESULT WriteFromStart(LM_FILE_HANDLE fh, const void* buffer, UINT32 length,
+                              UINT32* outCount, LM_FILE_INFO* outInfo) {
+    constexpr UINT64 offset        = 0u;
+    constexpr BOOL   writeToEnd    = FALSE;
+    constexpr BOOL   constrainedIo = FALSE;
+    return ::LayerMountWriteFile(fh, buffer, offset, length, writeToEnd, constrainedIo,
+                                 outCount, outInfo);
+}
+
+inline HRESULT OverwriteAddingAttributes(LM_FILE_HANDLE fh, UINT32 fileAttributes,
+                                         UINT64 allocationSize, LM_FILE_INFO* outInfo) {
+    constexpr BOOL replaceAttributes = FALSE;
+    return ::LayerMountOverwriteFile(fh, fileAttributes, replaceAttributes,
+                                     allocationSize, outInfo);
+}
+
+// Each default is the value LayerMountSetFileInfo reads as "keep the stored value".
+struct FileInfoChange {
+    UINT32 fileAttributes = kKeepStoredAttributes;
+    UINT64 creationTime   = kKeepStoredTime;
+    UINT64 lastAccessTime = kKeepStoredTime;
+    UINT64 lastWriteTime  = kKeepStoredTime;
+    UINT64 changeTime     = kKeepStoredTime;
+    UINT64 allocationSize = kKeepStoredSize;
+    UINT64 fileSize       = kKeepStoredSize;
+};
+
+inline HRESULT SetFileInfo(LM_FILE_HANDLE fh, const FileInfoChange& change,
+                           LM_FILE_INFO* outInfo) {
+    return ::LayerMountSetFileInfo(
+        fh,
+        change.fileAttributes,
+        change.creationTime,
+        change.lastAccessTime,
+        change.lastWriteTime,
+        change.changeTime,
+        change.allocationSize,
+        change.fileSize,
+        outInfo);
+}
+
 // Read the first 64 bytes of `fh` through the ABI and return them; the
 // read's HRESULT lands in *outHr.
 inline std::string ReadThroughHandle(LM_FILE_HANDLE fh, HRESULT* outHr) {
     char   buffer[64] = {};
     UINT32 transferred = 0;
-    *outHr = ::LayerMountReadFile(fh, buffer, 0, sizeof(buffer), &transferred);
+    *outHr = ReadFromStart(fh, buffer, sizeof(buffer), &transferred);
     return std::string(buffer, transferred);
 }
 
@@ -300,40 +386,26 @@ inline bool IsFileNotFoundHr(HRESULT hr) noexcept {
 inline LM_FILE_HANDLE OpenWithAccess(LM_HANDLE mount,
                                      const wchar_t* relativePath,
                                      UINT32 grantedAccess) {
-    LM_FILE_HANDLE fh = nullptr;
-    LM_FILE_INFO   info{};
+    OpenedFile opened;
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountOpenFile(mount, relativePath, grantedAccess, 0u, 0u, &fh, &info));
-    return fh;
+        OpenOverlayFile(mount, relativePath, grantedAccess, kNoCreateOptions, opened));
+    return opened.handle;
 }
 
 inline HRESULT SetFileSize(LM_FILE_HANDLE fh, UINT64 size, LM_FILE_INFO* outInfo) {
-    return ::LayerMountSetFileInfo(
-        fh,
-        INVALID_FILE_ATTRIBUTES,
-        /*creationTime*/   0u,
-        /*lastAccessTime*/ 0u,
-        /*lastWriteTime*/  0u,
-        /*changeTime*/     0u,
-        /*allocationSize*/ UINT64_MAX,
-        /*fileSize*/       size,
-        outInfo);
+    FileInfoChange change;
+    change.fileSize = size;
+    return SetFileInfo(fh, change, outInfo);
 }
 
 // Sets the last access time and the last write time; a zero time keeps
 // the stored value, as the ABI defines.
 inline HRESULT SetFileTimes(LM_FILE_HANDLE fh, UINT64 lastAccessTime, UINT64 lastWriteTime,
                             LM_FILE_INFO* outInfo) {
-    return ::LayerMountSetFileInfo(
-        fh,
-        INVALID_FILE_ATTRIBUTES,
-        /*creationTime*/   0u,
-        lastAccessTime,
-        lastWriteTime,
-        /*changeTime*/     0u,
-        /*allocationSize*/ UINT64_MAX,
-        /*fileSize*/       UINT64_MAX,
-        outInfo);
+    FileInfoChange change;
+    change.lastAccessTime = lastAccessTime;
+    change.lastWriteTime  = lastWriteTime;
+    return SetFileInfo(fh, change, outInfo);
 }
 
 // The test fails with `message` unless a read open of `relativePath`
@@ -341,10 +413,9 @@ inline HRESULT SetFileTimes(LM_FILE_HANDLE fh, UINT64 lastAccessTime, UINT64 las
 inline void AssertOpenFailsNotFound(LM_HANDLE mount,
                                     const wchar_t* relativePath,
                                     const wchar_t* message) {
-    LM_FILE_HANDLE fh = nullptr;
-    LM_FILE_INFO   info{};
-    const HRESULT hr = ::LayerMountOpenFile(
-        mount, relativePath, GENERIC_READ, 0u, 0u, &fh, &info);
+    OpenedFile opened;
+    const HRESULT hr = OpenOverlayFile(
+        mount, relativePath, GENERIC_READ, kNoCreateOptions, opened);
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
         IsFileNotFoundHr(hr), message);
 }

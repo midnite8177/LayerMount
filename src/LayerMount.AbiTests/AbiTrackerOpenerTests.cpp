@@ -54,8 +54,9 @@ std::wstring WriteAllowSystemDenyOpenerDeleteRules(const TempLayerEnv& env) {
 LayerMountHolder CreateTrackedMount(const TempLayerEnv& env,
                                     const std::wstring& rulesPath) {
     LayerMountHolder mount = CreateLayerMount(env);
+    constexpr BOOL enable = TRUE;
     Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountProcessTrackerEnable(mount.Get(), TRUE));
+        ::LayerMountProcessTrackerEnable(mount.Get(), enable));
     Assert::AreEqual<HRESULT>(S_OK,
         ::LayerMountProcessTrackerSetRules(mount.Get(), rulesPath.c_str()),
         L"the rule set loads");
@@ -72,22 +73,20 @@ public:
         LayerMountHolder mount =
             CreateTrackedMount(env, WriteAllowOpenerDenyOthersRules(env));
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\tracked.txt", GENERIC_READ,
-                                 /*createOptions*/ 0u, /*originatorPid*/ 0u,
-                                 &fh, &info),
+            OpenOverlayFile(mount.Get(), L"\\tracked.txt", GENERIC_READ,
+                            kNoCreateOptions, opened),
             L"the open by the allowed process succeeds");
 
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadThroughHandle(fh, &hrRead);
+        const std::string bytes = ReadThroughHandle(opened.handle, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead,
             L"the engine checks the read against the opener, so it succeeds");
         Assert::AreEqual(std::string("opener bytes"), bytes,
             L"the read returns the file's bytes");
 
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
     }
 
     TEST_METHOD(RulesDenyOpenerRead_Open_FailsWithAccessDenied) {
@@ -96,14 +95,12 @@ public:
         LayerMountHolder mount =
             CreateTrackedMount(env, WriteDenyOpenerReadRules(env));
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED),
-            ::LayerMountOpenFile(mount.Get(), L"\\tracked.txt", GENERIC_READ,
-                                 /*createOptions*/ 0u, /*originatorPid*/ 0u,
-                                 &fh, &info),
+            OpenOverlayFile(mount.Get(), L"\\tracked.txt", GENERIC_READ,
+                            kNoCreateOptions, opened),
             L"the rule denies the open itself");
-        Assert::IsNull(fh, L"the denied open returns no handle");
+        Assert::IsNull(opened.handle, L"the denied open returns no handle");
     }
 
     TEST_METHOD(RulesDenySystemProcess_ReadOnOpenedHandle_ReturnsBytes) {
@@ -112,22 +109,20 @@ public:
         LayerMountHolder mount =
             CreateTrackedMount(env, WriteDenySystemAndUnknownProcessRules(env));
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\tracked.txt", GENERIC_READ,
-                                 /*createOptions*/ 0u, /*originatorPid*/ 0u,
-                                 &fh, &info),
+            OpenOverlayFile(mount.Get(), L"\\tracked.txt", GENERIC_READ,
+                            kNoCreateOptions, opened),
             L"the open by this process passes the catch-all rule");
 
         HRESULT hrRead = E_FAIL;
-        const std::string bytes = ReadThroughHandle(fh, &hrRead);
+        const std::string bytes = ReadThroughHandle(opened.handle, &hrRead);
         Assert::AreEqual<HRESULT>(S_OK, hrRead,
             L"a rule that denies the system process does not fail the read");
         Assert::AreEqual(std::string("opener bytes"), bytes,
             L"the read returns the file's bytes");
 
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
     }
 
     TEST_METHOD(RulesDenyOpenerDelete_CanDeleteOnHandleOpenedBySystem_Succeeds) {
@@ -137,27 +132,24 @@ public:
             CreateTrackedMount(env, WriteAllowSystemDenyOpenerDeleteRules(env));
         constexpr DWORD systemPid = 4;
 
-        LM_FILE_HANDLE bySystem = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile bySystem;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\tracked.txt", DELETE,
-                                 /*createOptions*/ 0u, systemPid,
-                                 &bySystem, &info),
+            OpenOverlayFileAs(mount.Get(), L"\\tracked.txt", DELETE, kNoCreateOptions,
+                              systemPid, bySystem),
             L"the open by the system process passes its rule");
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCanDeleteOpenFile(bySystem),
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCanDeleteOpenFile(bySystem.handle),
             L"the delete check uses the opener, not the process that calls it");
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(bySystem));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(bySystem.handle));
 
-        LM_FILE_HANDLE byThisProcess = nullptr;
+        OpenedFile byThisProcess;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\tracked.txt", DELETE,
-                                 /*createOptions*/ 0u, /*originatorPid*/ 0u,
-                                 &byThisProcess, &info),
+            OpenOverlayFile(mount.Get(), L"\\tracked.txt", DELETE, kNoCreateOptions,
+                            byThisProcess),
             L"the open by this process passes; only its delete is denied");
         Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED),
-            ::LayerMountCanDeleteOpenFile(byThisProcess),
+            ::LayerMountCanDeleteOpenFile(byThisProcess.handle),
             L"the rule denies the delete for the opener");
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(byThisProcess));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(byThisProcess.handle));
     }
 };
 

@@ -68,7 +68,7 @@ public:
             wchar_t  tmp[64] = {};
             SIZE_T   req     = 42;
             HRESULT  hr      =
-                ::LayerMountGetLastErrorMessage(hrA, tmp, 64, &req);
+                ::LayerMountGetLastErrorMessage(hrA, tmp, std::size(tmp), &req);
             hrB        = hr;
             requiredB  = req;
         });
@@ -194,7 +194,7 @@ public:
     TEST_METHOD(LayerMountGetLastErrorMessage_NullRequired_ReturnsEPointer) {
         wchar_t buf[16] = {};
         Assert::AreEqual<HRESULT>(E_POINTER,
-            ::LayerMountGetLastErrorMessage(S_OK, buf, 16, nullptr));
+            ::LayerMountGetLastErrorMessage(S_OK, buf, std::size(buf), nullptr));
     }
 
     TEST_METHOD(LayerMountResolvePath_NullHandle_ReturnsEHandle) {

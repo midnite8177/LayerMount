@@ -14,40 +14,30 @@ public:
         LayerMountHolder  mount = CreateLayerMount(env);
 
         const wchar_t* path      = L"\\hello.txt";
-        LM_FILE_HANDLE fh       = nullptr;
-        LM_FILE_INFO   info{};
-        HRESULT hr = ::LayerMountCreateFile(
-            mount.Get(), path,
-            /*createOptions*/ 0u,
-            /*grantedAccess*/ GENERIC_READ | GENERIC_WRITE,
-            /*fileAttributes*/ FILE_ATTRIBUTE_NORMAL,
-            /*securityDescriptor*/ nullptr, 0u,
-            /*allocationSize*/ 0u,
-            /*originatorPid*/ 0u,
-            &fh, &info);
+        OpenedFile     opened;
+        HRESULT hr = CreateOverlayFile(
+            mount.Get(), path, GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+            FILE_ATTRIBUTE_NORMAL, opened);
         Assert::AreEqual<HRESULT>(S_OK, hr, L"LayerMountCreateFile");
-        Assert::IsNotNull(fh, L"file handle must be non-null");
+        Assert::IsNotNull(opened.handle, L"file handle must be non-null");
 
         const char     payload[] = "hello overlay";
         const UINT32   payloadLen = static_cast<UINT32>(sizeof(payload) - 1);
         UINT32         written    = 0;
         LM_FILE_INFO  postWrite{};
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, payload, /*offset*/ 0, payloadLen,
-                               /*writeToEnd*/ FALSE, /*constrainedIo*/ FALSE,
-                               &written, &postWrite));
+            WriteFromStart(opened.handle, payload, payloadLen, &written, &postWrite));
         Assert::AreEqual<UINT32>(payloadLen, written);
 
         char     readBuf[32] = {};
         UINT32   readCount   = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountReadFile(fh, readBuf, /*offset*/ 0, sizeof(readBuf),
-                              &readCount));
+            ReadFromStart(opened.handle, readBuf, sizeof(readBuf), &readCount));
         Assert::AreEqual<UINT32>(payloadLen, readCount);
         Assert::IsTrue(std::memcmp(readBuf, payload, payloadLen) == 0,
                        L"Readback must match writeback byte-for-byte");
 
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         LM_RESOLVED_PATH rp{};
         std::vector<wchar_t> absBuf(MAX_PATH);
@@ -62,16 +52,13 @@ public:
         TempLayerEnv   env(0);
         LayerMountHolder  mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh   = nullptr;
-        LM_FILE_INFO   info{};
-        HRESULT hr = ::LayerMountOpenFile(
-            mount.Get(), L"\\nope.txt",
-            /*grantedAccess*/ GENERIC_READ, /*createOptions*/ 0u,
-            /*originatorPid*/ 0u, &fh, &info);
+        OpenedFile opened;
+        HRESULT hr = OpenOverlayFile(
+            mount.Get(), L"\\nope.txt", GENERIC_READ, kNoCreateOptions, opened);
         Assert::IsTrue(IsFileNotFoundHr(hr),
             L"An open of a non-existent file must surface as ERROR_FILE_NOT_FOUND "
             L"(Win32 or NT-status encoding)");
-        Assert::IsNull(fh, L"out handle must remain null on failure");
+        Assert::IsNull(opened.handle, L"out handle must remain null on failure");
     }
 
     TEST_METHOD(DeleteFile_AfterCreate_RemovesFile) {
@@ -80,23 +67,20 @@ public:
 
         const wchar_t* path = L"\\gone.txt";
         {
-            LM_FILE_HANDLE fh = nullptr;
-            LM_FILE_INFO   info{};
+            OpenedFile created;
             Assert::AreEqual<HRESULT>(S_OK,
-                ::LayerMountCreateFile(mount.Get(), path, 0u,
-                    GENERIC_READ | GENERIC_WRITE | DELETE,
-                    FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u,
-                    &fh, &info));
-            Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+                CreateOverlayFile(mount.Get(), path,
+                    GENERIC_READ | GENERIC_WRITE | DELETE, kNoCreateOptions,
+                    FILE_ATTRIBUTE_NORMAL, created));
+            Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(created.handle));
         }
 
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountDeleteFile(mount.Get(), path));
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
-        HRESULT hrOpen = ::LayerMountOpenFile(
-            mount.Get(), path, GENERIC_READ, 0u, 0u, &fh, &info);
+        OpenedFile opened;
+        HRESULT hrOpen = OpenOverlayFile(
+            mount.Get(), path, GENERIC_READ, kNoCreateOptions, opened);
         Assert::IsTrue(IsFileNotFoundHr(hrOpen),
             L"Opening a deleted file must surface as FileNotFound");
     }
@@ -105,23 +89,22 @@ public:
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fhA = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile created;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\a.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE | DELETE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fhA, &info));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fhA));
+            CreateOverlayFile(mount.Get(), L"\\a.txt",
+                GENERIC_READ | GENERIC_WRITE | DELETE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, created));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(created.handle));
 
+        constexpr BOOL replaceIfExists = FALSE;
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountRenameFile(mount.Get(),
-                L"\\a.txt", L"\\b.txt", FALSE));
+                L"\\a.txt", L"\\b.txt", replaceIfExists));
 
-        LM_FILE_HANDLE fhB = nullptr;
+        OpenedFile renamed;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\b.txt",
-                GENERIC_READ | GENERIC_WRITE | DELETE,
-                0u, 0u, &fhB, &info));
+            OpenOverlayFile(mount.Get(), L"\\b.txt",
+                GENERIC_READ | GENERIC_WRITE | DELETE, kNoCreateOptions, renamed));
 
         const std::wstring upperPath = env.Upper() + L"\\b.txt";
         HANDLE killHandle = ::CreateFileW(
@@ -144,21 +127,14 @@ public:
                                           &disp, sizeof(disp)) != FALSE,
             L"mark b.txt DELETE_PENDING");
 
-        LM_FILE_INFO postSet{};
-        HRESULT hr = ::LayerMountSetFileInfo(
-            fhB,
-            FILE_ATTRIBUTE_NORMAL,
-            /*creationTime*/   0,
-            /*lastAccessTime*/ 0,
-            /*lastWriteTime*/  0,
-            /*changeTime*/     0,
-            /*allocationSize*/ UINT64_MAX,
-            /*fileSize*/       UINT64_MAX,
-            &postSet);
+        FileInfoChange setNormal;
+        setNormal.fileAttributes = FILE_ATTRIBUTE_NORMAL;
+        LM_FILE_INFO   postSet{};
+        HRESULT hr = SetFileInfo(renamed.handle, setNormal, &postSet);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"SetFileInfo through an open handle on a delete-pending file");
 
-        ::LayerMountCloseFile(fhB);
+        ::LayerMountCloseFile(renamed.handle);
         ::CloseHandle(killHandle);
     }
 
@@ -169,79 +145,72 @@ public:
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fhSeed = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile seed;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\target.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE | DELETE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fhSeed, &info));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fhSeed));
+            CreateOverlayFile(mount.Get(), L"\\target.txt",
+                GENERIC_READ | GENERIC_WRITE | DELETE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, seed));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(seed.handle));
 
-        LM_FILE_HANDLE fhDel = nullptr;
+        OpenedFile deleteOnly;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\target.txt",
-                DELETE, 0u, 0u, &fhDel, &info));
+            OpenOverlayFile(mount.Get(), L"\\target.txt",
+                DELETE, kNoCreateOptions, deleteOnly));
 
         const UINT64 nonZeroLastWriteTime = 132000000000000000ULL;
         LM_FILE_INFO postSet{};
-        HRESULT hr = SetFileTimes(fhDel, 0u, nonZeroLastWriteTime, &postSet);
+        HRESULT hr = SetFileTimes(deleteOnly.handle, 0u, nonZeroLastWriteTime, &postSet);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"SetFileInfo timestamps through a DELETE-only handle");
 
-        ::LayerMountCloseFile(fhDel);
+        ::LayerMountCloseFile(deleteOnly.handle);
     }
 
     TEST_METHOD(Overwrite_OnDeleteOnlyHandle_Truncates) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fhSeed = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile seed;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\overwrite.bin", 0u,
-                GENERIC_READ | GENERIC_WRITE | DELETE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fhSeed, &info));
+            CreateOverlayFile(mount.Get(), L"\\overwrite.bin",
+                GENERIC_READ | GENERIC_WRITE | DELETE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, seed));
 
         const char payload[] = "before-overwrite";
         UINT32 written = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fhSeed, payload, 0,
-                                  static_cast<UINT32>(sizeof(payload) - 1),
-                                  FALSE, FALSE, &written, nullptr));
+            WriteFromStart(seed.handle, payload, static_cast<UINT32>(sizeof(payload) - 1),
+                           &written, nullptr));
         Assert::AreEqual<UINT32>(static_cast<UINT32>(sizeof(payload) - 1), written);
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fhSeed));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(seed.handle));
 
-        LM_FILE_HANDLE fhDel = nullptr;
+        OpenedFile deleteOnly;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountOpenFile(mount.Get(), L"\\overwrite.bin",
-                DELETE, 0u, 0u, &fhDel, &info));
+            OpenOverlayFile(mount.Get(), L"\\overwrite.bin",
+                DELETE, kNoCreateOptions, deleteOnly));
 
-        LM_FILE_INFO postOverwrite{};
-        HRESULT hr = ::LayerMountOverwriteFile(
-            fhDel,
-            /*fileAttributes*/   FILE_ATTRIBUTE_NORMAL,
-            /*replaceAttributes*/ FALSE,
-            /*allocationSize*/   4096u,
-            &postOverwrite);
+        constexpr UINT64 allocationSize = 4096u;
+        LM_FILE_INFO     postOverwrite{};
+        HRESULT hr = OverwriteAddingAttributes(deleteOnly.handle, FILE_ATTRIBUTE_NORMAL,
+                                               allocationSize, &postOverwrite);
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"Overwrite through a handle without FILE_WRITE_DATA");
         Assert::AreEqual<UINT64>(0u, postOverwrite.fileSize,
             L"Overwrite must truncate the file");
 
-        ::LayerMountCloseFile(fhDel);
+        ::LayerMountCloseFile(deleteOnly.handle);
     }
 
     TEST_METHOD(EnumerateStreams_FileWithNoAds_ReturnsEmpty) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\plain.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+            CreateOverlayFile(mount.Get(), L"\\plain.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         UINT32 count = 0xDEADBEEF;
         Assert::AreEqual<HRESULT>(S_OK,
@@ -267,13 +236,12 @@ public:
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\host.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+            CreateOverlayFile(mount.Get(), L"\\host.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         const std::wstring upper = env.Upper() + L"\\host.txt";
         WriteRawStream(upper + L":secret",  "hush",   4);
@@ -318,13 +286,12 @@ public:
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\host.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+            CreateOverlayFile(mount.Get(), L"\\host.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         const std::wstring upper = env.Upper() + L"\\host.txt";
         const std::vector<char> onePage(4096, 'x');
@@ -364,13 +331,12 @@ public:
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\multi.txt", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+            CreateOverlayFile(mount.Get(), L"\\multi.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
 
         const std::wstring upper = env.Upper() + L"\\multi.txt";
         for (const wchar_t* s : { L":a", L":b", L":c" }) {

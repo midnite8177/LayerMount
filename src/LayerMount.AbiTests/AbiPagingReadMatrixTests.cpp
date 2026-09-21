@@ -186,8 +186,13 @@ public:
     FileHandleHolder(const FileHandleHolder&)            = delete;
     FileHandleHolder& operator=(const FileHandleHolder&) = delete;
 
-    LM_FILE_HANDLE  Get() const noexcept { return handle_; }
-    LM_FILE_HANDLE* AddressOf() noexcept { return &handle_; }
+    LM_FILE_HANDLE Get() const noexcept { return handle_; }
+
+    // Takes ownership of `handle` and closes the handle held before it.
+    void Adopt(LM_FILE_HANDLE handle) noexcept {
+        Reset();
+        handle_ = handle;
+    }
 
     void Reset() noexcept {
         if (handle_ != nullptr) {
@@ -294,26 +299,19 @@ void StageBeforeMount(const TempLayerEnv& env, Origin origin) {
 
 void CreateThroughMount(LM_HANDLE mount, const std::wstring& overlayPath,
                         const std::string& bytes) {
+    OpenedFile       created;
+    const HRESULT    hr = CreateOverlayFile(mount, overlayPath.c_str(),
+                                            GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                                            FILE_ATTRIBUTE_NORMAL, created);
     FileHandleHolder fh;
-    LM_FILE_INFO     info{};
-    Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountCreateFile(mount, overlayPath.c_str(),
-            /*createOptions*/ 0u,
-            /*grantedAccess*/ GENERIC_READ | GENERIC_WRITE,
-            /*fileAttributes*/ FILE_ATTRIBUTE_NORMAL,
-            /*securityDescriptor*/ nullptr, 0u,
-            /*allocationSize*/ 0u,
-            /*originatorPid*/ 0u,
-            fh.AddressOf(), &info),
-        (L"LayerMountCreateFile " + overlayPath).c_str());
+    fh.Adopt(created.handle);
+    Assert::AreEqual<HRESULT>(S_OK, hr, (L"LayerMountCreateFile " + overlayPath).c_str());
     if (bytes.empty()) return;
     UINT32       written = 0;
     LM_FILE_INFO postWrite{};
     Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountWriteFile(fh.Get(), bytes.data(), /*offset*/ 0,
-            static_cast<UINT32>(bytes.size()),
-            /*writeToEnd*/ FALSE, /*constrainedIo*/ FALSE,
-            &written, &postWrite),
+        WriteFromStart(fh.Get(), bytes.data(), static_cast<UINT32>(bytes.size()),
+                       &written, &postWrite),
         (L"LayerMountWriteFile " + overlayPath).c_str());
     Assert::AreEqual<UINT32>(static_cast<UINT32>(bytes.size()), written,
         (L"write count " + overlayPath).c_str());
@@ -321,11 +319,12 @@ void CreateThroughMount(LM_HANDLE mount, const std::wstring& overlayPath,
 
 void OpenOrFail(LM_HANDLE mount, const std::wstring& overlayPath, UINT32 grantedAccess,
                 const std::wstring& label, FileHandleHolder& fh, LM_FILE_INFO* info) {
-    Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountOpenFile(mount, overlayPath.c_str(),
-            grantedAccess,
-            /*createOptions*/ 0u, /*originatorPid*/ 0u,
-            fh.AddressOf(), info),
+    OpenedFile    opened;
+    const HRESULT hr = OpenOverlayFile(mount, overlayPath.c_str(), grantedAccess,
+                                       kNoCreateOptions, opened);
+    fh.Adopt(opened.handle);
+    *info = opened.info;
+    Assert::AreEqual<HRESULT>(S_OK, hr,
         (label + L" LayerMountOpenFile " + overlayPath).c_str());
 }
 
@@ -693,7 +692,7 @@ public:
 
         std::vector<BYTE> buffer(static_cast<size_t>(kPageBytes), kSentinel);
         UINT32            count = 0;
-        const HRESULT     hr    = ::LayerMountReadFile(fh.Get(), buffer.data(), /*offset*/ 0,
+        const HRESULT     hr    = ReadFromStart(fh.Get(), buffer.data(),
             static_cast<UINT32>(kPageBytes), &count);
         Assert::IsTrue(FAILED(hr),
                        (L"a read on a handle with no read-data right fails, got " +
@@ -749,15 +748,16 @@ public:
         OpenOrFail(mount.Get(), overlayPath, GENERIC_READ, L"read", reader, &readInfo);
         Assert::AreEqual<UINT64>(newSize, readInfo.fileSize,
                                  L"the open for read reports the new size");
-        std::vector<BYTE> buffer(static_cast<size_t>(2 * kPageBytes), kSentinel);
+        constexpr UINT64  readOffset = 0;
+        constexpr UINT32  readLength = static_cast<UINT32>(2 * kPageBytes);
+        std::vector<BYTE> buffer(readLength, kSentinel);
         UINT32            count = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountReadFile(reader.Get(), buffer.data(), /*offset*/ 0,
-                static_cast<UINT32>(buffer.size()), &count),
+            ReadFromStart(reader.Get(), buffer.data(), readLength, &count),
             L"a read on the reopened handle");
         Assert::AreEqual<UINT32>(static_cast<UINT32>(newSize), count,
                                  L"the read returns the bytes up to the new end of file");
-        Assert::IsTrue(MatchesPattern(buffer, count, /*offset*/ 0),
+        Assert::IsTrue(MatchesPattern(buffer, count, readOffset),
                        L"the read returns the lower's bytes up to the new end of file");
         reader.Reset();
 
@@ -833,8 +833,7 @@ public:
         std::vector<BYTE> buffer(readLength, kSentinel);
         UINT32            count = 0;
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountReadFile(fh.Get(), buffer.data(), readOffset, readLength,
-                                 &count),
+            ReadFromStart(fh.Get(), buffer.data(), readLength, &count),
             L"a read on the maximum-allowed handle");
         Assert::AreEqual<UINT32>(readLength, count, L"the read returns a full page");
         Assert::IsTrue(MatchesPattern(buffer, count, readOffset),
@@ -858,68 +857,102 @@ public:
             ::DeleteFileW(LowerPathOf(env, Origin::MetacopyShell, listed).c_str()) != FALSE,
             L"the lower origin is removable");
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
-        const HRESULT  hr = ::LayerMountOpenFile(mount.Get(),
+        OpenedFile    opened;
+        const HRESULT hr = OpenOverlayFile(mount.Get(),
             OverlayPath(Origin::MetacopyShell, listed).c_str(),
-            /*grantedAccess*/ GENERIC_READ,
-            /*createOptions*/ 0u, /*originatorPid*/ 0u, &fh, &info);
+            GENERIC_READ, kNoCreateOptions, opened);
         Assert::AreEqual<HRESULT>(kHrObjectNameNotFoundNt, hr,
                                   L"the open for read data fails with the fill's status");
-        Assert::IsNull(fh, L"a failed open returns no handle");
+        Assert::IsNull(opened.handle, L"a failed open returns no handle");
         AssertShellIsSparse(UpperPathOf(env, Origin::MetacopyShell, listed),
                             StagedSize(Origin::MetacopyShell, listed),
                             L"a failed fill leaves the shell sparse");
     }
 
-    TEST_METHOD(Preallocation_AboveRounding_StaysVisibleOnHandle) {
+    TEST_METHOD(Preallocation_PathQueryAndListingReportRoundedSize_HandleReportsPreallocation) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        LM_FILE_HANDLE fh = nullptr;
-        LM_FILE_INFO   info{};
+        OpenedFile                opened;
+        const PreallocatedShortFile staged = StagePreallocatedShortFile(mount.Get(), opened);
+
+        LM_FILE_INFO handleInfo{};
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountGetFileInfo(opened.handle, &handleInfo));
+        const PathQuery      path  = QueryPath(mount.Get(), kPreallocatedPath);
+        const DirectoryEntry entry = ListRootEntry(mount.Get(), kPreallocatedName);
+
+        Assert::AreEqual<UINT64>(staged.payloadLen, handleInfo.fileSize,
+            L"the handle reports the bytes written as the file size");
+        Assert::IsTrue(handleInfo.allocationSize >= staged.requested,
+            (L"the handle reports the preallocation or more, got " +
+             std::to_wstring(handleInfo.allocationSize)).c_str());
+
+        Assert::AreEqual<HRESULT>(S_OK, path.hr, L"LayerMountResolvePath on the open file");
+        Assert::AreEqual<UINT64>(staged.payloadLen, path.fileSize,
+            L"the path query reports the bytes written as the file size");
+        Assert::AreEqual<UINT64>(kPageBytes, path.allocationSize,
+            L"the path query reports one page, not the preallocation");
+
+        Assert::IsTrue(entry.found, L"the listing holds the open file");
+        Assert::AreEqual<UINT64>(staged.payloadLen, entry.info.fileSize,
+            L"the listing reports the bytes written as the file size");
+        Assert::AreEqual<UINT64>(kPageBytes, entry.info.allocationSize,
+            L"the listing reports one page, not the preallocation");
+
+        AssertAllocationCoversFileSize(handleInfo, L"handle");
+        AssertAllocationCoversFileSize(path, L"path query");
+        AssertAllocationCoversFileSize(entry.info, L"listing");
+
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
+    }
+
+private:
+    static constexpr const wchar_t* kPreallocatedPath = L"\\prealloc.bin";
+    static constexpr const wchar_t* kPreallocatedName = L"prealloc.bin";
+
+    struct PreallocatedShortFile {
+        UINT32 payloadLen;
+        UINT64 requested;
+    };
+
+    // Creates a file through the overlay, writes a few bytes, and sets a
+    // 64 KiB allocation on the still-open handle. The set-info result
+    // reports at least the requested allocation.
+    static PreallocatedShortFile StagePreallocatedShortFile(LM_HANDLE mount, OpenedFile& opened) {
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountCreateFile(mount.Get(), L"\\prealloc.bin", 0u,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_ATTRIBUTE_NORMAL, nullptr, 0u, 0u, 0u, &fh, &info));
+            CreateOverlayFile(mount, kPreallocatedPath,
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
 
         const char   payload[]  = "short";
         const UINT32 payloadLen = static_cast<UINT32>(sizeof(payload) - 1);
         UINT32       written    = 0;
-        LM_FILE_INFO postWrite{};
         Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountWriteFile(fh, payload, 0, payloadLen, FALSE, FALSE,
-                                  &written, &postWrite));
+            WriteFromStart(opened.handle, payload, payloadLen, &written, nullptr));
+        Assert::AreEqual<UINT32>(payloadLen, written, L"the write stores every payload byte");
 
-        const UINT64 requested = 64u * 1024u;
-        LM_FILE_INFO postSet{};
-        Assert::AreEqual<HRESULT>(S_OK,
-            ::LayerMountSetFileInfo(
-                fh,
-                INVALID_FILE_ATTRIBUTES,
-                /*creationTime*/   0,
-                /*lastAccessTime*/ 0,
-                /*lastWriteTime*/  0,
-                /*changeTime*/     0,
-                /*allocationSize*/ requested,
-                /*fileSize*/       UINT64_MAX,
-                &postSet));
-
-        LM_FILE_INFO afterSet{};
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountGetFileInfo(fh, &afterSet));
-        Assert::AreEqual<UINT64>(payloadLen, afterSet.fileSize,
-            L"the file size stays at the bytes written");
-        Assert::IsTrue(afterSet.allocationSize >= requested,
-            (L"the handle reports the requested allocation or more, got " +
-             std::to_wstring(afterSet.allocationSize)).c_str());
+        const UINT64   requested = 64u * 1024u;
+        FileInfoChange preallocate;
+        preallocate.allocationSize = requested;
+        LM_FILE_INFO   postSet{};
+        Assert::AreEqual<HRESULT>(S_OK, SetFileInfo(opened.handle, preallocate, &postSet));
         Assert::IsTrue(postSet.allocationSize >= requested,
             (L"the set-info result reports the requested allocation or more, got " +
              std::to_wstring(postSet.allocationSize)).c_str());
 
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+        return PreallocatedShortFile{payloadLen, requested};
     }
 
-private:
+    static void AssertAllocationCoversFileSize(const LM_FILE_INFO& info, const wchar_t* producer) {
+        Assert::IsTrue(info.allocationSize >= info.fileSize,
+            (std::wstring(L"the ") + producer + L" allocation is at least the file size").c_str());
+    }
+
+    static void AssertAllocationCoversFileSize(const PathQuery& query, const wchar_t* producer) {
+        Assert::IsTrue(query.allocationSize >= query.fileSize,
+            (std::wstring(L"the ") + producer + L" allocation is at least the file size").c_str());
+    }
+
     // Stages a sparse shell, sets one time on an attribute-only handle,
     // closes, and opens for read. The open fills the shell with the
     // lower's bytes and reports the set time, and the lower keeps its size.
