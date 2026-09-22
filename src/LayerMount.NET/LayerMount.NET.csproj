@@ -31,7 +31,7 @@
     <Description>Linux-style overlay filesystems for Windows. Managed .NET 8 wrapper around the native LayerMount engine; AOT-compatible. Transitively pulls the native engine via the LayerMount.Native package.</Description>
     <Authors>Jeff Slutter</Authors>
     <Copyright>Copyright (c) 2026 Jeff Slutter</Copyright>
-    <PackageTags>windows overlay filesystem projfs layer union union-mount copy-on-write vhd vhdx vss dotnet net8 aot layermount</PackageTags>
+    <PackageTags>windows overlay filesystem layer union union-mount copy-on-write vhd vhdx vss dotnet net8 aot layermount</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/midnite8177/LayerMount</PackageProjectUrl>
