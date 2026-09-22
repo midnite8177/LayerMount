@@ -12,6 +12,29 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="2.0.0"></a>
+## [2.0.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v2.0.0) (2026-09-22)
+
+### Features
+
+* **abi:** add a Cleanup call that keeps the file context ([f593bc6](https://www.github.com/midnite8177/LayerMount/commit/f593bc6b7d8930c845d109c6244be0d02e2a5cb7))
+* **abi:** report one allocation size from every producer and zero-fill a short read ([56bf3f4](https://www.github.com/midnite8177/LayerMount/commit/56bf3f4a734ca7b70687e2423de536f86a773ca9))
+* **net:** the managed wrapper carries the handshake reader ([fa17494](https://www.github.com/midnite8177/LayerMount/commit/fa17494a1368fd1cf2bf305593e91abaf16f18ec))
+
+### Bug Fixes
+
+* **abi:** fill a metacopy shell at open for data access ([c17884d](https://www.github.com/midnite8177/LayerMount/commit/c17884d70e8f212f9aeceb3f4e6c25ed4454ba8d))
+* **engine:** a copy-up keeps the holes, the attributes and the access time of the lower file ([dff381e](https://www.github.com/midnite8177/LayerMount/commit/dff381e59dc8e6f170474584a1af04e8b9692c74))
+* **engine:** a filled metacopy shell keeps its timestamps and loses the sparse attribute ([ae2d9f2](https://www.github.com/midnite8177/LayerMount/commit/ae2d9f2f0b2afba48764851a5cfaf88165c07261))
+* **engine:** an open resolves MAXIMUM_ALLOWED, and a handle operation matches tracker rules against the opener ([45a34d1](https://www.github.com/midnite8177/LayerMount/commit/45a34d1c3ed4d161cff871f2b72d358cb5399991))
+
+### Breaking Changes
+
+* clean up code and add the domain glossary and ADRs ([62d07dc](https://www.github.com/midnite8177/LayerMount/commit/62d07dc083540f2341852c90acc82658701a8037))
+* **abi:** fill a metacopy shell at open for data access ([c17884d](https://www.github.com/midnite8177/LayerMount/commit/c17884d70e8f212f9aeceb3f4e6c25ed4454ba8d))
+* **abi:** report one allocation size from every producer and zero-fill a short read ([56bf3f4](https://www.github.com/midnite8177/LayerMount/commit/56bf3f4a734ca7b70687e2423de536f86a773ca9))
+* **engine:** an open resolves MAXIMUM_ALLOWED, and a handle operation matches tracker rules against the opener ([45a34d1](https://www.github.com/midnite8177/LayerMount/commit/45a34d1c3ed4d161cff871f2b72d358cb5399991))
+
 <a name="1.1.0"></a>
 ## [1.1.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v1.1.0) (2026-09-14)
 
