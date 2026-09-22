@@ -36,7 +36,7 @@
     <Description>Native overlay-filesystem engine for Windows. Ships LayerMount.dll for win-x64 and win-arm64 alongside the public C header. The managed wrapper is in the LayerMount package, which takes a dependency on this one.</Description>
     <Authors>Jeff Slutter</Authors>
     <Copyright>Copyright (c) 2026 Jeff Slutter</Copyright>
-    <PackageTags>windows overlay filesystem projfs layer union union-mount copy-on-write vhd vhdx vss native layermount</PackageTags>
+    <PackageTags>windows overlay filesystem layer union union-mount copy-on-write vhd vhdx vss native layermount</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/midnite8177/LayerMount</PackageProjectUrl>
