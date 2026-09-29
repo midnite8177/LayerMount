@@ -245,7 +245,7 @@ public sealed class VhdApi
                 }
             }
             HResultGuard.ThrowIfFailed(
-                unchecked((int)0x800700EAu) /* ERROR_MORE_DATA */,
+                BufferHelpers.HRESULT_E_MORE_DATA,
                 nameof(NativeMethods.LayerMountVhdListLayers));
             throw new InvalidOperationException("unreachable");
         }

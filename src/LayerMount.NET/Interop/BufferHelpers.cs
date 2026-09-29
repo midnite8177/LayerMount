@@ -1,13 +1,8 @@
 // Two-call buffer-pattern helpers for the LayerMount C ABI.
 //
-// The native DLL exposes several PWSTR out-buffer entry points that share a
-// uniform contract: pass buffer=null / bufferChars=0 to learn the required
-// size in *requiredChars, then allocate and call again. ERROR_MORE_DATA
-// (as HRESULT_FROM_WIN32) is returned if the caller-provided buffer was
-// short; *requiredChars is always written on that path.
-//
-// This file isolates the dance so every public-API surface method can
-// express the intent as a one-liner.
+// Native entry points with a string or byte out-buffer share one contract:
+// pass buffer=null and a capacity of 0 to get the required size, then
+// allocate and call again. TwoCallFunc states the full contract.
 
 using System;
 
@@ -15,10 +10,10 @@ namespace LayerMount.Interop;
 
 internal static class BufferHelpers
 {
-    // Chars (not bytes) at or below which we stack-allocate; above, we heap-
+    // Elements at or below which we stack-allocate; above, we heap-
     // allocate. 256 WCHARs = 512 bytes, well under the 1 KiB stack-use
     // soft-limit most callers tolerate.
-    private const int StackThreshold = 256;
+    internal const int StackThreshold = 256;
 
     // Maximum fill-call attempts before surfacing ERROR_MORE_DATA as a real
     // failure. Live-growing exports (e.g. process-tracker JSON while
@@ -29,18 +24,27 @@ internal static class BufferHelpers
 
     // HRESULT_FROM_WIN32(ERROR_MORE_DATA) -- the ABI returns this on the
     // fill call when the live payload grew past our allocated capacity.
-    private const int HRESULT_E_MORE_DATA = unchecked((int)0x800700EA);
+    internal const int HRESULT_E_MORE_DATA = unchecked((int)0x800700EA);
 
-    // Shape of a native entry point that implements the two-call pattern
-    // for a single PWSTR output. Returns HRESULT; always writes
-    // *requiredChars (including NUL) on failure + success.
-    internal unsafe delegate int TwoCallStringFunc(
-        char* buffer, nuint bufferChars, nuint* requiredChars);
+    /// <summary>
+    /// Shape of a native entry point that implements the two-call pattern
+    /// for one out-buffer of <typeparamref name="T"/> elements. Returns
+    /// HRESULT and always writes *required, on failure and on success.
+    /// After a successful fill, *required holds the count of elements
+    /// written; for a string that count includes the NUL.
+    /// </summary>
+    internal unsafe delegate int TwoCallFunc<T>(
+        T* buffer, nuint bufferLength, nuint* required)
+        where T : unmanaged;
+
+    private delegate TResult WrittenProjection<T, TResult>(ReadOnlySpan<T> written);
 
     /// <summary>
     /// Runs the two-call buffer pattern. Returns the resulting managed
-    /// string (NUL-terminator trimmed) and the final HRESULT. On failure
-    /// the string is null and the caller should route the HRESULT through
+    /// string (NUL-terminator trimmed) and the final HRESULT. The string
+    /// holds only the chars the fill call reports, so a source that shrank
+    /// after the sizing call leaves no trailing NULs. On failure
+    /// the string is null and the caller must route the HRESULT through
     /// <c>HResultGuard.ThrowIfFailed</c>.
     /// </summary>
     /// <remarks>
@@ -53,61 +57,83 @@ internal static class BufferHelpers
     /// retry, live exports surface spurious
     /// <c>LayerMountException(ERROR_MORE_DATA)</c> to managed callers.
     /// </remarks>
-    internal static unsafe int TryReadString(
-        TwoCallStringFunc call, out string? result)
+    internal static int TryReadString(
+        TwoCallFunc<char> call, out string? result)
+        => TryRead(
+            call,
+            static written => written.Length <= 1
+                ? string.Empty
+                : new string(written[..^1]),
+            out result);
+
+    /// <summary>
+    /// Runs the two-call buffer pattern for a byte result. Returns the
+    /// bytes the fill call wrote and the final HRESULT. On failure the
+    /// array is null and the caller must route the HRESULT through
+    /// <c>HResultGuard.ThrowIfFailed</c>.
+    /// </summary>
+    /// <remarks>
+    /// Retries the fill call on ERROR_MORE_DATA up to <see cref="MaxFillRetries"/>
+    /// times, for a source that grew after the sizing call. When the source
+    /// shrank, the array holds only the bytes the fill call reports.
+    /// </remarks>
+    internal static int TryReadBytes(
+        TwoCallFunc<byte> call, out byte[]? result)
+        => TryRead(call, static written => written.ToArray(), out result);
+
+    private static unsafe int TryRead<T, TResult>(
+        TwoCallFunc<T> call, WrittenProjection<T, TResult> project, out TResult? result)
+        where T : unmanaged
     {
         nuint required = 0;
         int hr = call(null, 0, &required);
         if (hr < 0)
         {
-            result = null;
+            result = default;
             return hr;
         }
 
-        // requiredChars includes the NUL. 0 or 1 means "empty string".
-        if (required <= 1)
+        if (required == 0)
         {
-            result = string.Empty;
+            result = project(ReadOnlySpan<T>.Empty);
             return 0;
         }
 
         for (int attempt = 0; attempt < MaxFillRetries; attempt++)
         {
-            int charCount = checked((int)required);
-            Span<char> buffer = charCount <= StackThreshold
-                ? stackalloc char[StackThreshold]
-                : new char[charCount];
-            buffer = buffer[..charCount];
+            int length = checked((int)required);
+            Span<T> buffer = length <= StackThreshold
+                ? stackalloc T[StackThreshold]
+                : new T[length];
+            buffer = buffer[..length];
 
-            nuint actualRequired;
-            fixed (char* p = buffer)
+            nuint actual = 0;
+            fixed (T* p = buffer)
             {
-                actualRequired = 0;
-                hr = call(p, required, &actualRequired);
+                hr = call(p, required, &actual);
             }
 
-            if (hr == HRESULT_E_MORE_DATA && actualRequired > required)
+            if (hr == HRESULT_E_MORE_DATA && actual > required)
             {
-                // Source grew between probe and fill. Adopt the new size
-                // and retry with a larger buffer.
-                required = actualRequired;
+                required = actual;
                 continue;
             }
             if (hr < 0)
             {
-                result = null;
+                result = default;
                 return hr;
             }
 
-            // Strip the trailing NUL -- the native ABI always NUL-terminates.
-            result = new string(buffer[..(charCount - 1)]);
+            // Without the clamp, a fill that reports more than the buffer
+            // holds throws ArgumentOutOfRangeException from the slice.
+            result = project(buffer[..(int)Math.Min(actual, required)]);
             return 0;
         }
 
         // Exhausted retries: the source is growing faster than we can
         // allocate. Surface as a real ERROR_MORE_DATA so callers see a
         // distinct failure rather than a silent truncation.
-        result = null;
+        result = default;
         return HRESULT_E_MORE_DATA;
     }
 }

@@ -265,46 +265,22 @@ public sealed partial class LayerMount
     {
         ArgumentNullException.ThrowIfNull(relativePath);
         using var lease = new SafeHandleLease(_handle);
+        IntPtr handle = lease.Handle;
         uint attributes = 0;
-        nuint required = 0;
 
-        int hr = NativeMethods.LayerMountGetSecurity(
-            lease.Handle, relativePath, securityInformation,
-            &attributes, null, 0, &required);
+        int hr = BufferHelpers.TryReadBytes(
+            (byte* buffer, nuint bufferBytes, nuint* requiredBytes) =>
+            {
+                uint callAttributes = 0;
+                int callHr = NativeMethods.LayerMountGetSecurity(
+                    handle, relativePath, securityInformation,
+                    &callAttributes, buffer, bufferBytes, requiredBytes);
+                attributes = callAttributes;
+                return callHr;
+            },
+            out byte[]? sd);
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetSecurity));
-
-        if (required == 0)
-        {
-            return (attributes, []);
-        }
-
-        // Probe-then-fill against a descriptor that can change size
-        // between the two calls, for example when someone adds an ACE.
-        // Bounded so pathological churn surfaces as a real failure
-        // rather than spinning forever.
-        for (int attempt = 0; attempt < BufferHelpers.MaxFillRetries; attempt++)
-        {
-            byte[] sd = new byte[(int)required];
-            nuint actual = 0;
-            fixed (byte* p = sd)
-            {
-                hr = NativeMethods.LayerMountGetSecurity(
-                    lease.Handle, relativePath, securityInformation,
-                    &attributes, p, required, &actual);
-            }
-
-            if (hr == HRESULT_E_MORE_DATA && actual > required
-                && attempt < BufferHelpers.MaxFillRetries - 1)
-            {
-                required = actual;
-                continue;
-            }
-            HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountGetSecurity));
-            return (attributes, TrimToActual(sd, actual));
-        }
-
-        HResultGuard.ThrowIfFailed(HRESULT_E_MORE_DATA, nameof(NativeMethods.LayerMountGetSecurity));
-        return (attributes, []);
+        return (attributes, sd ?? []);
     }
 
     /// <summary>
@@ -386,7 +362,7 @@ public sealed partial class LayerMount
         nuint actual = 0;
         hr = FillReparseBuffer(lease, relativePath, buffer, &actual);
 
-        if (hr == HRESULT_E_MORE_DATA)
+        if (hr == BufferHelpers.HRESULT_E_MORE_DATA)
         {
             buffer = new byte[MaximumReparseDataBufferSize];
             hr = FillReparseBuffer(lease, relativePath, buffer, &actual);
@@ -546,7 +522,7 @@ public sealed partial class LayerMount
                     lease.Handle, relativePath, p, required, &written);
             }
 
-            if (hrFill == HRESULT_E_MORE_DATA && attempt < BufferHelpers.MaxFillRetries - 1)
+            if (hrFill == BufferHelpers.HRESULT_E_MORE_DATA && attempt < BufferHelpers.MaxFillRetries - 1)
             {
                 // A stream was added between probe and fill. Re-probe.
                 continue;
@@ -570,11 +546,9 @@ public sealed partial class LayerMount
 
         // Exhausted retries: streams keep being added faster than we can
         // probe + allocate. Surface as a real ERROR_MORE_DATA.
-        HResultGuard.ThrowIfFailed(HRESULT_E_MORE_DATA, nameof(NativeMethods.LayerMountEnumerateStreams));
+        HResultGuard.ThrowIfFailed(BufferHelpers.HRESULT_E_MORE_DATA, nameof(NativeMethods.LayerMountEnumerateStreams));
         return [];
     }
-
-    private const int HRESULT_E_MORE_DATA = unchecked((int)0x800700EA);
 
     private static byte[] TrimToActual(byte[] buffer, nuint actual) =>
         actual == (nuint)buffer.Length ? buffer : buffer[..(int)actual];

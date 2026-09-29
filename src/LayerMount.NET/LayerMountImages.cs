@@ -429,7 +429,7 @@ public sealed class ImagesApi
             }
         }
         HResultGuard.ThrowIfFailed(
-            unchecked((int)0x800700EAu) /* ERROR_MORE_DATA */,
+            BufferHelpers.HRESULT_E_MORE_DATA,
             nameof(NativeMethods.LayerMountImageGetMetadata));
         throw new InvalidOperationException("unreachable");
     }

@@ -167,7 +167,7 @@ public sealed class VssApi
             }
         }
         HResultGuard.ThrowIfFailed(
-            unchecked((int)0x800700EAu) /* ERROR_MORE_DATA */,
+            BufferHelpers.HRESULT_E_MORE_DATA,
             nameof(NativeMethods.LayerMountVssListSnapshots));
         throw new InvalidOperationException("unreachable");
     }
