@@ -82,10 +82,9 @@ internal ref struct SafeHandleLease
         }
         catch (ObjectDisposedException ex)
         {
-            throw new LayerMountInvalidHandleException(
-                unchecked((int)0x80070006u) /* E_HANDLE */,
-                "SafeHandleLease",
-                ex.Message);
+            throw new LayerMountInvalidHandleException(new NativeFailure(
+                HResultGuard.E_HANDLE, "SafeHandleLease", ex.Message,
+                FromMetacopyFill: false));
         }
         Handle = h.DangerousGetHandle();
     }

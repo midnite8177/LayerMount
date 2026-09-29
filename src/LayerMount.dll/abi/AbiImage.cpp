@@ -153,6 +153,7 @@ LM_API HRESULT LM_CALL LayerMountImagePack(LM_HANDLE                    mount,
                                           const LM_IMAGE_PACK_OPTIONS* options,
                                           LM_IMAGE_HANDLE*             outImage)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount    == nullptr) return E_HANDLE;
@@ -188,6 +189,7 @@ LM_API HRESULT LM_CALL LayerMountImagePackDifferential(
     const LM_IMAGE_PACK_OPTIONS* options,
     LM_IMAGE_HANDLE*             outImage)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount    == nullptr) return E_HANDLE;
@@ -221,6 +223,7 @@ LM_API HRESULT LM_CALL LayerMountImageCreateManifest(LM_HANDLE    mount,
                                                      const PCWSTR* imagePaths,
                                                      UINT32        imageCount)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount    == nullptr) return E_HANDLE;
@@ -253,6 +256,7 @@ LM_API HRESULT LM_CALL LayerMountImageUnpack(LM_HANDLE mount,
                                             PCWSTR     targetDir,
                                             BOOL       verifyChecksum)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount   == nullptr) return E_HANDLE;
@@ -278,6 +282,7 @@ LM_API HRESULT LM_CALL LayerMountImageUnpack(LM_HANDLE mount,
 LM_API HRESULT LM_CALL LayerMountImageValidate(LM_HANDLE mount,
                                               PCWSTR     imagePath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount   == nullptr) return E_HANDLE;
@@ -307,6 +312,7 @@ LM_API HRESULT LM_CALL LayerMountImageGetManifest(LM_HANDLE          mount,
                                                  PCWSTR              manifestPath,
                                                  LM_IMAGE_MANIFEST* manifest)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount   == nullptr) return E_HANDLE;
@@ -373,6 +379,7 @@ LM_API HRESULT LM_CALL LayerMountImageGetMetadata(LM_HANDLE          mount,
                                                  PCWSTR              imagePath,
                                                  LM_IMAGE_METADATA* metadata)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount   == nullptr) return E_HANDLE;
@@ -427,6 +434,7 @@ LM_API HRESULT LM_CALL LayerMountImageGetMetadata(LM_HANDLE          mount,
 
 LM_API HRESULT LM_CALL LayerMountImageClose(LM_IMAGE_HANDLE image)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (image == nullptr) return E_HANDLE;

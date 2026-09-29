@@ -6,6 +6,7 @@
 #include "HandleTable.h"
 #include "HandleTypes.h"
 #include "../impl/LayerMount.h"
+#include "../impl/NtStatusUtil.h"
 #include "../impl/WhiteoutManager.h"
 
 #include <cstdint>
@@ -13,6 +14,8 @@
 #include <memory>
 #include <string>
 #include <utility>
+
+using ::LayerMount::HresultFromNtStatus;
 
 namespace {
 
@@ -47,15 +50,6 @@ inline void ToPublicFileInfo(const ::LayerMount::InternalFileInfo& src,
     dst.indexNumber    = src.IndexNumber;
     dst.hardLinks      = src.HardLinks;
     dst.eaSize         = src.EaSize;
-}
-
-// HRESULT_FROM_NT for the NTSTATUS values the engine returns. The C ABI
-// uniformly returns HRESULT; map success to S_OK, everything else
-// through the standard HRESULT-from-NTSTATUS encoding (facility = NT,
-// severity from the high bit of the NTSTATUS).
-inline HRESULT HresultFromNtStatus(NTSTATUS status) {
-    if (status == STATUS_SUCCESS) return S_OK;
-    return HRESULT_FROM_NT(status);
 }
 
 // Validate that a caller-supplied byte buffer is a structurally valid
@@ -137,6 +131,7 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(LM_HANDLE       handle,
                                          LM_FILE_HANDLE* outFile,
                                          LM_FILE_INFO*   outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -205,6 +200,7 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
                                            LM_FILE_HANDLE* outFile,
                                            LM_FILE_INFO*   outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -283,6 +279,7 @@ LM_API HRESULT LM_CALL LayerMountReadFile(LM_FILE_HANDLE file,
                                          UINT32          length,
                                          UINT32*         bytesTransferred)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file              == nullptr) return E_HANDLE;
@@ -320,6 +317,7 @@ LM_API HRESULT LM_CALL LayerMountWriteFile(LM_FILE_HANDLE file,
                                           UINT32*         bytesTransferred,
                                           LM_FILE_INFO*  outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file              == nullptr) return E_HANDLE;
@@ -361,6 +359,7 @@ LM_API HRESULT LM_CALL LayerMountOverwriteFile(LM_FILE_HANDLE file,
                                               UINT64          allocationSize,
                                               LM_FILE_INFO*  outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;
@@ -390,6 +389,7 @@ LM_API HRESULT LM_CALL LayerMountOverwriteFile(LM_FILE_HANDLE file,
 LM_API HRESULT LM_CALL LayerMountFlushFile(LM_FILE_HANDLE file,
                                           LM_FILE_INFO*  outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;
@@ -418,6 +418,7 @@ LM_API HRESULT LM_CALL LayerMountFlushFile(LM_FILE_HANDLE file,
 LM_API HRESULT LM_CALL LayerMountGetFileInfo(LM_FILE_HANDLE file,
                                             LM_FILE_INFO*  outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file    == nullptr) return E_HANDLE;
@@ -463,6 +464,7 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(LM_FILE_HANDLE file,
                                             UINT64          fileSize,
                                             LM_FILE_INFO*  outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;
@@ -497,6 +499,7 @@ LM_API HRESULT LM_CALL LayerMountGetReparsePoint(LM_HANDLE handle,
                                                 SIZE_T     bufferBytes,
                                                 SIZE_T*    requiredBytes)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -529,6 +532,7 @@ LM_API HRESULT LM_CALL LayerMountSetReparsePoint(LM_HANDLE  handle,
                                                 const BYTE* buffer,
                                                 SIZE_T      bufferBytes)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -560,6 +564,7 @@ LM_API HRESULT LM_CALL LayerMountDeleteReparsePoint(LM_HANDLE  handle,
                                                    const BYTE* buffer,
                                                    SIZE_T      bufferBytes)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -592,6 +597,7 @@ LM_API HRESULT LM_CALL LayerMountEnumerateStreams(LM_HANDLE        handle,
                                                   UINT32           bufferCapacity,
                                                   UINT32*          outCount)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -656,6 +662,7 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(LM_HANDLE             handle,
                                                LM_DIR_ENUM_CALLBACK  callback,
                                                void*                  userContext)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle          == nullptr) return E_HANDLE;
@@ -715,6 +722,7 @@ LM_API HRESULT LM_CALL LayerMountGetSecurity(LM_HANDLE handle,
                                             SIZE_T     securityDescriptorBytes,
                                             SIZE_T*    requiredBytes)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -751,6 +759,7 @@ LM_API HRESULT LM_CALL LayerMountSetSecurity(LM_HANDLE  handle,
                                             const BYTE* modificationDescriptor,
                                             SIZE_T      modificationDescriptorBytes)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle                 == nullptr) return E_HANDLE;
@@ -789,6 +798,7 @@ LM_API HRESULT LM_CALL LayerMountSetSecurity(LM_HANDLE  handle,
 
 LM_API HRESULT LM_CALL LayerMountDeleteFile(LM_HANDLE handle, PCWSTR relativePath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -814,6 +824,7 @@ LM_API HRESULT LM_CALL LayerMountDeleteFile(LM_HANDLE handle, PCWSTR relativePat
 
 LM_API HRESULT LM_CALL LayerMountCanDeleteFile(LM_HANDLE handle, PCWSTR relativePath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -840,6 +851,7 @@ LM_API HRESULT LM_CALL LayerMountCanDeleteFile(LM_HANDLE handle, PCWSTR relative
 
 LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(LM_FILE_HANDLE file)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;
@@ -862,6 +874,7 @@ LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(LM_FILE_HANDLE file)
 
 LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(LM_FILE_HANDLE file)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;
@@ -887,6 +900,7 @@ LM_API HRESULT LM_CALL LayerMountRenameFile(LM_HANDLE handle,
                                            PCWSTR     newRelativePath,
                                            BOOL       replaceIfExists)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle          == nullptr) return E_HANDLE;
@@ -916,6 +930,7 @@ LM_API HRESULT LM_CALL LayerMountRenameFile(LM_HANDLE handle,
 LM_API HRESULT LM_CALL LayerMountUpdateOpenFilePath(LM_FILE_HANDLE file,
                                                     PCWSTR          newRelativePath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file            == nullptr) return E_HANDLE;
@@ -944,6 +959,7 @@ LM_API HRESULT LM_CALL LayerMountRenameOpenFile(LM_FILE_HANDLE file,
                                                PCWSTR          newRelativePath,
                                                BOOL            replaceIfExists)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;
@@ -971,6 +987,7 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(LM_HANDLE handle,
                                                PCWSTR     relativePath,
                                                BOOL       isDirectory)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -1004,6 +1021,7 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(LM_HANDLE handle,
 
 LM_API HRESULT LM_CALL LayerMountSetOpaque(LM_HANDLE handle, PCWSTR dirRelativePath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle          == nullptr) return E_HANDLE;
@@ -1034,6 +1052,7 @@ LM_API HRESULT LM_CALL LayerMountSetOpaque(LM_HANDLE handle, PCWSTR dirRelativeP
 
 LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;
@@ -1063,6 +1082,7 @@ LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file)
 
 LM_API HRESULT LM_CALL LayerMountCleanupFile(LM_FILE_HANDLE file)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (file == nullptr) return E_HANDLE;

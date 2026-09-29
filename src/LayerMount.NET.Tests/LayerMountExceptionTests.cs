@@ -6,22 +6,25 @@ namespace LayerMount.Tests;
 
 /// <summary>
 /// Drives each HRESULT category through the managed wrapper and asserts
-/// the mapped exception subclass.
+/// the mapped exception subclass, and whether the failure came from a
+/// metacopy fill.
 /// </summary>
 public sealed class LayerMountExceptionTests
 {
+    private const uint GENERIC_READ            = 0x80000000u;
+    private const uint FILE_READ_ATTRIBUTES    = 0x00000080u;
+    private const uint FILE_WRITE_ATTRIBUTES   = 0x00000100u;
+    private const uint FILE_ATTRIBUTE_SPARSE   = 0x00000200u;
+    private const int  HR_NT_SHARING_VIOLATION = unchecked((int)0xD0000043u);
+
+    private const int AboveMetacopyThreshold = 2 * 1024 * 1024;
+
     [Fact]
     public void NotFound_OpenMissingFile_ThrowsNotFound()
     {
         using var env = new TempLayerEnvironment(0);
         using var mount = LayerMount.Create(env.BuildConfig());
 
-        // The engine returns file-not-found as HRESULT_FROM_NT(STATUS_OBJECT_NAME_NOT_FOUND)
-        // (0xD0000034). HResultGuard maps both the Win32 and NT-facility
-        // flavors to LayerMountNotFoundException -- prior to that mapping,
-        // GetFileInfo probes in downstream host adapters fell through to
-        // STATUS_UNSUCCESSFUL and clients saw ERROR_GEN_FAILURE on every
-        // create-disposition open.
         var ex = Assert.Throws<LayerMountNotFoundException>(() =>
             mount.OpenFile(@"\absent.txt", grantedAccess: 0x80000000u));
         Assert.True(
@@ -31,6 +34,43 @@ public sealed class LayerMountExceptionTests
             ex.HResult == unchecked((int)0xD000003Au),
             $"Unexpected HRESULT 0x{ex.HResult:X8} for missing-file error");
         Assert.False(string.IsNullOrEmpty(ex.Context));
+    }
+
+    [Fact]
+    public void OpenForRead_MetacopyFillFailsOnHeldLower_ReportsFromMetacopyFill()
+    {
+        using var env = new TempLayerEnvironment(1);
+        string lowerPath = Path.Combine(env.Lower(0), "big.bin");
+        File.WriteAllBytes(lowerPath, CreateBytes(AboveMetacopyThreshold));
+        using var mount = LayerMount.Create(env.BuildConfig());
+        using (var staged = mount.OpenFile(@"\big.bin", FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES))
+        {
+            Assert.NotEqual(0u, staged.Info.FileAttributes & FILE_ATTRIBUTE_SPARSE);
+        }
+        using var writer = new FileStream(lowerPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+
+        var ex = Assert.ThrowsAny<LayerMountException>(() =>
+            mount.OpenFile(@"\big.bin", GENERIC_READ));
+
+        Assert.Equal(HR_NT_SHARING_VIOLATION, ex.HResult);
+        Assert.True(ex.FromMetacopyFill);
+        Assert.Contains("fill", ex.Message);
+    }
+
+    [Fact]
+    public void OpenForRead_PlainFileHeldWithoutSharing_SameStatusIsNotFromMetacopyFill()
+    {
+        using var env = new TempLayerEnvironment(0);
+        string upperPath = Path.Combine(env.Upper, "plain.txt");
+        File.WriteAllText(upperPath, "plain bytes");
+        using var mount = LayerMount.Create(env.BuildConfig());
+        using var exclusive = new FileStream(upperPath, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var ex = Assert.ThrowsAny<LayerMountException>(() =>
+            mount.OpenFile(@"\plain.txt", GENERIC_READ));
+
+        Assert.Equal(HR_NT_SHARING_VIOLATION, ex.HResult);
+        Assert.False(ex.FromMetacopyFill);
     }
 
     [Fact]
@@ -53,9 +93,17 @@ public sealed class LayerMountExceptionTests
 
         var ex = Assert.Throws<LayerMountInvalidHandleException>(() =>
             mount.GetStats());
-        // Arg order flips from MSTest's StringAssert.Contains(value, substring)
-        // to xUnit's Assert.Contains(substring, value).
         Assert.Contains("HRESULT=0x", ex.Message);
         Assert.False(string.IsNullOrEmpty(ex.Context));
+    }
+
+    private static byte[] CreateBytes(int length)
+    {
+        var bytes = new byte[length];
+        for (int i = 0; i < length; ++i)
+        {
+            bytes[i] = (byte)('A' + (i % 26));
+        }
+        return bytes;
     }
 }

@@ -178,6 +178,7 @@ LM_API HRESULT LM_CALL LayerMountVssCreateSnapshot(
     SIZE_T                   devicePathBufferChars,
     SIZE_T*                  devicePathRequired)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount     == nullptr) return E_HANDLE;
@@ -282,6 +283,7 @@ LM_API HRESULT LM_CALL LayerMountVssCreateSnapshot(
 
 LM_API HRESULT LM_CALL LayerMountVssCloseSnapshot(LM_VSS_SNAPSHOT_HANDLE snapshot)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (snapshot == nullptr) return E_HANDLE;
@@ -306,6 +308,7 @@ LM_API HRESULT LM_CALL LayerMountVssCloseSnapshot(LM_VSS_SNAPSHOT_HANDLE snapsho
 LM_API HRESULT LM_CALL LayerMountVssDeleteSnapshot(LM_HANDLE mount,
                                                   PCWSTR     snapshotId)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount    == nullptr) return E_HANDLE;
@@ -338,6 +341,7 @@ LM_API HRESULT LM_CALL LayerMountVssListSnapshots(LM_HANDLE             mount,
                                                  UINT32*                entriesWritten,
                                                  UINT32*                entriesRequired)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount == nullptr) return E_HANDLE;
@@ -393,6 +397,7 @@ LM_API HRESULT LM_CALL LayerMountVssListSnapshots(LM_HANDLE             mount,
 
 LM_API HRESULT LM_CALL LayerMountVssCleanupSnapshots(LM_HANDLE mount)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount == nullptr) return E_HANDLE;
@@ -422,6 +427,7 @@ LM_API HRESULT LM_CALL LayerMountVssValidateSnapshotPath(LM_HANDLE mount,
                                                         PCWSTR     snapshotId,
                                                         BOOL*      outReachable)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount        == nullptr) return E_HANDLE;

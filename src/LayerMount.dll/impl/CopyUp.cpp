@@ -4,6 +4,7 @@
 #include "MetadataADS.h"
 #include "Cache.h"
 #include "NtStatusUtil.h"
+#include "../abi/ErrorTls.h"
 
 #include <winioctl.h>
 #include <aclapi.h>
@@ -14,6 +15,17 @@
 #pragma comment(lib, "advapi32.lib")
 
 namespace {
+
+NTSTATUS RecordFillFailure(const std::wstring& relativePath, const wchar_t* stage,
+                           NTSTATUS status) {
+    wchar_t statusText[16] = {};
+    swprintf_s(statusText, L"0x%08lX", static_cast<unsigned long>(status));
+    const std::wstring message = L"The metacopy fill of '" + relativePath +
+                                 L"' failed to " + stage + L" (NTSTATUS " +
+                                 statusText + L").";
+    ::LayerMount::abi::ErrorTls::SetFillFailure(::LayerMount::HresultFromNtStatus(status), message.c_str());
+    return status;
+}
 
 // Enable a single privilege in the current process token. Returns true on
 // successful adjust. Idempotent — re-enabling an already-enabled privilege is
@@ -1320,10 +1332,9 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     // that write. The post-lock read guarantees we see the winner's commit.
     LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(upperPath, &config_);
     if (!metadata.metacopy) {
-        return STATUS_SUCCESS; // Not a metacopy, nothing to do
+        return STATUS_SUCCESS;
     }
 
-    // Open source file from the origin layer
     ScopedHandle srcHandle(CreateFileW(
         metadata.originLayer.c_str(),
         GENERIC_READ,
@@ -1334,7 +1345,8 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         nullptr));
 
     if (!srcHandle.IsValid()) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return RecordFillFailure(normalized, L"open the origin file",
+                                 ::LayerMount::NtStatusFromWin32(GetLastError()));
     }
 
     WIN32_FILE_ATTRIBUTE_DATA shellInfo{};
@@ -1346,12 +1358,13 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
 
     NTSTATUS status = FillMetacopyShell(srcHandle, upperPath);
     if (!NT_SUCCESS(status)) {
-        return status;
+        return RecordFillFailure(normalized, L"copy the origin's data into the shell",
+                                 status);
     }
 
     status = FinishFilledShell(upperPath, metadata);
     if (!NT_SUCCESS(status)) {
-        return status;
+        return RecordFillFailure(normalized, L"finish the filled shell", status);
     }
 
     basicInfo.Restore();

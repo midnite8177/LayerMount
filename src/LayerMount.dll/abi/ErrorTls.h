@@ -1,6 +1,3 @@
-// ErrorTls.h -- Internal header. Thread-local storage for the most recent
-// failure message on the calling thread. Backs LayerMountGetLastErrorMessage.
-//
 // NOT installed. DLL consumers access this only indirectly through the
 // public header.
 
@@ -19,8 +16,16 @@ void Set(HRESULT hr, PCWSTR message) noexcept;
 // for storage. Intended for catch blocks that pick up std::exception::what().
 void SetFromNarrow(HRESULT hr, const char* utf8) noexcept;
 
-// Clears both the HRESULT and the message. Called on DLL_THREAD_DETACH
-// to release the wstring's heap buffer.
+void SetFillFailure(HRESULT hr, PCWSTR message) noexcept;
+
+// Clears only the fill mark. The HRESULT and the message stay, so
+// LayerMountGetLastErrorMessage still reads the previous failure.
+void ClearFillFailure() noexcept;
+
+bool LastFailureWasFill() noexcept;
+
+// Clears the HRESULT, the message and the fill mark, and frees the
+// message's buffer.
 void Clear() noexcept;
 
 // Reads the stored message using the two-call buffer pattern. `hr`

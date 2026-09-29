@@ -47,6 +47,7 @@ extern "C" {
 LM_API HRESULT LM_CALL LayerMountPointIsDriveLetter(PCWSTR mountPoint,
                                                          BOOL*  outIsDriveLetter)
 {
+    LM_ABI_ENTRY();
     if (outIsDriveLetter == nullptr) return E_POINTER;
 
     using namespace ::LayerMount::abi;
@@ -64,6 +65,7 @@ LM_API HRESULT LM_CALL LayerMountPointPrepareDirectory(
     PCWSTR                mountPoint,
     LM_MOUNT_POINT_PREP* outPrep)
 {
+    LM_ABI_ENTRY();
     if (outPrep == nullptr) return E_POINTER;
 
     using namespace ::LayerMount::abi;
@@ -86,6 +88,7 @@ LM_API HRESULT LM_CALL LayerMountPointCaptureIdentity(
     PCWSTR                mountPoint,
     LM_MOUNT_POINT_PREP* prep)
 {
+    LM_ABI_ENTRY();
     if (prep == nullptr) return E_POINTER;
 
     using namespace ::LayerMount::abi;
@@ -107,6 +110,7 @@ LM_API HRESULT LM_CALL LayerMountPointReleaseIfSafe(
     PCWSTR                      mountPoint,
     const LM_MOUNT_POINT_PREP* prep)
 {
+    LM_ABI_ENTRY();
     if (prep == nullptr) return E_POINTER;
 
     using namespace ::LayerMount::abi;

@@ -102,7 +102,9 @@ The `CapabilityGate` wrapper makes the choice explicit at every fork.
 records a failure stores a UTF-16 message in thread-local storage; the
 caller fetches it via `LayerMountGetLastErrorMessage(hr, ...)`. The HRESULT
 reported back is the precise translation of the underlying `GetLastError`
-or `STATUS_*`, never a generic `E_FAIL`.
+or `STATUS_*`, never a generic `E_FAIL`. A failed metacopy fill keeps the
+status of the step that failed, and `LayerMountGetLastFailureWasFill`
+tells it apart from a refusal with the same status.
 
 **Atomicity at the boundary.** Anything that mutates the upper layer
 (file copy-up, directory rename across layers, whiteout creation) goes
@@ -733,6 +735,20 @@ caller fetches the message via `LayerMountGetLastErrorMessage(hr, ...)`
 on the same thread; passing a different HRESULT than the one stored
 returns `*requiredChars = 0` so a caller cannot accidentally read a
 stale message belonging to a different operation.
+
+The same storage holds one more fact: whether the most recent call on
+the thread failed in a metacopy fill. `LM_ABI_ENTRY` clears it as the
+first statement of every export, before the argument checks, so every
+call resets it, whether it then succeeds or fails. The exceptions are
+the three exports that inspect a failure: `LayerMountGetLastErrorMessage`,
+`LayerMountGetLastFailureWasFill` and `LayerMountHResultToNtStatus`.
+`CopyUp::CompleteLazyCopyUp` sets the mark when a fill fails. It also
+records a message that names the path, the stage that failed and the
+NTSTATUS. The HRESULT stays the fill's own status, as ADR 0006 requires.
+The managed wrapper reads it on the same thread right after a failed
+call and exposes it as `LayerMountException.FromMetacopyFill`. A reopen
+of the handle after a successful fill is not part of the fill and does
+not set the mark.
 
 Reserved overlay-specific HRESULT range: `FACILITY_ITF` codes
 `0xB000..0xBFFF`. Host adapters must not emit codes in this range from

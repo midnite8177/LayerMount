@@ -153,7 +153,16 @@ returns. The fill takes the sparse attribute off unless the lower file
 is sparse, so a filled file has the allocation of a normal copy. An
 open for attributes, security, or delete keeps the shell sparse. A
 failed fill fails the open with the fill's status and returns no
-handle. `LayerMountReadFile` (`LayerMountFile.Read`) never
+handle. A write, or a change of the end of file or the allocation size,
+on a handle that kept the shell sparse fills it first and fails the same
+way. The status alone does not tell a failed fill from a refused open:
+a fill whose lower file is gone reports not found, as a missing file
+does. `LayerMountGetLastFailureWasFill` (`LayerMountException.FromMetacopyFill`),
+read on the same thread right after the failed call, reports the fill.
+An adapter that answers an open-if or overwrite-if request by creating
+the file after a not-found open checks it first. After a failed fill the
+shell still exists, so the adapter returns the fill's status and creates
+nothing. `LayerMountReadFile` (`LayerMountFile.Read`) never
 copies a file up and never reopens the handle for a fill. A read reopens
 the handle only after a rename or after a cleanup. It writes
 `*bytesTransferred` even on failure.

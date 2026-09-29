@@ -15,4 +15,13 @@ namespace LayerMount {
 // codes fall back to STATUS_UNSUCCESSFUL.
 NTSTATUS NtStatusFromWin32(DWORD win32Error) noexcept;
 
-} // namespace LayerMount
+// The HRESULT the C ABI returns for an engine NTSTATUS: S_OK for success,
+// HRESULT_FROM_NT for everything else. A failed fill stores its message
+// under this value, so LayerMountGetLastErrorMessage finds it with the
+// HRESULT the caller received.
+inline HRESULT HresultFromNtStatus(NTSTATUS status) noexcept {
+    if (status == STATUS_SUCCESS) return S_OK;
+    return HRESULT_FROM_NT(status);
+}
+
+}

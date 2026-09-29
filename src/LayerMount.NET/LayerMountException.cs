@@ -1,13 +1,5 @@
 // HRESULT -> .NET exception translation layer.
 //
-// Every non-success HRESULT returned by the native ABI is funnelled through
-// HResultGuard.ThrowIfFailed, which:
-//   1. Pulls the thread-local error message via LayerMountGetLastErrorMessage.
-//   2. Maps well-known HRESULT values to category-specific subclasses.
-//   3. Stashes the HRESULT on Exception.HResult (already an int field) and
-//      the caller-supplied context string (typically the native entry-point
-//      name) on the Context property so exceptions pinpoint the call site.
-//
 // Subclass choice is deliberately narrow -- one per category that .NET
 // callers already have a conventional catch for (NotFound, AccessDenied,
 // InvalidHandle) plus a capability-missing bucket for the overlay-specific
@@ -26,20 +18,33 @@ public class LayerMountException : Exception
     /// <summary>Native entry-point name or user-supplied call-site tag.</summary>
     public string Context { get; }
 
-    internal LayerMountException(int hr, string context, string? message)
-        : base(BuildMessage(hr, context, message))
+    /// <summary>
+    /// True when the call failed while it filled a metacopy shell. An open
+    /// for data, a write, or a change of size on a metacopy shell copies the
+    /// lower file's data into the shell first. A failed fill fails the call
+    /// with the status of the step that failed, so <see cref="Exception.HResult"/>
+    /// alone does not tell it apart from a refusal of the call. A host adapter
+    /// that falls back to a create when an open reports not found checks this
+    /// property first, because a fill that cannot find its lower file also
+    /// reports not found.
+    /// </summary>
+    public bool FromMetacopyFill { get; }
+
+    internal LayerMountException(NativeFailure failure)
+        : base(BuildMessage(failure))
     {
-        HResult = hr;
-        Context = context;
+        HResult = failure.Hr;
+        Context = failure.Context;
+        FromMetacopyFill = failure.FromMetacopyFill;
     }
 
-    private static string BuildMessage(int hr, string context, string? message)
+    private static string BuildMessage(NativeFailure failure)
     {
-        if (!string.IsNullOrEmpty(message))
+        if (!string.IsNullOrEmpty(failure.Message))
         {
-            return $"{context}: {message} (HRESULT=0x{hr:X8})";
+            return $"{failure.Context}: {failure.Message} (HRESULT=0x{failure.Hr:X8})";
         }
-        return $"{context}: LayerMount operation failed (HRESULT=0x{hr:X8})";
+        return $"{failure.Context}: LayerMount operation failed (HRESULT=0x{failure.Hr:X8})";
     }
 }
 
@@ -50,8 +55,8 @@ public class LayerMountException : Exception
 /// </summary>
 public sealed class LayerMountNotFoundException : LayerMountException
 {
-    internal LayerMountNotFoundException(int hr, string context, string? message)
-        : base(hr, context, message) { }
+    internal LayerMountNotFoundException(NativeFailure failure)
+        : base(failure) { }
 }
 
 /// <summary>
@@ -60,8 +65,8 @@ public sealed class LayerMountNotFoundException : LayerMountException
 /// </summary>
 public sealed class LayerMountAccessDeniedException : LayerMountException
 {
-    internal LayerMountAccessDeniedException(int hr, string context, string? message)
-        : base(hr, context, message) { }
+    internal LayerMountAccessDeniedException(NativeFailure failure)
+        : base(failure) { }
 }
 
 /// <summary>
@@ -70,8 +75,8 @@ public sealed class LayerMountAccessDeniedException : LayerMountException
 /// </summary>
 public sealed class LayerMountInvalidHandleException : LayerMountException
 {
-    internal LayerMountInvalidHandleException(int hr, string context, string? message)
-        : base(hr, context, message) { }
+    internal LayerMountInvalidHandleException(NativeFailure failure)
+        : base(failure) { }
 }
 
 /// <summary>
@@ -82,9 +87,15 @@ public sealed class LayerMountInvalidHandleException : LayerMountException
 /// </summary>
 public sealed class LayerMountCapabilityMissingException : LayerMountException
 {
-    internal LayerMountCapabilityMissingException(int hr, string context, string? message)
-        : base(hr, context, message) { }
+    internal LayerMountCapabilityMissingException(NativeFailure failure)
+        : base(failure) { }
 }
+
+/// <summary>
+/// The facts about one failed native call that every exception carries.
+/// </summary>
+internal readonly record struct NativeFailure(
+    int Hr, string Context, string? Message, bool FromMetacopyFill);
 
 /// <summary>
 /// Translates HRESULTs returned by the native ABI into LayerMountException
@@ -93,18 +104,11 @@ public sealed class LayerMountCapabilityMissingException : LayerMountException
 /// </summary>
 internal static class HResultGuard
 {
-    // Well-known HRESULT constants (unchecked cast so high bit is preserved).
-    //
-    // LayerMount.dll surfaces two HRESULT flavors: Win32-facility wrappers
-    // (HRESULT_FROM_WIN32, bits 0x80070000) and NT-facility wrappers
-    // (HRESULT_FROM_NT, bits 0xD0000000 — the FACILITY_NT_BIT 0x10000000
-    // layered over the raw NTSTATUS). The ABI contract documented in
-    // LayerMount.h:526-527 explicitly includes both. Mapping only the Win32
-    // set caused `new LayerMount().OpenFile("missing")` to throw the base
-    // LayerMountException, which defeated every `catch (LayerMountNotFoundException)`
-    // in downstream host adapters.
+    // LayerMount.dll returns two HRESULT flavors: Win32-facility values
+    // (HRESULT_FROM_WIN32, 0x8007xxxx) and NT-facility values
+    // (HRESULT_FROM_NT, 0xDxxxxxxx). Each category maps both.
     private const int E_ACCESSDENIED       = unchecked((int)0x80070005u);
-    private const int E_HANDLE             = unchecked((int)0x80070006u);
+    internal const int E_HANDLE            = unchecked((int)0x80070006u);
     private const int E_NOTIMPL            = unchecked((int)0x80004001u);
     private const int E_FAIL               = unchecked((int)0x80004005u);
     private const int HR_FILE_NOT_FOUND    = unchecked((int)0x80070002u);
@@ -121,7 +125,10 @@ internal static class HResultGuard
             return;
         }
         string? message = ReadLastErrorMessage(hr);
-        throw MapException(hr, context, message);
+        // The next native call clears the fill mark, so read it before any
+        // other call on this thread.
+        bool fromMetacopyFill = ReadLastFailureWasFill();
+        throw MapException(new NativeFailure(hr, context, message, fromMetacopyFill));
     }
 
     private static unsafe string? ReadLastErrorMessage(int hr)
@@ -137,31 +144,38 @@ internal static class HResultGuard
         return probeHr >= 0 ? message : null;
     }
 
-    private static LayerMountException MapException(int hr, string context, string? message)
+    private static unsafe bool ReadLastFailureWasFill()
     {
-        switch (hr)
+        int wasFill = 0;
+        int hr = NativeMethods.LayerMountGetLastFailureWasFill(&wasFill);
+        return hr >= 0 && wasFill != 0;
+    }
+
+    private static LayerMountException MapException(NativeFailure failure)
+    {
+        switch (failure.Hr)
         {
             case HR_FILE_NOT_FOUND:
             case HR_PATH_NOT_FOUND:
             case HR_NT_NOT_FOUND:
             case HR_NT_PATH_NOT_FOUND:
-                return new LayerMountNotFoundException(hr, context, message);
+                return new LayerMountNotFoundException(failure);
 
             case E_ACCESSDENIED:
             case HR_NT_ACCESS_DENIED:
-                return new LayerMountAccessDeniedException(hr, context, message);
+                return new LayerMountAccessDeniedException(failure);
 
             case E_HANDLE:
             case HR_NT_INVALID_HANDLE:
-                return new LayerMountInvalidHandleException(hr, context, message);
+                return new LayerMountInvalidHandleException(failure);
 
             case E_NOTIMPL
-                when message is not null
-                     && message.Contains("capability", StringComparison.OrdinalIgnoreCase):
-                return new LayerMountCapabilityMissingException(hr, context, message);
+                when failure.Message is not null
+                     && failure.Message.Contains("capability", StringComparison.OrdinalIgnoreCase):
+                return new LayerMountCapabilityMissingException(failure);
 
             default:
-                return new LayerMountException(hr, context, message);
+                return new LayerMountException(failure);
         }
     }
 }

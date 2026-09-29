@@ -9,6 +9,7 @@ namespace {
 
 thread_local HRESULT      g_lastHr{S_OK};
 thread_local std::wstring g_lastMessage;
+thread_local bool         g_lastFailureWasFill{false};
 
 std::wstring WidenUtf8(const char* utf8) noexcept
 {
@@ -60,9 +61,26 @@ void SetFromNarrow(HRESULT hr, const char* utf8) noexcept
     }
 }
 
+void SetFillFailure(HRESULT hr, PCWSTR message) noexcept
+{
+    Set(hr, message);
+    g_lastFailureWasFill = true;
+}
+
+void ClearFillFailure() noexcept
+{
+    g_lastFailureWasFill = false;
+}
+
+bool LastFailureWasFill() noexcept
+{
+    return g_lastFailureWasFill;
+}
+
 void Clear() noexcept
 {
     g_lastHr = S_OK;
+    g_lastFailureWasFill = false;
     try {
         g_lastMessage.clear();
         g_lastMessage.shrink_to_fit();

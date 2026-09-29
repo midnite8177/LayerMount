@@ -101,6 +101,7 @@
     <ClCompile Include="AbiMaximumAllowedTests.cpp" />
     <ClCompile Include="AbiTrackerOpenerTests.cpp" />
     <ClCompile Include="AbiCreateRollbackTests.cpp" />
+    <ClCompile Include="AbiMetacopyFillReportTests.cpp" />
   </ItemGroup>
 
   <ItemGroup>

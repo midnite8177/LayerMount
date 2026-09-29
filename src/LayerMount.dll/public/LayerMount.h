@@ -22,6 +22,9 @@
  *   header states otherwise. C++ exceptions never cross the ABI
  *   boundary. A human-readable message for the most recent failure on
  *   the calling thread is available via LayerMountGetLastErrorMessage.
+ *   LayerMountGetLastFailureWasFill reports whether that failure came
+ *   from a metacopy fill. The HRESULT of a failed fill is the fill's own
+ *   status, which can equal the status of a refused open.
  *
  *   Reserved HRESULT range for overlay-specific failure codes:
  *     FACILITY_ITF with codes 0xB000..0xBFFF. Hosts must not emit codes
@@ -516,6 +519,21 @@ LM_API HRESULT LM_CALL LayerMountGetVersion(
 LM_API HRESULT LM_CALL LayerMountGetLastErrorMessage(
     HRESULT hr, PWSTR buffer, SIZE_T bufferChars, SIZE_T* requiredChars);
 
+/* Writes TRUE to *wasFill when the most recent call on the calling thread
+ * failed in a metacopy fill, and FALSE otherwise. A fill runs inside
+ * LayerMountOpenFile, LayerMountCreateFile, LayerMountWriteFile and
+ * LayerMountSetFileInfo. Its failure returns the status of the step that
+ * failed, so the HRESULT alone does not tell it apart from a refusal of
+ * the call. Every call resets the report when it starts, before its
+ * argument checks, whether it then succeeds or fails. This export,
+ * LayerMountGetLastErrorMessage and LayerMountHResultToNtStatus leave it
+ * unchanged, so a caller can read the message and translate the status
+ * first. Read it after the failed call, on the same thread, before any
+ * other call. The failed fill also leaves a message
+ * that names the fill stage and its status for
+ * LayerMountGetLastErrorMessage. Returns E_POINTER if `wasFill` is NULL. */
+LM_API HRESULT LM_CALL LayerMountGetLastFailureWasFill(BOOL* wasFill);
+
 /*
  * Creates an overlay from `config` and returns its handle in *outHandle.
  * Validates that the upper layer exists and is writable and that every
@@ -747,7 +765,8 @@ LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
  * (read, write, append, or execute), the engine fills the shell before
  * it returns. *outInfo then reports the filled file. An open for
  * attributes, security, or delete keeps the shell sparse. A failed fill
- * fails the open with the fill's status and returns no handle.
+ * fails the open with the fill's status and returns no handle, and
+ * LayerMountGetLastFailureWasFill then reports TRUE.
  */
 LM_API HRESULT LM_CALL LayerMountOpenFile(
     LM_HANDLE       handle,
@@ -772,6 +791,10 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(
  * resolved set. A failed resolution removes the file, directory, or
  * stream the create made and fails the create with the resolution's
  * status.
+ *
+ * A create of a named stream on a metacopy shell fills the shell first.
+ * A failed fill fails the create with the fill's status, and
+ * LayerMountGetLastFailureWasFill then reports TRUE.
  *
  * Returns E_INVALIDARG if `securityDescriptor` is non-NULL but is not a
  * structurally valid self-relative descriptor fitting within
@@ -833,7 +856,9 @@ LM_API HRESULT LM_CALL LayerMountReadFile(
  * into the upper layer first if it is not already there.
  * `constrainedIo` rejects a write that would extend the file past its
  * current allocation. Fills `outInfo` with post-write metadata when
- * non-NULL.
+ * non-NULL. A write on a handle that kept a metacopy shell sparse fills
+ * the shell first. A failed fill fails the write with the fill's status,
+ * and LayerMountGetLastFailureWasFill then reports TRUE.
  */
 LM_API HRESULT LM_CALL LayerMountWriteFile(
     LM_FILE_HANDLE file,
@@ -877,7 +902,10 @@ LM_API HRESULT LM_CALL LayerMountGetFileInfo(
 /* Updates attributes, timestamps, allocation size, and end-of-file for
  * the open `file`; each parameter's leave-unchanged sentinel is
  * documented at its declaration below. Fills `outInfo` with the
- * resulting metadata when non-NULL. */
+ * resulting metadata when non-NULL. A change of the allocation size or
+ * the end of file on a handle that kept a metacopy shell sparse fills
+ * the shell first. A failed fill fails the call with the fill's status,
+ * and LayerMountGetLastFailureWasFill then reports TRUE. */
 LM_API HRESULT LM_CALL LayerMountSetFileInfo(
     LM_FILE_HANDLE file,
     UINT32          fileAttributes,      /* INVALID_FILE_ATTRIBUTES to leave unchanged */

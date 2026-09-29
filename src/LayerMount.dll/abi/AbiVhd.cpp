@@ -95,6 +95,7 @@ LM_API HRESULT LM_CALL LayerMountVhdCreate(LM_HANDLE            mount,
                                           const LM_VHD_CONFIG* config,
                                           LM_VHD_HANDLE*       outVhd)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount == nullptr) return E_HANDLE;
@@ -174,6 +175,7 @@ LM_API HRESULT LM_CALL LayerMountVhdOpen(LM_HANDLE            mount,
                                         const LM_VHD_CONFIG* config,
                                         LM_VHD_HANDLE*       outVhd)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount == nullptr) return E_HANDLE;
@@ -227,6 +229,7 @@ LM_API HRESULT LM_CALL LayerMountVhdAttach(LM_VHD_HANDLE vhd,
                                           SIZE_T         physicalPathChars,
                                           SIZE_T*        physicalPathRequired)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (vhd == nullptr) return E_HANDLE;
@@ -285,6 +288,7 @@ LM_API HRESULT LM_CALL LayerMountVhdAttach(LM_VHD_HANDLE vhd,
 
 LM_API HRESULT LM_CALL LayerMountVhdDetach(LM_VHD_HANDLE vhd)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (vhd == nullptr) return E_HANDLE;
@@ -317,6 +321,7 @@ LM_API HRESULT LM_CALL LayerMountVhdDetach(LM_VHD_HANDLE vhd)
 
 LM_API HRESULT LM_CALL LayerMountVhdMerge(LM_VHD_HANDLE childVhd)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (childVhd == nullptr) return E_HANDLE;
@@ -340,6 +345,7 @@ LM_API HRESULT LM_CALL LayerMountVhdImport(LM_HANDLE mount,
                                           PCWSTR     vhdPath,
                                           UINT64     sizeBytes)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount       == nullptr) return E_HANDLE;
@@ -368,6 +374,7 @@ LM_API HRESULT LM_CALL LayerMountVhdExport(LM_HANDLE mount,
                                           PCWSTR     vhdPath,
                                           PCWSTR     directoryPath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount       == nullptr) return E_HANDLE;
@@ -391,6 +398,7 @@ LM_API HRESULT LM_CALL LayerMountVhdExport(LM_HANDLE mount,
 
 LM_API HRESULT LM_CALL LayerMountVhdClose(LM_VHD_HANDLE vhd)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (vhd == nullptr) return E_HANDLE;
@@ -421,6 +429,7 @@ LM_API HRESULT LM_CALL LayerMountVhdGetVolumeGuid(LM_VHD_HANDLE vhd,
                                                  SIZE_T         bufferChars,
                                                  SIZE_T*        requiredChars)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (vhd == nullptr) return E_HANDLE;
@@ -513,6 +522,7 @@ LM_API HRESULT LM_CALL LayerMountVhdListLayers(LM_HANDLE          mount,
                                                UINT32*             entriesWritten,
                                                UINT32*             entriesRequired)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount == nullptr) return E_HANDLE;
@@ -592,6 +602,7 @@ LM_API HRESULT LM_CALL LayerMountVhdUnregisterLayer(LM_HANDLE mount,
                                                     PCWSTR     manifestDir,
                                                     BOOL*      outRemoved)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount  == nullptr) return E_HANDLE;
@@ -649,6 +660,7 @@ LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(LM_HANDLE mount,
                                                         SIZE_T     bufferChars,
                                                         SIZE_T*    requiredChars)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (mount  == nullptr) return E_HANDLE;

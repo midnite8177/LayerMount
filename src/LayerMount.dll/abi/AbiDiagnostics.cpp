@@ -86,6 +86,7 @@ extern "C" {
 LM_API HRESULT LM_CALL LayerMountGetStats(LM_HANDLE  handle,
                                          LM_STATS*  outStats)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle   == nullptr) return E_HANDLE;
@@ -122,6 +123,7 @@ LM_API HRESULT LM_CALL LayerMountSetEventCallback(LM_HANDLE         handle,
                                                  LM_EVENT_CALLBACK callback,
                                                  void*              userContext)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle == nullptr) return E_HANDLE;
@@ -151,6 +153,7 @@ LM_API HRESULT LM_CALL LayerMountSetEventCallback(LM_HANDLE         handle,
 LM_API HRESULT LM_CALL LayerMountProcessTrackerEnable(LM_HANDLE handle,
                                                      BOOL       enabled)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle == nullptr) return E_HANDLE;
@@ -172,6 +175,7 @@ LM_API HRESULT LM_CALL LayerMountProcessTrackerEnable(LM_HANDLE handle,
 LM_API HRESULT LM_CALL LayerMountProcessTrackerSetRules(LM_HANDLE handle,
                                                        PCWSTR     rulesPath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle    == nullptr) return E_HANDLE;
@@ -213,6 +217,7 @@ LM_API HRESULT LM_CALL LayerMountProcessTrackerExportJson(LM_HANDLE handle,
                                                          SIZE_T     bufferChars,
                                                          SIZE_T*    requiredChars)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle == nullptr) return E_HANDLE;
@@ -252,6 +257,7 @@ LM_API HRESULT LM_CALL LayerMountProcessTrackerExportCsv(LM_HANDLE handle,
                                                         SIZE_T     bufferChars,
                                                         SIZE_T*    requiredChars)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle == nullptr) return E_HANDLE;

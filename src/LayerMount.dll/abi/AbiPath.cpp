@@ -7,11 +7,14 @@
 #include "HandleTable.h"
 #include "HandleTypes.h"
 #include "../impl/LayerMount.h"
+#include "../impl/NtStatusUtil.h"
 #include "../impl/PathResolver.h"
 
 #include <cstdint>
 #include <cstring>
 #include <string>
+
+using ::LayerMount::HresultFromNtStatus;
 
 namespace {
 
@@ -23,11 +26,6 @@ inline LM_LAYER_SOURCE ToPublicLayerSource(::LayerMount::LayerSource src) {
     }
 }
 
-inline HRESULT HresultFromNtStatus(NTSTATUS status) {
-    if (status == STATUS_SUCCESS) return S_OK;
-    return HRESULT_FROM_NT(status);
-}
-
 } // namespace
 
 extern "C" {
@@ -36,6 +34,7 @@ LM_API HRESULT LM_CALL LayerMountResolvePath(LM_HANDLE         handle,
                                             PCWSTR             relativePath,
                                             LM_RESOLVED_PATH* outResolved)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;
@@ -88,6 +87,7 @@ LM_API HRESULT LM_CALL LayerMountResolvePath(LM_HANDLE         handle,
 LM_API HRESULT LM_CALL LayerMountGetVolumeInfo(LM_HANDLE       handle,
                                               LM_VOLUME_INFO* outInfo)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle  == nullptr) return E_HANDLE;
@@ -125,6 +125,7 @@ LM_API HRESULT LM_CALL LayerMountGetVolumeInfo(LM_HANDLE       handle,
 LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(LM_HANDLE handle,
                                                    PCWSTR     relativePath)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle       == nullptr) return E_HANDLE;

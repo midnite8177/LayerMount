@@ -1,11 +1,15 @@
 // AbiGuard.h -- Internal header. Wraps every ABI export body in a
 // try/catch that translates C++ exceptions to HRESULT and records a
-// human-readable message via ErrorTls.
+// human-readable message via ErrorTls. LM_ABI_ENTRY clears the thread's
+// fill mark, so the mark describes only the current call. Every export
+// runs it first, before its argument checks, except the exports that
+// read the error state or translate its HRESULT.
 //
 // Usage:
 //
 //   LM_API HRESULT LM_CALL LayerMountFoo(LM_HANDLE h, int x, int* out)
 //   {
+//       LM_ABI_ENTRY();
 //       if (h == nullptr || out == nullptr) return E_POINTER;
 //       LM_ABI_BEGIN();
 //       // ... implementation that may throw ...
@@ -50,11 +54,10 @@ private:
     std::wstring message_;
 };
 
-} // namespace LayerMount::abi
+}
 
-// Paired macros. LM_ABI_BEGIN opens the try block; LM_ABI_END closes it
-// and supplies the catch ladder. Any return statement inside the body
-// must come before LM_ABI_END.
+#define LM_ABI_ENTRY() ::LayerMount::abi::ErrorTls::ClearFillFailure()
+
 #define LM_ABI_BEGIN() try {
 
 #define LM_ABI_END() \

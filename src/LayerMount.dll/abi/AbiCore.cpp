@@ -1,6 +1,3 @@
-// AbiCore.cpp -- Lifecycle ABI entry points:
-// LayerMountCreate, LayerMountDestroy, LayerMountGetVersion, LayerMountGetLastErrorMessage.
-
 #include "../public/LayerMount.h"
 #include "AbiGuard.h"
 #include "ErrorTls.h"
@@ -62,6 +59,7 @@ LM_API HRESULT LM_CALL LayerMountGetVersion(UINT32* major,
                                            UINT32* patch,
                                            UINT32* abiVersion)
 {
+    LM_ABI_ENTRY();
     // Each out param is independently optional so a caller that only
     // wants the ABI version (the only field that gates compatibility)
     // need not allocate the other three.
@@ -83,9 +81,17 @@ LM_API HRESULT LM_CALL LayerMountGetLastErrorMessage(HRESULT  hr,
     return ::LayerMount::abi::ErrorTls::Last(hr, buffer, bufferChars, requiredChars);
 }
 
+LM_API HRESULT LM_CALL LayerMountGetLastFailureWasFill(BOOL* wasFill)
+{
+    if (wasFill == nullptr) return E_POINTER;
+    *wasFill = ::LayerMount::abi::ErrorTls::LastFailureWasFill() ? TRUE : FALSE;
+    return S_OK;
+}
+
 LM_API HRESULT LM_CALL LayerMountCreate(const LM_CONFIG* config,
                                        LM_HANDLE* outHandle)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (outHandle == nullptr) return E_POINTER;
@@ -133,6 +139,7 @@ LM_API HRESULT LM_CALL LayerMountCreateTransient(PCWSTR workDir,
                                                  UINT32 hostCapabilities,
                                                  LM_HANDLE* outHandle)
 {
+    LM_ABI_ENTRY();
     if (workDir   == nullptr) return E_INVALIDARG;
     if (outHandle == nullptr) return E_POINTER;
 
@@ -159,6 +166,7 @@ LM_API HRESULT LM_CALL LayerMountCreateTransient(PCWSTR workDir,
 
 LM_API HRESULT LM_CALL LayerMountDestroy(LM_HANDLE handle)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle == nullptr) return E_HANDLE;
@@ -210,6 +218,7 @@ LM_API HRESULT LM_CALL LayerMountDestroy(LM_HANDLE handle)
 
 LM_API HRESULT LM_CALL LayerMountSetHostAttached(LM_HANDLE handle, BOOL attached)
 {
+    LM_ABI_ENTRY();
     using namespace ::LayerMount::abi;
 
     if (handle == nullptr) return E_HANDLE;

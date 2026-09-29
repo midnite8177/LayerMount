@@ -46,6 +46,10 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(DllName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial int LayerMountGetLastFailureWasFill(int* wasFill);
+
+    [LibraryImport(DllName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial int LayerMountCreate(
         LM_CONFIG* config, IntPtr* outHandle);
 
