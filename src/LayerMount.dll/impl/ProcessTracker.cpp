@@ -294,10 +294,6 @@ void ProcessTracker::AddLogEntry(AccessLogEntry entry) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 6.2 — Process resolution
-// ---------------------------------------------------------------------------
-
 ProcessInfo ProcessTracker::ResolveProcessUncached(DWORD pid) const {
     ProcessInfo info;
     info.pid = pid;
@@ -444,10 +440,6 @@ ProcessInfo ProcessTracker::ResolveProcess(DWORD pid) const {
     return info;
 }
 
-// ---------------------------------------------------------------------------
-// 6.3 — Access logging
-// ---------------------------------------------------------------------------
-
 void ProcessTracker::LogAccess(DWORD pid, const std::wstring& relativePath, OperationType op) {
     ProcessInfo pInfo = ResolveProcess(pid);
 
@@ -479,10 +471,6 @@ std::vector<AccessLogEntry> ProcessTracker::GetRecentEntries(size_t count) const
 
     return result;
 }
-
-// ---------------------------------------------------------------------------
-// 6.4 — Access rules
-// ---------------------------------------------------------------------------
 
 bool ProcessTracker::LoadRules(const std::wstring& configPath) {
     // Open via std::filesystem::path (wide) so non-ASCII directory
@@ -593,10 +581,6 @@ bool ProcessTracker::CheckAccess(DWORD pid, const std::wstring& relativePath, Op
 
     return allowed;
 }
-
-// ---------------------------------------------------------------------------
-// 6.5 — Log export
-// ---------------------------------------------------------------------------
 
 std::string ProcessTracker::ExportLogAsJson() const {
     std::vector<AccessLogEntry> entries = GetRecentEntries(logCapacity_);

@@ -114,46 +114,44 @@ public:
     // Returns ERROR_SUCCESS if elevated, ERROR_PRIVILEGE_NOT_HELD (1314) if not.
     static DWORD CheckElevation();
 
-    // 4.1 — Create a new VHDX file.
+    // Create a new VHDX file.
     // |dynamic| = true for sparse/expandable, false for fixed allocation.
     DWORD CreateVHD(const std::wstring& path, ULONGLONG sizeBytes, bool dynamic,
                     VhdHandle& outHandle);
 
-    // 4.2 — Attach (mount) / detach a VHD.
-    // |lifetime| controls whether the attach survives process death. Default
-    // is Permanent for backward compatibility with existing callers; the
-    // mount-child code path in MountCommand passes ProcessScoped explicitly.
+    // Attach (mount) / detach a VHD.
+    // |lifetime| controls whether the attach survives process death.
     // |suppressDriveLetter| adds ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER so
     // the Windows Mount Manager does NOT auto-assign a drive letter to the
     // attached volume. Use for transient attaches (import/export/mount-backing)
     // where a drive letter would only trigger a disruptive AutoPlay flash.
     DWORD AttachVHD(const std::wstring& path, bool readOnly,
                     VhdHandle& outHandle, std::wstring& outPhysicalPath,
-                    AttachLifetime lifetime = AttachLifetime::Permanent,
-                    bool suppressDriveLetter = false);
+                    AttachLifetime lifetime,
+                    bool suppressDriveLetter);
     DWORD DetachVHD(const std::wstring& path);
 
-    // 4.3 — Create a differencing (child) VHDX whose parent is |parentPath|.
+    // Create a differencing (child) VHDX whose parent is |parentPath|.
     DWORD CreateDifferencingVHD(const std::wstring& childPath,
                                 const std::wstring& parentPath,
                                 VhdHandle& outHandle);
 
-    // 4.4 — Merge a child VHDX's changes back into its parent.
+    // Merge a child VHDX's changes back into its parent.
     DWORD MergeVHD(const std::wstring& childPath);
 
-    // 4.5 — Initialize a newly attached VHD: partition (GPT) and format (NTFS).
+    // Initialize a newly attached VHD: partition (GPT) and format (NTFS).
     // |physicalDiskPath| is the \\.\PhysicalDriveN path from AttachVHD.
     // |vhdPath| is the original VHDX file path (needed for diskpart fallback).
     DWORD InitializeVHD(const std::wstring& physicalDiskPath,
                         const std::wstring& vhdPath);
 
-    // 4.7 — Import a directory into a new VHDX.
+    // Import a directory into a new VHDX.
     // If |sizeBytes| == 0, auto-calculate from directory contents + 20% overhead.
     DWORD ImportDirectory(const std::wstring& directoryPath,
                           const std::wstring& vhdPath,
-                          ULONGLONG sizeBytes = 0);
+                          ULONGLONG sizeBytes);
 
-    // 4.8 — Export a VHDX's contents to a directory.
+    // Export a VHDX's contents to a directory.
     DWORD ExportToDirectory(const std::wstring& vhdPath,
                             const std::wstring& directoryPath);
 

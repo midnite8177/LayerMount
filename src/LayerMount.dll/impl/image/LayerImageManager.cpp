@@ -886,7 +886,6 @@ static DWORD ReadHeaderAndMetadata(const std::wstring& imagePath,
 // Public API
 // ===========================================================================
 
-// 8.3 — CreateImage
 DWORD LayerImageManager::CreateImage(const std::wstring& sourceDir,
                                      const std::wstring& outputPath,
                                      LayerMetadata& metadata,
@@ -914,7 +913,6 @@ DWORD LayerImageManager::CreateImage(const std::wstring& sourceDir,
     return ERROR_SUCCESS;
 }
 
-// 8.5 — ExtractImage
 DWORD LayerImageManager::ExtractImage(const std::wstring& imagePath,
                                       const std::wstring& targetDir,
                                       bool verifyChecksum) {
@@ -1004,7 +1002,6 @@ DWORD LayerImageManager::ExtractImage(const std::wstring& imagePath,
     return ERROR_SUCCESS;
 }
 
-// 8.6 — GetImageInfo
 DWORD LayerImageManager::GetImageInfo(const std::wstring& imagePath,
                                       LayerImageHeader& header,
                                       LayerMetadata& metadata) {
@@ -1032,7 +1029,6 @@ DWORD LayerImageManager::ValidateImage(const std::wstring& imagePath) {
     return ERROR_SUCCESS;
 }
 
-// 8.7 — CreateDifferentialImage
 DWORD LayerImageManager::CreateDifferentialImage(
     const std::wstring& sourceDir, const std::wstring& baseDir,
     const std::wstring& outputPath, LayerMetadata& metadata,
@@ -1147,7 +1143,6 @@ DWORD LayerImageManager::CreateDifferentialImage(
     return ERROR_SUCCESS;
 }
 
-// 8.8 — CreateManifest
 DWORD LayerImageManager::CreateManifest(
     const std::wstring& outputPath,
     const std::vector<std::wstring>& layerImagePaths) {
@@ -1185,7 +1180,6 @@ DWORD LayerImageManager::CreateManifest(
     return ERROR_SUCCESS;
 }
 
-// 8.8 — LoadManifest
 DWORD LayerImageManager::LoadManifest(const std::wstring& manifestPath,
                                       LayerManifest& manifest) {
     std::ifstream in(manifestPath);

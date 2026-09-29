@@ -80,7 +80,9 @@ public:
         LayerMount::VHD::VhdHandle attachHandle;
         std::wstring physicalPath;
         const DWORD rc = mgr.AttachVHD(vhdPath, /*readOnly*/ false,
-                                        attachHandle, physicalPath);
+                                        attachHandle, physicalPath,
+                                        LayerMount::VHD::AttachLifetime::Permanent,
+                                        /*suppressDriveLetter=*/ false);
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, rc);
         Assert::IsFalse(physicalPath.empty(),
                         L"AttachVHD must return a \\\\.\\PhysicalDriveN path");
@@ -143,7 +145,7 @@ public:
         LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
 
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.ImportDirectory(src, vhd),
+            mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0),
             L"Import must succeed before we can export");
 
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
@@ -178,7 +180,7 @@ public:
 
         LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
         // Import produces a fully formatted, populated VHD.
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd));
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0));
 
         const DWORD before = ::GetLogicalDrives();
 
@@ -219,7 +221,7 @@ public:
         { std::ofstream(src + L"\\dir1\\nested") << "nested-content"; }
 
         LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd));
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0));
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ExportToDirectory(vhd, out));
 
         auto ReadAll = [](const std::wstring& p) -> std::string {
@@ -255,7 +257,8 @@ public:
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
             mgr.AttachVHD(vhdPath, /*readOnly*/ false, attachHandle,
                            physicalPath,
-                           LayerMount::VHD::AttachLifetime::Permanent));
+                           LayerMount::VHD::AttachLifetime::Permanent,
+                           /*suppressDriveLetter=*/ false));
         attachHandle.Close();
 
         // Explicit detach must succeed — the attach is still live.
@@ -285,7 +288,8 @@ public:
             Assert::AreEqual<DWORD>(ERROR_SUCCESS,
                 mgr.AttachVHD(vhdPath, /*readOnly*/ false, attachHandle,
                                physicalPath,
-                               LayerMount::VHD::AttachLifetime::ProcessScoped));
+                               LayerMount::VHD::AttachLifetime::ProcessScoped,
+                               /*suppressDriveLetter=*/ false));
             Assert::IsFalse(physicalPath.empty());
             // attachHandle closes at scope exit — that should detach the VHD.
         }
@@ -297,7 +301,8 @@ public:
         std::wstring newPhysicalPath;
         const DWORD rc = mgr.AttachVHD(vhdPath, /*readOnly*/ false,
                                         reattachHandle, newPhysicalPath,
-                                        LayerMount::VHD::AttachLifetime::ProcessScoped);
+                                        LayerMount::VHD::AttachLifetime::ProcessScoped,
+                                        /*suppressDriveLetter=*/ false);
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, rc,
             L"Re-attach after ProcessScoped handle close must succeed");
 

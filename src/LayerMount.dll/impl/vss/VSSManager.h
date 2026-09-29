@@ -53,7 +53,7 @@ public:
     // Returns ERROR_SUCCESS if elevated, ERROR_PRIVILEGE_NOT_HELD (1314) if not.
     static DWORD CheckElevation();
 
-    // 5.1 — Create a VSS snapshot of the given volume.
+    // Create a VSS snapshot of the given volume.
     // |volumePath| must be a volume root path with trailing backslash (e.g., L"C:\\").
     // |persistent| = true for CLIENT_ACCESSIBLE (survives reboot),
     //                false for BACKUP (auto-deleted when VSSManager is destroyed).
@@ -61,12 +61,12 @@ public:
     DWORD CreateSnapshot(const std::wstring& volumePath, bool persistent,
                          std::wstring& outSnapshotId, std::wstring& outDevicePath);
 
-    // 5.5 — Delete a specific snapshot by ID.
+    // Delete a specific snapshot by ID.
     // Deletes through a fresh IVssBackupComponents under VSS_CTX_ALL for both
     // contexts, then drops the tracked entry and its held instance, if any.
     DWORD DeleteSnapshot(const std::wstring& snapshotId);
 
-    // 5.5 — Delete all non-persistent snapshots.
+    // Delete all non-persistent snapshots.
     // Call after LayerMount::Unmount() to clean up session-scoped snapshots.
     DWORD CleanupNonPersistent();
 
@@ -79,7 +79,6 @@ public:
     DWORD ValidateSnapshotPath(const std::wstring& snapshotId,
                                bool& outReachable) const;
 
-    // 5.4 — Query methods.
     // ListSnapshots enumerates ALL snapshots present on the system via
     // IVssBackupComponents::Query under VSS_CTX_ALL — not just those created
     // in-process. Ownership (which tool created a snapshot) is not tracked;
@@ -88,10 +87,8 @@ public:
     //
     // Returns ERROR_SUCCESS on success (including "no snapshots exist") and
     // a Win32 error code when the VSS provider, InitializeForBackup,
-    // SetContext, or Query step failed -- previously these failures were
-    // silently translated into an empty result, which masked VSS service
-    // problems as "zero snapshots." `out` is always cleared on entry and
-    // populated only on success.
+    // SetContext, or Query step failed. `out` is always cleared on entry
+    // and populated only on success.
     DWORD ListSnapshots(std::vector<SnapshotInfo>& out) const;
     std::optional<SnapshotInfo> GetSnapshot(const std::wstring& id) const;
 

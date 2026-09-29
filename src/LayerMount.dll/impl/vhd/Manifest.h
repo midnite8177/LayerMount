@@ -29,7 +29,7 @@ private:
     bool   held_   = false;
 };
 
-// Storage backend type — per task spec: directory/vhd/vss
+// Storage backend type: directory, VHD, or VSS.
 enum class LayerType { Directory, VHD, VSS };
 
 struct LayerEntry {

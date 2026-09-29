@@ -152,10 +152,6 @@ std::wstring Manifest::DefaultPath(const std::wstring& workingDir) {
     return (std::filesystem::path(workingDir) / DefaultFileName()).wstring();
 }
 
-// ===========================================================================
-// 4.9 — Manifest::Load
-// ===========================================================================
-
 DWORD Manifest::Load(const std::wstring& manifestPath) {
     // Use Win32 CreateFileW instead of std::ifstream so the specific open
     // failure survives: ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
@@ -219,10 +215,6 @@ DWORD Manifest::Load(const std::wstring& manifestPath) {
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// 4.9 — Manifest::Save
-// ===========================================================================
-
 DWORD Manifest::Save(const std::wstring& manifestPath) const {
     nlohmann::json root;
     root["schemaVersion"] = 1;
@@ -279,10 +271,6 @@ DWORD Manifest::Save(const std::wstring& manifestPath) const {
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// 4.9 — Manifest mutation methods
-// ===========================================================================
-
 void Manifest::AddLayer(const LayerEntry& entry) {
     layers_[entry.id] = entry;
 }
@@ -309,10 +297,6 @@ std::vector<const LayerEntry*> Manifest::ListLayers() const {
     }
     return result;
 }
-
-// ===========================================================================
-// 4.10 — DetectOrphans / CleanupOrphans
-// ===========================================================================
 
 Manifest::OrphanReport Manifest::DetectOrphans(
     const std::wstring& layerDirectory) const {

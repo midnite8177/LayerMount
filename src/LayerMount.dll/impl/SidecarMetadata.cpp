@@ -59,8 +59,8 @@ FILETIME Uint64ToFileTime(uint64_t val) {
 }
 
 // SHA-1 of `data`. Returns empty on BCrypt failure. Uses BCRYPT_SHA1_ALGORITHM
-// rather than a non-crypto hash because the task spec calls out SHA-1
-// explicitly and because BCrypt is already linked (LayerImageManager uses
+// rather than a non-crypto hash because SHA-1 is the required digest
+// and because BCrypt is already linked (LayerImageManager uses
 // SHA-256). Lowercase hex output, 40 chars.
 std::wstring Sha1Hex(const std::string& data) {
     BCRYPT_ALG_HANDLE hAlg = nullptr;

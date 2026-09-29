@@ -20,10 +20,6 @@ using namespace LayerMount;
 
 namespace LayerMountTests {
 
-// ============================================================================
-// 9.5 — Full copy-up tests
-// ============================================================================
-
 TEST_CLASS(CopyUpTests) {
 public:
     TEST_CLASS_INITIALIZE(ClassInit) {
@@ -525,10 +521,6 @@ public:
         Assert::IsTrue(wm.HasWhiteout(L"ldir", env.Upper()));
     }
 };
-
-// ============================================================================
-// 9.6 — Metacopy tests
-// ============================================================================
 
 TEST_CLASS(MetacopyTests) {
 public:

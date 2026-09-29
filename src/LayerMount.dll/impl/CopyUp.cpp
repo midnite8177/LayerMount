@@ -771,10 +771,6 @@ void CopyUp::RecordCopyUp(const std::wstring& relativePath) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 3.1 — Work directory management
-// ---------------------------------------------------------------------------
-
 std::wstring CopyUp::GenerateWorkPath() {
     uint64_t counter = workCounter_.fetch_add(1, std::memory_order_relaxed);
     DWORD pid = GetCurrentProcessId();
@@ -885,10 +881,6 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
 
     return STATUS_SUCCESS;
 }
-
-// ---------------------------------------------------------------------------
-// 3.2 — Full copy-up
-// ---------------------------------------------------------------------------
 
 // Copy a reparse-point entry (symlink / junction) from lower to upper,
 // preserving the reparse tag + data rather than following the link.
@@ -1176,10 +1168,6 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     return STATUS_SUCCESS;
 }
 
-// ---------------------------------------------------------------------------
-// 3.3 — Metacopy
-// ---------------------------------------------------------------------------
-
 NTSTATUS CopyUp::MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
                                               const std::wstring& workPath) {
     if (!SetSparse(dstHandle.Get())) {
@@ -1457,10 +1445,6 @@ NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
     return STATUS_SUCCESS;
 }
 
-// ---------------------------------------------------------------------------
-// 3.4 — Directory copy-up
-// ---------------------------------------------------------------------------
-
 NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     std::wstring normalized = NormalizePath(relativePath);
 
@@ -1557,10 +1541,6 @@ NTSTATUS CopyUp::SecureAndTagUpperDirectory(const std::wstring& sourcePath,
 
     return STATUS_SUCCESS;
 }
-
-// ---------------------------------------------------------------------------
-// 3.5 — Directory rename redirect
-// ---------------------------------------------------------------------------
 
 NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
                                         const std::wstring& newRelativePath,

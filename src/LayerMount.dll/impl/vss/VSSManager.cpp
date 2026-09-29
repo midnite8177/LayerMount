@@ -197,10 +197,6 @@ static HRESULT DeleteShadow(const VSS_ID& vssId) {
     return hr;
 }
 
-// ===========================================================================
-// 5.1 + 5.3 — CreateSnapshot
-// ===========================================================================
-
 DWORD VSSManager::CreateSnapshot(const std::wstring& volumePath, bool persistent,
                                   std::wstring& outSnapshotId,
                                   std::wstring& outDevicePath) {
@@ -391,10 +387,6 @@ DWORD VSSManager::CreateSnapshot(const std::wstring& volumePath, bool persistent
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// 5.5 — DeleteSnapshot
-// ===========================================================================
-
 DWORD VSSManager::DeleteSnapshot(const std::wstring& snapshotId) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -423,10 +415,6 @@ DWORD VSSManager::DeleteSnapshot(const std::wstring& snapshotId) {
     }
     return ERROR_SUCCESS;
 }
-
-// ===========================================================================
-// 5.5 — CleanupNonPersistent
-// ===========================================================================
 
 DWORD VSSManager::CleanupNonPersistent() {
     // Collect IDs under the lock, then delete each via the regular DeleteSnapshot
@@ -478,10 +466,6 @@ DWORD VSSManager::ValidateSnapshotPath(const std::wstring& snapshotId,
         ::GetFileAttributesW(rootPath.c_str()) != INVALID_FILE_ATTRIBUTES;
     return ERROR_SUCCESS;
 }
-
-// ===========================================================================
-// 5.4 — Query methods
-// ===========================================================================
 
 DWORD VSSManager::ListSnapshots(std::vector<SnapshotInfo>& out) const {
     // Enumerate all system snapshots via IVssBackupComponents::Query under

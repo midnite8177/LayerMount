@@ -165,10 +165,6 @@ DWORD VHDLayerManager::OpenVHD(const std::wstring& path, VhdHandle& outHandle) {
 Manifest& VHDLayerManager::GetManifest() { return *manifest_; }
 const Manifest& VHDLayerManager::GetManifest() const { return *manifest_; }
 
-// ===========================================================================
-// 4.1 — CreateVHD
-// ===========================================================================
-
 DWORD VHDLayerManager::CreateVHD(const std::wstring& path, ULONGLONG sizeBytes,
                                   bool dynamic, VhdHandle& outHandle) {
     DWORD result = CheckElevation();
@@ -208,10 +204,6 @@ DWORD VHDLayerManager::CreateVHD(const std::wstring& path, ULONGLONG sizeBytes,
 
     return result;
 }
-
-// ===========================================================================
-// 4.2 — AttachVHD / DetachVHD
-// ===========================================================================
 
 DWORD VHDLayerManager::AttachVHD(const std::wstring& path, bool readOnly,
                                   VhdHandle& outHandle,
@@ -289,10 +281,6 @@ DWORD VHDLayerManager::DetachVHD(const std::wstring& path) {
     return result;
 }
 
-// ===========================================================================
-// 4.3 — CreateDifferencingVHD
-// ===========================================================================
-
 DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
                                               const std::wstring& parentPath,
                                               VhdHandle& outHandle) {
@@ -328,10 +316,6 @@ DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
     return result;
 }
 
-// ===========================================================================
-// 4.4 — MergeVHD
-// ===========================================================================
-
 DWORD VHDLayerManager::MergeVHD(const std::wstring& childPath) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
@@ -353,10 +337,6 @@ DWORD VHDLayerManager::MergeVHD(const std::wstring& childPath) {
 
     return result;
 }
-
-// ===========================================================================
-// 4.5 — InitializeVHD
-// ===========================================================================
 
 // Well-known GPT partition type GUIDs
 // {EBD0A0A2-B9E5-4433-87C0-68B6B72699C7} — Basic Data Partition
@@ -428,16 +408,16 @@ DWORD VHDLayerManager::InitializeVHD(const std::wstring& physicalDiskPath,
     ::DeviceIoControl(hDisk, IOCTL_DISK_UPDATE_PROPERTIES,
                       nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
 
-    // Step 5: Set drive layout — single Basic Data partition (per spec)
+    // Step 5: Set drive layout, single Basic Data partition
     // DRIVE_LAYOUT_INFORMATION_EX already contains 1 PARTITION_INFORMATION_EX entry
     // so sizeof(DRIVE_LAYOUT_INFORMATION_EX) is sufficient for 1 partition.
-    constexpr LONGLONG kPartitionOffset = 1048576;  // 1 MB
-    constexpr LONGLONG kTailPadding = 1048576;       // 1 MB
+    constexpr LONGLONG kPartitionOffsetBytes = 1048576;
+    constexpr LONGLONG kTailPaddingBytes = 1048576;
 
-    LONGLONG partitionLength = totalDiskSize - kPartitionOffset - kTailPadding;
+    LONGLONG partitionLength = totalDiskSize - kPartitionOffsetBytes - kTailPaddingBytes;
     if (partitionLength <= 0) {
         ::CloseHandle(hDisk);
-        return ERROR_DISK_TOO_FRAGMENTED;  // Disk too small
+        return ERROR_DISK_TOO_FRAGMENTED;
     }
 
     // Allocate buffer for DRIVE_LAYOUT_INFORMATION_EX with 1 partition entry
@@ -448,15 +428,15 @@ DWORD VHDLayerManager::InitializeVHD(const std::wstring& physicalDiskPath,
     layout->PartitionStyle = PARTITION_STYLE_GPT;
     layout->PartitionCount = 1;
     layout->Gpt.DiskId = diskId;
-    layout->Gpt.StartingUsableOffset.QuadPart = kPartitionOffset;
-    layout->Gpt.UsableLength.QuadPart = totalDiskSize - kPartitionOffset - kTailPadding;
+    layout->Gpt.StartingUsableOffset.QuadPart = kPartitionOffsetBytes;
+    layout->Gpt.UsableLength.QuadPart = totalDiskSize - kPartitionOffsetBytes - kTailPaddingBytes;
     layout->Gpt.MaxPartitionCount = 128;
 
     GUID partId{};
     ::CoCreateGuid(&partId);
 
     layout->PartitionEntry[0].PartitionStyle = PARTITION_STYLE_GPT;
-    layout->PartitionEntry[0].StartingOffset.QuadPart = kPartitionOffset;
+    layout->PartitionEntry[0].StartingOffset.QuadPart = kPartitionOffsetBytes;
     layout->PartitionEntry[0].PartitionLength.QuadPart = partitionLength;
     layout->PartitionEntry[0].PartitionNumber = 1;
     layout->PartitionEntry[0].RewritePartition = TRUE;
@@ -681,10 +661,6 @@ DWORD VHDLayerManager::InitializeVHDDiskpart(const std::wstring& vhdPath) {
     return (exitCode == 0) ? ERROR_SUCCESS : ERROR_UNRECOGNIZED_VOLUME;
 }
 
-// ===========================================================================
-// 4.7 — ImportDirectory
-// ===========================================================================
-
 DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
                                         const std::wstring& vhdPath,
                                         ULONGLONG sizeBytes) {
@@ -816,10 +792,6 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
     // operator can recover the stranded resource.
     return cleanupErr;
 }
-
-// ===========================================================================
-// 4.8 — ExportToDirectory
-// ===========================================================================
 
 DWORD VHDLayerManager::ExportToDirectory(const std::wstring& vhdPath,
                                           const std::wstring& directoryPath) {

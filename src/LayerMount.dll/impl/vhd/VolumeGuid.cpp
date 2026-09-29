@@ -6,9 +6,6 @@
 
 namespace LayerMount::VHD {
 
-// ===========================================================================
-// 4.6 — GetVolumeGuidForPhysicalDisk
-// ===========================================================================
 // Enumerates all volumes and matches by physical disk number.
 // Translated from C# VhdServices.FindVHDVolumePath.
 
@@ -111,10 +108,6 @@ DWORD GetVolumeGuidForPhysicalDisk(const std::wstring& physicalDiskPath,
     return ERROR_NOT_FOUND;
 }
 
-// ===========================================================================
-// 4.6 — GetMountPointForGuid
-// ===========================================================================
-
 DWORD GetMountPointForGuid(const std::wstring& volumeGuid,
                             std::wstring& outMountPoint) {
     outMountPoint.clear();
@@ -149,10 +142,6 @@ DWORD GetMountPointForGuid(const std::wstring& volumeGuid,
 
     return ERROR_NOT_FOUND;
 }
-
-// ===========================================================================
-// 4.6 — GetVolumeGuidForVHD
-// ===========================================================================
 
 DWORD GetVolumeGuidForVHD(HANDLE vhdHandle, std::wstring& outVolumeGuid) {
     outVolumeGuid.clear();
