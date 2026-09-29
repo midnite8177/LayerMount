@@ -2,11 +2,12 @@
 
 #include "LayerMount.h"
 
+#include <optional>
 #include <string_view>
+#include <vector>
 
 namespace LayerMount {
 
-// Forward declaration — full definition in Cache.h
 class Cache;
 
 namespace abi { class EventEmitter; }
@@ -20,17 +21,13 @@ enum class WhiteoutType {
 
 class WhiteoutManager {
 public:
-    // cache may be nullptr (for isolated testing or when invalidation is not needed)
-    explicit WhiteoutManager(const LayerConfig& config, Cache* cache = nullptr);
+    // A null cache turns off cache invalidation.
+    explicit WhiteoutManager(const LayerConfig& config, Cache* cache);
 
-    // Event emitter wired post-construction by LayerMount. Unset ->
-    // emission is a no-op (matches existing test callers that construct
-    // WhiteoutManager directly).
+    // A null emitter turns off event emission.
     void SetEventEmitter(::LayerMount::abi::EventEmitter* events) noexcept {
         events_ = events;
     }
-
-    // --- Whiteout detection ---
 
     // True when fileName starts with the .wh. prefix in any case, because
     // NTFS matches a marker name case-insensitively.
@@ -40,6 +37,11 @@ public:
     // without its .wh. prefix. whiteoutName must pass IsWhiteoutName.
     static std::wstring GetWhitedOutName(const std::wstring& whiteoutName);
 
+    // Returns the name that a directory entry hides when the entry is a
+    // whiteout file. Returns nullopt for any other entry and for the opaque
+    // marker.
+    static std::optional<std::wstring> WhitedOutNameOfEntry(const std::wstring& entryName);
+
     // Does a .wh.<name> marker exist for relativePath in the given layer?
     bool HasWhiteout(const std::wstring& relativePath,
                      const std::wstring& layerPath) const;
@@ -47,13 +49,9 @@ public:
     // Check all layers (upper first, then lowers in order)
     bool HasWhiteoutInAnyLayer(const std::wstring& relativePath) const;
 
-    // --- Whiteout creation/removal (upper layer only) ---
-
-    bool CreateWhiteout(const std::wstring& relativePath,
-                        WhiteoutType type = WhiteoutType::File);
+    // Both functions change the upper layer only.
+    bool CreateWhiteout(const std::wstring& relativePath, WhiteoutType type);
     bool RemoveWhiteout(const std::wstring& relativePath);
-
-    // --- Opaque directory support ---
 
     // Check if directory is opaque in the upper layer (ADS marker or .wh..wh..opq)
     bool IsOpaque(const std::wstring& dirRelativePath) const;
@@ -64,8 +62,6 @@ public:
 
     bool SetOpaque(const std::wstring& dirRelativePath);
     bool RemoveOpaque(const std::wstring& dirRelativePath);
-
-    // --- Opaque inheritance ---
 
     // Walk ancestors upward; return true if any ancestor is opaque in upper layer
     bool HasOpaqueAncestor(const std::wstring& relativePath) const;
@@ -84,22 +80,14 @@ public:
     bool HasWhitedOutAncestorInLayer(const std::wstring& relativePath,
                                      const std::wstring& layerPath) const;
 
-    // --- Directory enumeration support ---
-
-    // List all whiteout-hidden filenames in a directory within a given layer.
-    // Returns original names (with .wh. prefix stripped), in an unspecified
-    // order that follows the directory.
-    // On success (enumeration reached ERROR_NO_MORE_FILES) writes true to
-    // *ok if ok != nullptr. A mid-enumeration FindNextFileW failure (sharing
-    // violation, network error, etc.) leaves *ok == false so callers can
-    // fail directory merging instead of using a partial whiteout list that
-    // would expose already-deleted lower entries.
-    std::vector<std::wstring> ListWhiteoutsInDirectory(
+    // Returns the names that the whiteouts in one layer's directory hide,
+    // without the .wh. prefix, in directory order. A directory missing from
+    // the layer gives an empty list. A failed scan gives nullopt, because a
+    // partial list would show entries that the layer deleted. The list does
+    // not include the opaque marker.
+    std::optional<std::vector<std::wstring>> ListWhitedOutNames(
         const std::wstring& dirRelativePath,
-        const std::wstring& layerPath,
-        bool* ok = nullptr) const;
-
-    // --- Utility ---
+        const std::wstring& layerPath) const;
 
     // Build the whiteout marker filename for a relative path: parent\.wh.<name>
     static std::wstring GetWhiteoutFileName(const std::wstring& relativePath);

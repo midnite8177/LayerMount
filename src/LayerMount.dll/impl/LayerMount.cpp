@@ -720,9 +720,9 @@ void MergeUpperEntries(const std::wstring& upperPath,
     do {
         const std::wstring name = findData.cFileName;
         if (WhiteoutManager::IsWhiteoutName(name)) {
-            if (name != kOpaqueMarkerFile) {
-                merge.whitedOutNames.insert(
-                    CaseFoldedName(WhiteoutManager::GetWhitedOutName(name)));
+            if (const std::optional<std::wstring> hidden =
+                    WhiteoutManager::WhitedOutNameOfEntry(name)) {
+                merge.whitedOutNames.insert(CaseFoldedName(*hidden));
             }
             continue;
         }
@@ -748,11 +748,10 @@ struct LowerDirectory {
 // whitedOutNames. On a failed enumeration, adds no name and returns Partial.
 WhiteoutList CollectLowerWhiteouts(const LowerDirectory& dir,
                                    std::unordered_set<std::wstring>& whitedOutNames) {
-    bool whiteoutEnumOk = true;
-    const std::vector<std::wstring> layerWhiteouts =
-        dir.whiteoutMgr.ListWhiteoutsInDirectory(dir.dirNorm, dir.lowerPath, &whiteoutEnumOk);
-    if (!whiteoutEnumOk) return WhiteoutList::Partial;
-    for (const std::wstring& whitedOutName : layerWhiteouts) {
+    const std::optional<std::vector<std::wstring>> layerWhitedOutNames =
+        dir.whiteoutMgr.ListWhitedOutNames(dir.dirNorm, dir.lowerPath);
+    if (!layerWhitedOutNames) return WhiteoutList::Partial;
+    for (const std::wstring& whitedOutName : *layerWhitedOutNames) {
         whitedOutNames.insert(CaseFoldedName(whitedOutName));
     }
     return WhiteoutList::Complete;

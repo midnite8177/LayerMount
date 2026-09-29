@@ -15,18 +15,10 @@ constexpr size_t kWhiteoutPrefixLength = std::wstring_view(kWhiteoutPrefix).size
 
 }
 
-// ---------------------------------------------------------------------------
-// Construction
-// ---------------------------------------------------------------------------
-
 WhiteoutManager::WhiteoutManager(const LayerConfig& config, Cache* cache)
     : config_(config)
     , cache_(cache) {
 }
-
-// ---------------------------------------------------------------------------
-// Static helpers
-// ---------------------------------------------------------------------------
 
 bool WhiteoutManager::IsWhiteoutName(std::wstring_view fileName) {
     constexpr int prefixLength = static_cast<int>(kWhiteoutPrefixLength);
@@ -38,6 +30,11 @@ bool WhiteoutManager::IsWhiteoutName(std::wstring_view fileName) {
 
 std::wstring WhiteoutManager::GetWhitedOutName(const std::wstring& whiteoutName) {
     return whiteoutName.substr(kWhiteoutPrefixLength);
+}
+
+std::optional<std::wstring> WhiteoutManager::WhitedOutNameOfEntry(const std::wstring& entryName) {
+    if (!IsWhiteoutName(entryName) || entryName == kOpaqueMarkerFile) return std::nullopt;
+    return GetWhitedOutName(entryName);
 }
 
 std::wstring WhiteoutManager::GetWhiteoutFileName(const std::wstring& relativePath) {
@@ -55,10 +52,6 @@ std::wstring WhiteoutManager::GetWhiteoutFullPath(const std::wstring& layerPath,
     std::wstring whRelative = GetWhiteoutFileName(relativePath);
     return layerPath + L"\\" + whRelative;
 }
-
-// ---------------------------------------------------------------------------
-// Whiteout detection
-// ---------------------------------------------------------------------------
 
 bool WhiteoutManager::HasWhiteout(const std::wstring& relativePath,
                                    const std::wstring& layerPath) const {
@@ -79,10 +72,6 @@ bool WhiteoutManager::HasWhiteoutInAnyLayer(const std::wstring& relativePath) co
     }
     return false;
 }
-
-// ---------------------------------------------------------------------------
-// Whiteout creation/removal (upper layer only)
-// ---------------------------------------------------------------------------
 
 bool WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
                                       WhiteoutType type) {
@@ -150,10 +139,6 @@ bool WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
 
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// Opaque directory support
-// ---------------------------------------------------------------------------
 
 bool WhiteoutManager::IsOpaque(const std::wstring& dirRelativePath) const {
     return IsOpaqueInLayer(dirRelativePath, config_.upperPath);
@@ -235,10 +220,6 @@ bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
     return adsOk && legacyOk;
 }
 
-// ---------------------------------------------------------------------------
-// Opaque inheritance
-// ---------------------------------------------------------------------------
-
 bool WhiteoutManager::HasOpaqueAncestor(const std::wstring& relativePath) const {
     fs::path p(relativePath);
     fs::path ancestor = p.parent_path();
@@ -295,10 +276,6 @@ bool WhiteoutManager::HasWhitedOutAncestorInLayer(const std::wstring& relativePa
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Directory enumeration support
-// ---------------------------------------------------------------------------
-
 std::wstring JoinLayerScanPath(const std::wstring& layerPath,
                                const std::wstring& dirRelativePath) {
     return dirRelativePath.empty()
@@ -306,10 +283,9 @@ std::wstring JoinLayerScanPath(const std::wstring& layerPath,
         : layerPath + L"\\" + dirRelativePath + L"\\*";
 }
 
-std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
+std::optional<std::vector<std::wstring>> WhiteoutManager::ListWhitedOutNames(
     const std::wstring& dirRelativePath,
-    const std::wstring& layerPath,
-    bool* ok) const {
+    const std::wstring& layerPath) const {
 
     std::vector<std::wstring> result;
     std::wstring searchPath = JoinLayerScanPath(layerPath, dirRelativePath);
@@ -318,24 +294,15 @@ std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
         const DWORD err = ::GetLastError();
-        // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND: no entries, success.
-        // Anything else is a real enumeration failure.
-        if (ok != nullptr) {
-            *ok = (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND);
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            return result;
         }
-        return result;
+        return std::nullopt;
     }
 
     do {
-        std::wstring name(findData.cFileName);
-
-        if (name == L"." || name == L"..") continue;
-
-        if (IsWhiteoutName(name)) {
-            if (name == kOpaqueMarkerFile) continue;
-
-            result.push_back(GetWhitedOutName(name));
-        }
+        std::optional<std::wstring> hidden = WhitedOutNameOfEntry(findData.cFileName);
+        if (hidden) result.push_back(std::move(*hidden));
     } while (FindNextFileW(hFind, &findData));
 
     // FindNextFileW returns false both at a normal end and on a real I/O failure.
@@ -344,8 +311,8 @@ std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
     const DWORD terminalErr = ::GetLastError();
     FindClose(hFind);
 
-    if (ok != nullptr) {
-        *ok = (terminalErr == ERROR_NO_MORE_FILES);
+    if (terminalErr != ERROR_NO_MORE_FILES) {
+        return std::nullopt;
     }
     return result;
 }

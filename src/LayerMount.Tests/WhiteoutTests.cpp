@@ -87,7 +87,7 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        Assert::IsTrue(wm.CreateWhiteout(L"foo.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"foo.txt", WhiteoutType::File));
 
         std::wstring whPath = env.Upper() + L"\\.wh.foo.txt";
         DWORD attrs = ::GetFileAttributesW(whPath.c_str());
@@ -102,7 +102,7 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        Assert::IsTrue(wm.CreateWhiteout(L"sub\\foo.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"sub\\foo.txt", WhiteoutType::File));
 
         std::wstring parentDir = env.Upper() + L"\\sub";
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
@@ -121,7 +121,7 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        wm.CreateWhiteout(L"foo.txt");
+        wm.CreateWhiteout(L"foo.txt", WhiteoutType::File);
         Assert::IsTrue(wm.HasWhiteout(L"foo.txt", env.Upper()));
     }
 
@@ -157,7 +157,7 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        wm.CreateWhiteout(L"foo.txt");
+        wm.CreateWhiteout(L"foo.txt", WhiteoutType::File);
         Assert::IsTrue(wm.HasWhiteout(L"foo.txt", env.Upper()));
 
         Assert::IsTrue(wm.RemoveWhiteout(L"foo.txt"));
@@ -190,7 +190,7 @@ public:
         cache.Put(L"foo.txt", fake);
         Assert::IsTrue(cache.Get(L"foo.txt").has_value(), L"Cache should have entry before whiteout");
 
-        wm.CreateWhiteout(L"foo.txt");
+        wm.CreateWhiteout(L"foo.txt", WhiteoutType::File);
 
         Assert::IsFalse(cache.Get(L"foo.txt").has_value(),
             L"Cache entry should be invalidated after CreateWhiteout");
@@ -219,7 +219,7 @@ public:
         Assert::IsTrue(before.source == LayerSource::Lower);
 
         // Whiteout invalidates the cache entry
-        wm.CreateWhiteout(L"secret.txt");
+        wm.CreateWhiteout(L"secret.txt", WhiteoutType::File);
 
         ResolvedPath after = resolver.ResolvePath(L"secret.txt");
         Assert::IsFalse(after.Found(), L"Whiteout should hide the lower file");
@@ -235,7 +235,7 @@ public:
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);
 
-        wm.CreateWhiteout(L"secret.txt");
+        wm.CreateWhiteout(L"secret.txt", WhiteoutType::File);
         Assert::IsFalse(resolver.ResolvePath(L"secret.txt").Found());
 
         wm.RemoveWhiteout(L"secret.txt");
@@ -252,42 +252,43 @@ public:
         AssertTempIsNTFS();
     }
 
-    TEST_METHOD(ListWhiteoutsInDirectory_ReturnsOriginalNamesWithPrefixStripped) {
+    TEST_METHOD(ListWhitedOutNames_ReturnsOriginalNamesWithPrefixStripped) {
         TempLayerEnvironment env(1);
         auto config = env.MakeConfig();
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        wm.CreateWhiteout(L"a.txt");
-        wm.CreateWhiteout(L"b.txt");
-        wm.CreateWhiteout(L"c.txt");
+        wm.CreateWhiteout(L"a.txt", WhiteoutType::File);
+        wm.CreateWhiteout(L"b.txt", WhiteoutType::File);
+        wm.CreateWhiteout(L"c.txt", WhiteoutType::File);
 
-        auto whiteouts = wm.ListWhiteoutsInDirectory(L"", env.Upper());
+        const auto names = wm.ListWhitedOutNames(L"", env.Upper());
 
+        Assert::IsTrue(names.has_value(), L"Scan of the upper root should succeed");
         auto contains = [&](const std::wstring& name) {
-            return std::find(whiteouts.begin(), whiteouts.end(), name) != whiteouts.end();
+            return std::find(names->begin(), names->end(), name) != names->end();
         };
-        Assert::AreEqual(size_t{3}, whiteouts.size());
+        Assert::AreEqual(size_t{3}, names->size());
         Assert::IsTrue(contains(L"a.txt"));
         Assert::IsTrue(contains(L"b.txt"));
         Assert::IsTrue(contains(L"c.txt"));
     }
 
-    TEST_METHOD(ListWhiteoutsInDirectory_RootOfExtendedFormLayerPath_ScansSuccessfully) {
+    TEST_METHOD(ListWhitedOutNames_RootOfExtendedFormLayerPath_ScansSuccessfully) {
         TempLayerEnvironment env(1);
         auto config = env.MakeConfig();
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        wm.CreateWhiteout(L"a.txt");
+        wm.CreateWhiteout(L"a.txt", WhiteoutType::File);
 
         std::wstring extendedUpper = L"\\\\?\\" + env.Upper();
-        bool ok = false;
-        auto whiteouts = wm.ListWhiteoutsInDirectory(L"", extendedUpper, &ok);
+        const auto names = wm.ListWhitedOutNames(L"", extendedUpper);
 
-        Assert::IsTrue(ok, L"Root scan of an extended-form layer path should succeed");
-        Assert::AreEqual(size_t{1}, whiteouts.size());
-        Assert::AreEqual(std::wstring(L"a.txt"), whiteouts[0]);
+        Assert::IsTrue(names.has_value(),
+                       L"Root scan of an extended-form layer path should succeed");
+        Assert::AreEqual(size_t{1}, names->size());
+        Assert::AreEqual(std::wstring(L"a.txt"), (*names)[0]);
     }
 };
 

@@ -279,7 +279,7 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         // target.txt has a pre-existing whiteout (user previously deleted it).
-        Assert::IsTrue(wm.CreateWhiteout(L"target.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"target.txt", WhiteoutType::File));
         Assert::IsTrue(wm.HasWhiteout(L"target.txt", env.Upper()));
 
         Assert::IsTrue(NT_SUCCESS(
@@ -367,7 +367,7 @@ public:
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"box");
         env.WriteFile(env.Upper(), L"box\\a.txt", "data");
-        Assert::IsTrue(WhiteoutManager(env.MakeConfig()).SetOpaque(L"box"));
+        Assert::IsTrue(WhiteoutManager(env.MakeConfig(), nullptr).SetOpaque(L"box"));
 
         auto config = env.MakeConfig();
         Cache cache;

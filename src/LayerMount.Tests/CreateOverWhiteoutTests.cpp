@@ -87,7 +87,7 @@ public:
         PathResolver resolver(config, wm, cache);
 
         // Simulate prior delete.
-        Assert::IsTrue(wm.CreateWhiteout(L"f.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"f.txt", WhiteoutType::File));
         Assert::IsFalse(resolver.ResolvePath(L"f.txt").Found());
 
         SimulateCreateFile(resolver, wm, cache, L"f.txt", "new-upper");
@@ -147,7 +147,7 @@ public:
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);
 
-        Assert::IsTrue(wm.CreateWhiteout(L"wasfile"));
+        Assert::IsTrue(wm.CreateWhiteout(L"wasfile", WhiteoutType::File));
 
         SimulateCreateDir(resolver, wm, cache, L"wasfile");
 
@@ -198,7 +198,7 @@ public:
         PathResolver resolver(config, wm, cache);
 
         // Simulate the rename-source artifacts: whiteout at the old name.
-        Assert::IsTrue(wm.CreateWhiteout(L"moved.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"moved.txt", WhiteoutType::File));
         Assert::IsFalse(resolver.ResolvePath(L"moved.txt").Found());
 
         SimulateCreateFile(resolver, wm, cache, L"moved.txt", "recreated");
@@ -248,7 +248,7 @@ public:
         // chain in upper (so the marker has somewhere to land). The interesting
         // invariant below is that the create path still succeeds regardless of
         // whether the parent existed beforehand.
-        Assert::IsTrue(wm.CreateWhiteout(L"a\\b\\c.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"a\\b\\c.txt", WhiteoutType::File));
 
         SimulateCreateFile(resolver, wm, cache, L"a\\b\\c.txt", "new");
 
@@ -276,7 +276,7 @@ public:
         PathResolver resolver(config, wm, cache);
 
         // (1) delete lower-only file — whiteout goes up.
-        Assert::IsTrue(wm.CreateWhiteout(L"loop.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"loop.txt", WhiteoutType::File));
 
         // (2) create — whiteout cleared, upper content wins.
         SimulateCreateFile(resolver, wm, cache, L"loop.txt", "first-upper");
@@ -286,7 +286,7 @@ public:
         // (3) delete again — upper removed, whiteout back (because lower still exists).
         ::DeleteFileW(resolver.GetUpperPath(L"loop.txt").c_str());
         if (resolver.ResolveLowerPath(L"loop.txt").Found()) {
-            Assert::IsTrue(wm.CreateWhiteout(L"loop.txt"));
+            Assert::IsTrue(wm.CreateWhiteout(L"loop.txt", WhiteoutType::File));
         }
         cache.InvalidateWithAncestors(L"loop.txt");
 

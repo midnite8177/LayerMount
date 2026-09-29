@@ -179,10 +179,10 @@ constexpr const wchar_t* kOpaqueMarkerFile  = L".wh..wh..opq";
   (always; a delete that needs a whiteout owns the whiteout in upper).
 - `RemoveWhiteout(rel)` — used by `Create`/`Rename` when a new file
   resurrects a previously-deleted name.
-- `ListWhiteoutsInDirectory(dir, layer, ok)` — directory-merge support;
-  the `ok` out-param is **false** when enumeration was interrupted, so
-  the caller refuses to expose a partial list (a missing whiteout would
-  surface a logically-deleted lower entry).
+- `ListWhitedOutNames(dir, layer)` supports the directory merge.
+  It returns `std::nullopt` when the scan fails, so the caller cannot
+  use a partial list. A missing whiteout would show a lower entry that
+  a layer deleted.
 
 `FILE_FLAG_BACKUP_SEMANTICS` on the marker open is intentional: a
 parent directory that inherited a `DENY-WRITE` ACE from the lower layer
@@ -284,7 +284,7 @@ or rename it. See "Path safety guards". Directory merging in
    and adds `<name>` to a `whitedOutNames` set, then *skips* the marker
    itself.
 2. For each lower, it enumerates; before consuming entries it loads the
-   layer's whiteouts (via `ListWhiteoutsInDirectory`) into the same set.
+   layer's whiteouts (via `ListWhitedOutNames`) into the same set.
    If enumeration of whiteouts fails mid-stream, the merge aborts
    descent through deeper lowers — a partial whiteout list could leak a
    logically-deleted entry.

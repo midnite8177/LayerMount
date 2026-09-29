@@ -173,8 +173,8 @@ public:
         auto config = env.MakeConfig();
         Cache cache;
         WhiteoutManager wm(config, &cache);
-        Assert::IsTrue(wm.CreateWhiteout(L"box\\a.txt"));
-        Assert::IsTrue(wm.CreateWhiteout(L"box\\b.txt"));
+        Assert::IsTrue(wm.CreateWhiteout(L"box\\a.txt", WhiteoutType::File));
+        Assert::IsTrue(wm.CreateWhiteout(L"box\\b.txt", WhiteoutType::File));
 
         ::LayerMount::LayerMount mount(config);
         auto merged = mount.MergeDirectoryEntries(L"box");
@@ -191,7 +191,7 @@ public:
         env.CreateDir(env.Lower(0), L"sd");
         env.WriteFile(env.Lower(0), L"sd\\inner.txt", "inner-lower");
         env.CreateDir(env.Upper(),  L"sd");
-        Assert::IsTrue(WhiteoutManager(env.MakeConfig()).SetOpaque(L"sd"));
+        Assert::IsTrue(WhiteoutManager(env.MakeConfig(), nullptr).SetOpaque(L"sd"));
 
         auto config = env.MakeConfig();
         Cache cache;
