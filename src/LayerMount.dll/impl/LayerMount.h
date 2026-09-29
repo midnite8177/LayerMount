@@ -358,8 +358,9 @@ public:
         InternalFileInfo* fileInfo,
         const std::wstring* pathHint = nullptr);
 
-    // Merge directory entries from all visible layers.
-    // Returns a sorted map: lowercase filename -> MergedEntry.
+    // Returns a sorted map: lowercase filename -> MergedEntry. Returns an
+    // empty map for an unsafe or reserved path, the same as for an empty
+    // directory.
     std::map<std::wstring, MergedEntry> MergeDirectoryEntries(
         const std::wstring& dirRelativePath) const;
 

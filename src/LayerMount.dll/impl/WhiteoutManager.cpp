@@ -269,6 +269,12 @@ bool WhiteoutManager::HasOpaqueAncestorInLayer(const std::wstring& relativePath,
     return false;
 }
 
+bool WhiteoutManager::HasOpaqueSelfOrAncestorInLayer(const std::wstring& dirRelativePath,
+                                                      const std::wstring& layerPath) const {
+    return IsOpaqueInLayer(dirRelativePath, layerPath) ||
+        HasOpaqueAncestorInLayer(dirRelativePath, layerPath);
+}
+
 bool WhiteoutManager::HasWhitedOutAncestorInLayer(const std::wstring& relativePath,
                                                    const std::wstring& layerPath) const {
     fs::path p(relativePath);

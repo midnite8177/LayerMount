@@ -724,20 +724,29 @@ void MergeUpperEntries(const std::wstring& upperPath,
     FindClose(hFind);
 }
 
-// Adds the names that lowerPath's whiteouts in dirNorm hide to
-// whitedOutNames. Returns false when the whiteout enumeration fails.
-bool CollectLowerWhiteouts(const WhiteoutManager& whiteoutMgr,
-                           const std::wstring& lowerPath,
-                           const std::wstring& dirNorm,
-                           std::unordered_set<std::wstring>& whitedOutNames) {
+enum class WhiteoutList {
+    Complete,
+    Partial,
+};
+
+struct LowerDirectory {
+    const WhiteoutManager& whiteoutMgr;
+    const std::wstring& lowerPath;
+    const std::wstring& dirNorm;
+};
+
+// Adds the names that the lower's whiteouts in the directory hide to
+// whitedOutNames. On a failed enumeration, adds no name and returns Partial.
+WhiteoutList CollectLowerWhiteouts(const LowerDirectory& dir,
+                                   std::unordered_set<std::wstring>& whitedOutNames) {
     bool whiteoutEnumOk = true;
     const std::vector<std::wstring> layerWhiteouts =
-        whiteoutMgr.ListWhiteoutsInDirectory(dirNorm, lowerPath, &whiteoutEnumOk);
-    if (!whiteoutEnumOk) return false;
+        dir.whiteoutMgr.ListWhiteoutsInDirectory(dir.dirNorm, dir.lowerPath, &whiteoutEnumOk);
+    if (!whiteoutEnumOk) return WhiteoutList::Partial;
     for (const std::wstring& whitedOutName : layerWhiteouts) {
         whitedOutNames.insert(CaseFoldedName(whitedOutName));
     }
-    return true;
+    return WhiteoutList::Complete;
 }
 
 enum class DeeperLowers {
@@ -745,25 +754,23 @@ enum class DeeperLowers {
     Hidden,
 };
 
-// Adds lowerPath's entries in dirNorm that no higher layer lists and that no
-// whiteout hides. The whiteouts of lowerPath hide its own entries too.
-// Returns whether the lowers below lowerPath can add entries to dirNorm.
-DeeperLowers MergeLowerEntries(const WhiteoutManager& whiteoutMgr,
-                               const std::wstring& lowerPath,
-                               const std::wstring& dirNorm,
-                               DirectoryMerge& merge) {
-    const DeeperLowers deeperLowers = whiteoutMgr.IsOpaqueInLayer(dirNorm, lowerPath)
-        ? DeeperLowers::Hidden
-        : DeeperLowers::Visible;
+// Adds the lower's entries in the directory that no higher layer lists and
+// that no whiteout hides. The whiteouts of the lower hide its own entries too.
+// Returns whether the lowers below it can add entries to the directory.
+DeeperLowers MergeLowerEntries(const LowerDirectory& dir, DirectoryMerge& merge) {
+    const DeeperLowers deeperLowers =
+        dir.whiteoutMgr.HasOpaqueSelfOrAncestorInLayer(dir.dirNorm, dir.lowerPath)
+            ? DeeperLowers::Hidden
+            : DeeperLowers::Visible;
 
     WIN32_FIND_DATAW findData;
-    const std::wstring searchPath = JoinLayerScanPath(lowerPath, dirNorm);
+    const std::wstring searchPath = JoinLayerScanPath(dir.lowerPath, dir.dirNorm);
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) return deeperLowers;
 
-    // A partial whiteout list can show entries that this lower deleted, so
-    // the merge adds no entry from this lower or from a deeper lower.
-    if (!CollectLowerWhiteouts(whiteoutMgr, lowerPath, dirNorm, merge.whitedOutNames)) {
+    // A partial whiteout list can show a name that this lower deleted, from
+    // this lower or from a deeper lower.
+    if (CollectLowerWhiteouts(dir, merge.whitedOutNames) == WhiteoutList::Partial) {
         FindClose(hFind);
         return DeeperLowers::Hidden;
     }
@@ -793,15 +800,16 @@ std::map<std::wstring, MergedEntry> LayerMount::MergeDirectoryEntries(
     }
 
     DirectoryMerge merge;
-    const bool isOpaque = whiteoutMgr_->IsOpaque(dirNorm);
+    const bool lowersHidden =
+        whiteoutMgr_->HasOpaqueSelfOrAncestorInLayer(dirNorm, config_.upperPath);
 
     MergeUpperEntries(config_.upperPath, dirNorm, merge);
-    if (isOpaque) {
+    if (lowersHidden) {
         return std::move(merge.entries);
     }
 
     for (const std::wstring& lowerPath : config_.lowerPaths) {
-        if (MergeLowerEntries(*whiteoutMgr_, lowerPath, dirNorm, merge)
+        if (MergeLowerEntries(LowerDirectory{*whiteoutMgr_, lowerPath, dirNorm}, merge)
                 != DeeperLowers::Visible) {
             break;
         }

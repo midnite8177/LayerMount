@@ -71,6 +71,9 @@ public:
     bool HasOpaqueAncestorInLayer(const std::wstring& relativePath,
                                   const std::wstring& layerPath) const;
 
+    bool HasOpaqueSelfOrAncestorInLayer(const std::wstring& dirRelativePath,
+                                        const std::wstring& layerPath) const;
+
     // Walk ancestors upward; return true if any ancestor has a whiteout marker in
     // the given layer. A whiteout at a directory path hides every descendant from
     // that layer downward — callers in the resolver use this to stop surfacing

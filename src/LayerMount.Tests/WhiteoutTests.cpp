@@ -25,6 +25,17 @@ struct ResolverUnderTest {
     PathResolver resolver;
 };
 
+void AssertEveryListedEntryResolves(const TempLayerEnvironment& env,
+                                    const std::wstring& dir,
+                                    const std::map<std::wstring, MergedEntry>& merged) {
+    ResolverUnderTest r(env);
+    for (const auto& [key, entry] : merged) {
+        const std::wstring child = dir + L"\\" + entry.findData.cFileName;
+        Assert::IsTrue(r.resolver.ResolvePath(child).Found(),
+            (L"Every listed entry must resolve: " + child).c_str());
+    }
+}
+
 }
 
 TEST_CLASS(WhiteoutTests) {
@@ -416,6 +427,53 @@ public:
         Assert::IsFalse(wm.HasOpaqueAncestor(L"sub\\child.txt"));
     }
 
+    TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_DirOpaqueInLayer_ReturnsTrue) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\.wh..wh..opq", "");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+
+        Assert::IsTrue(wm.HasOpaqueSelfOrAncestorInLayer(L"d", env.Lower(0)));
+    }
+
+    TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_AncestorOpaqueInLayer_ReturnsTrue) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a\\.wh..wh..opq", "");
+        env.CreateDir(env.Lower(0), L"a\\b\\c");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+
+        Assert::IsTrue(wm.HasOpaqueSelfOrAncestorInLayer(L"a\\b\\c", env.Lower(0)));
+    }
+
+    TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_OpaqueOnlyInOtherLayer_ReturnsFalse) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"a\\.wh..wh..opq", "");
+        env.CreateDir(env.Lower(0), L"a\\b");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+
+        Assert::IsFalse(wm.HasOpaqueSelfOrAncestorInLayer(L"a\\b", env.Lower(0)));
+        Assert::IsTrue(wm.HasOpaqueSelfOrAncestorInLayer(L"a\\b", env.Upper()));
+    }
+
+    TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_NoMarker_ReturnsFalse) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"a\\b");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+
+        Assert::IsFalse(wm.HasOpaqueSelfOrAncestorInLayer(L"a\\b", env.Lower(0)));
+    }
+
     TEST_METHOD(HasOpaqueAncestor_GrandparentOpaque_ReturnsTrue) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"a\\b\\c");
@@ -546,6 +604,43 @@ public:
             L"The listing must not show the opaque marker file");
         Assert::AreEqual(static_cast<size_t>(1), merged.size(),
             L"The listing must hold only the entry of the lower");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_AncestorOpaqueInLower_ShowsThatLowersEntriesAndHidesDeeperLower) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"d\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"d\\sub\\own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"d\\sub\\below.txt", "lower1");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"d\\sub");
+
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the entry of the lower that holds the opaque marker on the ancestor");
+        Assert::IsTrue(merged.count(L"below.txt") == 0,
+            L"The listing must hide the entry of the lower below the opaque marker on the ancestor");
+
+        AssertEveryListedEntryResolves(env, L"d\\sub", merged);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_AncestorOpaqueInUpper_ShowsUpperEntriesAndHidesEveryLower) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Upper(), L"d\\.wh..wh..opq", "");
+        env.WriteFile(env.Upper(), L"d\\sub\\up.txt", "upper");
+        env.WriteFile(env.Lower(0), L"d\\sub\\low0.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"d\\sub\\low1.txt", "lower1");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"d\\sub");
+
+        Assert::IsTrue(merged.count(L"up.txt") == 1,
+            L"The listing must show the entry of the upper");
+        Assert::IsTrue(merged.count(L"low0.txt") == 0,
+            L"The listing must hide the entry of the first lower below the opaque marker on the ancestor");
+        Assert::IsTrue(merged.count(L"low1.txt") == 0,
+            L"The listing must hide the entry of the second lower below the opaque marker on the ancestor");
+
+        AssertEveryListedEntryResolves(env, L"d\\sub", merged);
     }
 
     TEST_METHOD(PathResolve_DirOpaqueInLower_ResolvesChildOfThatLowerAndHidesChildOfDeeperLower) {
