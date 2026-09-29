@@ -274,8 +274,11 @@ otherwise resurface on the next resolve.
 
 ### What about whiteouts in directory listings?
 
-Whiteout markers are *never* visible in the overlay. Directory
-merging in `LayerMount::MergeDirectoryEntries`:
+Whiteout markers are *never* visible in the overlay. The resolver
+returns not found for any path with a segment that starts with `.wh.`,
+so a caller who knows a marker's name still cannot open, read, delete
+or rename it. See "Path safety guards". Directory merging in
+`LayerMount::MergeDirectoryEntries`:
 
 1. Enumerates upper. For each `.wh.<name>` it sees, it strips the prefix
    and adds `<name>` to a `whitedOutNames` set, then *skips* the marker
@@ -309,6 +312,9 @@ algorithm (in `impl/PathResolver.cpp`):
 2a. Empty (root) -> return upper-layer root.
 2b. Reject unsafe paths (..-segments, embedded ':').
 2c. Reject paths inside the reserved `.overlay\` subtree.
+2d. Reject paths with a segment that starts with `.wh.`, in every
+    layer. This covers whiteout and opaque markers and anything
+    beneath a marker-named directory.
 3.  Cache lookup; return on hit.
 4.  Probe upper. If present, read `:overlay` ADS:
       - If `redirect` is set, recurse with depth+1 (renamed-from-lower
@@ -332,7 +338,7 @@ algorithm (in `impl/PathResolver.cpp`):
 ```
 
 `ResolveLowerPath` does not probe the upper. It runs steps 2, 2b, 2c,
-5a and 7 only, it does not use the cache, and an empty path is not
+2d, 5a and 7 only, it does not use the cache, and an empty path is not
 found. Create, delete, copy-up and rename use it when the engine needs
 the *lower* state independent of any upper shadow.
 
@@ -356,10 +362,25 @@ It rejects:
   `upper\..\escape.txt` to `escape.txt` outside the layer root),
 - any `:` (drive letter or ADS suffix injection).
 
-`IsReservedRelativePath(normalized)` rejects the `.overlay` directory
-and anything beneath it. That subtree is the sidecar-metadata store on
-non-ADS upper layers (see below); exposing it through the overlay would
-let a caller open, modify, or delete internal records.
+`IsReservedRelativePath(normalized)` rejects two kinds of path:
+
+- The `.overlay` directory and anything beneath it. That subtree is the
+  sidecar-metadata store on non-ADS upper layers, described below. A
+  caller who reaches it through the overlay could open, modify, or
+  delete internal records.
+- Any path with a segment that starts with `.wh.`. This covers whiteout
+  markers, the opaque marker `.wh..wh..opq` and every path beneath a
+  marker-named directory. Without it, creating `dir\.wh.name` would
+  write a live whiteout, and creating `dir\.wh..wh..opq` would make
+  `dir` opaque.
+
+The resolver treats a reserved path as not found in the upper and in
+every lower. `Create` returns `STATUS_ACCESS_DENIED`, and so does
+`Rename` when either end is reserved. `UpdateContextPath` returns
+`STATUS_INVALID_PARAMETER`. The marker compare ignores case, as NTFS
+does, so `.WH.` matches too. The whiteout and opaque
+bookkeeping inside the engine probes the layers with
+`GetFileAttributesW` and does not go through the resolver.
 
 ### Stream-qualified paths and case
 
@@ -546,14 +567,19 @@ choice, the SHA-1 rationale, and the read and remove details.
 
 ### Reserved namespaces
 
-The engine reserves two namespaces in the upper layer:
+The engine reserves three namespaces:
 
-- `:overlay`, `:overlay.opaque` ADS streams. `Overwrite` (CREATE_ALWAYS
-  semantics) deletes user ADS streams but skips anything starting with
-  `:overlay`.
+- `:overlay`, `:overlay.opaque` ADS streams in the upper layer.
+  `Overwrite`, which has CREATE_ALWAYS semantics, deletes user ADS
+  streams but skips anything starting with `:overlay`.
 - The `<upper>\.overlay\` directory. `IsReservedRelativePath` rejects
   every read and write that targets it, and `MergeDirectoryEntries`
   filters it out of root listings.
+- Names that start with `.wh.`, in every directory and every layer.
+  `IsReservedRelativePath` rejects a path with such a segment, so the
+  ABI calls `LayerMountCreateWhiteout` and `LayerMountSetOpaque` return
+  `E_INVALIDARG` for it. `MergeDirectoryEntries` filters the markers out
+  of every listing and lists nothing for a marker-named directory.
 
 ---
 

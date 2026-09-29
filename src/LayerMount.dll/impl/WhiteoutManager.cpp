@@ -28,9 +28,12 @@ WhiteoutManager::WhiteoutManager(const LayerConfig& config, Cache* cache)
 // Static helpers
 // ---------------------------------------------------------------------------
 
-bool WhiteoutManager::IsWhiteoutName(const std::wstring& fileName) {
+bool WhiteoutManager::IsWhiteoutName(std::wstring_view fileName) {
+    constexpr int prefixLength = static_cast<int>(kWhiteoutPrefixLength);
     return fileName.size() >= kWhiteoutPrefixLength &&
-           fileName.compare(0, kWhiteoutPrefixLength, kWhiteoutPrefix) == 0;
+           CompareStringOrdinal(fileName.data(), prefixLength,
+                                kWhiteoutPrefix, prefixLength,
+                                TRUE) == CSTR_EQUAL;
 }
 
 std::wstring WhiteoutManager::GetWhitedOutName(const std::wstring& whiteoutName) {

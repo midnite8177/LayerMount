@@ -181,9 +181,10 @@ public sealed partial class LayerMount
     /// <param name="isDirectory">Whether to create a directory- or file-shaped marker.</param>
     /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
     /// <exception cref="LayerMountException">
-    /// If <paramref name="relativePath"/> is outside the overlay root or
-    /// inside the reserved metadata subtree, or the underlying native
-    /// call otherwise returns a non-success HRESULT.
+    /// If <paramref name="relativePath"/> is outside the overlay root,
+    /// is inside the reserved metadata subtree, or has a segment that
+    /// starts with <c>.wh.</c>, or if the underlying native call
+    /// otherwise returns a non-success HRESULT.
     /// </exception>
     public void CreateWhiteout(string relativePath, bool isDirectory = false)
     {
@@ -201,9 +202,10 @@ public sealed partial class LayerMount
     /// <param name="dirRelativePath">Directory path relative to the overlay root.</param>
     /// <exception cref="ArgumentNullException"><paramref name="dirRelativePath"/> is null.</exception>
     /// <exception cref="LayerMountException">
-    /// If <paramref name="dirRelativePath"/> is outside the overlay root
-    /// or inside the reserved metadata subtree, or the underlying
-    /// native call otherwise returns a non-success HRESULT.
+    /// If <paramref name="dirRelativePath"/> is outside the overlay root,
+    /// is inside the reserved metadata subtree, or has a segment that
+    /// starts with <c>.wh.</c>, or if the underlying native call
+    /// otherwise returns a non-success HRESULT.
     /// </exception>
     public void SetOpaque(string dirRelativePath)
     {

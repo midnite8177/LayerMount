@@ -2,6 +2,8 @@
 
 #include "LayerMount.h"
 
+#include <string_view>
+
 namespace LayerMount {
 
 // Forward declaration — full definition in Cache.h
@@ -30,8 +32,9 @@ public:
 
     // --- Whiteout detection ---
 
-    // Does this filename have the .wh. prefix?
-    static bool IsWhiteoutName(const std::wstring& fileName);
+    // True when fileName starts with the .wh. prefix in any case, because
+    // NTFS matches a marker name case-insensitively.
+    static bool IsWhiteoutName(std::wstring_view fileName);
 
     // Returns the name that a whiteout file hides, which is whiteoutName
     // without its .wh. prefix. whiteoutName must pass IsWhiteoutName.

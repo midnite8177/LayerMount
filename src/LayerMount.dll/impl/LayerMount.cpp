@@ -344,24 +344,35 @@ bool TryParseStreamPath(const std::wstring& normalized,
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// IsReservedRelativePath
-// ---------------------------------------------------------------------------
-//
-// Sidecar metadata on non-ADS hosts lives at `<upper>\.overlay\...`. Without a
-// reservation, that directory would show up in the merged namespace: a user
-// could list it, delete entries, or overwrite the .meta.json files that carry
-// stable-id / opaque / origin state. Treat `.overlay` as internal and reject
-// it at every callback that touches the merged view (resolver, merge,
-// Create/Rename/etc.).
+namespace {
 
-bool IsReservedRelativePath(const std::wstring& normalized) {
-    // NormalizePath lowercases, so `kSidecarDirName` matches verbatim.
+bool IsRootSidecarPath(const std::wstring& normalized) {
     const std::wstring_view reserved(kSidecarDirName);
     if (normalized.size() < reserved.size()) return false;
     if (normalized.compare(0, reserved.size(), reserved) != 0) return false;
     if (normalized.size() == reserved.size()) return true;
     return normalized[reserved.size()] == L'\\';
+}
+
+bool HasMarkerSegment(std::wstring_view normalized) {
+    size_t start = 0;
+    while (true) {
+        const size_t separator = normalized.find(L'\\', start);
+        if (WhiteoutManager::IsWhiteoutName(
+                normalized.substr(start, separator - start))) {
+            return true;
+        }
+        if (separator == std::wstring_view::npos) {
+            return false;
+        }
+        start = separator + 1;
+    }
+}
+
+}
+
+bool IsReservedRelativePath(const std::wstring& normalized) {
+    return IsRootSidecarPath(normalized) || HasMarkerSegment(normalized);
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,8 +1287,6 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
         return STATUS_OBJECT_NAME_INVALID;
     }
 
-    // Reject writes into the reserved sidecar subtree. Callers must never be
-    // able to create or materialize files inside `<upper>\.overlay\`.
     if (IsReservedRelativePath(hostNorm)) {
         return STATUS_ACCESS_DENIED;
     }
@@ -2231,7 +2240,6 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
         }
     }
 
-    // Reject renames that touch the reserved sidecar subtree on either end.
     if (IsReservedRelativePath(oldNorm) || IsReservedRelativePath(newNorm)) {
         return STATUS_ACCESS_DENIED;
     }

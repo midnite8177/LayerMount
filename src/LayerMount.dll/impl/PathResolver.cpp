@@ -7,11 +7,6 @@ namespace LayerMount {
 
 namespace {
 
-// Returns false for a path that the resolver must not resolve. Windows
-// canonicalizes an unsafe path (parent traversal, or a drive or stream
-// qualifier) to a location outside the layer roots. The reserved `.overlay`
-// subtree holds sidecar metadata that a caller must not reach through the
-// mount.
 bool IsResolvablePath(const std::wstring& normalized) {
     return IsSafeRelativePath(normalized) && !IsReservedRelativePath(normalized);
 }

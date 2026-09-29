@@ -224,12 +224,14 @@ bool TryParseStreamPath(const std::wstring& normalized,
                         std::wstring& outHostNorm,
                         std::wstring& outStreamSuffix);
 
-// Reserved internal subtree: sidecar metadata lives under `<upper>\.overlay\`
-// on hosts without ADS. Exposing it through the merged namespace would let a
-// user enumerate/modify/delete sidecar records and corrupt metacopy/opaque/
-// origin state. Returns true for the exact name `.overlay` and any path
-// beneath it. `normalized` is expected to be the output of `NormalizePath`
-// (lowercased, no leading/trailing separators).
+// Returns true for a path that the merged view never shows. That is the
+// sidecar metadata subtree `.overlay` at the overlay root and anything
+// beneath it, and any path with a segment that starts with `kWhiteoutPrefix`
+// in any case, which covers whiteout markers, the opaque marker and anything
+// beneath a marker-named directory. The sidecar store exists only at the
+// root, so a `.overlay` below the root is an ordinary name. The `.overlay`
+// compare is case-sensitive, so `normalized` must be the lowercased output
+// of `NormalizePath`.
 constexpr const wchar_t* kSidecarDirName = L".overlay";
 bool IsReservedRelativePath(const std::wstring& normalized);
 
@@ -514,8 +516,8 @@ public:
     // I/O. Hosts call this from their rename-fanout when a path-based
     // rename affects a concurrent open handle on the source path.
     // Returns STATUS_INVALID_PARAMETER if the new path is empty, a drive
-    // or stream-qualified form, contains `..` traversal, or lands in a
-    // reserved internal subtree. The open handle is left unchanged on
+    // or stream-qualified form, contains `..` traversal, or is a reserved
+    // path (see `IsReservedRelativePath`). The open handle is left unchanged on
     // rejection so the caller can surface the error without losing state.
     NTSTATUS UpdateContextPath(FileContext* ctx,
                                const std::wstring& newRelativePath);

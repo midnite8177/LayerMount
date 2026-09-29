@@ -1030,14 +1030,15 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(
 /* Creates a whiteout marker for `relativePath` in the upper layer,
  * hiding the corresponding lower-layer entry. `isDirectory` selects the
  * directory- or file-shaped marker. Rejects a path outside the overlay
- * root or inside the reserved metadata subtree with E_INVALIDARG. */
+ * root, inside the reserved metadata subtree, or with a segment that
+ * starts with `.wh.` with E_INVALIDARG. */
 LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
     LM_HANDLE handle, PCWSTR relativePath, BOOL isDirectory);
 
 /* Marks the directory at `dirRelativePath` opaque, hiding every
  * lower-layer entry beneath it regardless of name. Rejects a path
- * outside the overlay root or inside the reserved metadata subtree with
- * E_INVALIDARG. */
+ * outside the overlay root, inside the reserved metadata subtree, or
+ * with a segment that starts with `.wh.` with E_INVALIDARG. */
 LM_API HRESULT LM_CALL LayerMountSetOpaque(
     LM_HANDLE handle, PCWSTR dirRelativePath);
 

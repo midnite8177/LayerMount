@@ -54,6 +54,11 @@ public:
         Assert::IsFalse(WhiteoutManager::IsWhiteoutName(L"foo.txt"));
     }
 
+    TEST_METHOD(IsWhiteoutName_UpperCasePrefix_ReturnsTrue) {
+        Assert::IsTrue(WhiteoutManager::IsWhiteoutName(L".WH.foo.txt"));
+        Assert::IsTrue(WhiteoutManager::IsWhiteoutName(L".Wh.foo.txt"));
+    }
+
     TEST_METHOD(IsWhiteoutName_PartialPrefix_ReturnsFalse) {
         Assert::IsFalse(WhiteoutManager::IsWhiteoutName(L".w.foo"));
     }
@@ -777,6 +782,346 @@ public:
             L"The sidecar directory at the root must not show in the listing");
         Assert::IsTrue(merged.count(L"visible.txt") == 1,
             L"The listing of the root must show the upper's file");
+    }
+};
+
+TEST_CLASS(MarkerNameResolutionTests) {
+public:
+    TEST_CLASS_INITIALIZE(ClassInit) {
+        AssertTempIsNTFS();
+    }
+
+    TEST_METHOD(PathResolve_WhiteoutMarkerInUpper_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"sub\\.wh.name", "");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"sub\\.wh.name").Found(),
+            L"A whiteout marker in the upper must not resolve");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerInUpper_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"sub\\.wh..wh..opq", "");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"sub\\.wh..wh..opq").Found(),
+            L"An opaque marker in the upper must not resolve");
+    }
+
+    TEST_METHOD(PathResolve_WhiteoutMarkerInLower_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.wh.name", "");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"sub\\.wh.name").Found(),
+            L"A whiteout marker in a lower must not resolve");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"sub\\.wh.name").Found(),
+            L"A whiteout marker in a lower must not resolve in the lowers");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerInLower_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"sub\\.wh..wh..opq").Found(),
+            L"An opaque marker in a lower must not resolve");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"sub\\.wh..wh..opq").Found(),
+            L"An opaque marker in a lower must not resolve in the lowers");
+    }
+
+    TEST_METHOD(PathResolve_UpperCaseMarkerName_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.wh.name", "");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"sub\\.WH.name").Found(),
+            L"A marker must not resolve when the caller spells its prefix in upper case");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"sub\\.WH.name").Found(),
+            L"A marker must not resolve in the lowers when the caller spells its prefix in upper case");
+    }
+
+    TEST_METHOD(PathResolve_ChildOfMarkerNamedDirInLower_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.wh.x\\child.txt", "lower");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"sub\\.wh.x\\child.txt").Found(),
+            L"A path below a marker-named directory must not resolve");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"sub\\.wh.x\\child.txt").Found(),
+            L"A path below a marker-named directory must not resolve in the lowers");
+    }
+
+    TEST_METHOD(PathResolve_NameContainingMarkerPrefixMidName_Resolves) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\file.wh.txt", "lower");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsTrue(r.resolver.ResolvePath(L"sub\\file.wh.txt").Found(),
+            L"A name that holds .wh. after its first character is an ordinary file and must resolve");
+    }
+};
+
+TEST_CLASS(MarkerNameMountTests) {
+public:
+    TEST_CLASS_INITIALIZE(ClassInit) {
+        AssertTempIsNTFS();
+    }
+
+    static constexpr UINT32 kNoCreateOptions = 0u;
+    static constexpr DWORD kNoCallerPid = 0u;
+    static constexpr UINT64 kNoAllocationSize = 0u;
+    static constexpr BOOLEAN kFailIfExists = FALSE;
+    static constexpr PSECURITY_DESCRIPTOR kDefaultSecurity = nullptr;
+
+    static NTSTATUS OpenThroughMount(::LayerMount::LayerMount& mount,
+                                     const std::wstring& path) {
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        const NTSTATUS status = mount.Open(path, FILE_READ_DATA,
+                                           kNoCreateOptions, kNoCallerPid,
+                                           &ctx, &info);
+        if (ctx) mount.Close(ctx.get());
+        return status;
+    }
+
+    static NTSTATUS CreateThroughMount(::LayerMount::LayerMount& mount,
+                                       const std::wstring& path,
+                                       UINT32 createOptions) {
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        const UINT32 attributes = (createOptions & FILE_DIRECTORY_FILE) != 0
+            ? FILE_ATTRIBUTE_DIRECTORY
+            : FILE_ATTRIBUTE_NORMAL;
+        const NTSTATUS status = mount.Create(path, createOptions,
+                                             FILE_ALL_ACCESS, attributes,
+                                             kDefaultSecurity, kNoAllocationSize,
+                                             kNoCallerPid, &ctx, &info);
+        if (ctx) mount.Close(ctx.get());
+        return status;
+    }
+
+    TEST_METHOD(Open_WhiteoutMarkerInUpper_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"sub\\.wh.name", "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
+                         static_cast<long>(OpenThroughMount(mount, L"sub\\.wh.name")),
+                         L"Opening a whiteout marker in the upper must report not found");
+    }
+
+    TEST_METHOD(Open_OpaqueMarkerInLower_IsNotFound) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
+                         static_cast<long>(OpenThroughMount(mount, L"sub\\.wh..wh..opq")),
+                         L"Opening an opaque marker in a lower must report not found");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_UpperCaseMarkerInLower_IsNotListed) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.WH.foo", "");
+        env.WriteFile(env.Lower(0), L"sub\\keep.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L".wh.foo") == 0,
+            L"A marker spelled in upper case must not be listed");
+        Assert::IsTrue(merged.count(L"keep.txt") == 1,
+            L"An ordinary sibling of the marker must stay listed");
+        AssertEveryListedEntryResolves(env, L"sub", merged);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_UpperCaseWhiteoutInUpper_HidesLowerEntry) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower");
+        env.WriteFile(env.Upper(), L"sub\\.WH.gone.txt", "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"gone.txt") == 0,
+            L"A whiteout spelled in upper case must hide the lower entry in the listing");
+        Assert::IsTrue(merged.count(L".wh.gone.txt") == 0,
+            L"A whiteout spelled in upper case must not be listed");
+        AssertEveryListedEntryResolves(env, L"sub", merged);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_MarkerNamedDirInLower_IsEmpty) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.wh.x\\child.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"sub\\.wh.x").empty(),
+            L"A marker-named directory must list no entries");
+    }
+
+    TEST_METHOD(Create_WhiteoutMarkerName_IsDeniedAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L"sub");
+        env.WriteFile(env.Lower(0), L"sub\\name", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
+                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh.name", kNoCreateOptions)),
+                         L"Creating a whiteout marker name must be denied");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.name"),
+            L"A denied create must write no marker in the upper");
+        Assert::IsTrue(NT_SUCCESS(OpenThroughMount(mount, L"sub\\name")),
+            L"A denied create must not hide the lower file");
+    }
+
+    TEST_METHOD(Create_OpaqueMarkerName_IsDeniedAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L"sub");
+        env.WriteFile(env.Lower(0), L"sub\\lower.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
+                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh..wh..opq", kNoCreateOptions)),
+                         L"Creating the opaque marker name must be denied");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh..wh..opq"),
+            L"A denied create must write no opaque marker in the upper");
+        Assert::IsTrue(NT_SUCCESS(OpenThroughMount(mount, L"sub\\lower.txt")),
+            L"A denied create must not make the directory opaque");
+    }
+
+    TEST_METHOD(Create_UpperCaseMarkerName_IsDenied) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L"sub");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
+                         static_cast<long>(CreateThroughMount(mount, L"sub\\.WH.name", kNoCreateOptions)),
+                         L"Creating a marker name spelled in upper case must be denied");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.name"),
+            L"A denied create must write no marker in the upper");
+    }
+
+    TEST_METHOD(Create_MarkerNameWithStream_IsDenied) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L"sub");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
+                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh.name:stream", kNoCreateOptions)),
+                         L"Creating a stream on a marker name must be denied");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.name"),
+            L"A denied create must write no marker in the upper");
+    }
+
+    TEST_METHOD(Create_MarkerNamedDirectory_IsDenied) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L"sub");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
+                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh.dir", FILE_DIRECTORY_FILE)),
+                         L"Creating a directory with a marker name must be denied");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.dir"),
+            L"A denied create must write no directory in the upper");
+    }
+
+    TEST_METHOD(Rename_ToMarkerName_IsDeniedAndLeavesSource) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"sub\\a.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
+                         static_cast<long>(mount.Rename(L"sub\\a.txt", L"sub\\.wh.a.txt",
+                                                        kFailIfExists, kNoCallerPid)),
+                         L"Renaming onto a marker name must be denied");
+        Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"sub\\a.txt"),
+            L"A denied rename must leave the source in place");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.a.txt"),
+            L"A denied rename must write no marker in the upper");
+    }
+
+    TEST_METHOD(RenameContext_ToMarkerName_IsDeniedAndLeavesSource) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"sub\\a.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"sub\\a.txt", FILE_READ_DATA | DELETE,
+                                             kNoCreateOptions, kNoCallerPid,
+                                             &ctx, &info)));
+
+        const NTSTATUS status = mount.Rename(ctx.get(), L"sub\\.wh.a.txt",
+                                             kFailIfExists, kNoCallerPid);
+        mount.Close(ctx.get());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED), static_cast<long>(status),
+            L"Renaming an open file onto a marker name must be denied");
+        Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"sub\\a.txt"),
+            L"A denied rename must leave the source in place");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.a.txt"),
+            L"A denied rename must write no marker in the upper");
+    }
+
+    TEST_METHOD(UpdateContextPath_ToMarkerName_IsInvalidParameter) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"sub\\a.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"sub\\a.txt", FILE_READ_DATA,
+                                             kNoCreateOptions, kNoCallerPid,
+                                             &ctx, &info)));
+
+        const NTSTATUS status = mount.UpdateContextPath(ctx.get(), L"sub\\.wh.a.txt");
+        const std::wstring pathAfter = ctx->relativePath;
+        mount.Close(ctx.get());
+
+        Assert::AreEqual(static_cast<long>(STATUS_INVALID_PARAMETER), static_cast<long>(status),
+            L"Moving an open context onto a marker name must be rejected");
+        Assert::AreEqual(std::wstring(L"sub\\a.txt"), pathAfter,
+            L"A rejected update must leave the context path unchanged");
+    }
+
+    TEST_METHOD(Delete_WhiteoutMarkerInUpper_IsNotFoundAndLeavesMarker) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower");
+        env.WriteFile(env.Upper(), L"sub\\.wh.gone.txt", "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
+                         static_cast<long>(mount.Delete(L"sub\\.wh.gone.txt", kNoCallerPid)),
+                         L"Deleting a whiteout marker must report not found");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"sub\\.wh.gone.txt"),
+            L"A refused delete must leave the marker in place");
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
+                         static_cast<long>(OpenThroughMount(mount, L"sub\\gone.txt")),
+                         L"A refused delete must keep the lower file hidden");
+    }
+
+    TEST_METHOD(Rename_FromMarkerName_IsDeniedAndLeavesMarker) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower");
+        env.WriteFile(env.Upper(), L"sub\\.wh.gone.txt", "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
+                         static_cast<long>(mount.Rename(L"sub\\.wh.gone.txt", L"sub\\back.txt",
+                                                        kFailIfExists, kNoCallerPid)),
+                         L"Renaming a marker must be denied");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"sub\\.wh.gone.txt"),
+            L"A denied rename must leave the marker in place");
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
+                         static_cast<long>(OpenThroughMount(mount, L"sub\\gone.txt")),
+                         L"A denied rename must keep the lower file hidden");
     }
 };
 

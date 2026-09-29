@@ -25,6 +25,26 @@ public:
         Assert::AreEqual<INT32>(0, rp.lowerIndex);
     }
 
+    TEST_METHOD(CreateWhiteout_MarkerSegment_ReturnsInvalidArg) {
+        TempLayerEnv  env(1);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(E_INVALIDARG,
+            ::LayerMountCreateWhiteout(mount.Get(), L"\\sub\\.wh.x", FALSE),
+            L"A whiteout for a path with a marker segment must be rejected");
+        Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\sub\\.wh..wh.x"),
+            L"A rejected whiteout must write no marker in the upper");
+    }
+
+    TEST_METHOD(SetOpaque_MarkerSegment_ReturnsInvalidArg) {
+        TempLayerEnv  env(1);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(E_INVALIDARG,
+            ::LayerMountSetOpaque(mount.Get(), L"\\sub\\.wh.x"),
+            L"An opaque mark on a path with a marker segment must be rejected");
+    }
+
     TEST_METHOD(ResolvePath_ShortBuffer_ReturnsMoreDataAndRequired) {
         TempLayerEnv  env(1);
         env.WriteLowerFile(0, L"long_name_file.dat", "x");
