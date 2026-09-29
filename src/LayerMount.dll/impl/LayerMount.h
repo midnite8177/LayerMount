@@ -187,10 +187,13 @@ std::wstring NormalizePath(const std::wstring& path);
 // Returns true if `normalized` is safe to combine with a layer root. Rejects
 // empty input, drive/stream-qualified forms (any `:` character), and any `..`
 // segment that would traverse out of the layer root when concatenated. Call
-// this at every write-side entry point that *must not* accept stream
-// qualifiers (CreateWhiteout, SetOpaque, Rename source/dest, ReadDirectory)
-// before building paths with `GetUpperPath` / `BuildUpperPathPreserveCase`
-// or passing results to `EnsureDirectoryExists`. For callsites that
+// this at every entry point that *must not* accept stream qualifiers. On the
+// write side (CreateWhiteout, SetOpaque, Rename source/dest), call it before
+// building paths with `GetUpperPath` / `BuildUpperPathPreserveCase` or
+// passing results to `EnsureDirectoryExists`. Directory enumeration
+// (MergeDirectoryEntries, behind ReadDirectory and CanDelete) needs it too,
+// because `FindFirstFileW` resolves `..` segments and would enumerate
+// outside the layer root. For callsites that
 // legitimately handle alternate data streams (Create / Open / Delete /
 // UpdateContextPath), use `TryParseStreamPath` instead.
 bool IsSafeRelativePath(const std::wstring& normalized);

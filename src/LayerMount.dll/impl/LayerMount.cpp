@@ -20,6 +20,7 @@
 #include <cstring>
 #include <cwctype>
 #include <string_view>
+#include <unordered_set>
 
 namespace LayerMount {
 
@@ -216,13 +217,14 @@ std::wstring NormalizePath(const std::wstring& path) {
 // IsSafeRelativePath
 // ---------------------------------------------------------------------------
 //
-// Shared guard for every write-side entry point. A path coming from an ABI
-// caller is untrusted; once we concatenate it onto `config_.upperPath` and
-// hand the result to `CreateFileW` / `MoveFileExW` / `CreateDirectoryW`,
-// Windows canonicalizes the combined string and any `..` segment escapes
-// the overlay root. A colon anywhere in the path likewise lets the caller
-// inject a drive letter (`c:\escape`) or an alternate-data-stream suffix
-// that would be written to the wrong target.
+// Guard for every entry point that joins an untrusted ABI path onto a
+// layer root. Windows canonicalizes the joined string, so a `..` segment
+// escapes the root. On the write side, `CreateFileW`, `MoveFileExW` and
+// `CreateDirectoryW` would then act outside the overlay. In directory
+// enumeration, `FindFirstFileW` resolves the `..` and would list a
+// directory outside the layer root. A colon anywhere in the path lets the
+// caller inject a drive letter (`c:\escape`) or an alternate-data-stream
+// suffix that names the wrong target.
 
 bool IsSafeRelativePath(const std::wstring& normalized) {
     if (normalized.empty()) {
@@ -672,19 +674,111 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
     return STATUS_SUCCESS;
 }
 
-// ---------------------------------------------------------------------------
-// MergeDirectoryEntries — shared by ReadDirectory and CanDelete
-// ---------------------------------------------------------------------------
+namespace {
+
+std::wstring CaseFoldedName(const std::wstring& name) {
+    std::wstring folded = name;
+    CharLowerBuffW(folded.data(), static_cast<DWORD>(folded.size()));
+    return folded;
+}
+
+// Returns the merge key for a directory entry that the merged listing
+// shows. Returns nothing for `.`, `..`, a whiteout file such as the opaque
+// marker, and the sidecar directory, which stays hidden at every depth.
+std::optional<std::wstring> VisibleEntryKey(const std::wstring& name) {
+    if (name == L"." || name == L"..") return std::nullopt;
+    if (WhiteoutManager::IsWhiteoutName(name)) return std::nullopt;
+    std::wstring key = CaseFoldedName(name);
+    if (key == kSidecarDirName) return std::nullopt;
+    return key;
+}
+
+// Adds the upper's entries in dirNorm to merged, and adds the names that
+// the upper's whiteouts hide to whitedOutNames.
+void MergeUpperEntries(const std::wstring& upperPath,
+                       const std::wstring& dirNorm,
+                       std::map<std::wstring, MergedEntry>& merged,
+                       std::unordered_set<std::wstring>& whitedOutNames) {
+    WIN32_FIND_DATAW findData;
+    const std::wstring searchPath = JoinLayerScanPath(upperPath, dirNorm);
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    do {
+        const std::wstring name = findData.cFileName;
+        if (WhiteoutManager::IsWhiteoutName(name)) {
+            if (name != kOpaqueMarkerFile) {
+                whitedOutNames.insert(
+                    CaseFoldedName(WhiteoutManager::GetWhitedOutName(name)));
+            }
+            continue;
+        }
+        const std::optional<std::wstring> key = VisibleEntryKey(name);
+        if (!key) continue;
+        merged[*key] = MergedEntry{findData, LayerSource::Upper};
+    } while (FindNextFileW(hFind, &findData));
+    FindClose(hFind);
+}
+
+// Adds the names that lowerPath's whiteouts in dirNorm hide to
+// whitedOutNames. Returns false when the whiteout enumeration fails.
+bool CollectLowerWhiteouts(const WhiteoutManager& whiteoutMgr,
+                           const std::wstring& lowerPath,
+                           const std::wstring& dirNorm,
+                           std::unordered_set<std::wstring>& whitedOutNames) {
+    bool whiteoutEnumOk = true;
+    const std::vector<std::wstring> layerWhiteouts =
+        whiteoutMgr.ListWhiteoutsInDirectory(dirNorm, lowerPath, &whiteoutEnumOk);
+    if (!whiteoutEnumOk) return false;
+    for (const std::wstring& whitedOutName : layerWhiteouts) {
+        whitedOutNames.insert(CaseFoldedName(whitedOutName));
+    }
+    return true;
+}
+
+// Adds lowerPath's entries in dirNorm that no higher layer lists or hides.
+// Returns false when the merge stops at this lower, so no deeper lower
+// contributes.
+bool MergeLowerEntries(const WhiteoutManager& whiteoutMgr,
+                       const std::wstring& lowerPath,
+                       const std::wstring& dirNorm,
+                       std::map<std::wstring, MergedEntry>& merged,
+                       std::unordered_set<std::wstring>& whitedOutNames) {
+    // A directory opaque in a lower hides that lower's entries and every deeper lower.
+    if (whiteoutMgr.IsOpaqueInLayer(dirNorm, lowerPath)) {
+        return false;
+    }
+
+    WIN32_FIND_DATAW findData;
+    const std::wstring searchPath = JoinLayerScanPath(lowerPath, dirNorm);
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return true;
+
+    // A partial whiteout list could expose lower entries that this layer
+    // deleted, so the merge stops at this layer as it does for an opaque one.
+    if (!CollectLowerWhiteouts(whiteoutMgr, lowerPath, dirNorm, whitedOutNames)) {
+        FindClose(hFind);
+        return false;
+    }
+
+    do {
+        const std::optional<std::wstring> key = VisibleEntryKey(findData.cFileName);
+        if (!key) continue;
+        if (merged.count(*key) || whitedOutNames.count(*key)) continue;
+        merged[*key] = MergedEntry{findData, LayerSource::Lower};
+    } while (FindNextFileW(hFind, &findData));
+    FindClose(hFind);
+    return true;
+}
+
+}
 
 std::map<std::wstring, MergedEntry> LayerMount::MergeDirectoryEntries(
     const std::wstring& dirRelativePath) const {
 
     std::map<std::wstring, MergedEntry> merged;
-    std::wstring dirNorm = NormalizePath(dirRelativePath);
+    const std::wstring dirNorm = NormalizePath(dirRelativePath);
 
-    // Reject traversal and reserved-subtree paths before touching the filesystem.
-    // Without this, `..` segments in dirRelativePath are canonicalized by Windows
-    // during FindFirstFileW and can enumerate outside the overlay root.
     if (!dirNorm.empty() && !IsSafeRelativePath(dirNorm)) {
         return merged;
     }
@@ -692,121 +786,17 @@ std::map<std::wstring, MergedEntry> LayerMount::MergeDirectoryEntries(
         return merged;
     }
 
-    // Collect whiteout names (original names hidden by whiteout markers)
     std::unordered_set<std::wstring> whitedOutNames;
+    const bool isOpaque = whiteoutMgr_->IsOpaque(dirNorm);
 
-    // Check if this directory is opaque in the upper layer
-    bool isOpaque = whiteoutMgr_->IsOpaque(dirNorm);
-
-    // --- Enumerate upper layer ---
-    std::wstring upperDir = config_.upperPath + L"\\" + dirNorm;
-    if (dirNorm.empty()) {
-        upperDir = config_.upperPath;
+    MergeUpperEntries(config_.upperPath, dirNorm, merged, whitedOutNames);
+    if (isOpaque) {
+        return merged;
     }
 
-    WIN32_FIND_DATAW findData;
-    std::wstring searchPath = upperDir + L"\\*";
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            std::wstring name = findData.cFileName;
-
-            // Skip . and ..
-            if (name == L"." || name == L"..") continue;
-
-            // Track whiteout names but don't include them in listing
-            if (WhiteoutManager::IsWhiteoutName(name)) {
-                // Strip .wh. prefix to get the hidden name
-                std::wstring hiddenName = name.substr(4);
-                std::wstring hiddenNorm = hiddenName;
-                CharLowerBuffW(hiddenNorm.data(), static_cast<DWORD>(hiddenNorm.size()));
-                whitedOutNames.insert(hiddenNorm);
-                continue;
-            }
-
-            // Skip opaque marker files
-            if (name == kOpaqueMarkerFile) continue;
-
-            std::wstring nameNorm = name;
-            CharLowerBuffW(nameNorm.data(), static_cast<DWORD>(nameNorm.size()));
-
-            // Hide the sidecar metadata subtree from merged-view listings.
-            // Only possible at the overlay root (SidecarBase places `.overlay`
-            // directly under `<upper>`); deeper directories will never enumerate
-            // a `.overlay` child unless the user legitimately named one, which
-            // would still collide with the reserved name and must stay hidden.
-            if (nameNorm == kSidecarDirName) continue;
-
-            MergedEntry entry;
-            entry.findData = findData;
-            entry.source = LayerSource::Upper;
-            merged[nameNorm] = entry;
-        } while (FindNextFileW(hFind, &findData));
-        FindClose(hFind);
-    }
-
-    // --- Enumerate lower layers (if not opaque) ---
-    if (!isOpaque) {
-        for (size_t i = 0; i < config_.lowerPaths.size(); ++i) {
-            std::wstring lowerDir = config_.lowerPaths[i] + L"\\" + dirNorm;
-            if (dirNorm.empty()) {
-                lowerDir = config_.lowerPaths[i];
-            }
-
-            // Check if this directory is opaque in this lower layer
-            std::wstring dirRelNorm = NormalizePath(dirRelativePath);
-            if (whiteoutMgr_->IsOpaqueInLayer(dirRelNorm, config_.lowerPaths[i])) {
-                break; // Opaque in this layer — skip this and all lower layers
-            }
-
-            searchPath = lowerDir + L"\\*";
-            hFind = FindFirstFileW(searchPath.c_str(), &findData);
-            if (hFind == INVALID_HANDLE_VALUE) continue;
-
-            // Collect per-layer whiteout names. If enumeration failed
-            // mid-stream we cannot trust the partial list: a lower entry we
-            // would expose might actually be whited-out by a marker we never
-            // saw. Conservatively treat enumeration failure like an opaque
-            // marker -- close this find handle and stop descending through
-            // further lower layers so we don't leak already-deleted entries.
-            bool whiteoutEnumOk = true;
-            std::vector<std::wstring> layerWhiteouts =
-                whiteoutMgr_->ListWhiteoutsInDirectory(
-                    dirRelNorm, config_.lowerPaths[i], &whiteoutEnumOk);
-            if (!whiteoutEnumOk) {
-                FindClose(hFind);
-                break;
-            }
-            for (const auto& wo : layerWhiteouts) {
-                std::wstring woNorm = wo;
-                CharLowerBuffW(woNorm.data(), static_cast<DWORD>(woNorm.size()));
-                whitedOutNames.insert(woNorm);
-            }
-
-            do {
-                std::wstring name = findData.cFileName;
-                if (name == L"." || name == L"..") continue;
-                if (WhiteoutManager::IsWhiteoutName(name)) continue;
-                if (name == kOpaqueMarkerFile) continue;
-
-                std::wstring nameNorm = name;
-                CharLowerBuffW(nameNorm.data(), static_cast<DWORD>(nameNorm.size()));
-
-                // Same reserved-name hide as the upper-layer pass above.
-                if (nameNorm == kSidecarDirName) continue;
-
-                // Skip if already present (upper layer wins)
-                if (merged.count(nameNorm)) continue;
-
-                // Skip if whited out
-                if (whitedOutNames.count(nameNorm)) continue;
-
-                MergedEntry entry;
-                entry.findData = findData;
-                entry.source = LayerSource::Lower;
-                merged[nameNorm] = entry;
-            } while (FindNextFileW(hFind, &findData));
-            FindClose(hFind);
+    for (const std::wstring& lowerPath : config_.lowerPaths) {
+        if (!MergeLowerEntries(*whiteoutMgr_, lowerPath, dirNorm, merged, whitedOutNames)) {
+            break;
         }
     }
 

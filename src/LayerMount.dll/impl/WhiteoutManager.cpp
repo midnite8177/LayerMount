@@ -3,9 +3,17 @@
 #include "Cache.h"
 #include "../abi/EventEmitter.h"
 
+#include <string_view>
+
 namespace LayerMount {
 
 namespace fs = std::filesystem;
+
+namespace {
+
+constexpr size_t kWhiteoutPrefixLength = std::wstring_view(kWhiteoutPrefix).size();
+
+}
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -21,9 +29,12 @@ WhiteoutManager::WhiteoutManager(const LayerConfig& config, Cache* cache)
 // ---------------------------------------------------------------------------
 
 bool WhiteoutManager::IsWhiteoutName(const std::wstring& fileName) {
-    const size_t prefixLen = wcslen(kWhiteoutPrefix);
-    return fileName.size() >= prefixLen &&
-           fileName.compare(0, prefixLen, kWhiteoutPrefix) == 0;
+    return fileName.size() >= kWhiteoutPrefixLength &&
+           fileName.compare(0, kWhiteoutPrefixLength, kWhiteoutPrefix) == 0;
+}
+
+std::wstring WhiteoutManager::GetWhitedOutName(const std::wstring& whiteoutName) {
+    return whiteoutName.substr(kWhiteoutPrefixLength);
 }
 
 std::wstring WhiteoutManager::GetWhiteoutFileName(const std::wstring& relativePath) {
@@ -279,21 +290,12 @@ bool WhiteoutManager::HasWhitedOutAncestorInLayer(const std::wstring& relativePa
 // Directory enumeration support
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// Build the FindFirstFileW search path for a layer's own directory. Skip
-// the extra separator when there is no relative subpath: FindFirstFileW
-// refuses a doubled separator at the root of an extended-form (\\?\) path,
-// though it accepts the same doubled separator for a plain path and a
-// single separator for a non-empty subpath under an extended-form root.
 std::wstring JoinLayerScanPath(const std::wstring& layerPath,
-                                const std::wstring& dirRelativePath) {
+                               const std::wstring& dirRelativePath) {
     return dirRelativePath.empty()
         ? layerPath + L"\\*"
         : layerPath + L"\\" + dirRelativePath + L"\\*";
 }
-
-}  // namespace
 
 std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
     const std::wstring& dirRelativePath,
@@ -315,8 +317,6 @@ std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
         return result;
     }
 
-    const size_t prefixLen = wcslen(kWhiteoutPrefix);
-
     do {
         std::wstring name(findData.cFileName);
 
@@ -325,7 +325,7 @@ std::vector<std::wstring> WhiteoutManager::ListWhiteoutsInDirectory(
         if (IsWhiteoutName(name)) {
             if (name == kOpaqueMarkerFile) continue;
 
-            result.push_back(name.substr(prefixLen));
+            result.push_back(GetWhitedOutName(name));
         }
     } while (FindNextFileW(hFind, &findData));
 

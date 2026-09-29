@@ -33,6 +33,10 @@ public:
     // Does this filename have the .wh. prefix?
     static bool IsWhiteoutName(const std::wstring& fileName);
 
+    // Returns the name that a whiteout file hides, which is whiteoutName
+    // without its .wh. prefix. whiteoutName must pass IsWhiteoutName.
+    static std::wstring GetWhitedOutName(const std::wstring& whiteoutName);
+
     // Does a .wh.<name> marker exist for relativePath in the given layer?
     bool HasWhiteout(const std::wstring& relativePath,
                      const std::wstring& layerPath) const;
@@ -103,5 +107,12 @@ private:
     Cache* cache_;
     ::LayerMount::abi::EventEmitter* events_ = nullptr;
 };
+
+// Returns the FindFirstFileW search pattern for dirRelativePath in the
+// layer at layerPath. An empty dirRelativePath gets no extra separator,
+// because FindFirstFileW refuses a doubled separator at the root of an
+// extended-form (\\?\) path, though a plain path accepts one.
+std::wstring JoinLayerScanPath(const std::wstring& layerPath,
+                               const std::wstring& dirRelativePath);
 
 } // namespace LayerMount
