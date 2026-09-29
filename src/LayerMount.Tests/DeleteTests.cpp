@@ -278,6 +278,19 @@ public:
         Assert::IsTrue(merged.count(L".wh.hide.txt") == 0,
             L"Whiteout marker file must itself be filtered from the listing");
     }
+
+    TEST_METHOD(CanDelete_DirOpaqueInLowerWithEntries_ReturnsDirectoryNotEmpty) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(
+            static_cast<long>(STATUS_DIRECTORY_NOT_EMPTY),
+            static_cast<long>(mount.CanDelete(L"sub", 0)),
+            L"A directory that is opaque in a lower and has entries there is not empty");
+    }
 };
 
-} // namespace LayerMountTests
+}

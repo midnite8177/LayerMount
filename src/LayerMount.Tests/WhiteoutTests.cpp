@@ -1,9 +1,3 @@
-// Unit tests for WhiteoutManager. Test the class in isolation — do NOT mount
-// an overlay, do NOT invoke host-adapter callbacks. The "directory listing
-// excludes .wh.* files" merged-view behavior is covered by
-// LayerMount::MergeDirectoryEntries integration tests — this file
-// covers the primitives used there.
-
 #include "pch.h"
 #include "TestFixture.h"
 
@@ -16,6 +10,22 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
 
 namespace LayerMountTests {
+
+namespace {
+
+struct ResolverUnderTest {
+    explicit ResolverUnderTest(const TempLayerEnvironment& env)
+        : config(env.MakeConfig())
+        , wm(config, &cache)
+        , resolver(config, wm, cache) {}
+
+    ::LayerMount::LayerConfig config;
+    Cache cache;
+    WhiteoutManager wm;
+    PathResolver resolver;
+};
+
+}
 
 TEST_CLASS(WhiteoutTests) {
 public:
@@ -470,6 +480,141 @@ public:
         Assert::IsTrue(result.Found(), L"Lower file should be re-exposed");
         Assert::IsTrue(result.source == LayerSource::Lower);
     }
+
+    TEST_METHOD(MergeDirectoryEntries_DirOpaqueInLower_ShowsThatLowersEntriesAndHidesDeeperLower) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the entry of the lower that holds the opaque marker");
+        Assert::IsTrue(merged.count(L"below.txt") == 0,
+            L"The listing must hide the entry of the lower below the opaque marker");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_DirOpaqueInMiddleLower_ShowsLowersAboveAndHidesLowersBelow) {
+        TempLayerEnvironment env(3);
+        env.WriteFile(env.Lower(0), L"sub\\top.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(1), L"sub\\middle.txt", "lower1");
+        env.WriteFile(env.Lower(2), L"sub\\bottom.txt", "lower2");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"top.txt") == 1,
+            L"The listing must show the entry of the lower above the opaque marker");
+        Assert::IsTrue(merged.count(L"middle.txt") == 1,
+            L"The listing must show the entry of the lower that holds the opaque marker");
+        Assert::IsTrue(merged.count(L"bottom.txt") == 0,
+            L"The listing must hide the entry of the lower below the opaque marker");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_DirOpaqueInLowerWithWhiteout_WhiteoutHidesNameInThatLowerAndBelow) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"sub\\.wh.gone.txt", "");
+        env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower0");
+        env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"sub\\gone.txt", "lower1");
+        env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the entry of the lower that holds the opaque marker");
+        Assert::IsTrue(merged.count(L"gone.txt") == 0,
+            L"The whiteout must hide the name in its own lower and in the lower below");
+        Assert::IsTrue(merged.count(L"below.txt") == 0,
+            L"The listing must hide the entry of the lower below the opaque marker");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_DirOpaqueInLower_OpaqueMarkerFileNotListed) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L".wh..wh..opq") == 0,
+            L"The listing must not show the opaque marker file");
+        Assert::AreEqual(static_cast<size_t>(1), merged.size(),
+            L"The listing must hold only the entry of the lower");
+    }
+
+    TEST_METHOD(PathResolve_DirOpaqueInLower_ResolvesChildOfThatLowerAndHidesChildOfDeeperLower) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
+
+        ResolverUnderTest r(env);
+
+        ResolvedPath own = r.resolver.ResolvePath(L"sub\\own.txt");
+        Assert::IsTrue(own.Found(),
+            L"A child in the lower that holds the opaque marker must resolve");
+        Assert::IsTrue(own.source == LayerSource::Lower);
+        Assert::AreEqual(0, own.lowerIndex);
+
+        ResolvedPath below = r.resolver.ResolvePath(L"sub\\below.txt");
+        Assert::IsFalse(below.Found(),
+            L"A child that only a deeper lower has must not resolve");
+    }
+
+    TEST_METHOD(ResolveLowerPath_DirOpaqueInLower_ResolvesChildOfThatLowerAndHidesChildOfDeeperLower) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
+
+        ResolverUnderTest r(env);
+
+        ResolvedPath own = r.resolver.ResolveLowerPath(L"sub\\own.txt");
+        Assert::IsTrue(own.Found(),
+            L"A child in the lower that holds the opaque marker must resolve");
+        Assert::IsTrue(own.source == LayerSource::Lower);
+        Assert::AreEqual(0, own.lowerIndex);
+
+        ResolvedPath below = r.resolver.ResolveLowerPath(L"sub\\below.txt");
+        Assert::IsFalse(below.Found(),
+            L"A child that only a deeper lower has must not resolve");
+    }
+
+    TEST_METHOD(PathResolve_DirOpaqueInLowerWithWhiteoutForChild_HidesChild) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"sub\\.wh.gone.txt", "");
+        env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"sub\\gone.txt", "lower1");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"sub\\gone.txt").Found(),
+            L"The whiteout must hide the child in its own lower and in the lower below");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"sub\\gone.txt").Found(),
+            L"The whiteout must hide the child in its own lower and in the lower below");
+    }
+
+    TEST_METHOD(PathResolve_DirOpaqueInLowerWithWhiteoutForAncestor_HidesDescendant) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"a\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"a\\.wh.b", "");
+        env.WriteFile(env.Lower(0), L"a\\b\\c.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"a\\b\\c.txt", "lower1");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"a\\b\\c.txt").Found(),
+            L"The whiteout for the ancestor must hide the descendant in its own lower and in the lower below");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"a\\b\\c.txt").Found(),
+            L"The whiteout for the ancestor must hide the descendant in its own lower and in the lower below");
+    }
 };
 
-} // namespace LayerMountTests
+}

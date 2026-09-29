@@ -693,12 +693,16 @@ std::optional<std::wstring> VisibleEntryKey(const std::wstring& name) {
     return key;
 }
 
-// Adds the upper's entries in dirNorm to merged, and adds the names that
-// the upper's whiteouts hide to whitedOutNames.
+struct DirectoryMerge {
+    std::map<std::wstring, MergedEntry> entries;
+    std::unordered_set<std::wstring> whitedOutNames;
+};
+
+// Adds the upper's entries in dirNorm to merge.entries, and adds the names
+// that the upper's whiteouts hide to merge.whitedOutNames.
 void MergeUpperEntries(const std::wstring& upperPath,
                        const std::wstring& dirNorm,
-                       std::map<std::wstring, MergedEntry>& merged,
-                       std::unordered_set<std::wstring>& whitedOutNames) {
+                       DirectoryMerge& merge) {
     WIN32_FIND_DATAW findData;
     const std::wstring searchPath = JoinLayerScanPath(upperPath, dirNorm);
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
@@ -708,14 +712,14 @@ void MergeUpperEntries(const std::wstring& upperPath,
         const std::wstring name = findData.cFileName;
         if (WhiteoutManager::IsWhiteoutName(name)) {
             if (name != kOpaqueMarkerFile) {
-                whitedOutNames.insert(
+                merge.whitedOutNames.insert(
                     CaseFoldedName(WhiteoutManager::GetWhitedOutName(name)));
             }
             continue;
         }
         const std::optional<std::wstring> key = VisibleEntryKey(name);
         if (!key) continue;
-        merged[*key] = MergedEntry{findData, LayerSource::Upper};
+        merge.entries[*key] = MergedEntry{findData, LayerSource::Upper};
     } while (FindNextFileW(hFind, &findData));
     FindClose(hFind);
 }
@@ -736,39 +740,42 @@ bool CollectLowerWhiteouts(const WhiteoutManager& whiteoutMgr,
     return true;
 }
 
-// Adds lowerPath's entries in dirNorm that no higher layer lists or hides.
-// Returns false when the merge stops at this lower, so no deeper lower
-// contributes.
-bool MergeLowerEntries(const WhiteoutManager& whiteoutMgr,
-                       const std::wstring& lowerPath,
-                       const std::wstring& dirNorm,
-                       std::map<std::wstring, MergedEntry>& merged,
-                       std::unordered_set<std::wstring>& whitedOutNames) {
-    // A directory opaque in a lower hides that lower's entries and every deeper lower.
-    if (whiteoutMgr.IsOpaqueInLayer(dirNorm, lowerPath)) {
-        return false;
-    }
+enum class DeeperLowers {
+    Visible,
+    Hidden,
+};
+
+// Adds lowerPath's entries in dirNorm that no higher layer lists and that no
+// whiteout hides. The whiteouts of lowerPath hide its own entries too.
+// Returns whether the lowers below lowerPath can add entries to dirNorm.
+DeeperLowers MergeLowerEntries(const WhiteoutManager& whiteoutMgr,
+                               const std::wstring& lowerPath,
+                               const std::wstring& dirNorm,
+                               DirectoryMerge& merge) {
+    const DeeperLowers deeperLowers = whiteoutMgr.IsOpaqueInLayer(dirNorm, lowerPath)
+        ? DeeperLowers::Hidden
+        : DeeperLowers::Visible;
 
     WIN32_FIND_DATAW findData;
     const std::wstring searchPath = JoinLayerScanPath(lowerPath, dirNorm);
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) return true;
+    if (hFind == INVALID_HANDLE_VALUE) return deeperLowers;
 
-    // A partial whiteout list could expose lower entries that this layer
-    // deleted, so the merge stops at this layer as it does for an opaque one.
-    if (!CollectLowerWhiteouts(whiteoutMgr, lowerPath, dirNorm, whitedOutNames)) {
+    // A partial whiteout list can show entries that this lower deleted, so
+    // the merge adds no entry from this lower or from a deeper lower.
+    if (!CollectLowerWhiteouts(whiteoutMgr, lowerPath, dirNorm, merge.whitedOutNames)) {
         FindClose(hFind);
-        return false;
+        return DeeperLowers::Hidden;
     }
 
     do {
         const std::optional<std::wstring> key = VisibleEntryKey(findData.cFileName);
         if (!key) continue;
-        if (merged.count(*key) || whitedOutNames.count(*key)) continue;
-        merged[*key] = MergedEntry{findData, LayerSource::Lower};
+        if (merge.entries.count(*key) || merge.whitedOutNames.count(*key)) continue;
+        merge.entries[*key] = MergedEntry{findData, LayerSource::Lower};
     } while (FindNextFileW(hFind, &findData));
     FindClose(hFind);
-    return true;
+    return deeperLowers;
 }
 
 }
@@ -776,31 +783,31 @@ bool MergeLowerEntries(const WhiteoutManager& whiteoutMgr,
 std::map<std::wstring, MergedEntry> LayerMount::MergeDirectoryEntries(
     const std::wstring& dirRelativePath) const {
 
-    std::map<std::wstring, MergedEntry> merged;
     const std::wstring dirNorm = NormalizePath(dirRelativePath);
 
     if (!dirNorm.empty() && !IsSafeRelativePath(dirNorm)) {
-        return merged;
+        return {};
     }
     if (IsReservedRelativePath(dirNorm)) {
-        return merged;
+        return {};
     }
 
-    std::unordered_set<std::wstring> whitedOutNames;
+    DirectoryMerge merge;
     const bool isOpaque = whiteoutMgr_->IsOpaque(dirNorm);
 
-    MergeUpperEntries(config_.upperPath, dirNorm, merged, whitedOutNames);
+    MergeUpperEntries(config_.upperPath, dirNorm, merge);
     if (isOpaque) {
-        return merged;
+        return std::move(merge.entries);
     }
 
     for (const std::wstring& lowerPath : config_.lowerPaths) {
-        if (!MergeLowerEntries(*whiteoutMgr_, lowerPath, dirNorm, merged, whitedOutNames)) {
+        if (MergeLowerEntries(*whiteoutMgr_, lowerPath, dirNorm, merge)
+                != DeeperLowers::Visible) {
             break;
         }
     }
 
-    return merged;
+    return std::move(merge.entries);
 }
 
 // ---------------------------------------------------------------------------

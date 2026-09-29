@@ -195,7 +195,7 @@ always persist the marker for an entry it owns.
 
 A whiteout in **layer N** hides the corresponding name from **layer N**
 itself and from every layer **below N**, but **not** from layers above
-N. This matches Linux layermount semantics: an upper-layer write can
+N. This matches overlayfs semantics: an upper-layer write can
 re-introduce a name that a lower-layer whiteout previously hid. Concretely:
 
 - Whiteout in `lowerPaths[0]` hides the entry from `lowerPaths[0..n]`.
@@ -206,10 +206,13 @@ re-introduce a name that a lower-layer whiteout previously hid. Concretely:
 
 ### Opaque directories
 
-A directory marked **opaque** in a layer hides every lower-layer entry
-beneath it, regardless of name. Opaque is the directory analog of a
-whiteout: it expresses "this directory's contents in this layer are the
-authoritative set; do not merge children from below".
+A directory marked **opaque** in a layer hides every entry of the same
+directory in the layers below that layer, regardless of name. The
+entries of the layer that holds the marker stay visible. The rule is the same for the
+upper and for a lower: a directory opaque in lower N shows the entries
+of lower N and hides lowers N+1..end. Opaque is the directory analog of
+a whiteout: it expresses "this directory's contents in this layer are
+the authoritative set; do not merge children from below".
 
 Two coexisting representations:
 
@@ -244,7 +247,8 @@ The resolver applies the rules transitively:
 - `WhiteoutManager::HasOpaqueAncestor(rel)` /
   `HasOpaqueAncestorInLayer(rel, layer)` walks the parent chain and
   returns true if any ancestor is opaque. An opaque ancestor hides
-  every descendant in lower layers.
+  every descendant in the layers below the layer that holds the marker.
+  The descendants in the layer that holds the marker stay visible.
 
 Both walks stop at the layer root.
 
@@ -283,9 +287,10 @@ merging in `LayerMount::MergeDirectoryEntries`:
    logically-deleted entry.
 3. For each enumerated entry, lower wins only if upper did not already
    produce it AND the name is not in `whitedOutNames`.
-4. Opaque directories short-circuit step 2: if the directory is opaque
-   in the upper layer, no lower is enumerated. If the directory is
-   opaque in lower N, layers N+1..end are skipped.
+4. An opaque directory limits step 2. If the directory is opaque in the
+   upper layer, the merge enumerates no lower. If the directory is
+   opaque in lower N, the merge enumerates lower N and skips lowers
+   N+1..end.
 
 The reserved sidecar subtree (`.overlay`) is filtered out of the merged
 view as well — see "Reserved namespaces" below.
@@ -317,17 +322,19 @@ algorithm (in `impl/PathResolver.cpp`):
 7.  For each lower in priority order:
       a. Whiteout in this lower => stop iterating.
       b. Whitedout ancestor in this lower => stop iterating.
-      c. Opaque ancestor in this lower => stop iterating.
-      d. Probe this lower; on hit, capture and break.
-8.  If a lower hit was captured, scan deeper lowers for type conflicts
-    (file vs. directory) and log via OutputDebugStringW (the resolved
-    entry still wins; the log is diagnostic).
+      c. Probe this lower; on hit, capture and break.
+      d. Opaque ancestor in this lower => stop after this lower.
+8.  If a lower hit was captured, scan the deeper lowers that stay
+    visible for type conflicts (file vs. directory) and log via
+    OutputDebugStringW (the resolved entry still wins; the log is
+    diagnostic).
 9.  Cache the result and return.
 ```
 
-`ResolveLowerPath` runs the same pipeline with step 4 omitted — it is
-used by copy-up and by rename when the engine needs to know what the
-*lower* state looks like independent of any upper shadow.
+`ResolveLowerPath` does not probe the upper. It runs steps 2, 2b, 2c,
+5a and 7 only, it does not use the cache, and an empty path is not
+found. Create, delete, copy-up and rename use it when the engine needs
+the *lower* state independent of any upper shadow.
 
 The redirect step (4) is the metacopy mechanism. After a `Rename` of an
 entry that lived in a lower layer, the engine writes a metacopy stub

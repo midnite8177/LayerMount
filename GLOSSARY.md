@@ -64,10 +64,10 @@ A read that the memory manager sends on behalf of a mapped file or the system ca
 _Avoid_: mmap read, cache read
 
 **Whiteout**:
-A marker in a layer that hides a same-named entry in every lower below it.
+A marker in a layer that hides a same-named entry in that layer and in every lower below it.
 
 **Opaque directory**:
-A directory marker that hides all lower content under that directory.
+A directory marker that hides the same directory in every layer below the layer that holds the marker. The entries of the layer that holds the marker stay visible, as in overlayfs.
 
 ### Layer images
 

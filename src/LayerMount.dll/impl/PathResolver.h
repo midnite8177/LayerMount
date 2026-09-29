@@ -37,6 +37,19 @@ private:
     ResolvedPath ResolvePathInternal(const std::wstring& relativePath,
                                      int redirectDepth) const;
 
+    // Returns the first lower at or after firstLower, in priority order,
+    // that holds the path. Returns an empty result when no visible lower
+    // holds it. The path must be normalized and safe. A whiteout for the
+    // path or for an ancestor in a lower hides the path in that lower and in
+    // every deeper lower. An opaque ancestor in a lower hides the path in
+    // the deeper lowers only.
+    ResolvedPath FindInLowers(const std::wstring& normalized, size_t firstLower) const;
+
+    // Logs the first visible lower below the hit that holds the path with
+    // the other type, file or directory. The hit stays the result.
+    void LogTypeConflictInDeeperLowers(const std::wstring& normalized,
+                                       const ResolvedPath& hit) const;
+
     static constexpr int kMaxRedirectDepth = 40;
 
     const LayerConfig& config_;
