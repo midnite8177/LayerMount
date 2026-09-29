@@ -283,38 +283,4 @@ std::wstring JoinLayerScanPath(const std::wstring& layerPath,
         : layerPath + L"\\" + dirRelativePath + L"\\*";
 }
 
-std::optional<std::vector<std::wstring>> WhiteoutManager::ListWhitedOutNames(
-    const std::wstring& dirRelativePath,
-    const std::wstring& layerPath) const {
-
-    std::vector<std::wstring> result;
-    std::wstring searchPath = JoinLayerScanPath(layerPath, dirRelativePath);
-
-    WIN32_FIND_DATAW findData;
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        const DWORD err = ::GetLastError();
-        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-            return result;
-        }
-        return std::nullopt;
-    }
-
-    do {
-        std::optional<std::wstring> hidden = WhitedOutNameOfEntry(findData.cFileName);
-        if (hidden) result.push_back(std::move(*hidden));
-    } while (FindNextFileW(hFind, &findData));
-
-    // FindNextFileW returns false both at a normal end and on a real I/O failure.
-    // Read the error before FindClose, which can overwrite it, or a failed
-    // enumeration reports success.
-    const DWORD terminalErr = ::GetLastError();
-    FindClose(hFind);
-
-    if (terminalErr != ERROR_NO_MORE_FILES) {
-        return std::nullopt;
-    }
-    return result;
 }
-
-} // namespace LayerMount

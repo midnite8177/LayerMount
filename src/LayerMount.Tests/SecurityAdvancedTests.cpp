@@ -28,7 +28,7 @@
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
-using LayerMountTestShared::AddInheritableDenyAce;
+using LayerMountTestShared::AddDenyAce;
 using LayerMountTestShared::EveryoneSid;
 
 namespace LayerMountTests {
@@ -187,13 +187,10 @@ public:
         Assert::IsNotNull(everyone.sid,
             L"Precondition: allocate Everyone SID");
 
-        // Place an inheritable deny-write ACE on the parent, let the child
-        // inherit it automatically. SetNamedSecurityInfo will push the
-        // inheritable ACE down to existing children when
-        // PROTECTED_DACL_SECURITY_INFORMATION is not set.
+        // The child inherits the deny-write ACE from the parent.
         const std::wstring lowerDir = env.Lower(0) + L"\\secured";
-        AddInheritableDenyAce(lowerDir, FILE_GENERIC_WRITE,
-                              OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+        AddDenyAce(lowerDir, FILE_GENERIC_WRITE,
+                   OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
 
         const std::wstring lowerChild = env.Lower(0) + L"\\secured\\child.txt";
         // Verify child actually inherited the deny (pre-copy-up baseline).

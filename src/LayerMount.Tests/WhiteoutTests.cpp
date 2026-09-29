@@ -5,6 +5,7 @@
 #include "PathResolver.h"
 #include "Cache.h"
 #include "MetadataADS.h"
+#include "AclTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
@@ -34,6 +35,88 @@ void AssertEveryListedEntryResolves(const TempLayerEnvironment& env,
         Assert::IsTrue(r.resolver.ResolvePath(child).Found(),
             (L"Every listed entry must resolve: " + child).c_str());
     }
+}
+
+// Denies FILE_LIST_DIRECTORY to Everyone on one directory, without
+// inheritance, and restores the directory's original DACL on destruction.
+// Declare it after the TempLayerEnvironment so the DACL comes back before
+// the environment removes its tree.
+class DirectoryListingDenied {
+public:
+    explicit DirectoryListingDenied(const std::wstring& path) : path_(path) {
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            ::GetNamedSecurityInfoW(path_.c_str(), SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION,
+                                    nullptr, nullptr, &originalDacl_, nullptr,
+                                    &originalSd_),
+            L"GetNamedSecurityInfoW reads the directory's DACL");
+        LayerMountTestShared::AddDenyAce(path_, FILE_LIST_DIRECTORY, NO_INHERITANCE);
+    }
+
+    ~DirectoryListingDenied() {
+        ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path_.c_str()), SE_FILE_OBJECT,
+                                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, originalDacl_, nullptr);
+        ::LocalFree(originalSd_);
+    }
+
+    DirectoryListingDenied(const DirectoryListingDenied&) = delete;
+    DirectoryListingDenied& operator=(const DirectoryListingDenied&) = delete;
+
+private:
+    std::wstring path_;
+    PACL originalDacl_ = nullptr;
+    PSECURITY_DESCRIPTOR originalSd_ = nullptr;
+};
+
+// Makes the calling thread impersonate a copy of the process token with
+// SE_BACKUP_NAME disabled, and reverts on destruction. The engine enables
+// that privilege for the process. FindFirstFileW opens with backup intent,
+// so a deny ACE does not stop a scan while the privilege is on.
+class BackupPrivilegeDisabledOnThread {
+public:
+    BackupPrivilegeDisabledOnThread() {
+        Assert::IsTrue(::ImpersonateSelf(SecurityImpersonation) != FALSE,
+            L"ImpersonateSelf gives the thread a copy of the process token");
+        if (!DisableBackupPrivilegeOnThread()) {
+            ::RevertToSelf();
+            Assert::Fail(L"SE_BACKUP_NAME is disabled on the thread's token");
+        }
+    }
+
+    ~BackupPrivilegeDisabledOnThread() {
+        ::RevertToSelf();
+    }
+
+    BackupPrivilegeDisabledOnThread(const BackupPrivilegeDisabledOnThread&) = delete;
+    BackupPrivilegeDisabledOnThread& operator=(const BackupPrivilegeDisabledOnThread&) = delete;
+
+private:
+    static bool DisableBackupPrivilegeOnThread() {
+        HANDLE token = nullptr;
+        if (!::OpenThreadToken(::GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                               TRUE, &token)) {
+            return false;
+        }
+        TOKEN_PRIVILEGES privileges{};
+        privileges.PrivilegeCount = 1;
+        privileges.Privileges[0].Attributes = 0;
+        bool disabled = false;
+        if (::LookupPrivilegeValueW(nullptr, SE_BACKUP_NAME, &privileges.Privileges[0].Luid)) {
+            disabled = ::AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges),
+                                               nullptr, nullptr) != FALSE;
+        }
+        ::CloseHandle(token);
+        return disabled;
+    }
+};
+
+DWORD FindFirstFileError(const std::wstring& searchPath) {
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind = ::FindFirstFileW(searchPath.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return ::GetLastError();
+    ::FindClose(hFind);
+    return ERROR_SUCCESS;
 }
 
 }
@@ -252,43 +335,94 @@ public:
         AssertTempIsNTFS();
     }
 
-    TEST_METHOD(ListWhitedOutNames_ReturnsOriginalNamesWithPrefixStripped) {
-        TempLayerEnvironment env(1);
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
+    TEST_METHOD(MergeDirectoryEntries_LowerDirUnreadable_HidesDeeperLowersEntries) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Upper(), L"sub\\up.txt", "upper");
+        env.CreateDir(env.Lower(0), L"sub");
+        env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
+        DirectoryListingDenied denied(env.Lower(0) + L"\\sub");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED,
+            FindFirstFileError(env.Lower(0) + L"\\sub\\*"),
+            L"The deny ACE must make the lower's directory scan fail");
 
-        wm.CreateWhiteout(L"a.txt", WhiteoutType::File);
-        wm.CreateWhiteout(L"b.txt", WhiteoutType::File);
-        wm.CreateWhiteout(L"c.txt", WhiteoutType::File);
+        auto merged = mount.MergeDirectoryEntries(L"sub");
 
-        const auto names = wm.ListWhitedOutNames(L"", env.Upper());
-
-        Assert::IsTrue(names.has_value(), L"Scan of the upper root should succeed");
-        auto contains = [&](const std::wstring& name) {
-            return std::find(names->begin(), names->end(), name) != names->end();
-        };
-        Assert::AreEqual(size_t{3}, names->size());
-        Assert::IsTrue(contains(L"a.txt"));
-        Assert::IsTrue(contains(L"b.txt"));
-        Assert::IsTrue(contains(L"c.txt"));
+        Assert::IsTrue(merged.count(L"up.txt") == 1,
+            L"The listing must show the upper's entry");
+        Assert::IsTrue(merged.count(L"below.txt") == 0,
+            L"An unreadable lower can hold whiteouts, so the listing must hide the deeper lower's entry");
     }
 
-    TEST_METHOD(ListWhitedOutNames_RootOfExtendedFormLayerPath_ScansSuccessfully) {
+    TEST_METHOD(MergeDirectoryEntries_FileInLowerAtListedDir_ShowsDeeperLowersEntries) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub", "lower0");
+        env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"below.txt") == 1,
+            L"A file in a lower where the listed directory should be must not hide the deeper lower's entry");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_WhiteoutsInLower_HideTheirNamesInDeeperLower) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"sub\\.wh.a.txt", "");
+        env.WriteFile(env.Lower(0), L"sub\\.wh.b.txt", "");
+        env.WriteFile(env.Lower(1), L"sub\\a.txt", "lower1");
+        env.WriteFile(env.Lower(1), L"sub\\b.txt", "lower1");
+        env.WriteFile(env.Lower(1), L"sub\\c.txt", "lower1");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"a.txt") == 0,
+            L"The whiteout .wh.a.txt must hide a.txt in the deeper lower");
+        Assert::IsTrue(merged.count(L"b.txt") == 0,
+            L"The whiteout .wh.b.txt must hide b.txt in the deeper lower");
+        Assert::IsTrue(merged.count(L"c.txt") == 1,
+            L"The listing must show the deeper lower's entry that no whiteout hides");
+        Assert::AreEqual(static_cast<size_t>(1), merged.size(),
+            L"The listing must not show the whiteout markers");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_WhiteoutScannedAfterEntryInSameLower_HidesThatEntry) {
         TempLayerEnvironment env(1);
+        // NTFS lists '!' (0x21) before '.' (0x2E), so the scan meets the
+        // entry before its whiteout.
+        env.WriteFile(env.Lower(0), L"sub\\!early.txt", "lower0");
+        env.WriteFile(env.Lower(0), L"sub\\.wh.!early.txt", "");
+        env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"!early.txt") == 0,
+            L"A lower's whiteout must hide that lower's own entry");
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the lower's entry that no whiteout hides");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_RootOfExtendedFormLowerPath_AppliesThatLowersWhiteouts) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L".wh.a.txt", "");
+        env.WriteFile(env.Lower(0), L"own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"a.txt", "lower1");
+        env.WriteFile(env.Lower(1), L"deep.txt", "lower1");
         auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
+        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0);
+        ::LayerMount::LayerMount mount(config);
 
-        wm.CreateWhiteout(L"a.txt", WhiteoutType::File);
+        auto merged = mount.MergeDirectoryEntries(L"");
 
-        std::wstring extendedUpper = L"\\\\?\\" + env.Upper();
-        const auto names = wm.ListWhitedOutNames(L"", extendedUpper);
-
-        Assert::IsTrue(names.has_value(),
-                       L"Root scan of an extended-form layer path should succeed");
-        Assert::AreEqual(size_t{1}, names->size());
-        Assert::AreEqual(std::wstring(L"a.txt"), (*names)[0]);
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the entry at the root of the extended-form lower");
+        Assert::IsTrue(merged.count(L"a.txt") == 0,
+            L"The whiteout at the root of the extended-form lower must hide a.txt below it");
+        Assert::IsTrue(merged.count(L"deep.txt") == 1,
+            L"The listing must show the deeper lower's entry that no whiteout hides");
     }
 };
 

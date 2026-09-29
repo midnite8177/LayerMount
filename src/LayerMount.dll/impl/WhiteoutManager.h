@@ -4,7 +4,6 @@
 
 #include <optional>
 #include <string_view>
-#include <vector>
 
 namespace LayerMount {
 
@@ -79,15 +78,6 @@ public:
     // lower-layer content beneath a deleted directory.
     bool HasWhitedOutAncestorInLayer(const std::wstring& relativePath,
                                      const std::wstring& layerPath) const;
-
-    // Returns the names that the whiteouts in one layer's directory hide,
-    // without the .wh. prefix, in directory order. A directory missing from
-    // the layer gives an empty list. A failed scan gives nullopt, because a
-    // partial list would show entries that the layer deleted. The list does
-    // not include the opaque marker.
-    std::optional<std::vector<std::wstring>> ListWhitedOutNames(
-        const std::wstring& dirRelativePath,
-        const std::wstring& layerPath) const;
 
     // Build the whiteout marker filename for a relative path: parent\.wh.<name>
     static std::wstring GetWhiteoutFileName(const std::wstring& relativePath);

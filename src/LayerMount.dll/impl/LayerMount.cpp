@@ -707,36 +707,76 @@ struct DirectoryMerge {
     std::unordered_set<std::wstring> whitedOutNames;
 };
 
+// FindFirstFileW gives ERROR_DIRECTORY when the layer holds a file at the
+// directory's path. The layer then has no directory there to list.
+bool IsDirectoryAbsentError(DWORD error) {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ||
+           error == ERROR_DIRECTORY;
+}
+
+enum class LayerScanResult {
+    Complete,
+    Failed,
+};
+
+struct LayerDirectoryEntry {
+    std::wstring key;
+    WIN32_FIND_DATAW findData;
+};
+
+struct LayerDirectoryScan {
+    LayerScanResult result;
+    std::vector<std::wstring> whitedOutNames;
+    std::vector<LayerDirectoryEntry> entries;
+};
+
+// Reads one layer's directory in one enumeration. whitedOutNames holds the
+// case-folded names that the layer's whiteouts hide, and entries holds the
+// layer's visible entries. A directory absent from the layer gives a
+// Complete scan with no names. A Failed scan holds what it read before
+// the failure.
+LayerDirectoryScan ScanLayerDirectory(const std::wstring& layerPath,
+                                      const std::wstring& dirNorm) {
+    LayerDirectoryScan scan{LayerScanResult::Complete, {}, {}};
+    WIN32_FIND_DATAW findData;
+    const std::wstring searchPath = JoinLayerScanPath(layerPath, dirNorm);
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        if (!IsDirectoryAbsentError(::GetLastError())) scan.result = LayerScanResult::Failed;
+        return scan;
+    }
+
+    do {
+        const std::wstring name = findData.cFileName;
+        if (const std::optional<std::wstring> hidden =
+                WhiteoutManager::WhitedOutNameOfEntry(name)) {
+            scan.whitedOutNames.push_back(CaseFoldedName(*hidden));
+            continue;
+        }
+        const std::optional<std::wstring> key = VisibleEntryKey(dirNorm, name);
+        if (!key) continue;
+        scan.entries.push_back(LayerDirectoryEntry{*key, findData});
+    } while (FindNextFileW(hFind, &findData));
+
+    // FindNextFileW returns false both at the end of the directory and on a
+    // failure. FindClose can overwrite the error, so read it first.
+    const DWORD scanEndError = ::GetLastError();
+    FindClose(hFind);
+    if (scanEndError != ERROR_NO_MORE_FILES) scan.result = LayerScanResult::Failed;
+    return scan;
+}
+
 // Adds the upper's entries in dirNorm to merge.entries, and adds the names
 // that the upper's whiteouts hide to merge.whitedOutNames.
 void MergeUpperEntries(const std::wstring& upperPath,
                        const std::wstring& dirNorm,
                        DirectoryMerge& merge) {
-    WIN32_FIND_DATAW findData;
-    const std::wstring searchPath = JoinLayerScanPath(upperPath, dirNorm);
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) return;
-
-    do {
-        const std::wstring name = findData.cFileName;
-        if (WhiteoutManager::IsWhiteoutName(name)) {
-            if (const std::optional<std::wstring> hidden =
-                    WhiteoutManager::WhitedOutNameOfEntry(name)) {
-                merge.whitedOutNames.insert(CaseFoldedName(*hidden));
-            }
-            continue;
-        }
-        const std::optional<std::wstring> key = VisibleEntryKey(dirNorm, name);
-        if (!key) continue;
-        merge.entries[*key] = MergedEntry{findData, LayerSource::Upper};
-    } while (FindNextFileW(hFind, &findData));
-    FindClose(hFind);
+    const LayerDirectoryScan scan = ScanLayerDirectory(upperPath, dirNorm);
+    merge.whitedOutNames.insert(scan.whitedOutNames.begin(), scan.whitedOutNames.end());
+    for (const LayerDirectoryEntry& entry : scan.entries) {
+        merge.entries[entry.key] = MergedEntry{entry.findData, LayerSource::Upper};
+    }
 }
-
-enum class WhiteoutList {
-    Complete,
-    Partial,
-};
 
 struct LowerDirectory {
     const WhiteoutManager& whiteoutMgr;
@@ -744,53 +784,30 @@ struct LowerDirectory {
     const std::wstring& dirNorm;
 };
 
-// Adds the names that the lower's whiteouts in the directory hide to
-// whitedOutNames. On a failed enumeration, adds no name and returns Partial.
-WhiteoutList CollectLowerWhiteouts(const LowerDirectory& dir,
-                                   std::unordered_set<std::wstring>& whitedOutNames) {
-    const std::optional<std::vector<std::wstring>> layerWhitedOutNames =
-        dir.whiteoutMgr.ListWhitedOutNames(dir.dirNorm, dir.lowerPath);
-    if (!layerWhitedOutNames) return WhiteoutList::Partial;
-    for (const std::wstring& whitedOutName : *layerWhitedOutNames) {
-        whitedOutNames.insert(CaseFoldedName(whitedOutName));
-    }
-    return WhiteoutList::Complete;
-}
-
 enum class DeeperLowers {
     Visible,
     Hidden,
 };
 
 // Adds the lower's entries in the directory that no higher layer lists and
-// that no whiteout hides. The whiteouts of the lower hide its own entries too.
-// Returns whether the lowers below it can add entries to the directory.
+// that no whiteout hides. Adds the names that the lower's whiteouts hide to
+// merge.whitedOutNames. The whiteouts of the lower hide its own entries too.
+// Returns whether the lowers below it can add entries to the directory. A
+// scan that fails for a reason other than an absent directory adds no entry
+// and hides the deeper lowers, because a whiteout the scan did not read can
+// hide one of their entries.
 DeeperLowers MergeLowerEntries(const LowerDirectory& dir, DirectoryMerge& merge) {
-    const DeeperLowers deeperLowers =
-        dir.whiteoutMgr.HasOpaqueSelfOrAncestorInLayer(dir.dirNorm, dir.lowerPath)
-            ? DeeperLowers::Hidden
-            : DeeperLowers::Visible;
+    const LayerDirectoryScan scan = ScanLayerDirectory(dir.lowerPath, dir.dirNorm);
+    if (scan.result == LayerScanResult::Failed) return DeeperLowers::Hidden;
 
-    WIN32_FIND_DATAW findData;
-    const std::wstring searchPath = JoinLayerScanPath(dir.lowerPath, dir.dirNorm);
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) return deeperLowers;
-
-    // A partial whiteout list can show a name that this lower deleted, from
-    // this lower or from a deeper lower.
-    if (CollectLowerWhiteouts(dir, merge.whitedOutNames) == WhiteoutList::Partial) {
-        FindClose(hFind);
-        return DeeperLowers::Hidden;
+    merge.whitedOutNames.insert(scan.whitedOutNames.begin(), scan.whitedOutNames.end());
+    for (const LayerDirectoryEntry& entry : scan.entries) {
+        if (merge.entries.count(entry.key) || merge.whitedOutNames.count(entry.key)) continue;
+        merge.entries[entry.key] = MergedEntry{entry.findData, LayerSource::Lower};
     }
-
-    do {
-        const std::optional<std::wstring> key = VisibleEntryKey(dir.dirNorm, findData.cFileName);
-        if (!key) continue;
-        if (merge.entries.count(*key) || merge.whitedOutNames.count(*key)) continue;
-        merge.entries[*key] = MergedEntry{findData, LayerSource::Lower};
-    } while (FindNextFileW(hFind, &findData));
-    FindClose(hFind);
-    return deeperLowers;
+    return dir.whiteoutMgr.HasOpaqueSelfOrAncestorInLayer(dir.dirNorm, dir.lowerPath)
+        ? DeeperLowers::Hidden
+        : DeeperLowers::Visible;
 }
 
 }

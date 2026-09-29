@@ -179,10 +179,6 @@ constexpr const wchar_t* kOpaqueMarkerFile  = L".wh..wh..opq";
   (always; a delete that needs a whiteout owns the whiteout in upper).
 - `RemoveWhiteout(rel)` — used by `Create`/`Rename` when a new file
   resurrects a previously-deleted name.
-- `ListWhitedOutNames(dir, layer)` supports the directory merge.
-  It returns `std::nullopt` when the scan fails, so the caller cannot
-  use a partial list. A missing whiteout would show a lower entry that
-  a layer deleted.
 
 `FILE_FLAG_BACKUP_SEMANTICS` on the marker open is intentional: a
 parent directory that inherited a `DENY-WRITE` ACE from the lower layer
@@ -283,13 +279,18 @@ or rename it. See "Path safety guards". Directory merging in
 1. Enumerates upper. For each `.wh.<name>` it sees, it strips the prefix
    and adds `<name>` to a `whitedOutNames` set, then *skips* the marker
    itself.
-2. For each lower, it enumerates; before consuming entries it loads the
-   layer's whiteouts (via `ListWhitedOutNames`) into the same set.
-   If enumeration of whiteouts fails mid-stream, the merge aborts
-   descent through deeper lowers — a partial whiteout list could leak a
-   logically-deleted entry.
-3. For each enumerated entry, lower wins only if upper did not already
-   produce it AND the name is not in `whitedOutNames`.
+2. For each lower, it enumerates the directory once. It adds the names
+   that the lower's whiteouts hide to the same set, and it holds the
+   lower's entries back until the scan ends. A lower that has no
+   directory at the path, or has a file there, adds nothing, and the
+   merge goes on to the next lower. A scan that fails in any other way,
+   at the first read or mid-stream, adds nothing from that lower and
+   stops the merge, because a whiteout that the scan did not read can
+   hide an entry in a deeper lower.
+3. After a clean scan, the merge adds a held-back lower entry only if no
+   higher layer already produced it AND the name is not in
+   `whitedOutNames`, which includes that lower's own whiteouts from
+   step 2.
 4. An opaque directory limits step 2. If the directory is opaque in the
    upper layer, the merge enumerates no lower. If the directory is
    opaque in lower N, the merge enumerates lower N and skips lowers

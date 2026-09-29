@@ -29,11 +29,11 @@ struct EveryoneSid {
 
 // Merges a deny ACE for Everyone, carrying accessMask and the given
 // inheritance flags, into the directory's existing DACL. The DACL stays
-// unprotected, so the ACE propagates to existing children. Each step
-// asserts on failure.
-inline void AddInheritableDenyAce(const std::wstring& path,
-                                  DWORD accessMask,
-                                  DWORD inheritance) {
+// unprotected, so an ACE with inheritance flags propagates to existing
+// children. Each step asserts on failure.
+inline void AddDenyAce(const std::wstring& path,
+                       DWORD accessMask,
+                       DWORD inheritance) {
     using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
 
     EveryoneSid everyone;

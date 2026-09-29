@@ -12,7 +12,7 @@ namespace {
 // with backup semantics and SE_BACKUP_NAME / SE_RESTORE_NAME enabled, and
 // neither privilege grants FILE_DELETE_CHILD, so the kernel checks the ACL.
 void DenyDeleteChildInChildDirectories(const std::wstring& path) {
-    LayerMountTestShared::AddInheritableDenyAce(
+    LayerMountTestShared::AddDenyAce(
         path, FILE_DELETE_CHILD, CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE);
 }
 
