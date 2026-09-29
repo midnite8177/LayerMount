@@ -712,4 +712,72 @@ public:
     }
 };
 
+TEST_CLASS(SidecarDirectoryListingTests) {
+public:
+    TEST_CLASS_INITIALIZE(ClassInit) {
+        AssertTempIsNTFS();
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_SidecarNamedDirBelowRootInUpper_IsListed) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L"sub\\.overlay");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L".overlay") == 1,
+            L"A user's .overlay directory below the root must show in the listing");
+        AssertEveryListedEntryResolves(env, L"sub", merged);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_SidecarNamedDirBelowRootInLower_IsListed) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"sub\\.overlay");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L".overlay") == 1,
+            L"A lower's .overlay directory below the root must show in the listing");
+        AssertEveryListedEntryResolves(env, L"sub", merged);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_SidecarNamedDirCreatedBelowRoot_IsListed) {
+        TempLayerEnvironment env(1);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        for (const wchar_t* dir : {L"sub", L"sub\\.overlay"}) {
+            std::unique_ptr<FileContext> ctx;
+            InternalFileInfo info{};
+            Assert::IsTrue(NT_SUCCESS(mount.Create(dir, FILE_DIRECTORY_FILE,
+                                                   FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+                                                   /*securityDescriptor*/ nullptr,
+                                                   /*allocationSize*/ 0u,
+                                                   /*callerPid*/ 0u, &ctx, &info)),
+                (std::wstring(L"The directory create must succeed: ") + dir).c_str());
+            mount.Close(ctx.get());
+        }
+
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L".overlay") == 1,
+            L"A .overlay directory that the engine created below the root must show in the listing");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_SidecarDirAtRoot_IsNotListed) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L".overlay");
+        env.CreateDir(env.Lower(0), L".overlay");
+        env.WriteFile(env.Upper(), L"visible.txt", "v");
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        auto merged = mount.MergeDirectoryEntries(L"");
+
+        Assert::IsTrue(merged.count(L".overlay") == 0,
+            L"The sidecar directory at the root must not show in the listing");
+        Assert::IsTrue(merged.count(L"visible.txt") == 1,
+            L"The listing of the root must show the upper's file");
+    }
+};
+
 }

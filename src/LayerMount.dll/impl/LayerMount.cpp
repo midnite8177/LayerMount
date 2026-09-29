@@ -682,14 +682,12 @@ std::wstring CaseFoldedName(const std::wstring& name) {
     return folded;
 }
 
-// Returns the merge key for a directory entry that the merged listing
-// shows. Returns nothing for `.`, `..`, a whiteout file such as the opaque
-// marker, and the sidecar directory, which stays hidden at every depth.
-std::optional<std::wstring> VisibleEntryKey(const std::wstring& name) {
+std::optional<std::wstring> VisibleEntryKey(const std::wstring& dirNorm,
+                                            const std::wstring& name) {
     if (name == L"." || name == L"..") return std::nullopt;
     if (WhiteoutManager::IsWhiteoutName(name)) return std::nullopt;
     std::wstring key = CaseFoldedName(name);
-    if (key == kSidecarDirName) return std::nullopt;
+    if (dirNorm.empty() && IsReservedRelativePath(key)) return std::nullopt;
     return key;
 }
 
@@ -717,7 +715,7 @@ void MergeUpperEntries(const std::wstring& upperPath,
             }
             continue;
         }
-        const std::optional<std::wstring> key = VisibleEntryKey(name);
+        const std::optional<std::wstring> key = VisibleEntryKey(dirNorm, name);
         if (!key) continue;
         merge.entries[*key] = MergedEntry{findData, LayerSource::Upper};
     } while (FindNextFileW(hFind, &findData));
@@ -776,7 +774,7 @@ DeeperLowers MergeLowerEntries(const LowerDirectory& dir, DirectoryMerge& merge)
     }
 
     do {
-        const std::optional<std::wstring> key = VisibleEntryKey(findData.cFileName);
+        const std::optional<std::wstring> key = VisibleEntryKey(dir.dirNorm, findData.cFileName);
         if (!key) continue;
         if (merge.entries.count(*key) || merge.whitedOutNames.count(*key)) continue;
         merge.entries[*key] = MergedEntry{findData, LayerSource::Lower};
