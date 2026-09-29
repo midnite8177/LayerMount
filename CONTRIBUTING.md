@@ -126,7 +126,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes:
 Area tags used in this repo: `vhd`, `vss`, `abi`, `native`, `net`, `deps`,
 `build`, `release`, `test-shared`, `security`, `copy-up`, `engine`. A
 `docs:` commit can also carry one: `guide` for the host adapter guide,
-`context` for `CONTEXT.md`. Commit messages never reference a task,
+`glossary` for `GLOSSARY.md`. Commit messages never reference a task,
 issue, or bead number; they describe the change in the project's own
 terms.
 
