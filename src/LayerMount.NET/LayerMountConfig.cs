@@ -45,7 +45,11 @@ public sealed record LayerMountConfig
     /// </summary>
     public bool EnableProcessTracking { get; init; }
 
-    /// <summary>Optional path to a JSON rules file for the process tracker.</summary>
+    /// <summary>
+    /// Optional path to a JSON rules file for the process tracker. When
+    /// <see cref="EnableProcessTracking"/> is set, the mount create fails
+    /// if this file is missing or does not parse.
+    /// </summary>
     public string? ProcessRulesPath { get; init; }
 
     /// <summary>Process-tracker access-log circular buffer capacity.</summary>

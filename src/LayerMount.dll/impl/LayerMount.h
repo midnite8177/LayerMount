@@ -256,6 +256,9 @@ struct InternalStreamInfo {
 
 class LayerMount {
 public:
+    // Throws std::system_error carrying ERROR_INVALID_DATA when
+    // config.enableProcessTracking is set and config.processRulesPath
+    // names a rules file that is missing or does not parse.
     explicit LayerMount(LayerConfig config);
     ~LayerMount();
 
@@ -554,15 +557,17 @@ public:
 
     LayerImage::LayerImageManager& Images();
 
-    // Runtime process-tracker toggle. TRUE constructs the tracker (if
-    // absent) using the overlay's accessLogCapacity; FALSE tears it down.
-    // Returns S_OK on state change or no-op; callers observe the effect
-    // via subsequent ABI calls. Safe against concurrent Tracker() callers.
-    // Each one sees either the old tracker, and holds the last reference
-    // until it releases it, or the new state.
+    // TRUE constructs the tracker when there is none, with the overlay's
+    // accessLogCapacity and processRulesPath; FALSE tears it down.
+    // Returns HRESULT_FROM_WIN32(ERROR_INVALID_DATA) when the rules file
+    // does not load, else S_OK on state change or no-op. Safe against
+    // concurrent Tracker() callers. Each one sees either the old tracker,
+    // and holds the last reference until it releases it, or the new state.
     HRESULT SetProcessTrackerEnabled(bool enabled);
 
 private:
+    std::shared_ptr<ProcessTracker> TryMakeProcessTracker();
+
     // Opens the root directory on the upper layer's own path. The root
     // has no lower origin, so no copy-up and no fill apply.
     NTSTATUS OpenRoot(UINT32 grantedAccess,

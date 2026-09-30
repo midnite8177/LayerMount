@@ -63,6 +63,17 @@ LayerMountHolder CreateTrackedMount(const TempLayerEnv& env,
     return mount;
 }
 
+void AssertCreateFailsWithInvalidData(const TempLayerEnv& env,
+                                      const std::wstring& rulesPath) {
+    ConfigBuilder config(env);
+    config.EnableProcessTrackingWithRules(rulesPath);
+
+    LM_HANDLE handle = nullptr;
+    Assert::AreEqual<HRESULT>(HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+        ::LayerMountCreate(config.Ptr(), &handle));
+    Assert::IsNull(handle, L"the failed create returns no handle");
+}
+
 }
 
 TEST_CLASS(AbiTrackerOpenerTests) {
@@ -101,6 +112,33 @@ public:
                             kNoCreateOptions, opened),
             L"the rule denies the open itself");
         Assert::IsNull(opened.handle, L"the denied open returns no handle");
+    }
+
+    TEST_METHOD(CreatedWithTrackingAndDenyOpenerReadRules_FirstOpen_FailsWithAccessDenied) {
+        TempLayerEnv env(0);
+        env.WriteUpperFile(L"tracked.txt", "opener bytes");
+        ConfigBuilder config(env);
+        config.EnableProcessTrackingWithRules(WriteDenyOpenerReadRules(env));
+        LayerMountHolder mount;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCreate(config.Ptr(), mount.AddressOf()));
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED),
+            OpenOverlayFile(mount.Get(), L"\\tracked.txt", GENERIC_READ,
+                            kNoCreateOptions, opened),
+            L"the rules from the create config deny the first open");
+        Assert::IsNull(opened.handle, L"the denied open returns no handle");
+    }
+
+    TEST_METHOD(CreatedWithTrackingAndUnparseableRules_Create_FailsWithInvalidData) {
+        TempLayerEnv env(0);
+        AssertCreateFailsWithInvalidData(env, WriteTrackerRules(env, "not json"));
+    }
+
+    TEST_METHOD(CreatedWithTrackingAndMissingRulesFile_Create_FailsWithInvalidData) {
+        TempLayerEnv env(0);
+        AssertCreateFailsWithInvalidData(env, env.Root() + L"\\missing-rules.json");
     }
 
     TEST_METHOD(RulesDenySystemProcess_ReadOnOpenedHandle_ReturnsBytes) {

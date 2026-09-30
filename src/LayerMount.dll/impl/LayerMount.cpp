@@ -20,6 +20,7 @@
 #include <cstring>
 #include <cwctype>
 #include <string_view>
+#include <system_error>
 #include <unordered_set>
 
 namespace LayerMount {
@@ -357,10 +358,23 @@ LayerMount::LayerMount(LayerConfig config)
     copyUp_->SetEventEmitter(&events_);
     whiteoutMgr_->SetEventEmitter(&events_);
     if (config_.enableProcessTracking) {
-        auto tracker = std::make_shared<ProcessTracker>(config_.accessLogCapacity);
-        tracker->SetEventEmitter(&events_);
-        processTracker_ = std::move(tracker);
+        processTracker_ = TryMakeProcessTracker();
+        if (processTracker_ == nullptr) {
+            throw std::system_error(static_cast<int>(ERROR_INVALID_DATA),
+                                    std::system_category(),
+                                    "The process rules file did not load");
+        }
     }
+}
+
+std::shared_ptr<ProcessTracker> LayerMount::TryMakeProcessTracker() {
+    auto tracker = std::make_shared<ProcessTracker>(config_.accessLogCapacity);
+    tracker->SetEventEmitter(&events_);
+    if (!config_.processRulesPath.empty() &&
+        !tracker->LoadRules(config_.processRulesPath)) {
+        return nullptr;
+    }
+    return tracker;
 }
 
 LayerMount::~LayerMount() = default;
@@ -393,17 +407,13 @@ LayerImage::LayerImageManager& LayerMount::Images() {
 
 HRESULT LayerMount::SetProcessTrackerEnabled(bool enabled) {
     if (enabled) {
-        std::shared_ptr<ProcessTracker> newTracker;
         {
             std::shared_lock readLock(processTrackerMutex_);
             if (processTracker_ != nullptr) return S_OK;
         }
-        auto candidate = std::make_shared<ProcessTracker>(config_.accessLogCapacity);
-        candidate->SetEventEmitter(&events_);
-        if (!config_.processRulesPath.empty()) {
-            if (!candidate->LoadRules(config_.processRulesPath)) {
-                return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-            }
+        auto candidate = TryMakeProcessTracker();
+        if (candidate == nullptr) {
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         }
         std::unique_lock writeLock(processTrackerMutex_);
         if (processTracker_ == nullptr) {

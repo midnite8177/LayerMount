@@ -547,6 +547,9 @@ LM_API HRESULT LM_CALL LayerMountGetLastFailureWasFill(BOOL* wasFill);
  *                    validation failed (see LayerMountGetLastErrorMessage)
  *   E_FAIL        -- the work directory could not be created
  *   E_OUTOFMEMORY -- the overlay handle table is exhausted
+ *   HRESULT_FROM_WIN32(ERROR_INVALID_DATA)
+ *                 -- enableProcessTracking is set and the processRulesPath
+ *                    file is missing or does not parse
  */
 LM_API HRESULT LM_CALL LayerMountCreate(
     const LM_CONFIG* config, LM_HANDLE* outHandle);

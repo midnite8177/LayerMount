@@ -271,10 +271,17 @@ struct ConfigBuilder {
     void SetStructSize(UINT32 s)      noexcept { cfg_.structSize = s; }
     void SetUpperPath(PCWSTR p)       noexcept { cfg_.upperPath = p; }
 
+    void EnableProcessTrackingWithRules(const std::wstring& rulesPath) {
+        rules_ = rulesPath;
+        cfg_.enableProcessTracking = TRUE;
+        cfg_.processRulesPath      = rules_.c_str();
+    }
+
 private:
     LM_CONFIG               cfg_{};
     std::wstring             upper_;
     std::wstring             work_;
+    std::wstring             rules_;
     std::vector<std::wstring> lowerStorage_;
     std::vector<PCWSTR>      lowerPointers_;
 };
