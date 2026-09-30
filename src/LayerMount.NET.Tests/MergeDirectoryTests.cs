@@ -62,15 +62,25 @@ public sealed class MergeDirectoryTests
     }
 
     [Fact]
-    public void MergeDirectory_CallbackThrows_ThrowsLayerMountException()
+    public void MergeDirectory_CallbackThrows_PropagatesTheCallbackException()
     {
         using var env = new TempLayerEnvironment(0);
         env.WriteUpperFile(@"dir\a.txt", "x");
+        env.WriteUpperFile(@"dir\b.txt", "x");
+        env.WriteUpperFile(@"dir\c.txt", "x");
         using var mount = LayerMount.Create(env.BuildConfig());
+        var thrown = new InvalidOperationException("callback failed");
 
-        Assert.ThrowsAny<LayerMountException>(() =>
+        int calls = 0;
+        var caught = Assert.Throws<InvalidOperationException>(() =>
             mount.MergeDirectory(@"\dir", (name, info) =>
-                throw new InvalidOperationException("callback failed")));
+            {
+                calls++;
+                throw thrown;
+            }));
+
+        Assert.Same(thrown, caught);
+        Assert.Equal(1, calls);
     }
 
     [Fact]

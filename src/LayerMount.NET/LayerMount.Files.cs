@@ -6,6 +6,7 @@
 
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using LayerMount.Interop;
 
@@ -215,10 +216,6 @@ public sealed partial class LayerMount
         HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountSetOpaque));
     }
 
-    // ------------------------------------------------------------------
-    // Security
-    // ------------------------------------------------------------------
-
     private const uint OWNER_SECURITY_INFORMATION = 0x1u;
     private const uint GROUP_SECURITY_INFORMATION = 0x2u;
     private const uint DACL_SECURITY_INFORMATION  = 0x4u;
@@ -321,10 +318,6 @@ public sealed partial class LayerMount
             HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountSetSecurity));
         }
     }
-
-    // ------------------------------------------------------------------
-    // Reparse points
-    // ------------------------------------------------------------------
 
     private const int MaximumReparseDataBufferSize = 16 * 1024;
 
@@ -440,19 +433,16 @@ public sealed partial class LayerMount
         }
     }
 
-    // ------------------------------------------------------------------
-    // Merge directory
-    // ------------------------------------------------------------------
-
     /// <summary>
     /// Merged view of a directory across the upper + lower layers. The
     /// callback fires once per entry in sorted order. Return
     /// <c>false</c> to stop the listing. The method then returns
-    /// normally.
+    /// normally. If the callback throws, the listing stops and the
+    /// callback's exception propagates to the caller unchanged.
     /// </summary>
     /// <exception cref="LayerMountException">
-    /// If a layer scan fails, if the callback throws, or if the native
-    /// call otherwise returns a non-success HRESULT.
+    /// If a layer scan fails, or if the native call otherwise returns a
+    /// non-success HRESULT.
     /// </exception>
     public unsafe void MergeDirectory(
         string dirRelativePath,
@@ -471,6 +461,7 @@ public sealed partial class LayerMount
             int hr = NativeMethods.LayerMountMergeDirectory(
                 lease.Handle, dirRelativePath, trampoline,
                 (void*)GCHandle.ToIntPtr(gc));
+            state.CallbackFailure?.Throw();
             if (hr == HResultGuard.E_ABORT && state.StoppedByCallback)
             {
                 return;
@@ -506,11 +497,6 @@ public sealed partial class LayerMount
         ArgumentNullException.ThrowIfNull(relativePath);
         using var lease = new SafeHandleLease(_handle);
 
-        // Probe-then-fill against a possibly-changing stream set. A new
-        // stream added between the probe and the fill makes the native
-        // side return ERROR_MORE_DATA -- treat that as transient and
-        // re-probe instead of throwing. Bounded so pathological churn
-        // surfaces as a real failure rather than spinning forever.
         for (int attempt = 0; attempt < BufferHelpers.MaxFillRetries; attempt++)
         {
             uint required = 0;
@@ -534,7 +520,6 @@ public sealed partial class LayerMount
 
             if (hrFill == BufferHelpers.HRESULT_E_MORE_DATA && attempt < BufferHelpers.MaxFillRetries - 1)
             {
-                // A stream was added between probe and fill. Re-probe.
                 continue;
             }
             HResultGuard.ThrowIfFailed(hrFill, nameof(NativeMethods.LayerMountEnumerateStreams));
@@ -554,8 +539,6 @@ public sealed partial class LayerMount
             return result;
         }
 
-        // Exhausted retries: streams keep being added faster than we can
-        // probe + allocate. Surface as a real ERROR_MORE_DATA.
         HResultGuard.ThrowIfFailed(BufferHelpers.HRESULT_E_MORE_DATA, nameof(NativeMethods.LayerMountEnumerateStreams));
         return [];
     }
@@ -595,9 +578,21 @@ public sealed partial class LayerMount
 
         public bool StoppedByCallback { get; private set; }
 
+        public ExceptionDispatchInfo? CallbackFailure { get; private set; }
+
         public int Invoke(string name, FileInfoSnapshot info)
         {
-            if (_callback(name, info)) return 0;
+            bool keepGoing;
+            try
+            {
+                keepGoing = _callback(name, info);
+            }
+            catch (Exception ex)
+            {
+                CallbackFailure = ExceptionDispatchInfo.Capture(ex);
+                return HResultGuard.E_FAIL;
+            }
+            if (keepGoing) return 0;
             StoppedByCallback = true;
             return HResultGuard.E_ABORT;
         }
