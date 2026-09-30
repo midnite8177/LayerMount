@@ -12,6 +12,36 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="3.0.0"></a>
+## [3.0.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v3.0.0) (2026-09-30)
+
+### Features
+
+* **abi:** report that a failed call came from a metacopy fill ([d8c4e87](https://www.github.com/midnite8177/LayerMount/commit/d8c4e875f838b1edffedbc25490c507bc4fa39a3))
+
+### Bug Fixes
+
+* **abi:** keep the security descriptor check inside the caller's buffer ([7d36ca0](https://www.github.com/midnite8177/LayerMount/commit/7d36ca0fef5359191cd76bcf44ae0de230c5700c))
+* **engine:** a directory opaque in a lower shows that lower's entries ([02ff988](https://www.github.com/midnite8177/LayerMount/commit/02ff988c15c85a973278797bd4f5c338270ab2df))
+* **engine:** a listing below an opaque ancestor hides the deeper lowers ([58bdd0d](https://www.github.com/midnite8177/LayerMount/commit/58bdd0d505cc1e7e3cea8699159ab0f0c967adba))
+* **engine:** apply a DACL-only descriptor when a file or directory is created ([ed6eb0c](https://www.github.com/midnite8177/LayerMount/commit/ed6eb0cc76985b168f160e0207e9189c11405433))
+* **engine:** ignore a create's security descriptor without LM_CAP_NTFS_ACLS ([3044091](https://www.github.com/midnite8177/LayerMount/commit/3044091add8ba92ee3c23298585296e8bc2a2fa1))
+* **engine:** list a .overlay directory below the overlay root ([3af2ebd](https://www.github.com/midnite8177/LayerMount/commit/3af2ebdac4c15d8000eec37f446e77872b92495a))
+* **engine:** load the process rules when a mount is created with tracking ([5d73605](https://www.github.com/midnite8177/LayerMount/commit/5d736055f2c57c68d3f81f2c4e6c263679aec525))
+* **engine:** report a failed directory scan to CanDelete and the listing ([225354c](https://www.github.com/midnite8177/LayerMount/commit/225354c3cb7d6c1707e9ba2f90622a90c9be3b56))
+* **engine:** reserve whiteout and opaque marker names in every layer ([1bccfb6](https://www.github.com/midnite8177/LayerMount/commit/1bccfb618a97194b23e9ace17ab08f3f300a92f2))
+* **engine:** stop the directory merge when a lower's scan fails ([5912fdd](https://www.github.com/midnite8177/LayerMount/commit/5912fddf256974d2b8bdc66233c8edafa1c021b8))
+* **engine:** stop the directory merge when the upper's scan fails ([f84c35b](https://www.github.com/midnite8177/LayerMount/commit/f84c35b1418e0412eec96ace632d0f92ddde335c))
+* **engine:** write the SACL of the security descriptor that a create gets ([9b09205](https://www.github.com/midnite8177/LayerMount/commit/9b09205b993e6f8c82f0302a39e1424bf5b5bc79))
+* **net:** rethrow the exception that the MergeDirectory callback throws ([0f1b595](https://www.github.com/midnite8177/LayerMount/commit/0f1b59551321a476112dec63af6232eec133a81c))
+* **net:** return normally when the MergeDirectory callback stops the listing ([ef08d10](https://www.github.com/midnite8177/LayerMount/commit/ef08d10429fb5b6433cf80a072cc9230fe32d482))
+* **net:** trim a string or byte result that shrank between probe and fill ([5dedc9e](https://www.github.com/midnite8177/LayerMount/commit/5dedc9e6fe85c86cfc38309a1cd7d29f9d59831f))
+
+### Breaking Changes
+
+* **engine:** load the process rules when a mount is created with tracking ([5d73605](https://www.github.com/midnite8177/LayerMount/commit/5d736055f2c57c68d3f81f2c4e6c263679aec525))
+* **net:** rethrow the exception that the MergeDirectory callback throws ([0f1b595](https://www.github.com/midnite8177/LayerMount/commit/0f1b59551321a476112dec63af6232eec133a81c))
+
 <a name="2.0.0"></a>
 ## [2.0.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v2.0.0) (2026-09-22)
 
