@@ -766,16 +766,32 @@ LayerDirectoryScan ScanLayerDirectory(const std::wstring& layerPath,
     return scan;
 }
 
-// Adds the upper's entries in dirNorm to merge.entries, and adds the names
-// that the upper's whiteouts hide to merge.whitedOutNames.
-void MergeUpperEntries(const std::wstring& upperPath,
-                       const std::wstring& dirNorm,
-                       DirectoryMerge& merge) {
-    const LayerDirectoryScan scan = ScanLayerDirectory(upperPath, dirNorm);
-    merge.whitedOutNames.insert(scan.whitedOutNames.begin(), scan.whitedOutNames.end());
-    for (const LayerDirectoryEntry& entry : scan.entries) {
-        merge.entries[entry.key] = MergedEntry{entry.findData, LayerSource::Upper};
+// Adds each scanned entry that no higher layer lists and that no name in
+// merge.whitedOutNames hides.
+void AddUnhiddenEntries(const std::vector<LayerDirectoryEntry>& entries,
+                        LayerSource source,
+                        DirectoryMerge& merge) {
+    for (const LayerDirectoryEntry& entry : entries) {
+        if (merge.entries.count(entry.key) || merge.whitedOutNames.count(entry.key)) continue;
+        merge.entries[entry.key] = MergedEntry{entry.findData, source};
     }
+}
+
+// Adds the upper's entries in dirNorm to merge.entries, and adds the names
+// that the upper's whiteouts hide to merge.whitedOutNames. The entries go in
+// before the whiteouts, because an upper entry wins over an upper whiteout
+// of the same name. A scan that fails for a reason other than an absent
+// directory adds nothing, and the caller must hide every lower, because a
+// whiteout that the scan did not read can hide a lower's entry.
+LayerScanResult MergeUpperEntries(const std::wstring& upperPath,
+                                  const std::wstring& dirNorm,
+                                  DirectoryMerge& merge) {
+    const LayerDirectoryScan scan = ScanLayerDirectory(upperPath, dirNorm);
+    if (scan.result == LayerScanResult::Failed) return LayerScanResult::Failed;
+
+    AddUnhiddenEntries(scan.entries, LayerSource::Upper, merge);
+    merge.whitedOutNames.insert(scan.whitedOutNames.begin(), scan.whitedOutNames.end());
+    return LayerScanResult::Complete;
 }
 
 struct LowerDirectory {
@@ -801,10 +817,7 @@ DeeperLowers MergeLowerEntries(const LowerDirectory& dir, DirectoryMerge& merge)
     if (scan.result == LayerScanResult::Failed) return DeeperLowers::Hidden;
 
     merge.whitedOutNames.insert(scan.whitedOutNames.begin(), scan.whitedOutNames.end());
-    for (const LayerDirectoryEntry& entry : scan.entries) {
-        if (merge.entries.count(entry.key) || merge.whitedOutNames.count(entry.key)) continue;
-        merge.entries[entry.key] = MergedEntry{entry.findData, LayerSource::Lower};
-    }
+    AddUnhiddenEntries(scan.entries, LayerSource::Lower, merge);
     return dir.whiteoutMgr.HasOpaqueSelfOrAncestorInLayer(dir.dirNorm, dir.lowerPath)
         ? DeeperLowers::Hidden
         : DeeperLowers::Visible;
@@ -828,7 +841,9 @@ std::map<std::wstring, MergedEntry> LayerMount::MergeDirectoryEntries(
     const bool lowersHidden =
         whiteoutMgr_->HasOpaqueSelfOrAncestorInLayer(dirNorm, config_.upperPath);
 
-    MergeUpperEntries(config_.upperPath, dirNorm, merge);
+    if (MergeUpperEntries(config_.upperPath, dirNorm, merge) == LayerScanResult::Failed) {
+        return {};
+    }
     if (lowersHidden) {
         return std::move(merge.entries);
     }

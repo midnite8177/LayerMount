@@ -278,7 +278,12 @@ or rename it. See "Path safety guards". Directory merging in
 
 1. Enumerates upper. For each `.wh.<name>` it sees, it strips the prefix
    and adds `<name>` to a `whitedOutNames` set, then *skips* the marker
-   itself.
+   itself. An upper that has no directory at the path, or has a file
+   there, adds nothing, and the merge goes on to the lowers. A scan that
+   fails in any other way, at the first read or mid-stream, adds nothing
+   from the upper and stops the merge before the lowers, because a
+   whiteout that the scan did not read can hide a lower's entry. The
+   listing is then empty.
 2. For each lower, it enumerates the directory once. It adds the names
    that the lower's whiteouts hide to the same set, and it holds the
    lower's entries back until the scan ends. A lower that has no

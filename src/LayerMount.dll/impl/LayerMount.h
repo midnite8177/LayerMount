@@ -361,8 +361,8 @@ public:
         const std::wstring* pathHint = nullptr);
 
     // Returns a sorted map: lowercase filename -> MergedEntry. Returns an
-    // empty map for an unsafe or reserved path, the same as for an empty
-    // directory.
+    // empty map for an unsafe or reserved path and when the upper holds the
+    // directory but cannot list it, the same as for an empty directory.
     std::map<std::wstring, MergedEntry> MergeDirectoryEntries(
         const std::wstring& dirRelativePath) const;
 

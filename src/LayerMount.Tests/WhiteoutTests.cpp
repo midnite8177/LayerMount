@@ -355,6 +355,29 @@ public:
             L"An unreadable lower can hold whiteouts, so the listing must hide the deeper lower's entry");
     }
 
+    TEST_METHOD(MergeDirectoryEntries_UpperDirUnreadable_HidesEveryLowersEntries) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"sub\\up.txt", "upper");
+        env.WriteFile(env.Upper(), L"sub\\.wh.gone.txt", "");
+        env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower0");
+        env.WriteFile(env.Lower(0), L"sub\\below.txt", "lower0");
+        DirectoryListingDenied denied(env.Upper() + L"\\sub");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED,
+            FindFirstFileError(env.Upper() + L"\\sub\\*"),
+            L"The deny ACE must make the upper's directory scan fail");
+
+        auto merged = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::IsTrue(merged.count(L"gone.txt") == 0,
+            L"The upper's unread whiteout hides gone.txt, so the listing must not show the lower's entry");
+        Assert::IsTrue(merged.count(L"below.txt") == 0,
+            L"An unreadable upper can hold whiteouts, so the listing must hide every lower's entry");
+        Assert::IsTrue(merged.empty(),
+            L"A failed upper scan must give an empty listing");
+    }
+
     TEST_METHOD(MergeDirectoryEntries_FileInLowerAtListedDir_ShowsDeeperLowersEntries) {
         TempLayerEnvironment env(2);
         env.WriteFile(env.Lower(0), L"sub", "lower0");
