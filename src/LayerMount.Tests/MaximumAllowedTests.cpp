@@ -39,11 +39,15 @@ public:
 
         std::unique_ptr<FileContext> ctx;
         InternalFileInfo info{};
-        Assert::IsTrue(NT_SUCCESS(mount.Create(L"max.txt", /*createOptions*/ 0u,
-                                               MAXIMUM_ALLOWED, FILE_ATTRIBUTE_NORMAL,
-                                               /*securityDescriptor*/ nullptr,
-                                               /*allocationSize*/ 0u,
-                                               /*callerPid*/ 0u, &ctx, &info)),
+        ::LayerMount::LayerMount::CreateRequest request{};
+        request.relativePath = L"max.txt";
+        request.createOptions = 0u;
+        request.grantedAccess = MAXIMUM_ALLOWED;
+        request.fileAttributes = FILE_ATTRIBUTE_NORMAL;
+        request.securityDescriptor = nullptr;
+        request.allocationSize = 0u;
+        request.callerPid = 0u;
+        Assert::IsTrue(NT_SUCCESS(mount.Create(request, &ctx, &info)),
                        L"the file create with MAXIMUM_ALLOWED succeeds");
         AssertResolved(*ctx);
         Assert::IsTrue((ctx->grantedAccess & FILE_WRITE_DATA) != 0,
@@ -57,11 +61,15 @@ public:
 
         std::unique_ptr<FileContext> ctx;
         InternalFileInfo info{};
-        Assert::IsTrue(NT_SUCCESS(mount.Create(L"maxdir", FILE_DIRECTORY_FILE,
-                                               MAXIMUM_ALLOWED, FILE_ATTRIBUTE_DIRECTORY,
-                                               /*securityDescriptor*/ nullptr,
-                                               /*allocationSize*/ 0u,
-                                               /*callerPid*/ 0u, &ctx, &info)),
+        ::LayerMount::LayerMount::CreateRequest request{};
+        request.relativePath = L"maxdir";
+        request.createOptions = FILE_DIRECTORY_FILE;
+        request.grantedAccess = MAXIMUM_ALLOWED;
+        request.fileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+        request.securityDescriptor = nullptr;
+        request.allocationSize = 0u;
+        request.callerPid = 0u;
+        Assert::IsTrue(NT_SUCCESS(mount.Create(request, &ctx, &info)),
                        L"the directory create with MAXIMUM_ALLOWED succeeds");
         AssertResolved(*ctx);
         mount.Close(ctx.get());

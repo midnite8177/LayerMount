@@ -816,10 +816,15 @@ public:
         for (const wchar_t* dir : {L"sub", L"sub\\.overlay"}) {
             std::unique_ptr<FileContext> ctx;
             InternalFileInfo info{};
-            Assert::IsTrue(NT_SUCCESS(mount.Create(dir, FILE_DIRECTORY_FILE,
-                                                   FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
-                                                   noSecurityDescriptor, noAllocationSize,
-                                                   untrackedCallerPid, &ctx, &info)),
+            ::LayerMount::LayerMount::CreateRequest request{};
+            request.relativePath = dir;
+            request.createOptions = FILE_DIRECTORY_FILE;
+            request.grantedAccess = FILE_ALL_ACCESS;
+            request.fileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+            request.securityDescriptor = noSecurityDescriptor;
+            request.allocationSize = noAllocationSize;
+            request.callerPid = untrackedCallerPid;
+            Assert::IsTrue(NT_SUCCESS(mount.Create(request, &ctx, &info)),
                 (std::wstring(L"The directory create must succeed: ") + dir).c_str());
             mount.Close(ctx.get());
         }
@@ -962,10 +967,15 @@ public:
         const UINT32 attributes = (createOptions & FILE_DIRECTORY_FILE) != 0
             ? FILE_ATTRIBUTE_DIRECTORY
             : FILE_ATTRIBUTE_NORMAL;
-        const NTSTATUS status = mount.Create(path, createOptions,
-                                             FILE_ALL_ACCESS, attributes,
-                                             kDefaultSecurity, kNoAllocationSize,
-                                             kNoCallerPid, &ctx, &info);
+        ::LayerMount::LayerMount::CreateRequest request{};
+        request.relativePath = path;
+        request.createOptions = createOptions;
+        request.grantedAccess = FILE_ALL_ACCESS;
+        request.fileAttributes = attributes;
+        request.securityDescriptor = kDefaultSecurity;
+        request.allocationSize = kNoAllocationSize;
+        request.callerPid = kNoCallerPid;
+        const NTSTATUS status = mount.Create(request, &ctx, &info);
         if (ctx) mount.Close(ctx.get());
         return status;
     }

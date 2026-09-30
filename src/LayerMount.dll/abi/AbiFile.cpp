@@ -233,10 +233,15 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
     const DWORD pid = originatorPid != 0 ? originatorPid : ::GetCurrentProcessId();
     std::unique_ptr<::LayerMount::FileContext> ctx;
     ::LayerMount::InternalFileInfo internalInfo{};
-    NTSTATUS status = mountHolder->core->Create(
-        relativePath, createOptions, grantedAccess, fileAttributes,
-        sd, allocationSize, pid,
-        &ctx, &internalInfo);
+    ::LayerMount::LayerMount::CreateRequest request{};
+    request.relativePath = relativePath;
+    request.createOptions = createOptions;
+    request.grantedAccess = grantedAccess;
+    request.fileAttributes = fileAttributes;
+    request.securityDescriptor = sd;
+    request.allocationSize = allocationSize;
+    request.callerPid = pid;
+    NTSTATUS status = mountHolder->core->Create(request, &ctx, &internalInfo);
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);
     }

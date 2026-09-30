@@ -129,6 +129,7 @@ namespace LayerImage { class LayerImageManager; }
 }
 
 #include "ProcessTracker.h"
+#include "SecurityPolicy.h"
 
 #include "../abi/CapabilityGate.h"
 #include "../abi/EventEmitter.h"
@@ -326,18 +327,23 @@ public:
                   std::unique_ptr<FileContext>* outCtx,
                   InternalFileInfo* outInfo);
 
+    struct CreateRequest {
+        std::wstring relativePath;
+        UINT32 createOptions;
+        UINT32 grantedAccess;
+        UINT32 fileAttributes;
+        PSECURITY_DESCRIPTOR securityDescriptor;
+        UINT64 allocationSize;
+        DWORD callerPid;
+    };
+
     // Create a new file or directory in the upper layer. CreateOptions
     // FILE_DIRECTORY_FILE selects directory creation. Applies the
-    // (optional) self-relative security descriptor and pre-allocates
-    // allocationSize bytes when non-zero. Marks a new directory as opaque
-    // when an entry of the same name exists in any lower layer.
-    NTSTATUS Create(const std::wstring& relativePath,
-                    UINT32 createOptions,
-                    UINT32 grantedAccess,
-                    UINT32 fileAttributes,
-                    PSECURITY_DESCRIPTOR securityDescriptor,
-                    UINT64 allocationSize,
-                    DWORD callerPid,
+    // self-relative security descriptor that SecurityPolicy picks, and
+    // pre-allocates allocationSize bytes when non-zero. Marks a new
+    // directory as opaque when an entry of the same name exists in any
+    // lower layer.
+    NTSTATUS Create(const CreateRequest& request,
                     std::unique_ptr<FileContext>* outCtx,
                     InternalFileInfo* outInfo);
 
@@ -590,6 +596,11 @@ private:
         UINT64 allocationSize = 0;
     };
 
+    // Copies the caller's settings from request into create, whose path
+    // fields Create has resolved, and returns the context of the new entry.
+    std::unique_ptr<FileContext> BuildCreate(const CreateRequest& request,
+                                             UpperCreate* create) const;
+
     // The directory half of Create. Makes the directory in the upper,
     // marks it opaque when lowerIsDirectory, applies the caller's
     // security descriptor, and opens ctx->handle. A failure after
@@ -632,6 +643,7 @@ private:
 
     LayerConfig config_;
     ::LayerMount::abi::CapabilityGate capabilities_;
+    SecurityPolicy                    securityPolicy_;
     ::LayerMount::abi::EventEmitter   events_;
     std::unique_ptr<Cache> cache_;
     std::unique_ptr<WhiteoutManager> whiteoutMgr_;

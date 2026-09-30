@@ -149,10 +149,9 @@ public:
         Assert::IsTrue(daclPresent != FALSE, L"A DACL-only request must still carry the DACL");
     }
 
-    TEST_METHOD(GetSecurity_DaclOnlyOnNonAclCapableMount_OmitsOwnerAndGroup) {
+    TEST_METHOD(GetSecurity_DaclOnlyOnNonAclCapableOverlay_OmitsOwnerAndGroup) {
         TempLayerEnv     env(0);
-        LayerMountHolder mount = CreateLayerMount(env,
-            LM_CAP_ADS | LM_CAP_REPARSE_POINTS | LM_CAP_SPARSE_FILES | LM_CAP_MULTIPLE_STREAMS);
+        LayerMountHolder mount = CreateLayerMount(env, kNonAclCapabilities);
         CreatePlainFile(mount, L"\\nonacl.txt");
 
         std::vector<BYTE> sd = FetchSecurity(mount, L"\\nonacl.txt", DACL_SECURITY_INFORMATION);
@@ -452,10 +451,49 @@ public:
             L"A descriptor without a DACL must leave the inherited DACL in place");
     }
 
+    TEST_METHOD(CreateFile_DescriptorOnNonAclCapableOverlay_KeepsTheInheritedDacl) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env, kNonAclCapabilities);
+        CreatePlainFile(mount, L"\\inherited.txt");
+        const std::wstring inheritedDacl = FetchUpperDaclSddl(env, L"\\inherited.txt");
+        Assert::AreNotEqual(std::wstring(kEveryoneFullAccessProtectedDacl), inheritedDacl,
+            L"setup: the inherited DACL differs from the descriptor's DACL");
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\with-descriptor.txt", kNoCreateOptions,
+                                   FILE_ATTRIBUTE_NORMAL, kEveryoneFullAccessProtectedDacl),
+            L"A file create with a descriptor must succeed on an overlay without ACL support");
+
+        Assert::AreEqual(inheritedDacl,
+            FetchUpperDaclSddl(env, L"\\with-descriptor.txt"),
+            L"An overlay without ACL support must ignore the descriptor and keep the inherited DACL");
+    }
+
+    TEST_METHOD(CreateDirectory_DescriptorOnNonAclCapableOverlay_KeepsTheInheritedDacl) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env, kNonAclCapabilities);
+        CreatePlainDirectory(mount, L"\\inherited");
+        const std::wstring inheritedDacl = FetchUpperDaclSddl(env, L"\\inherited");
+        Assert::AreNotEqual(std::wstring(kEveryoneFullAccessProtectedDacl), inheritedDacl,
+            L"setup: the inherited DACL differs from the descriptor's DACL");
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\with-descriptor", FILE_DIRECTORY_FILE,
+                                   FILE_ATTRIBUTE_DIRECTORY, kEveryoneFullAccessProtectedDacl),
+            L"A directory create with a descriptor must succeed on an overlay without ACL support");
+
+        Assert::AreEqual(inheritedDacl,
+            FetchUpperDaclSddl(env, L"\\with-descriptor"),
+            L"An overlay without ACL support must ignore the descriptor and keep the inherited DACL");
+    }
+
 private:
-    static constexpr PCWSTR kEveryoneFullAccessDacl = L"D:(A;;FA;;;WD)";
-    static constexpr PCWSTR kAdministratorsOwner    = L"O:BA";
-    static constexpr PCWSTR kEveryoneAuditSacl      = L"S:(AU;SAFA;FA;;;WD)";
+    static constexpr PCWSTR kEveryoneFullAccessDacl          = L"D:(A;;FA;;;WD)";
+    static constexpr PCWSTR kEveryoneFullAccessProtectedDacl = L"D:P(A;;FA;;;WD)";
+    static constexpr PCWSTR kAdministratorsOwner             = L"O:BA";
+    static constexpr PCWSTR kEveryoneAuditSacl               = L"S:(AU;SAFA;FA;;;WD)";
+    static constexpr UINT32 kNonAclCapabilities =
+        LM_CAP_ADS | LM_CAP_REPARSE_POINTS | LM_CAP_SPARSE_FILES | LM_CAP_MULTIPLE_STREAMS;
 
     static std::wstring EveryoneFullAccessAuditedDescriptor() {
         return std::wstring(kEveryoneFullAccessDacl) + kEveryoneAuditSacl;
@@ -495,26 +533,54 @@ private:
         return hr;
     }
 
-    static std::wstring FetchSddl(LayerMountHolder& mount, PCWSTR path, UINT32 secInfo) {
-        std::vector<BYTE> sd = FetchSecurity(mount, path, secInfo);
+    static std::wstring SddlOf(PSECURITY_DESCRIPTOR sd, UINT32 secInfo) {
         LPWSTR sddl = nullptr;
         Assert::IsTrue(
             ::ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                sd.data(), SDDL_REVISION_1, secInfo, &sddl, nullptr) != FALSE,
+                sd, SDDL_REVISION_1, secInfo, &sddl, nullptr) != FALSE,
             L"ConvertSecurityDescriptorToStringSecurityDescriptorW");
         std::wstring result(sddl);
         ::LocalFree(sddl);
         return result;
     }
 
+    static std::wstring FetchSddl(LayerMountHolder& mount, PCWSTR path, UINT32 secInfo) {
+        std::vector<BYTE> sd = FetchSecurity(mount, path, secInfo);
+        return SddlOf(sd.data(), secInfo);
+    }
+
     static void CreatePlainFile(LayerMountHolder& mount, PCWSTR path) {
+        CreateAndClosePlain(mount, path, GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                            FILE_ATTRIBUTE_NORMAL, L"setup: LayerMountCreateFile");
+    }
+
+    static void CreatePlainDirectory(LayerMountHolder& mount, PCWSTR path) {
+        CreateAndClosePlain(mount, path, GENERIC_READ, FILE_DIRECTORY_FILE,
+                            FILE_ATTRIBUTE_DIRECTORY,
+                            L"setup: LayerMountCreateFile for a directory");
+    }
+
+    static void CreateAndClosePlain(LayerMountHolder& mount, PCWSTR path,
+                                    UINT32 access, UINT32 createOptions,
+                                    UINT32 fileAttributes, PCWSTR createMessage) {
         OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
             CreateOverlayFile(mount.Get(), path,
-                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
-                FILE_ATTRIBUTE_NORMAL, opened),
-            L"setup: LayerMountCreateFile");
+                access, createOptions, fileAttributes, opened),
+            createMessage);
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
+    }
+
+    static std::wstring FetchUpperDaclSddl(const TempLayerEnv& env, PCWSTR path) {
+        const std::wstring upperPath = env.Upper() + path;
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            ::GetNamedSecurityInfoW(upperPath.c_str(), SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION,
+                                    nullptr, nullptr, nullptr, nullptr, &sd),
+            L"GetNamedSecurityInfoW on the upper");
+        const std::unique_ptr<void, decltype(&::LocalFree)> owned(sd, &::LocalFree);
+        return SddlOf(sd, DACL_SECURITY_INFORMATION);
     }
 
     static void SetDaclFromSddl(const std::wstring& path, PCWSTR sddl) {

@@ -112,7 +112,8 @@ every bit its target actually supports and no more.
 - `LM_CAP_NTFS_ACLS`. Without it, a security read returns a synthetic
   security descriptor instead of one read from the upper, and a
   security write silently no-ops and returns success instead of
-  failing.
+  failing. A create ignores the security descriptor it gets, and the
+  new file or directory keeps the security it inherits from its parent.
 - `LM_CAP_MULTIPLE_STREAMS` and `LM_CAP_CASE_SENSITIVE`. A host adapter
   clears either bit to declare the corresponding limitation. Neither
   bit currently gates any engine fallback; clearing it records the

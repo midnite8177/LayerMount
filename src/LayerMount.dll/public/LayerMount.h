@@ -786,6 +786,8 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(
  * The create writes the owner, group, DACL and SACL that
  * `securityDescriptor` carries. It drops the SACL unless the filesystem
  * process holds SE_SECURITY_NAME, and still writes the other parts.
+ * On an overlay without LM_CAP_NTFS_ACLS it writes none of them, and the
+ * new file or directory keeps the security it inherits from its parent.
  *
  * MAXIMUM_ALLOWED in `grantedAccess` resolves against the caller's rights
  * on the created file or directory. The handle's stored access holds the

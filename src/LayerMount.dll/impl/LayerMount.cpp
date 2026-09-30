@@ -349,6 +349,7 @@ bool EnsureDirectoryExists(const std::wstring& path) {
 LayerMount::LayerMount(LayerConfig config)
     : config_(std::move(config))
     , capabilities_(config_.hostCapabilities)
+    , securityPolicy_(capabilities_)
     , events_()
     , cache_(std::make_unique<Cache>(config_.pathCacheCapacity))
     , whiteoutMgr_(std::make_unique<WhiteoutManager>(config_, cache_.get()))
@@ -1063,7 +1064,7 @@ NTSTATUS WriteSecurityToNewObject(const std::wstring& path, PSECURITY_DESCRIPTOR
     if (toWrite == 0) {
         return STATUS_SUCCESS;
     }
-    // A mount that has not built a CopyUp yet has no SE_RESTORE_NAME, and
+    // An overlay that has not built a CopyUp yet has no SE_RESTORE_NAME, and
     // the open below then fails with ACCESS_DENIED under such a parent.
     EnableFileSystemPrivileges();
     DWORD access = READ_CONTROL | WRITE_DAC | WRITE_OWNER;
@@ -1301,13 +1302,7 @@ NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm,
     return copyUp_->CopyUpFile(hostNorm);
 }
 
-NTSTATUS LayerMount::Create(const std::wstring& relativePath,
-                           UINT32 createOptions,
-                           UINT32 grantedAccess,
-                           UINT32 fileAttributes,
-                           PSECURITY_DESCRIPTOR securityDescriptor,
-                           UINT64 allocationSize,
-                           DWORD callerPid,
+NTSTATUS LayerMount::Create(const CreateRequest& request,
                            std::unique_ptr<FileContext>* outCtx,
                            InternalFileInfo* outInfo) {
     if (outCtx == nullptr || outInfo == nullptr) {
@@ -1315,75 +1310,54 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
     }
     *outCtx = nullptr;
 
-    std::wstring normalized = NormalizePath(relativePath);
-
-    std::wstring hostNorm;
-    std::wstring streamSuffix;
-    if (!TryParseStreamPath(normalized, hostNorm, streamSuffix)) {
+    UpperCreate create;
+    create.normalized = NormalizePath(request.relativePath);
+    if (!TryParseStreamPath(create.normalized, create.hostNorm, create.streamSuffix)) {
         return STATUS_OBJECT_NAME_INVALID;
     }
 
-    if (IsReservedRelativePath(hostNorm)) {
+    if (IsReservedRelativePath(create.hostNorm)) {
         return STATUS_ACCESS_DENIED;
     }
 
-    if (auto tracker = Tracker(); tracker && callerPid != 0) {
-        if (!tracker->CheckAccess(callerPid, hostNorm, OperationType::Create)) {
+    if (auto tracker = Tracker(); tracker && request.callerPid != 0) {
+        if (!tracker->CheckAccess(request.callerPid, create.hostNorm, OperationType::Create)) {
             return STATUS_ACCESS_DENIED;
         }
     }
 
-    const bool isDirectory = (createOptions & FILE_DIRECTORY_FILE) != 0;
-    if (isDirectory && !streamSuffix.empty()) {
+    const bool isDirectory = (request.createOptions & FILE_DIRECTORY_FILE) != 0;
+    if (isDirectory && !create.streamSuffix.empty()) {
         return STATUS_FILE_IS_A_DIRECTORY;
     }
 
     const bool hadWhiteout =
-        whiteoutMgr_->HasWhiteout(hostNorm, config_.upperPath);
+        whiteoutMgr_->HasWhiteout(create.hostNorm, config_.upperPath);
 
-    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(hostNorm);
-    const bool existsInLower = lowerResolved.Found();
-    const bool lowerIsDir = existsInLower &&
+    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(create.hostNorm);
+    create.existsInLower = lowerResolved.Found();
+    create.lowerIsDirectory = create.existsInLower &&
         (lowerResolved.attributes & FILE_ATTRIBUTE_DIRECTORY);
 
-    std::wstring upperPath = pathResolver_->GetUpperPath(hostNorm);
+    create.upperPath = pathResolver_->GetUpperPath(create.hostNorm);
 
     // Catches a host path that is a directory when the caller did not pass FILE_DIRECTORY_FILE.
-    if (!streamSuffix.empty()) {
-        const DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
+    if (!create.streamSuffix.empty()) {
+        const DWORD upperAttrs = ::GetFileAttributesW(create.upperPath.c_str());
         const bool upperIsDir =
             (upperAttrs != INVALID_FILE_ATTRIBUTES) &&
             (upperAttrs & FILE_ATTRIBUTE_DIRECTORY);
-        if (upperIsDir || lowerIsDir) {
+        if (upperIsDir || create.lowerIsDirectory) {
             return STATUS_FILE_IS_A_DIRECTORY;
         }
     }
 
-    std::filesystem::path parentDir = std::filesystem::path(upperPath).parent_path();
+    std::filesystem::path parentDir = std::filesystem::path(create.upperPath).parent_path();
     if (!parentDir.empty()) {
         EnsureDirectoryExists(parentDir.wstring());
     }
 
-    auto ctx = std::make_unique<FileContext>();
-    ctx->relativePath = hostNorm;
-    ctx->streamSuffix = streamSuffix;
-    ctx->actualPath = upperPath + streamSuffix;
-    ctx->isDirectory = isDirectory;
-    ctx->writable = true;
-    ctx->ownerPid = callerPid;
-    ctx->createOptions = createOptions;
-
-    UpperCreate create;
-    create.normalized = normalized;
-    create.hostNorm = hostNorm;
-    create.streamSuffix = streamSuffix;
-    create.upperPath = upperPath;
-    create.existsInLower = existsInLower;
-    create.lowerIsDirectory = lowerIsDir;
-    create.grantedAccess = grantedAccess;
-    create.fileAttributes = fileAttributes;
-    create.securityDescriptor = securityDescriptor;
-    create.allocationSize = allocationSize;
+    std::unique_ptr<FileContext> ctx = BuildCreate(request, &create);
 
     const NTSTATUS createStatus = isDirectory
         ? CreateDirectoryInUpper(create, ctx.get())
@@ -1392,12 +1366,13 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
         return createStatus;
     }
 
-    // An earlier removal shows the lower entry again after a failed create.
+    // The whiteout goes only after the create succeeds. Removing it
+    // earlier would show the lower entry again if the create failed.
     if (hadWhiteout) {
-        whiteoutMgr_->RemoveWhiteout(hostNorm);
+        whiteoutMgr_->RemoveWhiteout(create.hostNorm);
     }
 
-    cache_->InvalidateWithAncestors(hostNorm);
+    cache_->InvalidateWithAncestors(create.hostNorm);
 
     NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
     if (!NT_SUCCESS(status)) {
@@ -1408,6 +1383,24 @@ NTSTATUS LayerMount::Create(const std::wstring& relativePath,
     stats_.activeHandles.fetch_add(1, std::memory_order_relaxed);
     *outCtx = std::move(ctx);
     return STATUS_SUCCESS;
+}
+
+std::unique_ptr<FileContext> LayerMount::BuildCreate(const CreateRequest& request,
+                                                     UpperCreate* create) const {
+    create->grantedAccess = request.grantedAccess;
+    create->fileAttributes = request.fileAttributes;
+    create->securityDescriptor = securityPolicy_.DescriptorForCreate(request.securityDescriptor);
+    create->allocationSize = request.allocationSize;
+
+    auto ctx = std::make_unique<FileContext>();
+    ctx->relativePath = create->hostNorm;
+    ctx->streamSuffix = create->streamSuffix;
+    ctx->actualPath = create->upperPath + create->streamSuffix;
+    ctx->isDirectory = (request.createOptions & FILE_DIRECTORY_FILE) != 0;
+    ctx->writable = true;
+    ctx->ownerPid = request.callerPid;
+    ctx->createOptions = request.createOptions;
+    return ctx;
 }
 
 NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
@@ -2347,59 +2340,6 @@ NTSTATUS LayerMount::UpdateContextPath(FileContext* ctx,
     return STATUS_SUCCESS;
 }
 
-namespace {
-
-// Builds a synthetic world-readable descriptor for an upper layer that
-// carries no real NTFS ACLs, holding only the sections `effective`
-// asks for (Owner=World, Group=World, DACL grants FILE_GENERIC_READ to
-// Everyone). SACL is never synthesized: a non-ACL-capable upper layer
-// has no audit data to fabricate.
-NTSTATUS GetSyntheticWorldSecurity(SECURITY_INFORMATION effective,
-                                    bool isProbe,
-                                    PSECURITY_DESCRIPTOR sd,
-                                    SIZE_T sdBytes,
-                                    SIZE_T* requiredBytes) {
-    std::wstring worldSddl;
-    if (effective & OWNER_SECURITY_INFORMATION) {
-        worldSddl += L"O:WD";
-    }
-    if (effective & GROUP_SECURITY_INFORMATION) {
-        worldSddl += L"G:WD";
-    }
-    if (effective & DACL_SECURITY_INFORMATION) {
-        worldSddl += L"D:(A;;FR;;;WD)";
-    }
-    if (worldSddl.empty()) {
-        if (requiredBytes != nullptr) {
-            *requiredBytes = 0;
-        }
-        return STATUS_SUCCESS;
-    }
-
-    PSECURITY_DESCRIPTOR worldSd = nullptr;
-    ULONG worldSize = 0;
-    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            worldSddl.c_str(), SDDL_REVISION_1, &worldSd, &worldSize)) {
-        return NtStatusFromWin32(::GetLastError());
-    }
-    if (requiredBytes != nullptr) {
-        *requiredBytes = worldSize;
-    }
-    if (isProbe) {
-        ::LocalFree(worldSd);
-        return STATUS_SUCCESS;
-    }
-    if (sdBytes < worldSize) {
-        ::LocalFree(worldSd);
-        return STATUS_BUFFER_OVERFLOW;
-    }
-    std::memcpy(sd, worldSd, worldSize);
-    ::LocalFree(worldSd);
-    return STATUS_SUCCESS;
-}
-
-}
-
 NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
                                 UINT32 securityInformation,
                                 PUINT32 outAttributes,
@@ -2440,8 +2380,8 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
         return STATUS_SUCCESS;
     }
 
-    if (!capabilities_.HasNtfsAcls()) {
-        return GetSyntheticWorldSecurity(effective, isProbe, sd, sdBytes, requiredBytes);
+    if (!securityPolicy_.ReadsUpperSecurity()) {
+        return SecurityPolicy::SyntheticSecurity(effective, isProbe, sd, sdBytes, requiredBytes);
     }
 
     // Bits outside owner, group, DACL, and SACL pass through to
@@ -2477,8 +2417,7 @@ NTSTATUS LayerMount::SetSecurity(const std::wstring& relativePath,
         }
     }
 
-    // Callers set security after every create, so a layer without ACLs drops it and succeeds.
-    if (!capabilities_.HasNtfsAcls()) {
+    if (!securityPolicy_.AppliesSecurityWrites()) {
         return STATUS_SUCCESS;
     }
 
