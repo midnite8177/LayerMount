@@ -14,18 +14,10 @@
 
 namespace LayerMount {
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 constexpr const wchar_t* kWhiteoutPrefix    = L".wh.";
 constexpr const wchar_t* kOpaqueMarkerFile  = L".wh..wh..opq";
 constexpr const wchar_t* kLayerMountADSStream  = L":overlay";
 constexpr const wchar_t* kOpaqueADSStream   = L":overlay.opaque";
-
-// ---------------------------------------------------------------------------
-// Enums
-// ---------------------------------------------------------------------------
 
 enum class LayerSource {
     None,
@@ -33,26 +25,15 @@ enum class LayerSource {
     Lower
 };
 
-// ---------------------------------------------------------------------------
-// Structs
-// ---------------------------------------------------------------------------
-
 struct LayerConfig {
     std::wstring upperPath;
     std::vector<std::wstring> lowerPaths;   // index 0 = highest priority lower
     std::wstring workDirPath;
 
-    // Process tracking
     bool enableProcessTracking = false;
     std::wstring processRulesPath;          // Path to JSON rules file (empty = no rules)
-    size_t accessLogCapacity = 10000;       // Circular buffer size
+    size_t accessLogCapacity = 10000;
 
-    // Path-resolver cache capacity (LRU bound). 0 means "use the engine
-    // default" (keep behavior of older callers that did not set this).
-    // Hosts with very large lower trees can raise this to avoid eviction
-    // thrash during cold-start scans. The previous code path discarded
-    // LM_CONFIG::pathCacheCapacity entirely so the value was always the
-    // hard-coded engine default.
     size_t pathCacheCapacity = 10000;
 
     // Host capabilities bitfield (LM_HOST_CAPABILITIES). Determines which
@@ -102,17 +83,11 @@ struct LayerMountStats {
     std::atomic<uint64_t> bytesRead{0};
     std::atomic<uint64_t> bytesWritten{0};
 
-    // Cleanup-time best-effort metadata updates that silently skipped due
-    // to a failed copy-up or a denied attribute set. These can't be
-    // surfaced through the void-returning SCleanup callback, but a non-zero
-    // count is a signal that upper-layer metadata may have drifted from
-    // what the caller staged on close.
+    // Best-effort metadata updates at cleanup that the engine skipped after
+    // a failed copy-up or a denied attribute set. A non-zero count means the
+    // upper's metadata can differ from what the caller set before close.
     std::atomic<uint64_t> cleanupMetadataFailureCount{0};
 };
-
-// ---------------------------------------------------------------------------
-// Per-open-handle file context (allocated in Create/Open, freed in Close)
-// ---------------------------------------------------------------------------
 
 struct FileContext {
     HANDLE handle = INVALID_HANDLE_VALUE;
@@ -142,10 +117,6 @@ struct FileContext {
                                     // NT handle.
 };
 
-// ---------------------------------------------------------------------------
-// Forward declarations
-// ---------------------------------------------------------------------------
-
 class PathResolver;
 class WhiteoutManager;
 class MetadataADS;
@@ -155,47 +126,22 @@ namespace VHD { class VHDLayerManager; }
 namespace VSS { class VSSManager; }
 namespace LayerImage { class LayerImageManager; }
 
-} // namespace LayerMount
+}
 
-// ProcessTracker must be fully defined before the atomic shared_ptr
-// member below is instantiated.
 #include "ProcessTracker.h"
 
-// CapabilityGate is consumed by the engine to gate optimized vs. fallback
-// paths. Header-only; lives under abi/ because it wraps a public-header
-// enum, but is freely included here -- the dependency edge from impl/ to
-// abi/ is small and confined to this one type.
 #include "../abi/CapabilityGate.h"
-
-// EventEmitter owns the host-supplied LM_EVENT_CALLBACK slot. Engine
-// code emits through it whenever a degraded-capability path runs or a
-// notable overlay event fires. Until LayerMountSetEventCallback wires a
-// real callback, every Emit is a silent no-op.
 #include "../abi/EventEmitter.h"
 
 namespace LayerMount {
 
-// ---------------------------------------------------------------------------
-// Utility functions
-// ---------------------------------------------------------------------------
-
 // Normalize a relative filesystem path: strip leading backslash, normalize
 // separators to backslash, fold to lowercase for case-insensitive NTFS matching.
-// Shared by Cache and PathResolver to ensure consistent key normalization.
 std::wstring NormalizePath(const std::wstring& path);
 
 // Returns true if `normalized` is safe to combine with a layer root. Rejects
 // empty input, drive/stream-qualified forms (any `:` character), and any `..`
-// segment that would traverse out of the layer root when concatenated. Call
-// this at every entry point that *must not* accept stream qualifiers. On the
-// write side (CreateWhiteout, SetOpaque, Rename source/dest), call it before
-// building paths with `GetUpperPath` / `BuildUpperPathPreserveCase` or
-// passing results to `EnsureDirectoryExists`. Directory enumeration
-// (MergeDirectoryEntries, behind ReadDirectory and CanDelete) needs it too,
-// because `FindFirstFileW` resolves `..` segments and would enumerate
-// outside the layer root. For callsites that
-// legitimately handle alternate data streams (Create / Open / Delete /
-// UpdateContextPath), use `TryParseStreamPath` instead.
+// segment that would traverse out of the layer root when concatenated.
 bool IsSafeRelativePath(const std::wstring& normalized);
 
 // Returns true if `streamName` (the parsed stream name only, *without* the
@@ -238,19 +184,18 @@ bool IsReservedRelativePath(const std::wstring& normalized);
 // Recursively create directories. Returns true on success or if already exists.
 bool EnsureDirectoryExists(const std::wstring& path);
 
-// ---------------------------------------------------------------------------
-// MergedEntry — used by ReadDirectory and CanDelete to share merge logic
-// ---------------------------------------------------------------------------
-
 struct MergedEntry {
     WIN32_FIND_DATAW findData;
     LayerSource source;
 };
 
-// ---------------------------------------------------------------------------
-// InternalFileInfo — host-agnostic file metadata used by the engine
-// internally. Translated to LM_FILE_INFO at the ABI boundary.
-// ---------------------------------------------------------------------------
+// One directory's entries merged across the layers, keyed by lowercase
+// filename. status is STATUS_SUCCESS, or the failed layer scan's status
+// with entries empty.
+struct MergedDirectory {
+    NTSTATUS status;
+    std::map<std::wstring, MergedEntry> entries;
+};
 
 struct InternalFileInfo {
     UINT32 FileAttributes;
@@ -274,7 +219,7 @@ struct SetInfoRequest {
     UINT64 creationTime;
     UINT64 lastAccessTime;
     UINT64 lastWriteTime;
-    // Not applied: FillFileInfo reports the change time as the last write time.
+    // SetInfo ignores changeTime.
     UINT64 changeTime;
     UINT64 allocationSize;
     UINT64 fileSize;
@@ -302,18 +247,12 @@ struct ResolvedSizes {
     UINT64 allocationSize = 0;
 };
 
-// Single named-data-stream entry as observed against the resolved
-// physical path of a file. Engine-internal; translated to LM_STREAM_INFO
-// at the ABI boundary. Names carry NTFS's native form (e.g. ":mystream:$DATA").
+// Names carry NTFS's native form (e.g. ":mystream:$DATA").
 struct InternalStreamInfo {
     std::wstring name;
     UINT64 streamSize;
     UINT64 allocationSize;
 };
-
-// ---------------------------------------------------------------------------
-// LayerMount class — main overlay filesystem engine
-// ---------------------------------------------------------------------------
 
 class LayerMount {
 public:
@@ -323,14 +262,7 @@ public:
     LayerMount(const LayerMount&) = delete;
     LayerMount& operator=(const LayerMount&) = delete;
 
-    // Mount/unmount responsibilities live in the host adapter (host-driven
-    // pattern). Callers drive the overlay via the primitives below;
-    // filesystem-host integration lives in the adapter above the C ABI.
-
-    // Statistics
     const LayerMountStats& Stats() const { return stats_; }
-
-    // --- Convenience methods used by callbacks ---
 
     // Both sizes are zero for a directory, a whiteout, a path that does not
     // exist, and a path the engine cannot stat.
@@ -348,29 +280,22 @@ public:
     NTSTATUS EnsureInUpperLayer(const std::wstring& relativePath);
 
     // Volume-level disk free / total space taken from the upper layer's
-    // hosting filesystem. The volume label is the DLL's choice (not
-    // configurable today); the caller fills it.
+    // hosting filesystem.
     NTSTATUS GetVolumeInfo(UINT64* outTotalSize, UINT64* outFreeSize) const;
 
-    // Populate InternalFileInfo from a file path.
     static NTSTATUS FillFileInfo(const std::wstring& path, InternalFileInfo* fileInfo);
 
-    // Populate InternalFileInfo from an open handle.
     static NTSTATUS FillFileInfoFromHandle(HANDLE handle,
         InternalFileInfo* fileInfo,
         const std::wstring* pathHint = nullptr);
 
-    // Returns a sorted map: lowercase filename -> MergedEntry. Returns an
-    // empty map for an unsafe or reserved path and when the upper holds the
-    // directory but cannot list it, the same as for an empty directory.
-    std::map<std::wstring, MergedEntry> MergeDirectoryEntries(
-        const std::wstring& dirRelativePath) const;
+    // Merges the directory's entries across the layers. A layer that holds
+    // the directory but cannot list it gives the status of that scan's
+    // Win32 error and no entries, whether it is the upper or a lower. An
+    // unsafe or reserved path gives STATUS_SUCCESS and no entries.
+    MergedDirectory MergeDirectoryEntries(const std::wstring& dirRelativePath) const;
 
-    // --- File-handle primitives ---
-    //
-    // Host-agnostic open / create / close. The C ABI shims in
-    // abi/AbiFile.cpp are thin translators on top of these. Open and
-    // Create take a callerPid for the ProcessTracker check and record it
+    // Open and Create take a callerPid for the ProcessTracker check and record it
     // as ctx->ownerPid; pass 0 to skip tracking for that call. A
     // primitive that takes a FileContext checks the tracker against
     // ctx->ownerPid, the process that opened the handle.
@@ -414,8 +339,7 @@ public:
                     InternalFileInfo* outInfo);
 
     // Close the NT handle inside ctx and decrement the active-handles
-    // stat. Does NOT delete ctx; the caller (typically the FilePayload
-    // holder in the handle table) owns the FileContext storage.
+    // stat. Does NOT delete ctx; the caller owns the FileContext storage.
     void Close(FileContext* ctx);
 
     // Close the NT handle inside ctx and keep ctx alive. The active-handles
@@ -481,15 +405,17 @@ public:
                      const SetInfoRequest& request,
                      InternalFileInfo* outInfo);
 
-    // Path-based delete: remove the entry from the upper layer (or simply
-    // whiteout if it lives only in lower). Validates read-only and
-    // directory-not-empty before mutating, mirroring the legacy SCanDelete
-    // checks. Returns STATUS_OBJECT_NAME_NOT_FOUND when neither layer
-    // has it.
+    // Checks read-only and directory-not-empty and changes nothing. Returns
+    // a failed directory scan's status, and STATUS_OBJECT_NAME_NOT_FOUND
+    // when neither layer has the entry.
     NTSTATUS CanDelete(const std::wstring& relativePath, DWORD callerPid);
-    NTSTATUS Delete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS CanDelete(FileContext* ctx);
+
+    // Calls CanDelete first. Removes the entry from the upper, and writes a
+    // whiteout when a lower holds it.
+    NTSTATUS Delete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS Delete(FileContext* ctx);
+
     // Delete the alternate data stream that `ctx` opened. The host file
     // and its other streams stay.
     NTSTATUS DeleteStreamOnContext(FileContext* ctx);
@@ -546,9 +472,7 @@ public:
 
     // Path-based security mutator. Triggers copy-up to the upper layer if
     // the entry lives only in lower. Applies via path-based
-    // ::SetFileSecurityW; the legacy file-context-based path used
-    // SetKernelObjectSecurity on an open handle but this shim has no
-    // handle to leverage.
+    // ::SetFileSecurityW.
     NTSTATUS SetSecurity(const std::wstring& relativePath,
                          UINT32 securityInformation,
                          PSECURITY_DESCRIPTOR sd,
@@ -592,7 +516,6 @@ public:
     NTSTATUS EnumerateStreams(const std::wstring& relativePath,
                               std::vector<InternalStreamInfo>& out);
 
-    // --- Accessors for callbacks ---
     PathResolver& Resolver() { return *pathResolver_; }
     WhiteoutManager& Whiteouts() { return *whiteoutMgr_; }
     CopyUp& CopyUpEngine() { return *copyUp_; }
@@ -611,15 +534,10 @@ public:
         return processTracker_;
     }
 
-    // Capability gate. Engine code queries this to pick the optimized
-    // vs. fallback path for ADS metadata, reparse copy-up, sparse
-    // copy-up, and NTFS ACL semantics.
     const ::LayerMount::abi::CapabilityGate& Capabilities() const noexcept {
         return capabilities_;
     }
 
-    // Event emitter. The ABI shim LayerMountSetEventCallback installs the
-    // host's callback here; engine code emits through it.
     ::LayerMount::abi::EventEmitter& Events() noexcept { return events_; }
     const ::LayerMount::abi::EventEmitter& Events() const noexcept { return events_; }
 
@@ -634,18 +552,14 @@ public:
     // shims open one on entry. Thread-safe.
     VSS::VSSManager& Vss();
 
-    // Layer image subsystem. Stateless today (every method takes paths
-    // and is a one-shot operation), but owned by the engine for lifecycle
-    // symmetry with Vhd()/Vss() and so future per-overlay caches can
-    // attach without breaking the ABI.
     LayerImage::LayerImageManager& Images();
 
     // Runtime process-tracker toggle. TRUE constructs the tracker (if
     // absent) using the overlay's accessLogCapacity; FALSE tears it down.
     // Returns S_OK on state change or no-op; callers observe the effect
-    // via subsequent ABI calls. Safe against concurrent
-    // TrackerSnapshot() callers -- they see either the old tracker (and
-    // hold the last reference until they release it) or the new state.
+    // via subsequent ABI calls. Safe against concurrent Tracker() callers.
+    // Each one sees either the old tracker, and holds the last reference
+    // until it releases it, or the new state.
     HRESULT SetProcessTrackerEnabled(bool enabled);
 
 private:
@@ -702,7 +616,10 @@ private:
     // upper file as its last step.
     NTSTATUS EnsureMetacopyMaterialized(FileContext* ctx);
 
-    // --- Members (declared in construction order) ---
+    // Merges the directory's entries. Returns a failed scan's status,
+    // STATUS_DIRECTORY_NOT_EMPTY when any entry is visible, and
+    // STATUS_SUCCESS otherwise.
+    NTSTATUS DirectoryEmptinessStatus(const std::wstring& dirNorm) const;
 
     LayerConfig config_;
     ::LayerMount::abi::CapabilityGate capabilities_;
@@ -712,12 +629,6 @@ private:
     std::unique_ptr<PathResolver> pathResolver_;
     LayerMountStats stats_;
     std::unique_ptr<CopyUp> copyUp_;
-    // Shared ownership so callback readers can pin the tracker for
-    // the duration of a check without coordinating with concurrent
-    // SetProcessTrackerEnabled(false) toggles. The shared_mutex below
-    // guards read/write access to this pointer; readers take shared
-    // lock, copy out the shared_ptr (atomic from their POV), and
-    // release. Toggles take unique lock.
     std::shared_ptr<ProcessTracker> processTracker_;
 
     // Lazy VHD/VSS/LayerImage subsystems. Each subsystem's mutex guards
@@ -738,4 +649,4 @@ private:
     mutable std::shared_mutex                     processTrackerMutex_;
 };
 
-} // namespace LayerMount
+}

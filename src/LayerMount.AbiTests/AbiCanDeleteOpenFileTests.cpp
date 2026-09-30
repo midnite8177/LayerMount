@@ -1,13 +1,14 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "AclTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
+using LayerMountTestShared::DirectoryListingDenied;
+using LayerMountTestShared::AssertListingDenied;
 
 namespace LayerMountAbiTests {
 
-// Pin the contract that host adapters rely on: the handle-based
-// variants surface the right HRESULT for directory-emptiness and
-// reparse-point semantics so the adapter doesn't have to re-derive them.
 TEST_CLASS(AbiCanDeleteOpenFileTests) {
 public:
     static LM_FILE_HANDLE OpenDir(LM_HANDLE mount, const wchar_t* path) {
@@ -52,8 +53,6 @@ public:
     }
 
     TEST_METHOD(NonEmptyDirectory_FromMergedLower_ReturnsDirectoryNotEmpty) {
-        // A directory is empty in upper but the merged view sees lower
-        // children. CanDelete must still report not-empty.
         TempLayerEnv  env(1);
         env.WriteLowerFile(0, L"merged\\hidden.txt", "lower content");
         LayerMountHolder mount = CreateLayerMount(env);
@@ -66,6 +65,27 @@ public:
             L"Lower-layer children must count toward emptiness check");
 
         ::LayerMountCloseFile(dh);
+    }
+
+    TEST_METHOD(UpperDirUnreadable_ReturnsTheScanFailure) {
+        TempLayerEnv  env(1);
+        std::filesystem::create_directory(env.Upper() + L"\\sub");
+        env.WriteLowerFile(0, L"sub\\x.txt", "lower content");
+        LayerMountHolder mount = CreateLayerMount(env);
+        LM_FILE_HANDLE dh = OpenDir(mount.Get(), L"\\sub");
+
+        HRESULT hr = S_OK;
+        {
+            DirectoryListingDenied denied(env.Upper() + L"\\sub");
+            BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            AssertListingDenied(env.Upper() + L"\\sub");
+            hr = ::LayerMountCanDeleteOpenFile(dh);
+        }
+        ::LayerMountCloseFile(dh);
+
+        Assert::AreEqual<HRESULT>(
+            HRESULT_FROM_NT(STATUS_ACCESS_DENIED), hr,
+            L"A directory the upper cannot list must not count as empty");
     }
 
     TEST_METHOD(RegularFile_CanDelete_ReturnsSOk) {
@@ -88,4 +108,4 @@ public:
     }
 };
 
-} // namespace LayerMountAbiTests
+}

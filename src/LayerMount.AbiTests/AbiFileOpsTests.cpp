@@ -1,11 +1,23 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "AclTestHelpers.h"
 
 #include <algorithm>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
+using LayerMountTestShared::DirectoryListingDenied;
+using LayerMountTestShared::AssertListingDenied;
 
 namespace LayerMountAbiTests {
+namespace {
+
+HRESULT LM_CALL CountEntry(PCWSTR, const LM_FILE_INFO*, void* userContext) {
+    ++*static_cast<int*>(userContext);
+    return S_OK;
+}
+
+}
 
 TEST_CLASS(AbiFileOpsTests) {
 public:
@@ -140,7 +152,7 @@ public:
 
     // Windows sends a set-information request, and an overwrite, through
     // whichever handle is open, regardless of the access mask granted at
-    // open. This test and the next one open the file with DELETE only.
+    // open.
     TEST_METHOD(SetInfo_TimestampsOnDeleteOnlyHandle_Succeeds) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
@@ -199,6 +211,41 @@ public:
             L"Overwrite must truncate the file");
 
         ::LayerMountCloseFile(deleteOnly.handle);
+    }
+
+    TEST_METHOD(MergeDirectory_UpperDirUnreadable_ReturnsTheScanFailure) {
+        TempLayerEnv env(1);
+        std::filesystem::create_directory(env.Upper() + L"\\sub");
+        env.WriteLowerFile(0, L"sub\\x.txt", "lower0");
+        LayerMountHolder mount = CreateLayerMount(env);
+        DirectoryListingDenied denied(env.Upper() + L"\\sub");
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        AssertListingDenied(env.Upper() + L"\\sub");
+
+        int entries = 0;
+        const HRESULT hr = ::LayerMountMergeDirectory(mount.Get(), L"\\sub", &CountEntry, &entries);
+
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED), hr,
+            L"A directory the upper cannot list must report the scan's failure");
+        Assert::AreEqual(0, entries, L"A failed merge must report no entry");
+    }
+
+    TEST_METHOD(MergeDirectory_LowerDirUnreadable_ReturnsTheScanFailure) {
+        TempLayerEnv env(2);
+        env.WriteUpperFile(L"sub\\up.txt", "upper");
+        std::filesystem::create_directory(env.Lower(0) + L"\\sub");
+        env.WriteLowerFile(1, L"sub\\x.txt", "lower1");
+        LayerMountHolder mount = CreateLayerMount(env);
+        DirectoryListingDenied denied(env.Lower(0) + L"\\sub");
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        AssertListingDenied(env.Lower(0) + L"\\sub");
+
+        int entries = 0;
+        const HRESULT hr = ::LayerMountMergeDirectory(mount.Get(), L"\\sub", &CountEntry, &entries);
+
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED), hr,
+            L"A directory a lower cannot list must report the scan's failure");
+        Assert::AreEqual(0, entries, L"A failed merge must report no entry, not a partial listing");
     }
 
     TEST_METHOD(EnumerateStreams_FileWithNoAds_ReturnsEmpty) {

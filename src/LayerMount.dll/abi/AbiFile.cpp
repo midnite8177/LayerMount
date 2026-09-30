@@ -1,5 +1,3 @@
-// AbiFile.cpp -- File-primitive ABI entry points.
-
 #include "../public/LayerMount.h"
 #include "AbiGuard.h"
 #include "ErrorTls.h"
@@ -9,6 +7,7 @@
 #include "../impl/NtStatusUtil.h"
 #include "../impl/WhiteoutManager.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -32,11 +31,6 @@ std::shared_ptr<::LayerMount::abi::FileHolder> ResolveFileHolder(LM_FILE_HANDLE 
     return holder;
 }
 
-// InternalFileInfo (impl/) and LM_FILE_INFO (public/) carry the same
-// field set in the same order; the casing differs and the public struct
-// is fixed-shape (revisions via LM_ABI_VERSION bump). Translate by
-// named assignment so a future field reorder of either struct produces a
-// compile error rather than silent corruption.
 inline void ToPublicFileInfo(const ::LayerMount::InternalFileInfo& src,
                              LM_FILE_INFO& dst) {
     dst.fileAttributes = src.FileAttributes;
@@ -67,22 +61,17 @@ inline bool IsValidBoundedSecurityDescriptor(const BYTE* buf, SIZE_T bytes) {
     // raw pointers in place of those offsets) and must NOT be used to
     // bound a self-relative buffer -- it rejects valid 20-to-39-byte
     // descriptors that legitimately fit a header plus a single SID.
-    constexpr SIZE_T kSelfRelativeHeaderBytes = 20;
+    constexpr SIZE_T kSelfRelativeHeaderBytes = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
+    static_assert(kSelfRelativeHeaderBytes == 20);
     if (bytes < kSelfRelativeHeaderBytes) return false;
 
-    // Fixed header layout (always first 20 bytes, regardless of form):
-    //   0  Revision   (1)
-    //   1  Sbz1       (1)
-    //   2  Control    (2)  -- SE_SELF_RELATIVE bit tells us fields are offsets
-    //   4  Owner      (4)
-    //   8  Group      (4)
-    //  12  Sacl       (4)
-    //  16  Dacl       (4)
+    constexpr size_t kControlOffset = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Control);
+    constexpr size_t kControlBytes = sizeof(SECURITY_DESCRIPTOR_RELATIVE::Control);
+    static_assert(kControlOffset == 2);
+    static_assert(kControlBytes == sizeof(WORD));
     WORD control = 0;
-    std::memcpy(&control, buf + 2, sizeof(WORD));
+    std::memcpy(&control, buf + kControlOffset, kControlBytes);
     if ((control & SE_SELF_RELATIVE) == 0) {
-        // Absolute descriptors carry raw pointers in those fields, which are
-        // meaningless across an ABI boundary. Reject.
         return false;
     }
 
@@ -98,28 +87,33 @@ inline bool IsValidBoundedSecurityDescriptor(const BYTE* buf, SIZE_T bytes) {
         if (off >= bytes) return false;
         return bytes - off >= minBytes;
     };
-    const size_t kMinSidHeader = 8;  // rev(1) + subAuthCount(1) + authority(6)
-    const size_t kMinAclHeader = 8;  // rev(2) + aclSize(2) + aceCount(2) + pad(2)
-    if (!offsetFits(readDword(4),  kMinSidHeader)) return false;
-    if (!offsetFits(readDword(8),  kMinSidHeader)) return false;
-    if (!offsetFits(readDword(12), kMinAclHeader)) return false;
-    if (!offsetFits(readDword(16), kMinAclHeader)) return false;
+    constexpr size_t kMinSidHeader = offsetof(SID, SubAuthority);
+    constexpr size_t kMinAclHeader = sizeof(ACL);
+    static_assert(kMinSidHeader == 8);
+    static_assert(kMinAclHeader == 8);
+    constexpr size_t kOwnerOffset = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Owner);
+    constexpr size_t kGroupOffset = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Group);
+    constexpr size_t kSaclOffset  = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Sacl);
+    constexpr size_t kDaclOffset  = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Dacl);
+    static_assert(kOwnerOffset == 4);
+    static_assert(kGroupOffset == 8);
+    static_assert(kSaclOffset == 12);
+    static_assert(kDaclOffset == 16);
+    if (!offsetFits(readDword(kOwnerOffset), kMinSidHeader)) return false;
+    if (!offsetFits(readDword(kGroupOffset), kMinSidHeader)) return false;
+    if (!offsetFits(readDword(kSaclOffset),  kMinAclHeader)) return false;
+    if (!offsetFits(readDword(kDaclOffset),  kMinAclHeader)) return false;
 
     auto sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(const_cast<BYTE*>(buf));
     if (!::IsValidSecurityDescriptor(sd)) return false;
 
-    // Final consistency check: GetSecurityDescriptorLength walks every
-    // component (SIDs, ACLs, and the embedded ACE list) and returns the
-    // total byte count. Reject any descriptor whose walked length exceeds
-    // the caller's supplied extent -- that rules out an ACL AclSize value
-    // or an ACE count that points past the buffer.
     const DWORD sdLen = ::GetSecurityDescriptorLength(sd);
     if (sdLen == 0) return false;
     if (static_cast<SIZE_T>(sdLen) > bytes) return false;
     return true;
 }
 
-} // namespace
+}
 
 extern "C" {
 
@@ -158,26 +152,18 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(LM_HANDLE       handle,
         return HresultFromNtStatus(status);
     }
 
-    // Allocate the slot BEFORE moving ctx so the failure path can still
-    // close the NT handle via the engine. We use the shared_ptr
-    // Allocate overload so we can keep a local reference, then populate
-    // `ctx` through the live slot once allocation succeeds.
     auto fileHolder = std::make_shared<FileHolder>();
-    fileHolder->parentOwner = mountHolder;                // pins parent
+    fileHolder->parentOwner = mountHolder;
     fileHolder->mount     = mountHolder->core.get();
 
     const std::uint64_t encodedFile = Handles().file.Allocate(fileHolder);
     if (encodedFile == 0) {
-        // Roll back the engine-side open so we don't leak the NT handle
-        // or leave activeHandles inflated.
         mountHolder->core->Close(ctx.get());
         ctx.reset();
         ErrorTls::Set(E_OUTOFMEMORY, L"LayerMountOpenFile: file handle table exhausted.");
         return E_OUTOFMEMORY;
     }
 
-    // The handle is not yet published to the caller, so no other thread
-    // can observe this slot -- populating ctx here is race-free.
     fileHolder->ctx = std::move(ctx);
     mountHolder->childCount.fetch_add(1, std::memory_order_acq_rel);
 
@@ -208,12 +194,6 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
     if (outInfo      == nullptr) return E_POINTER;
     if (relativePath == nullptr) return E_INVALIDARG;
     if (securityDescriptor == nullptr && securityDescriptorBytes != 0) return E_INVALIDARG;
-    // Bounded SD validation parity with LayerMountSetSecurity. The previous
-    // path discarded securityDescriptorBytes entirely and trusted the
-    // descriptor to be self-describing -- a malformed Owner/Group/Dacl/
-    // Sacl offset could then cause downstream Win32 wrappers to read
-    // past the caller's buffer. SD here is optional (CreateFile may
-    // receive a NULL SD); only validate when one was supplied.
     if (securityDescriptor != nullptr && securityDescriptorBytes > 0) {
         if (!IsValidBoundedSecurityDescriptor(securityDescriptor,
                                               securityDescriptorBytes)) {
@@ -230,10 +210,6 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
         return E_HANDLE;
     }
 
-    // PSECURITY_DESCRIPTOR is opaque void*; the caller's buffer points to
-    // a self-relative SD that has been bounded-validated above (when
-    // non-null). The engine's Create implementation may or may not consume
-    // the size hint; passing it through keeps the call shape uniform.
     PSECURITY_DESCRIPTOR sd = const_cast<PSECURITY_DESCRIPTOR>(
         reinterpret_cast<const void*>(securityDescriptor));
     (void)securityDescriptorBytes;
@@ -249,8 +225,6 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
         return HresultFromNtStatus(status);
     }
 
-    // Allocate the slot before moving ctx so the failure path can still
-    // close the NT handle via the engine. Same pattern as LayerMountOpenFile.
     auto fileHolder = std::make_shared<FileHolder>();
     fileHolder->parentOwner = mountHolder;
     fileHolder->mount     = mountHolder->core.get();
@@ -623,8 +597,6 @@ LM_API HRESULT LM_CALL LayerMountEnumerateStreams(LM_HANDLE        handle,
     const UINT32 required = static_cast<UINT32>(streams.size());
     *outCount = required;
 
-    // Size-probe call: caller passed null buffer to learn how big to make
-    // their allocation. Hand back the count and return S_OK regardless.
     if (outBuffer == nullptr) {
         return S_OK;
     }
@@ -633,9 +605,6 @@ LM_API HRESULT LM_CALL LayerMountEnumerateStreams(LM_HANDLE        handle,
         return HRESULT_FROM_WIN32(ERROR_MORE_DATA);
     }
 
-    // Fill the caller's buffer. streamName is a fixed-size LM_STREAM_NAME_MAX
-    // wchar buffer; any remaining entry is bounded by NTFS's 255-char
-    // stream-name limit (well under LM_STREAM_NAME_MAX - 1).
     for (UINT32 i = 0; i < required; ++i) {
         LM_STREAM_INFO& dst = outBuffer[i];
         const ::LayerMount::InternalStreamInfo& src = streams[i];
@@ -678,9 +647,13 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(LM_HANDLE             handle,
         return E_HANDLE;
     }
 
-    auto entries = mountHolder->core->MergeDirectoryEntries(dirRelativePath);
+    const ::LayerMount::MergedDirectory merged =
+        mountHolder->core->MergeDirectoryEntries(dirRelativePath);
+    if (!NT_SUCCESS(merged.status)) {
+        return HresultFromNtStatus(merged.status);
+    }
 
-    for (const auto& kv : entries) {
+    for (const auto& kv : merged.entries) {
         const ::LayerMount::MergedEntry& entry = kv.second;
 
         LM_FILE_INFO info{};
@@ -697,8 +670,8 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(LM_HANDLE             handle,
         info.lastWriteTime  = ::LayerMount::ComposeUInt64(
             entry.findData.ftLastWriteTime.dwHighDateTime,
             entry.findData.ftLastWriteTime.dwLowDateTime);
-        info.changeTime = info.lastWriteTime; // approximation; native ChangeTime
-                                              // requires a per-entry handle open.
+        // WIN32_FIND_DATAW has no change time.
+        info.changeTime = info.lastWriteTime;
         if (entry.findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
             info.reparseTag = entry.findData.dwReserved0;
         }
@@ -765,11 +738,6 @@ LM_API HRESULT LM_CALL LayerMountSetSecurity(LM_HANDLE  handle,
     if (handle                 == nullptr) return E_HANDLE;
     if (relativePath           == nullptr) return E_INVALIDARG;
     if (modificationDescriptor == nullptr) return E_INVALIDARG;
-    // A self-relative SECURITY_DESCRIPTOR carries Owner/Group/Dacl/Sacl as
-    // offsets into the caller's buffer. Without validating the buffer extent
-    // against those offsets, a malformed descriptor can cause the kernel
-    // to read past the supplied byte span. Reject anything that is not a
-    // structurally valid self-relative descriptor fitting within the hint.
     if (!IsValidBoundedSecurityDescriptor(modificationDescriptor,
                                           modificationDescriptorBytes)) {
         return E_INVALIDARG;
@@ -942,9 +910,6 @@ LM_API HRESULT LM_CALL LayerMountUpdateOpenFilePath(LM_FILE_HANDLE file,
     if (holder == nullptr) {
         return E_HANDLE;
     }
-    // UpdateContextPath rejects empty, drive-qualified, traversal, and
-    // reserved-subtree paths. Surface the NTSTATUS so a buggy host cannot
-    // rebind an open handle onto a path outside the overlay root.
     NTSTATUS status = holder->mount->UpdateContextPath(
         holder->ctx.get(), newRelativePath);
     if (!NT_SUCCESS(status)) {
@@ -1002,9 +967,6 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(LM_HANDLE handle,
         return E_HANDLE;
     }
 
-    // Validate the relative path at the ABI boundary so `..`, drive/stream
-    // qualifiers, and reserved subtrees cannot write marker files outside the
-    // configured upper layer when WhiteoutManager concatenates with upperPath.
     const std::wstring normalized = ::LayerMount::NormalizePath(relativePath);
     if (!::LayerMount::IsSafeRelativePath(normalized) ||
         ::LayerMount::IsReservedRelativePath(normalized)) {
@@ -1036,8 +998,6 @@ LM_API HRESULT LM_CALL LayerMountSetOpaque(LM_HANDLE handle, PCWSTR dirRelativeP
         return E_HANDLE;
     }
 
-    // Same ABI-boundary validation as LayerMountCreateWhiteout — opaque marker
-    // paths must not escape the overlay root or land in reserved subtrees.
     const std::wstring normalized = ::LayerMount::NormalizePath(dirRelativePath);
     if (!::LayerMount::IsSafeRelativePath(normalized) ||
         ::LayerMount::IsReservedRelativePath(normalized)) {
@@ -1059,12 +1019,6 @@ LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file)
 
     LM_ABI_BEGIN();
 
-    // Free returns the shared_ptr<FileHolder> that was in the slot; we
-    // still need to call CloseFile on the engine to close the NT handle
-    // and decrement the active-handles stat before the holder
-    // destructor releases storage. Decrement the parent's child count
-    // after the close so LayerMountDestroy can observe the live child
-    // until its resources have been returned.
     auto holder = Handles().file.Free(DecodeFileHandle(file));
     if (holder == nullptr) {
         return E_HANDLE;
@@ -1072,6 +1026,7 @@ LM_API HRESULT LM_CALL LayerMountCloseFile(LM_FILE_HANDLE file)
     if (holder->mount != nullptr && holder->ctx != nullptr) {
         holder->mount->Close(holder->ctx.get());
     }
+    // After Close, so LayerMountDestroy sees the live child until Close returns its resources.
     if (holder->parentOwner) {
         holder->parentOwner->childCount.fetch_sub(1, std::memory_order_acq_rel);
     }

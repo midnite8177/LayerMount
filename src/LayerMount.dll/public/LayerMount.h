@@ -71,7 +71,7 @@
 #endif
 
 #include <windows.h>
-#include <winternl.h>   /* NTSTATUS typedef for LayerMountHResultToNtStatus */
+#include <winternl.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -142,8 +142,7 @@ typedef enum LM_HOST_CAPABILITIES {
     LM_CAP_CASE_SENSITIVE   = 0x00000020u
 } LM_HOST_CAPABILITIES;
 
-/* Which layer a resolved path was found in. Mirrors the internal
- * LayerSource enum. */
+/* Which layer a resolved path was found in. */
 typedef enum LM_LAYER_SOURCE {
     LM_LAYER_NONE  = 0,
     LM_LAYER_UPPER = 1,
@@ -165,19 +164,21 @@ typedef enum LM_VHD_KIND {
     LM_VHD_KIND_DIFFERENCING = 2
 } LM_VHD_KIND;
 
-/* VHD attach lifetime. Mirrors VHDLayerManager::AttachLifetime. */
+/* How long a VHD attach lasts. LM_VHD_ATTACH_PERMANENT stays attached
+ * after the disk handle closes, until a detach. LM_VHD_ATTACH_PROCESS_SCOPED
+ * detaches when the handle closes, which includes the process exiting. */
 typedef enum LM_VHD_ATTACH_LIFETIME {
     LM_VHD_ATTACH_PERMANENT      = 0,
     LM_VHD_ATTACH_PROCESS_SCOPED = 1
 } LM_VHD_ATTACH_LIFETIME;
 
-/* Layer image compression algorithm. Mirrors LayerImageFormat::CompressionType. */
+/* The codec of a layer image's data section, as LM_IMAGE_METADATA reports it. */
 typedef enum LM_COMPRESSION_TYPE {
     LM_COMPRESSION_NONE = 0,
     LM_COMPRESSION_ZSTD = 1
 } LM_COMPRESSION_TYPE;
 
-/* Process-tracker operation category. Mirrors ProcessTracker::OperationType. */
+/* The file operation kinds the process tracker checks against its rules. */
 typedef enum LM_OPERATION_TYPE {
     LM_OP_CREATE         = 0,
     LM_OP_OPEN           = 1,
@@ -489,7 +490,6 @@ typedef HRESULT (LM_CALL *LM_DIR_ENUM_CALLBACK)(
     const LM_FILE_INFO*  info,
     void*                 userContext);
 
-/* LayerMount event fan-out. */
 typedef void (LM_CALL *LM_EVENT_CALLBACK)(
     const LM_EVENT* evt,
     void*            userContext);
@@ -555,11 +555,8 @@ LM_API HRESULT LM_CALL LayerMountCreate(
  * valid LM_HANDLE to drive VHD/VSS/Image primitives without mounting a
  * filesystem. Equivalent to LayerMountCreate with: upperPath = workDir, no
  * lower layers, no process tracking. Creates `workDir` (and missing
- * parents) on demand; if creation fails, LayerMountCreate's error path
- * surfaces the precise reason via LayerMountGetLastErrorMessage.
- *
- * Host adapters pass their own hostCapabilities so the helper stays portable
- * across NTFS / non-NTFS / non-Windows backends. */
+ * parents) on demand. If creation fails, LayerMountGetLastErrorMessage
+ * gives the reason. */
 LM_API HRESULT LM_CALL LayerMountCreateTransient(
     PCWSTR workDir, UINT32 hostCapabilities, LM_HANDLE* outHandle);
 
@@ -629,12 +626,9 @@ LM_API HRESULT LM_CALL LayerMountHResultToNtStatus(
  *   1. LayerMountPointPrepareDirectory(mp, &prep)
  *        Validates the path is free (no collision, not a reparse point)
  *        and creates parent directories on demand. Does NOT create the
- *        leaf and does NOT set prep.directoryCreatedByUs -- the engine's
- *        mount-point contract is that the host adapter creates the leaf
- *        itself when it mounts (so adapters that fail on a pre-existing
- *        directory aren't pre-empted). An eager create here would be
- *        actively harmful, and claiming ownership before the host adapter's
- *        mount call would be a contract lie: nothing is reserved yet.
+ *        leaf and does NOT set prep.directoryCreatedByUs. The host adapter
+ *        creates the leaf when it mounts, because some filesystem hosts
+ *        fail to mount on a directory that already exists.
  *   2. (host-adapter-specific mount call here -- creates + mounts on the leaf)
  *   3. LayerMountPointCaptureIdentity(mp, &prep)
  *        Captures the volume-serial + file-id of the now-mounted
@@ -912,7 +906,7 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(
     UINT64          creationTime,        /* 0 to leave unchanged */
     UINT64          lastAccessTime,
     UINT64          lastWriteTime,
-    UINT64          changeTime,
+    UINT64          changeTime,          /* ignored; the engine never sets the change time */
     UINT64          allocationSize,      /* UINT64_MAX to leave unchanged */
     UINT64          fileSize,
     LM_FILE_INFO*  outInfo);
@@ -923,12 +917,16 @@ LM_API HRESULT LM_CALL LayerMountDeleteFile(
     LM_HANDLE handle, PCWSTR relativePath);
 
 /* Reports via the returned HRESULT whether `relativePath` may be
- * deleted, without deleting it. S_OK means the delete would succeed. */
+ * deleted, without deleting it. S_OK means the delete would succeed. For a
+ * directory that a layer holds but cannot list, it returns that listing's
+ * failure. */
 LM_API HRESULT LM_CALL LayerMountCanDeleteFile(
     LM_HANDLE handle, PCWSTR relativePath);
 
 /* Reports via the returned HRESULT whether the open `file` may be
- * deleted, without deleting it. S_OK means the delete would succeed. */
+ * deleted, without deleting it. S_OK means the delete would succeed. For a
+ * directory that a layer holds but cannot list, it returns that listing's
+ * failure. */
 LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(
     LM_FILE_HANDLE file);
 
@@ -1020,7 +1018,8 @@ LM_API HRESULT LM_CALL LayerMountSetSecurity(
  * `callback` once per visible entry with its name and LM_FILE_INFO.
  * Whiteout markers and the entries they hide are never reported. Stops
  * and returns the callback's HRESULT the first time it returns anything
- * other than S_OK. */
+ * other than S_OK. When a layer holds the directory but cannot list it,
+ * returns that listing's failure without invoking `callback`. */
 LM_API HRESULT LM_CALL LayerMountMergeDirectory(
     LM_HANDLE             handle,
     PCWSTR                 dirRelativePath,
@@ -1252,9 +1251,7 @@ LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(
  * Single-call create: on success a snapshot exists and its id / device
  * path have been copied into the caller buffers. If either buffer is
  * NULL / too small, the call returns HRESULT_FROM_WIN32(ERROR_MORE_DATA)
- * and does NOT create a snapshot -- earlier builds created the snapshot
- * before the buffer check, so a sizing probe followed by a fill call
- * produced two snapshots for one logical request.
+ * and does NOT create a snapshot.
  */
 LM_API HRESULT LM_CALL LayerMountVssCreateSnapshot(
     LM_HANDLE               mount,
@@ -1443,7 +1440,7 @@ LM_API HRESULT LM_CALL LayerMountProcessTrackerExportCsv(
     SIZE_T*    requiredChars);
 
 #ifdef __cplusplus
-} /* extern "C" */
+}
 #endif
 
-#endif /* LAYERMOUNT_H */
+#endif

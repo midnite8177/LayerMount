@@ -1,9 +1,5 @@
 #pragma once
 
-// ACL helpers shared by the native test projects. Each consumer adds this
-// folder to its include path; the C# project one level up globs only *.cs,
-// so the header is not part of it.
-
 #include <windows.h>
 #include <aclapi.h>
 
@@ -68,6 +64,96 @@ inline void AddDenyAce(const std::wstring& path,
     ::LocalFree(newDacl);
     Assert::AreEqual<DWORD>(ERROR_SUCCESS, setResult,
         L"the directory's DACL takes the deny ACE");
+}
+
+// Denies FILE_LIST_DIRECTORY to Everyone on one directory, without
+// inheritance, and restores the directory's original DACL on destruction.
+// Declare it after the test's layer environment so the DACL comes back
+// before the environment removes its tree.
+class DirectoryListingDenied {
+public:
+    explicit DirectoryListingDenied(const std::wstring& path) : path_(path) {
+        using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            ::GetNamedSecurityInfoW(path_.c_str(), SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION,
+                                    nullptr, nullptr, &originalDacl_, nullptr,
+                                    &originalSd_),
+            L"GetNamedSecurityInfoW reads the directory's DACL");
+        AddDenyAce(path_, FILE_LIST_DIRECTORY, NO_INHERITANCE);
+    }
+
+    ~DirectoryListingDenied() {
+        ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path_.c_str()), SE_FILE_OBJECT,
+                                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, originalDacl_, nullptr);
+        ::LocalFree(originalSd_);
+    }
+
+    DirectoryListingDenied(const DirectoryListingDenied&) = delete;
+    DirectoryListingDenied& operator=(const DirectoryListingDenied&) = delete;
+
+private:
+    std::wstring path_;
+    PACL originalDacl_ = nullptr;
+    PSECURITY_DESCRIPTOR originalSd_ = nullptr;
+};
+
+// Makes the calling thread impersonate a copy of the process token with
+// SE_BACKUP_NAME disabled, and reverts on destruction. FindFirstFileW opens
+// with backup intent, so a deny ACE does not stop a scan while SE_BACKUP_NAME
+// is enabled.
+class BackupPrivilegeDisabledOnThread {
+public:
+    BackupPrivilegeDisabledOnThread() {
+        using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+        Assert::IsTrue(::ImpersonateSelf(SecurityImpersonation) != FALSE,
+            L"ImpersonateSelf gives the thread a copy of the process token");
+        if (!DisableBackupPrivilegeOnThread()) {
+            ::RevertToSelf();
+            Assert::Fail(L"SE_BACKUP_NAME is disabled on the thread's token");
+        }
+    }
+
+    ~BackupPrivilegeDisabledOnThread() {
+        ::RevertToSelf();
+    }
+
+    BackupPrivilegeDisabledOnThread(const BackupPrivilegeDisabledOnThread&) = delete;
+    BackupPrivilegeDisabledOnThread& operator=(const BackupPrivilegeDisabledOnThread&) = delete;
+
+private:
+    static bool DisableBackupPrivilegeOnThread() {
+        HANDLE token = nullptr;
+        if (!::OpenThreadToken(::GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                               TRUE, &token)) {
+            return false;
+        }
+        TOKEN_PRIVILEGES privileges{};
+        privileges.PrivilegeCount = 1;
+        privileges.Privileges[0].Attributes = 0;
+        bool disabled = false;
+        if (::LookupPrivilegeValueW(nullptr, SE_BACKUP_NAME, &privileges.Privileges[0].Luid)) {
+            disabled = ::AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges),
+                                               nullptr, nullptr) != FALSE;
+        }
+        ::CloseHandle(token);
+        return disabled;
+    }
+};
+
+inline DWORD FindFirstFileError(const std::wstring& searchPath) {
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind = ::FindFirstFileW(searchPath.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return ::GetLastError();
+    ::FindClose(hFind);
+    return ERROR_SUCCESS;
+}
+
+inline void AssertListingDenied(const std::wstring& dirPath) {
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual<DWORD>(
+        ERROR_ACCESS_DENIED, FindFirstFileError(dirPath + L"\\*"),
+        L"The deny ACE must make the directory scan fail");
 }
 
 }

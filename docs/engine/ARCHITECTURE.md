@@ -283,15 +283,16 @@ or rename it. See "Path safety guards". Directory merging in
    fails in any other way, at the first read or mid-stream, adds nothing
    from the upper and stops the merge before the lowers, because a
    whiteout that the scan did not read can hide a lower's entry. The
-   listing is then empty.
+   merge then returns the scan's status and no entries.
 2. For each lower, it enumerates the directory once. It adds the names
    that the lower's whiteouts hide to the same set, and it holds the
    lower's entries back until the scan ends. A lower that has no
    directory at the path, or has a file there, adds nothing, and the
    merge goes on to the next lower. A scan that fails in any other way,
-   at the first read or mid-stream, adds nothing from that lower and
-   stops the merge, because a whiteout that the scan did not read can
-   hide an entry in a deeper lower.
+   at the first read or mid-stream, stops the merge, because a whiteout
+   that the scan did not read can hide an entry in a deeper lower. The
+   merge then returns the scan's status and no entries, not the entries
+   of the layers above.
 3. After a clean scan, the merge adds a held-back lower entry only if no
    higher layer already produced it AND the name is not in
    `whitedOutNames`, which includes that lower's own whiteouts from
@@ -300,6 +301,10 @@ or rename it. See "Path safety guards". Directory merging in
    upper layer, the merge enumerates no lower. If the directory is
    opaque in lower N, the merge enumerates lower N and skips lowers
    N+1..end.
+
+`CanDelete` returns a failed merge's status instead of reading the
+missing entries as an empty directory, and `LayerMountMergeDirectory`
+returns it as an HRESULT before it invokes the callback.
 
 The reserved sidecar subtree (`.overlay`) is filtered out of the merged
 view as well — see "Reserved namespaces" below.
