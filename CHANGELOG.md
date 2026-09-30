@@ -12,6 +12,13 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="3.0.1"></a>
+## [3.0.1](https://www.github.com/midnite8177/LayerMount/releases/tag/v3.0.1) (2026-09-30)
+
+### Bug Fixes
+
+* **engine:** do not double the separator of a lower path that ends in one ([a7f6ddd](https://www.github.com/midnite8177/LayerMount/commit/a7f6ddd1639231dee08d7a14eb83be0bad72acd1))
+
 <a name="3.0.0"></a>
 ## [3.0.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v3.0.0) (2026-09-30)
 
