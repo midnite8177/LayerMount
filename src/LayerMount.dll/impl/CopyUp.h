@@ -75,13 +75,13 @@ public:
     NTSTATUS CommitFromWorkDir(const std::wstring& workPath,
                                const std::wstring& finalUpperPath);
 
-    // --- Full copy-up (3.2) ---
+    // --- Full copy-up ---
 
     // Copy a file from a lower layer to the upper layer atomically.
     // Creates parent directories as needed. Preserves security, timestamps, data.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
 
-    // --- Metacopy (3.3) ---
+    // --- Metacopy ---
 
     // Copy only metadata (security, timestamps) as a sparse file. Data copied on demand.
     NTSTATUS CopyUpMetadataOnly(const std::wstring& relativePath);
@@ -91,18 +91,12 @@ public:
     // survives the fill. Clears the metacopy ADS flag when done.
     NTSTATUS CompleteLazyCopyUp(const std::wstring& relativePath);
 
-    // --- Directory copy-up (3.4) ---
+    // --- Directory copy-up ---
 
     // Copy a directory entry (not contents) from a lower layer to the upper layer.
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);
 
-    // --- Directory rename redirect (3.5) ---
-
-    // Whether SE_SECURITY_NAME was successfully enabled on the FS process
-    // token. When false, SACL reads/writes would fail with
-    // ERROR_PRIVILEGE_NOT_HELD and must be skipped. Returning false means
-    // audit ACEs will not round-trip through the overlay for this process.
-    static bool IsSecurityPrivAvailable();
+    // --- Directory rename redirect ---
 
     // Handle directory rename across layers.
     // From lower: recursive copy + opaque + whiteout at old path.

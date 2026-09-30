@@ -576,34 +576,38 @@ private:
                       std::unique_ptr<FileContext>* outCtx,
                       InternalFileInfo* outInfo);
 
+    // What Create resolved for a new entry, and the caller's settings for it.
+    struct UpperCreate {
+        std::wstring normalized;
+        std::wstring hostNorm;
+        std::wstring streamSuffix;
+        std::wstring upperPath;
+        bool existsInLower = false;
+        bool lowerIsDirectory = false;
+        UINT32 grantedAccess = 0;
+        UINT32 fileAttributes = 0;
+        PSECURITY_DESCRIPTOR securityDescriptor = nullptr;
+        UINT64 allocationSize = 0;
+    };
+
     // The directory half of Create. Makes the directory in the upper,
     // marks it opaque when lowerIsDirectory, applies the caller's
     // security descriptor, and opens ctx->handle. A failure after
     // CreateDirectoryW made the directory removes it again; a directory
     // that already existed stays.
-    NTSTATUS CreateDirectoryInUpper(const std::wstring& normalized,
-                                    const std::wstring& upperPath,
-                                    bool lowerIsDirectory,
-                                    UINT32 grantedAccess,
-                                    PSECURITY_DESCRIPTOR securityDescriptor,
-                                    FileContext* ctx);
+    NTSTATUS CreateDirectoryInUpper(const UpperCreate& create, FileContext* ctx);
 
     // The file half of Create. Creates the file, or the stream named by
     // streamSuffix on its host file, in the upper and opens ctx->handle.
-    // A stream on a lower-only host copies the host up first; a stream on
-    // a metacopy shell fills the shell first. The security descriptor and
-    // allocationSize apply to a host file, never to a stream. A failure
-    // after CreateFileW made the entry deletes it again.
-    NTSTATUS CreateFileInUpper(const std::wstring& hostNorm,
-                               const std::wstring& streamSuffix,
-                               std::wstring upperPath,
-                               bool existsInLower,
-                               bool lowerIsDirectory,
-                               UINT32 grantedAccess,
-                               UINT32 fileAttributes,
-                               PSECURITY_DESCRIPTOR securityDescriptor,
-                               UINT64 allocationSize,
-                               FileContext* ctx);
+    // The security descriptor and allocationSize apply to a host file,
+    // never to a stream. A failure after CreateFileW made the entry
+    // deletes it again.
+    NTSTATUS CreateFileInUpper(const UpperCreate& create, FileContext* ctx);
+
+    // Makes the host file of a stream create a full file in the upper: a
+    // lower-only host copies up, and a metacopy shell fills. The fill
+    // comes first so that the lower's streams cannot land over the new one.
+    NTSTATUS PrepareStreamHost(const UpperCreate& create, FileContext* ctx);
 
     // Copies a lower file or directory up for a write-capable open and
     // chooses between a full copy and a metacopy shell. Sets

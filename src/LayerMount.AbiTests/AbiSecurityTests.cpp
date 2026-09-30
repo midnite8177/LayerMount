@@ -351,7 +351,104 @@ public:
             L"Validating the descriptor must not read past the buffer");
     }
 
+    TEST_METHOD(CreateFile_DaclOnlyDescriptor_CreatesTheFileWithThatDacl) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\dacl-only.txt", kNoCreateOptions,
+                                   FILE_ATTRIBUTE_NORMAL, kEveryoneFullAccessDacl),
+            L"LayerMountCreateFile must accept a descriptor with only a DACL");
+
+        Assert::AreEqual(std::wstring(kEveryoneFullAccessDacl),
+            FetchSddl(mount, L"\\dacl-only.txt", DACL_SECURITY_INFORMATION),
+            L"The new file's DACL must be the descriptor's DACL");
+    }
+
+    TEST_METHOD(CreateDirectory_DaclOnlyDescriptor_CreatesTheDirectoryWithThatDacl) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\dacl-only", FILE_DIRECTORY_FILE,
+                                   FILE_ATTRIBUTE_DIRECTORY, kEveryoneFullAccessDacl),
+            L"A directory create must accept a descriptor with only a DACL");
+
+        Assert::AreEqual(std::wstring(kEveryoneFullAccessDacl),
+            FetchSddl(mount, L"\\dacl-only", DACL_SECURITY_INFORMATION),
+            L"The new directory's DACL must be the descriptor's DACL");
+    }
+
+    TEST_METHOD(CreateFile_OwnerOnlyDescriptor_SetsTheOwnerAndKeepsTheInheritedDacl) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        CreatePlainFile(mount, L"\\inherited.txt");
+        const std::wstring inheritedDacl =
+            FetchSddl(mount, L"\\inherited.txt", DACL_SECURITY_INFORMATION);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\owner-only.txt", kNoCreateOptions,
+                                   FILE_ATTRIBUTE_NORMAL, kAdministratorsOwner),
+            L"LayerMountCreateFile must accept a descriptor with only an owner");
+
+        Assert::AreEqual(std::wstring(kAdministratorsOwner),
+            FetchSddl(mount, L"\\owner-only.txt", OWNER_SECURITY_INFORMATION),
+            L"The new file's owner must be the descriptor's owner");
+        Assert::AreEqual(inheritedDacl,
+            FetchSddl(mount, L"\\owner-only.txt", DACL_SECURITY_INFORMATION),
+            L"A descriptor without a DACL must leave the inherited DACL in place");
+    }
+
 private:
+    static constexpr PCWSTR kEveryoneFullAccessDacl = L"D:(A;;FA;;;WD)";
+    static constexpr PCWSTR kAdministratorsOwner    = L"O:BA";
+
+    class SddlDescriptor {
+    public:
+        explicit SddlDescriptor(PCWSTR sddl) {
+            Assert::IsTrue(
+                ::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl, SDDL_REVISION_1, &sd_, &size_) != FALSE,
+                L"setup: ConvertStringSecurityDescriptorToSecurityDescriptorW");
+        }
+        ~SddlDescriptor() { ::LocalFree(sd_); }
+        SddlDescriptor(const SddlDescriptor&) = delete;
+        SddlDescriptor& operator=(const SddlDescriptor&) = delete;
+
+        PSECURITY_DESCRIPTOR Get() const noexcept { return sd_; }
+        const BYTE*          Bytes() const noexcept { return static_cast<const BYTE*>(sd_); }
+        SIZE_T               Size() const noexcept { return size_; }
+
+    private:
+        PSECURITY_DESCRIPTOR sd_   = nullptr;
+        ULONG                size_ = 0;
+    };
+
+    static HRESULT CreateAndCloseWithSddl(LayerMountHolder& mount, PCWSTR path,
+                                          UINT32 createOptions, UINT32 fileAttributes,
+                                          PCWSTR sddl) {
+        SddlDescriptor sd(sddl);
+        OpenedFile     opened;
+        HRESULT hr = CreateOverlayFileWithDescriptor(mount.Get(), path,
+            GENERIC_READ, createOptions, fileAttributes, sd.Bytes(), sd.Size(), opened);
+        if (SUCCEEDED(hr)) {
+            Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
+        }
+        return hr;
+    }
+
+    static std::wstring FetchSddl(LayerMountHolder& mount, PCWSTR path, UINT32 secInfo) {
+        std::vector<BYTE> sd = FetchSecurity(mount, path, secInfo);
+        LPWSTR sddl = nullptr;
+        Assert::IsTrue(
+            ::ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd.data(), SDDL_REVISION_1, secInfo, &sddl, nullptr) != FALSE,
+            L"ConvertSecurityDescriptorToStringSecurityDescriptorW");
+        std::wstring result(sddl);
+        ::LocalFree(sddl);
+        return result;
+    }
+
     static void CreatePlainFile(LayerMountHolder& mount, PCWSTR path) {
         OpenedFile opened;
         Assert::AreEqual<HRESULT>(S_OK,
@@ -363,15 +460,10 @@ private:
     }
 
     static void SetDaclFromSddl(const std::wstring& path, PCWSTR sddl) {
-        PSECURITY_DESCRIPTOR sd = nullptr;
-        ULONG                size = 0;
+        SddlDescriptor sd(sddl);
         Assert::IsTrue(
-            ::ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl, SDDL_REVISION_1, &sd, &size) != FALSE,
-            L"setup: ConvertStringSecurityDescriptorToSecurityDescriptorW");
-        BOOL ok = ::SetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, sd);
-        ::LocalFree(sd);
-        Assert::IsTrue(ok != FALSE, L"setup: SetFileSecurityW");
+            ::SetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, sd.Get()) != FALSE,
+            L"setup: SetFileSecurityW");
     }
 
     static SIZE_T ProbeSecuritySize(

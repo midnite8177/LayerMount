@@ -170,7 +170,7 @@ public:
         // MetadataADS::WriteAdsOnly) bypassing the inherited DENY-WRITE
         // ACE when writing ADS / metadata to the upper file. That bypass
         // requires SE_BACKUP_NAME / SE_RESTORE_NAME, which are admin-only
-        // privileges enabled by EnsureCopyUpPrivileges; on a standard
+        // privileges enabled by EnableFileSystemPrivileges; on a standard
         // (non-elevated) token the privileges are not held and the post-
         // SetFileSecurityW writes return ACCESS_DENIED. The test is a
         // genuine assertion that copy-up under a restrictive parent DACL

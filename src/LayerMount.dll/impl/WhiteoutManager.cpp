@@ -89,7 +89,7 @@ bool WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
 
     // Create the whiteout marker as a hidden+system zero-byte file.
     // FILE_FLAG_BACKUP_SEMANTICS honors SE_RESTORE_NAME (enabled in
-    // CopyUp::EnsureCopyUpPrivileges) so a parent directory that inherited
+    // EnableFileSystemPrivileges) so a parent directory that inherited
     // a DENY-WRITE ACE from the lower layer does not block our ability to
     // drop the whiteout marker we own. Without this, renaming or deleting
     // a lower file under a restrictive parent DACL fails because the

@@ -4,6 +4,7 @@
 #include "MetadataADS.h"
 #include "Cache.h"
 #include "NtStatusUtil.h"
+#include "ElevationUtil.h"
 #include "../abi/ErrorTls.h"
 
 #include <winioctl.h>
@@ -25,69 +26,6 @@ NTSTATUS RecordFillFailure(const std::wstring& relativePath, const wchar_t* stag
                                  statusText + L").";
     ::LayerMount::abi::ErrorTls::SetFillFailure(::LayerMount::HresultFromNtStatus(status), message.c_str());
     return status;
-}
-
-// Enable a single privilege in the current process token. Returns true on
-// successful adjust. Idempotent — re-enabling an already-enabled privilege is
-// a successful no-op.
-bool EnablePrivilege(LPCWSTR privName) {
-    HANDLE token = nullptr;
-    if (!::OpenProcessToken(::GetCurrentProcess(),
-                            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-                            &token)) {
-        return false;
-    }
-    LUID luid{};
-    if (!::LookupPrivilegeValueW(nullptr, privName, &luid)) {
-        ::CloseHandle(token);
-        return false;
-    }
-    TOKEN_PRIVILEGES tp{};
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Luid = luid;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    const BOOL ok = ::AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp),
-                                              nullptr, nullptr);
-    // AdjustTokenPrivileges returns TRUE even for "not all assigned"; the
-    // actual outcome is in GetLastError. ERROR_NOT_ALL_ASSIGNED means the
-    // process token doesn't carry the privilege at all (standard user).
-    const DWORD err = ::GetLastError();
-    ::CloseHandle(token);
-    return ok && err == ERROR_SUCCESS;
-}
-
-// One-shot enabler for the privileges copy-up needs to bypass user-level
-// ACLs and place reparse points. Called at the top of any CopyUp entry point
-// that may stage a symlink/junction or commit through a restrictive parent.
-//
-//   - SE_CREATE_SYMBOLIC_LINK_NAME: required by FSCTL_SET_REPARSE_POINT for
-//     IO_REPARSE_TAG_SYMLINK. Without it, copying up a lower symlink fails
-//     with ERROR_PRIVILEGE_NOT_HELD even when running elevated, because
-//     elevated tokens carry the privilege DISABLED by default.
-//   - SE_RESTORE_NAME / SE_BACKUP_NAME: lets FILE_FLAG_BACKUP_SEMANTICS opens
-//     bypass DACL checks; needed when copy-up of a child commits into a
-//     parent directory whose copied-up DACL denies write.
-//   - SE_SECURITY_NAME: required to read/write SACL_SECURITY_INFORMATION
-//     (audit ACEs). Without it, copy-up silently drops SACLs — compliance
-//     controls (file-access audit rules) disappear on first modification.
-//     Gracefully no-ops on standard-user tokens where the priv is not held.
-bool IsSecurityPrivHeld() {
-    static std::once_flag once;
-    static bool held = false;
-    std::call_once(once, []() { held = EnablePrivilege(SE_SECURITY_NAME); });
-    return held;
-}
-
-void EnsureCopyUpPrivileges() {
-    static std::once_flag once;
-    std::call_once(once, []() {
-        EnablePrivilege(SE_CREATE_SYMBOLIC_LINK_NAME);
-        EnablePrivilege(SE_RESTORE_NAME);
-        EnablePrivilege(SE_BACKUP_NAME);
-        // SACL-bearing privilege is tracked separately so callers can skip
-        // SACL reads/writes when it isn't held (standard-user process).
-        (void)IsSecurityPrivHeld();
-    });
 }
 
 uint64_t MakeIndexNumber(const BY_HANDLE_FILE_INFORMATION& info) {
@@ -175,7 +113,7 @@ bool IsReservedLayerMountStream(const std::wstring& streamName) {
 // suffix as returned by FindFirstStreamW / FILE_STREAM_INFO.StreamName.
 //
 // Both opens use FILE_FLAG_BACKUP_SEMANTICS — combined with SE_BACKUP_NAME /
-// SE_RESTORE_NAME (enabled in EnsureCopyUpPrivileges) this bypasses DACL
+// SE_RESTORE_NAME (enabled in EnableFileSystemPrivileges) this bypasses DACL
 // checks, so a lower file inside a directory whose DACL denies our process
 // (e.g. an inherited DENY-WRITE for Everyone) can still have its ADS copied
 // up. Without backup semantics the destination open would fail because the
@@ -242,7 +180,7 @@ bool CopyAlternateStream(const std::wstring& srcPath,
 // Implementation note: uses handle-based GetFileInformationByHandleEx with
 // FileStreamInfo rather than the path-based FindFirstStreamW. Handle-based
 // enumeration honors FILE_FLAG_BACKUP_SEMANTICS on the source open, which
-// (with SE_BACKUP_NAME enabled in EnsureCopyUpPrivileges) bypasses DACL
+// (with SE_BACKUP_NAME enabled in EnableFileSystemPrivileges) bypasses DACL
 // checks so a lower file inside a directory whose ACL denies our process
 // can still have its ADS enumerated. The path-based FindFirstStreamW does
 // not carry backup semantics and would fail with ERROR_ACCESS_DENIED on
@@ -659,7 +597,7 @@ namespace LayerMount {
 // Restore() opens the target with FILE_FLAG_BACKUP_SEMANTICS. Path-based
 // SetFileAttributesW and a plain CreateFileW(FILE_WRITE_ATTRIBUTES) both
 // do DACL checks, so a lower file that inherited a DENY-WRITE from its
-// parent blocks the restore even though EnsureCopyUpPrivileges enabled
+// parent blocks the restore even though EnableFileSystemPrivileges enabled
 // SE_BACKUP_NAME and SE_RESTORE_NAME. Backup semantics honor those
 // privileges and let a directory open. Restore() returns false with the
 // Win32 error in GetLastError.
@@ -749,19 +687,7 @@ CopyUp::CopyUp(const LayerConfig& config,
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache)
     , stats_(stats) {
-    // Enable the privileges copy-up needs to (a) place reparse-point data
-    // for symlinks/junctions and (b) bypass user-level ACL denies on a
-    // freshly-copied-up parent directory when committing a child file.
-    // Token-level enable is sticky and process-wide; the std::call_once
-    // guard makes this a single, idempotent setup regardless of how many
-    // CopyUp instances the test or service constructs.
-    EnsureCopyUpPrivileges();
-}
-
-bool CopyUp::IsSecurityPrivAvailable() {
-    // Called frequently from GetSecurity paths — the underlying once_flag
-    // ensures this is a cheap load after first call.
-    return IsSecurityPrivHeld();
+    EnableFileSystemPrivileges();
 }
 
 void CopyUp::RecordCopyUp(const std::wstring& relativePath) {
@@ -843,7 +769,7 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
     // we created and own that directory. MoveFileExW then fails at the
     // destination's ACL check with ERROR_ACCESS_DENIED.
     //
-    // SE_RESTORE_NAME (enabled in EnsureCopyUpPrivileges) lets a backup-
+    // SE_RESTORE_NAME (enabled in EnableFileSystemPrivileges) lets a backup-
     // semantics-opened source handle perform a rename via FileRenameInfo
     // that bypasses the destination directory's DACL. This is the same
     // mechanism backup/restore tools use to write into protected paths.
@@ -1941,7 +1867,7 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
                 }
             }
         }
-        if (IsSecurityPrivHeld()) {
+        if (IsSecurityPrivilegeHeld()) {
             DWORD ssSize = 0;
             ::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION,
                                 nullptr, 0, &ssSize);
@@ -2088,7 +2014,7 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
         // ERROR_PRIVILEGE_NOT_HELD; querying would silently lose it, and
         // requesting SACL bits in the OWNER|GROUP call above would fail
         // the whole descriptor fetch. Keep this as a best-effort pass.
-        if (IsSecurityPrivHeld()) {
+        if (IsSecurityPrivilegeHeld()) {
             DWORD ssSize = 0;
             ::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION,
                                 nullptr, 0, &ssSize);
@@ -2256,7 +2182,7 @@ bool CopyUp::CopySecurityDescriptor(const std::wstring& srcPath,
     // ERROR_PRIVILEGE_NOT_HELD aborts the entire GetFileSecurityW call, so
     // silently gate SACL behind the priv rather than retrying on failure.
     // Audit ACEs survive copy-up only for filesystem services with the priv.
-    const bool sacl = IsSecurityPrivHeld();
+    const bool sacl = IsSecurityPrivilegeHeld();
     SECURITY_INFORMATION secInfo =
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
         DACL_SECURITY_INFORMATION;

@@ -206,7 +206,7 @@ bool WriteAdsOnly(const std::wstring& filePath, const LayerMountMetadata& metada
 
     // Permissive share mode; see OpenAdsForRead for the reason.
     // FILE_FLAG_BACKUP_SEMANTICS honors SE_BACKUP_NAME / SE_RESTORE_NAME
-    // (enabled in EnsureCopyUpPrivileges). Without it, an upper file that
+    // (enabled in EnableFileSystemPrivileges). Without it, an upper file that
     // inherited a DENY-WRITE ACE from its parent would refuse the
     // `:overlay` stream open even though the process holds the backup
     // privileges, and the metadata write would fail -- breaking copy-up
