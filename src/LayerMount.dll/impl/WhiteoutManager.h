@@ -93,9 +93,10 @@ private:
 };
 
 // Returns the FindFirstFileW search pattern for dirRelativePath in the
-// layer at layerPath. An empty dirRelativePath gets no extra separator,
-// because FindFirstFileW refuses a doubled separator at the root of an
-// extended-form (\\?\) path, though a plain path accepts one.
+// layer at layerPath. The pattern never holds a doubled separator, because
+// FindFirstFileW refuses one in an extended-form (\\?\) path, though a plain
+// path accepts one. A layerPath that ends in a separator, such as a drive
+// root or a shadow-copy device root, gets no second one.
 std::wstring JoinLayerScanPath(const std::wstring& layerPath,
                                const std::wstring& dirRelativePath);
 

@@ -350,6 +350,27 @@ public:
         Assert::IsTrue(merged.count(L"deep.txt") == 1,
             L"The listing must show the deeper lower's entry that no whiteout hides");
     }
+
+    TEST_METHOD(MergeDirectoryEntries_ExtendedFormLowerPathWithTrailingSeparator_ListsRootAndSubdirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"own.txt", "lower0");
+        env.WriteFile(env.Lower(0), L"sub\\nested.txt", "lower0");
+        auto config = env.MakeConfig();
+        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0) + L"\\";
+        ::LayerMount::LayerMount mount(config);
+
+        const MergedDirectory root = mount.MergeDirectoryEntries(L"");
+        const MergedDirectory sub = mount.MergeDirectoryEntries(L"sub");
+
+        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS), static_cast<long>(root.status),
+            L"The root scan of a lower path that ends in a separator must succeed");
+        Assert::IsTrue(root.entries.count(L"own.txt") == 1,
+            L"The listing must show the entry at the root of the lower");
+        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS), static_cast<long>(sub.status),
+            L"The subdirectory scan of a lower path that ends in a separator must succeed");
+        Assert::IsTrue(sub.entries.count(L"nested.txt") == 1,
+            L"The listing must show the entry in the subdirectory of the lower");
+    }
 };
 
 TEST_CLASS(OpaqueDirectoryTests) {
