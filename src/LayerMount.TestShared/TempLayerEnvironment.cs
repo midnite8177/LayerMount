@@ -43,6 +43,13 @@ public sealed class TempLayerEnvironment : IDisposable
 
     public string Lower(int index) => _lowers[index];
 
+    public void WriteUpperFile(string relative, string contents)
+    {
+        var path = Path.Combine(Upper, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, contents);
+    }
+
     public void WriteLowerFile(int index, string relative, string contents)
     {
         var path = Path.Combine(Lower(index), relative);

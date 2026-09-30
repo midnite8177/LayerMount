@@ -447,8 +447,13 @@ public sealed partial class LayerMount
     /// <summary>
     /// Merged view of a directory across the upper + lower layers. The
     /// callback fires once per entry in sorted order. Return
-    /// <c>false</c> to abort enumeration.
+    /// <c>false</c> to stop the listing. The method then returns
+    /// normally.
     /// </summary>
+    /// <exception cref="LayerMountException">
+    /// If a layer scan fails, if the callback throws, or if the native
+    /// call otherwise returns a non-success HRESULT.
+    /// </exception>
     public unsafe void MergeDirectory(
         string dirRelativePath,
         Func<string, FileInfoSnapshot, bool> callback)
@@ -456,9 +461,8 @@ public sealed partial class LayerMount
         ArgumentNullException.ThrowIfNull(dirRelativePath);
         ArgumentNullException.ThrowIfNull(callback);
 
-        // Pass the managed callback through a GCHandle in userContext; the
-        // static [UnmanagedCallersOnly] trampoline below unwraps it.
-        var gc = GCHandle.Alloc(callback, GCHandleType.Normal);
+        var state = new MergeDirectoryState(callback);
+        var gc = GCHandle.Alloc(state, GCHandleType.Normal);
         try
         {
             using var lease = new SafeHandleLease(_handle);
@@ -467,6 +471,10 @@ public sealed partial class LayerMount
             int hr = NativeMethods.LayerMountMergeDirectory(
                 lease.Handle, dirRelativePath, trampoline,
                 (void*)GCHandle.ToIntPtr(gc));
+            if (hr == HResultGuard.E_ABORT && state.StoppedByCallback)
+            {
+                return;
+            }
             HResultGuard.ThrowIfFailed(hr, nameof(NativeMethods.LayerMountMergeDirectory));
         }
         finally
@@ -564,16 +572,34 @@ public sealed partial class LayerMount
             if (userContext == null || name == null || info == null) return 0;
             var gc = GCHandle.FromIntPtr((IntPtr)userContext);
             if (!gc.IsAllocated) return 0;
-            if (gc.Target is not Func<string, FileInfoSnapshot, bool> callback) return 0;
+            if (gc.Target is not MergeDirectoryState state) return 0;
 
             string entryName = Marshal.PtrToStringUni((IntPtr)name) ?? string.Empty;
-            bool cont = callback(entryName, FileInfoSnapshot.From(*info));
-            // Return HRESULT; S_OK = keep going, E_ABORT = stop.
-            return cont ? 0 : unchecked((int)0x80004004u); // E_ABORT
+            return state.Invoke(entryName, FileInfoSnapshot.From(*info));
         }
         catch
         {
-            return unchecked((int)0x80004005u); // E_FAIL
+            // An exception that leaves an UnmanagedCallersOnly method ends the process.
+            return HResultGuard.E_FAIL;
+        }
+    }
+
+    private sealed class MergeDirectoryState
+    {
+        private readonly Func<string, FileInfoSnapshot, bool> _callback;
+
+        public MergeDirectoryState(Func<string, FileInfoSnapshot, bool> callback)
+        {
+            _callback = callback;
+        }
+
+        public bool StoppedByCallback { get; private set; }
+
+        public int Invoke(string name, FileInfoSnapshot info)
+        {
+            if (_callback(name, info)) return 0;
+            StoppedByCallback = true;
+            return HResultGuard.E_ABORT;
         }
     }
 }

@@ -110,7 +110,8 @@ internal static class HResultGuard
     private const int E_ACCESSDENIED       = unchecked((int)0x80070005u);
     internal const int E_HANDLE            = unchecked((int)0x80070006u);
     private const int E_NOTIMPL            = unchecked((int)0x80004001u);
-    private const int E_FAIL               = unchecked((int)0x80004005u);
+    internal const int E_ABORT             = unchecked((int)0x80004004u);
+    internal const int E_FAIL              = unchecked((int)0x80004005u);
     private const int HR_FILE_NOT_FOUND    = unchecked((int)0x80070002u);
     private const int HR_PATH_NOT_FOUND    = unchecked((int)0x80070003u);
     private const int HR_NT_NOT_FOUND      = unchecked((int)0xD0000034u); // STATUS_OBJECT_NAME_NOT_FOUND
