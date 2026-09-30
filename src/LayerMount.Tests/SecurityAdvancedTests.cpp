@@ -128,9 +128,7 @@ public:
     // ------------------------------------------------------------------------
     // Owner propagation: copy-up preserves the owner SID from lower.
     //
-    // CopySecurityDescriptor currently includes OWNER_SECURITY_INFORMATION,
-    // so this test should pass — it serves as regression coverage so a
-    // future refactor can't silently drop owner copying.
+    // CopySecurityDescriptor includes OWNER_SECURITY_INFORMATION.
     // ------------------------------------------------------------------------
     TEST_METHOD(CopyUp_PreservesOwnerSid) {
         LayerMountTests::TempLayerEnvironment env(1);
@@ -292,36 +290,11 @@ public:
     // ------------------------------------------------------------------------
     // SACL / audit ACE propagation.
     //
-    // CopySecurityDescriptor now requests SACL_SECURITY_INFORMATION when
-    // SE_SECURITY_NAME is held. Audit ACEs must survive copy-up so that
-    // compliance controls (file-access auditing) are preserved on first
-    // modification.
-    //
-    // Setting a SACL requires SE_SECURITY_NAME privilege. If the test
-    // environment doesn't grant it (standard user), we skip — the
-    // LayerMount implementation itself also no-ops SACL in that case.
+    // CopySecurityDescriptor requests SACL_SECURITY_INFORMATION when the
+    // process holds SE_SECURITY_NAME, so audit ACEs survive copy-up.
     // ------------------------------------------------------------------------
     TEST_METHOD(CopyUp_SaclAuditAce_PreservedOnCopyUp) {
-        // Enable SE_SECURITY_NAME for this thread.
-        HANDLE tok = nullptr;
-        if (!::OpenProcessToken(::GetCurrentProcess(),
-                                  TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
-            Logger::WriteMessage(L"[SKIP] Could not open process token");
-            return;
-        }
-        TOKEN_PRIVILEGES tp{};
-        tp.PrivilegeCount = 1;
-        if (!::LookupPrivilegeValueW(nullptr, SE_SECURITY_NAME,
-                                        &tp.Privileges[0].Luid)) {
-            ::CloseHandle(tok);
-            Logger::WriteMessage(L"[SKIP] LookupPrivilegeValue(SE_SECURITY_NAME) failed");
-            return;
-        }
-        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        ::AdjustTokenPrivileges(tok, FALSE, &tp, 0, nullptr, nullptr);
-        const DWORD adjustErr = ::GetLastError();
-        ::CloseHandle(tok);
-        if (adjustErr == ERROR_NOT_ALL_ASSIGNED) {
+        if (!LayerMountTestShared::TryEnablePrivilege(SE_SECURITY_NAME)) {
             Logger::WriteMessage(L"[SKIP] SE_SECURITY_NAME not held by this user");
             return;
         }

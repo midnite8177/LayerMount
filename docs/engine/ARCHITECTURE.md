@@ -183,7 +183,7 @@ constexpr const wchar_t* kOpaqueMarkerFile  = L".wh..wh..opq";
 `FILE_FLAG_BACKUP_SEMANTICS` on the marker open is intentional: a
 parent directory that inherited a `DENY-WRITE` ACE from the lower layer
 would otherwise block whiteout creation. Combined with
-`SE_RESTORE_NAME` (enabled in `CopyUp::EnsureCopyUpPrivileges`), the
+`SE_RESTORE_NAME` (enabled in `EnableFileSystemPrivileges`), the
 backup-semantics handle bypasses the DACL check so the engine can
 always persist the marker for an entry it owns.
 
@@ -530,8 +530,8 @@ sharing violation from the just-placed target.
 
 ### Privileges
 
-`CopyUp::EnsureCopyUpPrivileges` enables three privileges on the
-process token at first use:
+`EnableFileSystemPrivileges` in `ElevationUtil.h` enables four
+privileges on the process token at first use:
 
 - `SE_CREATE_SYMBOLIC_LINK_NAME` — required by `FSCTL_SET_REPARSE_POINT`
   for `IO_REPARSE_TAG_SYMLINK`. Even elevated tokens carry this
@@ -540,9 +540,12 @@ process token at first use:
   bypass DACL checks. Without these, copy-up of a child into a
   restrictive parent fails.
 - `SE_SECURITY_NAME` — required to read/write SACL audit ACEs. Tracked
-  separately in `IsSecurityPrivAvailable` so callers can skip the SACL
+  separately in `IsSecurityPrivilegeHeld` so callers can skip the SACL
   bit when the privilege is not held (standard-user process), instead
-  of failing the whole `GetFileSecurityW` call.
+  of failing the whole `GetFileSecurityW` call. A create writes the SACL
+  of the caller's security descriptor only when the process holds the
+  privilege. Without it, the create drops the SACL and still applies
+  the owner, group and DACL.
 
 ---
 

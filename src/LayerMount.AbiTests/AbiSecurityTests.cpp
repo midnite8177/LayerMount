@@ -379,7 +379,60 @@ public:
             L"The new directory's DACL must be the descriptor's DACL");
     }
 
+    TEST_METHOD(CreateFile_DescriptorWithSacl_CreatesTheFileWithThatSacl) {
+        ABI_SKIP_IF_NO_SECURITY_PRIVILEGE();
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\audited.txt", kNoCreateOptions,
+                                   FILE_ATTRIBUTE_NORMAL, EveryoneFullAccessAuditedDescriptor().c_str()),
+            L"LayerMountCreateFile must accept a descriptor with a SACL");
+
+        Assert::AreEqual(std::wstring(kEveryoneAuditSacl),
+            FetchSddl(mount, L"\\audited.txt", SACL_SECURITY_INFORMATION),
+            L"The new file's SACL must be the descriptor's SACL");
+        Assert::AreEqual(std::wstring(kEveryoneFullAccessDacl),
+            FetchSddl(mount, L"\\audited.txt", DACL_SECURITY_INFORMATION),
+            L"The new file's DACL must be the descriptor's DACL");
+    }
+
+    TEST_METHOD(CreateDirectory_DescriptorWithSacl_CreatesTheDirectoryWithThatSacl) {
+        ABI_SKIP_IF_NO_SECURITY_PRIVILEGE();
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\audited", FILE_DIRECTORY_FILE,
+                                   FILE_ATTRIBUTE_DIRECTORY, EveryoneFullAccessAuditedDescriptor().c_str()),
+            L"A directory create must accept a descriptor with a SACL");
+
+        Assert::AreEqual(std::wstring(kEveryoneAuditSacl),
+            FetchSddl(mount, L"\\audited", SACL_SECURITY_INFORMATION),
+            L"The new directory's SACL must be the descriptor's SACL");
+        Assert::AreEqual(std::wstring(kEveryoneFullAccessDacl),
+            FetchSddl(mount, L"\\audited", DACL_SECURITY_INFORMATION),
+            L"The new directory's DACL must be the descriptor's DACL");
+    }
+
+    TEST_METHOD(CreateFile_DescriptorWithSaclWithoutSecurityPrivilege_CreatesTheFileWithThatDacl) {
+        ABI_SKIP_IF_SECURITY_PRIVILEGE_HELD();
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateAndCloseWithSddl(mount, L"\\unaudited.txt", kNoCreateOptions,
+                                   FILE_ATTRIBUTE_NORMAL,
+                                   EveryoneFullAccessAuditedDescriptor().c_str()),
+            L"A create without SE_SECURITY_NAME must drop the SACL and succeed");
+
+        Assert::AreEqual(std::wstring(kEveryoneFullAccessDacl),
+            FetchSddl(mount, L"\\unaudited.txt", DACL_SECURITY_INFORMATION),
+            L"The new file's DACL must be the descriptor's DACL");
+    }
+
     TEST_METHOD(CreateFile_OwnerOnlyDescriptor_SetsTheOwnerAndKeepsTheInheritedDacl) {
+        ABI_SKIP_IF_NOT_ADMIN();
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);
         CreatePlainFile(mount, L"\\inherited.txt");
@@ -402,6 +455,11 @@ public:
 private:
     static constexpr PCWSTR kEveryoneFullAccessDacl = L"D:(A;;FA;;;WD)";
     static constexpr PCWSTR kAdministratorsOwner    = L"O:BA";
+    static constexpr PCWSTR kEveryoneAuditSacl      = L"S:(AU;SAFA;FA;;;WD)";
+
+    static std::wstring EveryoneFullAccessAuditedDescriptor() {
+        return std::wstring(kEveryoneFullAccessDacl) + kEveryoneAuditSacl;
+    }
 
     class SddlDescriptor {
     public:

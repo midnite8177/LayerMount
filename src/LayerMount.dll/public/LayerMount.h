@@ -783,6 +783,10 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(
  * A later handle call is checked against this process (see the file
  * primitives preamble).
  *
+ * The create writes the owner, group, DACL and SACL that
+ * `securityDescriptor` carries. It drops the SACL unless the filesystem
+ * process holds SE_SECURITY_NAME, and still writes the other parts.
+ *
  * MAXIMUM_ALLOWED in `grantedAccess` resolves against the caller's rights
  * on the created file or directory. The handle's stored access holds the
  * resolved set. A failed resolution removes the file, directory, or

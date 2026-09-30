@@ -156,4 +156,25 @@ inline void AssertListingDenied(const std::wstring& dirPath) {
         L"The deny ACE must make the directory scan fail");
 }
 
+
+inline bool TryEnablePrivilege(LPCWSTR privilege) {
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(),
+                            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    bool enabled = false;
+    if (::LookupPrivilegeValueW(nullptr, privilege, &tp.Privileges[0].Luid)) {
+        // AdjustTokenPrivileges returns TRUE with ERROR_NOT_ALL_ASSIGNED
+        // when the token does not carry the privilege.
+        enabled = ::AdjustTokenPrivileges(token, FALSE, &tp, 0, nullptr, nullptr) != FALSE
+               && ::GetLastError() == ERROR_SUCCESS;
+    }
+    ::CloseHandle(token);
+    return enabled;
+}
+
 }

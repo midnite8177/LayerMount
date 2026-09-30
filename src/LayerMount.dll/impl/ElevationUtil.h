@@ -35,4 +35,11 @@ void EnableFileSystemPrivileges();
 // The first call tries to enable it; later calls are a cheap load.
 bool IsSecurityPrivilegeHeld();
 
+// securityInformation without SACL_SECURITY_INFORMATION when
+// IsSecurityPrivilegeHeld() is false. A security read or write that names
+// the SACL without the privilege fails as a whole with
+// ERROR_PRIVILEGE_NOT_HELD, and the caller then loses the owner, group and
+// DACL too.
+SECURITY_INFORMATION DropSaclWithoutPrivilege(SECURITY_INFORMATION securityInformation);
+
 }

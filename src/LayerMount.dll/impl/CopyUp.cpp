@@ -2178,15 +2178,10 @@ NTSTATUS CopyUp::EnsureParentDirectories(const std::wstring& relativePath) {
 
 bool CopyUp::CopySecurityDescriptor(const std::wstring& srcPath,
                                      const std::wstring& dstPath) {
-    // Request SACL_SECURITY_INFORMATION iff SE_SECURITY_NAME is held.
-    // ERROR_PRIVILEGE_NOT_HELD aborts the entire GetFileSecurityW call, so
-    // silently gate SACL behind the priv rather than retrying on failure.
-    // Audit ACEs survive copy-up only for filesystem services with the priv.
-    const bool sacl = IsSecurityPrivilegeHeld();
-    SECURITY_INFORMATION secInfo =
+    // Audit ACEs survive copy-up only when the process holds SE_SECURITY_NAME.
+    const SECURITY_INFORMATION secInfo = DropSaclWithoutPrivilege(
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-        DACL_SECURITY_INFORMATION;
-    if (sacl) secInfo |= SACL_SECURITY_INFORMATION;
+        DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION);
 
     DWORD sdSize = 0;
     GetFileSecurityW(srcPath.c_str(), secInfo, nullptr, 0, &sdSize);

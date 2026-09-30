@@ -6,6 +6,8 @@
 
 #include "pch.h"
 
+#include "AclTestHelpers.h"
+
 #include <iterator>
 
 namespace LayerMountAbiTests {
@@ -366,9 +368,8 @@ inline LayerMountHolder CreateLayerMount(const TempLayerEnv& env,
     return LayerMountHolder(h);
 }
 
-// Admin-check: mount / VHD attach / VSS require elevation. Tests that need
-// elevation call this as the first statement and Assert::Inconclusive via
-// Logger + return if the process isn't elevated.
+// Mount, VHD attach and VSS need elevation. A skip macro below logs and
+// returns, so a skipped test reports a pass.
 inline bool IsProcessElevated() {
     HANDLE token = nullptr;
     if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
@@ -386,6 +387,24 @@ inline bool IsProcessElevated() {
         if (!::LayerMountAbiTests::IsProcessElevated()) {                         \
             Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage( \
                 L"Skipping: requires elevation");                                \
+            return;                                                              \
+        }                                                                        \
+    } while (0)
+
+#define ABI_SKIP_IF_NO_SECURITY_PRIVILEGE()                                      \
+    do {                                                                         \
+        if (!::LayerMountTestShared::TryEnablePrivilege(SE_SECURITY_NAME)) {     \
+            Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage( \
+                L"Skipping: requires SE_SECURITY_NAME");                         \
+            return;                                                              \
+        }                                                                        \
+    } while (0)
+
+#define ABI_SKIP_IF_SECURITY_PRIVILEGE_HELD()                                    \
+    do {                                                                         \
+        if (::LayerMountTestShared::TryEnablePrivilege(SE_SECURITY_NAME)) {      \
+            Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage( \
+                L"Skipping: requires a token without SE_SECURITY_NAME");         \
             return;                                                              \
         }                                                                        \
     } while (0)

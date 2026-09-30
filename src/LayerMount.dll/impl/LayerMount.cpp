@@ -1016,9 +1016,9 @@ NTSTATUS SetDeleteDispositionAndClose(HANDLE handle) {
     return STATUS_SUCCESS;
 }
 
-// The owner, group and DACL bits for the parts that sd carries. A create
-// never writes a SACL. SetKernelObjectSecurity fails if its
-// SECURITY_INFORMATION names an owner or group that sd does not carry.
+// SetKernelObjectSecurity fails if its SECURITY_INFORMATION names an owner
+// or group that sd does not carry. A DACL or SACL bit for an ACL that sd
+// does not carry replaces the ACL that the new object inherited.
 SECURITY_INFORMATION SecurityInformationCarriedBy(PSECURITY_DESCRIPTOR sd) {
     SECURITY_INFORMATION carried = 0;
     if (sd == nullptr) {
@@ -1040,6 +1040,12 @@ SECURITY_INFORMATION SecurityInformationCarriedBy(PSECURITY_DESCRIPTOR sd) {
     if (::GetSecurityDescriptorDacl(sd, &daclPresent, &dacl, &daclDefaulted) && daclPresent) {
         carried |= DACL_SECURITY_INFORMATION;
     }
+    BOOL saclPresent = FALSE;
+    PACL sacl = nullptr;
+    BOOL saclDefaulted = FALSE;
+    if (::GetSecurityDescriptorSacl(sd, &saclPresent, &sacl, &saclDefaulted) && saclPresent) {
+        carried |= SACL_SECURITY_INFORMATION;
+    }
     return carried;
 }
 
@@ -1047,23 +1053,31 @@ SECURITY_INFORMATION SecurityInformationCarriedBy(PSECURITY_DESCRIPTOR sd) {
 // WRITE_OWNER, so it fails with ACCESS_DENIED on a new child under a
 // protected parent DACL that does not grant them. When the process holds
 // SE_RESTORE_NAME, a backup-semantics handle can write any owner, group or
-// DACL on the new object.
+// DACL on the new object. A SACL also needs SE_SECURITY_NAME and
+// ACCESS_SYSTEM_SECURITY on the handle.
 NTSTATUS WriteSecurityToNewObject(const std::wstring& path, PSECURITY_DESCRIPTOR sd) {
     const SECURITY_INFORMATION carried = SecurityInformationCarriedBy(sd);
-    if (carried == 0) {
+    // Without SE_SECURITY_NAME the create still succeeds and writes the
+    // owner, group and DACL, as GetSecurity still returns them.
+    const SECURITY_INFORMATION toWrite = DropSaclWithoutPrivilege(carried);
+    if (toWrite == 0) {
         return STATUS_SUCCESS;
     }
     // A mount that has not built a CopyUp yet has no SE_RESTORE_NAME, and
     // the open below then fails with ACCESS_DENIED under such a parent.
     EnableFileSystemPrivileges();
+    DWORD access = READ_CONTROL | WRITE_DAC | WRITE_OWNER;
+    if ((toWrite & SACL_SECURITY_INFORMATION) != 0) {
+        access |= ACCESS_SYSTEM_SECURITY;
+    }
     ScopedHandle securityHandle{::CreateFileW(path.c_str(),
-        READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+        access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
     if (!securityHandle.IsValid()) {
         return NtStatusFromWin32(::GetLastError());
     }
-    if (!::SetKernelObjectSecurity(securityHandle.Get(), carried, sd)) {
+    if (!::SetKernelObjectSecurity(securityHandle.Get(), toWrite, sd)) {
         return NtStatusFromWin32(::GetLastError());
     }
     return STATUS_SUCCESS;
@@ -2392,14 +2406,7 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
                                 PSECURITY_DESCRIPTOR sd,
                                 SIZE_T sdBytes,
                                 SIZE_T* requiredBytes) {
-    // SACL needs SE_SECURITY_NAME. Drop it from the request. Otherwise
-    // ::GetFileSecurityW fails the whole call with
-    // ERROR_PRIVILEGE_NOT_HELD, and the caller loses OWNER, GROUP, and
-    // DACL too.
-    const SECURITY_INFORMATION effective =
-        IsSecurityPrivilegeHeld()
-            ? securityInformation
-            : (securityInformation & ~static_cast<UINT32>(SACL_SECURITY_INFORMATION));
+    const SECURITY_INFORMATION effective = DropSaclWithoutPrivilege(securityInformation);
 
     std::wstring normalized = NormalizePath(relativePath);
 

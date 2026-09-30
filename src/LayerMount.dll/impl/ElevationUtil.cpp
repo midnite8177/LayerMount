@@ -69,4 +69,11 @@ bool IsSecurityPrivilegeHeld() {
     return held;
 }
 
+SECURITY_INFORMATION DropSaclWithoutPrivilege(SECURITY_INFORMATION securityInformation) {
+    if (IsSecurityPrivilegeHeld()) {
+        return securityInformation;
+    }
+    return securityInformation & ~static_cast<SECURITY_INFORMATION>(SACL_SECURITY_INFORMATION);
+}
+
 }
