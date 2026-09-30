@@ -46,12 +46,37 @@ inline void ToPublicFileInfo(const ::LayerMount::InternalFileInfo& src,
     dst.eaSize         = src.EaSize;
 }
 
-// Validate that a caller-supplied byte buffer is a structurally valid
-// self-relative SECURITY_DESCRIPTOR whose every internal reference
-// (owner/group/dacl/sacl) fits within [buf, buf+bytes). SetFileSecurityW /
-// SetNamedSecurityInfoW rely on the descriptor being self-describing, but
-// a malformed Owner/Group/Dacl/Sacl offset can otherwise cause the kernel
-// (or these Win32 wrappers) to read past the caller's supplied extent.
+constexpr DWORD  kAbsentPartOffset = 0;
+constexpr size_t kMinSidHeader     = offsetof(SID, SubAuthority);
+constexpr size_t kMinAclHeader     = sizeof(ACL);
+static_assert(kMinSidHeader == 8);
+static_assert(kMinAclHeader == 8);
+
+bool PartHeaderFitsAt(SIZE_T bytes, DWORD off, size_t headerBytes) {
+    return off < bytes && bytes - off >= headerBytes;
+}
+
+bool SidFitsAt(const BYTE* buf, SIZE_T bytes, DWORD off) {
+    if (off == kAbsentPartOffset) return true;
+    if (!PartHeaderFitsAt(bytes, off, kMinSidHeader)) return false;
+    const BYTE   subAuthorityCount = buf[off + offsetof(SID, SubAuthorityCount)];
+    const size_t sidBytes = kMinSidHeader + sizeof(DWORD) * subAuthorityCount;
+    return bytes - off >= sidBytes;
+}
+
+bool AclFitsAt(const BYTE* buf, SIZE_T bytes, DWORD off) {
+    if (off == kAbsentPartOffset) return true;
+    if (!PartHeaderFitsAt(bytes, off, kMinAclHeader)) return false;
+    WORD aclSize = 0;
+    std::memcpy(&aclSize, buf + off + offsetof(ACL, AclSize), sizeof(aclSize));
+    return aclSize >= kMinAclHeader && bytes - off >= aclSize;
+}
+
+// True when buf holds a self-relative descriptor and every part that it uses
+// lies inside [buf, buf+bytes). IsValidSecurityDescriptor and the other Win32 security
+// calls take no length and read each part in full, so a part that runs past
+// the buffer makes them read past its end. They ignore a DACL or SACL offset
+// whose SE_DACL_PRESENT or SE_SACL_PRESENT flag is clear.
 inline bool IsValidBoundedSecurityDescriptor(const BYTE* buf, SIZE_T bytes) {
     if (buf == nullptr) return false;
     // Self-relative SECURITY_DESCRIPTORs carry the fixed 20-byte header
@@ -80,17 +105,6 @@ inline bool IsValidBoundedSecurityDescriptor(const BYTE* buf, SIZE_T bytes) {
         std::memcpy(&v, buf + offset, sizeof(DWORD));
         return v;
     };
-    // offset == 0 means "field absent". Otherwise the offset and its minimum
-    // footprint (SID or ACL header) must fit within the supplied buffer.
-    auto offsetFits = [&](DWORD off, size_t minBytes) {
-        if (off == 0) return true;
-        if (off >= bytes) return false;
-        return bytes - off >= minBytes;
-    };
-    constexpr size_t kMinSidHeader = offsetof(SID, SubAuthority);
-    constexpr size_t kMinAclHeader = sizeof(ACL);
-    static_assert(kMinSidHeader == 8);
-    static_assert(kMinAclHeader == 8);
     constexpr size_t kOwnerOffset = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Owner);
     constexpr size_t kGroupOffset = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Group);
     constexpr size_t kSaclOffset  = offsetof(SECURITY_DESCRIPTOR_RELATIVE, Sacl);
@@ -99,10 +113,12 @@ inline bool IsValidBoundedSecurityDescriptor(const BYTE* buf, SIZE_T bytes) {
     static_assert(kGroupOffset == 8);
     static_assert(kSaclOffset == 12);
     static_assert(kDaclOffset == 16);
-    if (!offsetFits(readDword(kOwnerOffset), kMinSidHeader)) return false;
-    if (!offsetFits(readDword(kGroupOffset), kMinSidHeader)) return false;
-    if (!offsetFits(readDword(kSaclOffset),  kMinAclHeader)) return false;
-    if (!offsetFits(readDword(kDaclOffset),  kMinAclHeader)) return false;
+    const bool saclPresent = (control & SE_SACL_PRESENT) != 0;
+    const bool daclPresent = (control & SE_DACL_PRESENT) != 0;
+    if (!SidFitsAt(buf, bytes, readDword(kOwnerOffset))) return false;
+    if (!SidFitsAt(buf, bytes, readDword(kGroupOffset))) return false;
+    if (saclPresent && !AclFitsAt(buf, bytes, readDword(kSaclOffset))) return false;
+    if (daclPresent && !AclFitsAt(buf, bytes, readDword(kDaclOffset))) return false;
 
     auto sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(const_cast<BYTE*>(buf));
     if (!::IsValidSecurityDescriptor(sd)) return false;

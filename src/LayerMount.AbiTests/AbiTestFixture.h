@@ -134,16 +134,28 @@ inline HRESULT OpenOverlayFile(LM_HANDLE mount, PCWSTR relativePath,
                              kCurrentProcessOriginator, out);
 }
 
+inline HRESULT CreateOverlayFileWithDescriptor(LM_HANDLE mount, PCWSTR relativePath,
+                                               UINT32 grantedAccess, UINT32 createOptions,
+                                               UINT32 fileAttributes,
+                                               const BYTE* securityDescriptor,
+                                               SIZE_T securityDescriptorBytes,
+                                               OpenedFile& out) {
+    constexpr UINT64 allocationSize = 0u;
+    return ::LayerMountCreateFile(mount, relativePath, createOptions, grantedAccess,
+                                  fileAttributes, securityDescriptor,
+                                  securityDescriptorBytes, allocationSize,
+                                  kCurrentProcessOriginator, &out.handle, &out.info);
+}
+
 inline HRESULT CreateOverlayFile(LM_HANDLE mount, PCWSTR relativePath,
                                  UINT32 grantedAccess, UINT32 createOptions,
                                  UINT32 fileAttributes, OpenedFile& out) {
     const BYTE*      securityDescriptor      = nullptr;
     constexpr SIZE_T securityDescriptorBytes = 0u;
-    constexpr UINT64 allocationSize          = 0u;
-    return ::LayerMountCreateFile(mount, relativePath, createOptions, grantedAccess,
-                                  fileAttributes, securityDescriptor,
-                                  securityDescriptorBytes, allocationSize,
-                                  kCurrentProcessOriginator, &out.handle, &out.info);
+    return CreateOverlayFileWithDescriptor(mount, relativePath, grantedAccess,
+                                           createOptions, fileAttributes,
+                                           securityDescriptor,
+                                           securityDescriptorBytes, out);
 }
 
 inline HRESULT ReadFromStart(LM_FILE_HANDLE fh, void* buffer, UINT32 length,

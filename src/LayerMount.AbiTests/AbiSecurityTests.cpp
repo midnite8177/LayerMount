@@ -14,6 +14,68 @@ namespace {
 constexpr UINT32 kFullSecInfo =
     OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
     DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
+
+// A buffer whose last byte sits just before a PAGE_GUARD page. The first
+// read of the guard page clears the guard, so a cleared guard after a call
+// means the call read past the buffer even if it caught the exception.
+class BufferAgainstGuardPage {
+public:
+    explicit BufferAgainstGuardPage(SIZE_T bytes) : bytes_(bytes) {
+        SYSTEM_INFO si{};
+        ::GetSystemInfo(&si);
+        pageSize_ = si.dwPageSize;
+        Assert::IsTrue(bytes <= pageSize_, L"setup: the buffer fits in one page");
+        pages_.reset(static_cast<BYTE*>(::VirtualAlloc(
+            nullptr, 2 * pageSize_, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)));
+        Assert::IsNotNull(pages_.get(), L"setup: VirtualAlloc");
+        DWORD oldProtect = 0;
+        Assert::IsTrue(::VirtualProtect(pages_.get() + pageSize_, pageSize_,
+                                        PAGE_READWRITE | PAGE_GUARD, &oldProtect) != FALSE,
+            L"setup: VirtualProtect");
+    }
+
+    BYTE*  Data() const noexcept { return pages_.get() + pageSize_ - bytes_; }
+    SIZE_T Size() const noexcept { return bytes_; }
+
+    bool GuardIntact() const {
+        MEMORY_BASIC_INFORMATION mbi{};
+        Assert::AreEqual<SIZE_T>(sizeof(mbi),
+            ::VirtualQuery(pages_.get() + pageSize_, &mbi, sizeof(mbi)), L"VirtualQuery");
+        return (mbi.Protect & PAGE_GUARD) != 0;
+    }
+
+private:
+    struct VirtualFreeDeleter {
+        void operator()(BYTE* p) const noexcept { ::VirtualFree(p, 0, MEM_RELEASE); }
+    };
+
+    SIZE_T                                    bytes_;
+    SIZE_T                                    pageSize_ = 0;
+    std::unique_ptr<BYTE, VirtualFreeDeleter> pages_;
+};
+
+constexpr SIZE_T kSelfRelativeHeaderBytes = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
+constexpr SIZE_T kPartHeaderBytes         = 8;
+
+void WriteDescriptorWithTrailingPartHeader(BufferAgainstGuardPage& buffer, WORD control,
+                                           DWORD SECURITY_DESCRIPTOR_RELATIVE::*partOffset,
+                                           const BYTE (&partHeader)[kPartHeaderBytes]) {
+    Assert::AreEqual<SIZE_T>(kSelfRelativeHeaderBytes + kPartHeaderBytes, buffer.Size(),
+        L"setup: the buffer holds exactly the header and one part header");
+    SECURITY_DESCRIPTOR_RELATIVE header{};
+    header.Revision = SECURITY_DESCRIPTOR_REVISION;
+    header.Control  = control;
+    header.*partOffset = static_cast<DWORD>(kSelfRelativeHeaderBytes);
+    std::memcpy(buffer.Data(), &header, sizeof(header));
+    std::memcpy(buffer.Data() + kSelfRelativeHeaderBytes, partHeader, kPartHeaderBytes);
+}
+
+HRESULT CreateFileWithDescriptor(LayerMountHolder& mount, PCWSTR path,
+                                 const BufferAgainstGuardPage& sd, OpenedFile& out) {
+    return CreateOverlayFileWithDescriptor(mount.Get(), path,
+                                           GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                                           FILE_ATTRIBUTE_NORMAL, sd.Data(), sd.Size(), out);
+}
 }
 
 TEST_CLASS(AbiSecurityTests) {
@@ -186,6 +248,107 @@ public:
         Assert::IsTrue(
             ::IsValidSecurityDescriptor(reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data())) != FALSE,
             L"The written prefix must hold a well-formed security descriptor");
+    }
+
+    TEST_METHOD(CreateFile_OwnerSidRunningPastTheBuffer_ReturnsInvalidArgWithoutReadingPastIt) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        constexpr BYTE kSidRevision = 1;
+        constexpr BYTE kMaxSubAuthorities = 15;
+        constexpr BYTE kNtAuthority = 5;
+        constexpr BYTE sidHeader[kPartHeaderBytes] = {
+            kSidRevision, kMaxSubAuthorities, 0, 0, 0, 0, 0, kNtAuthority};
+
+        BufferAgainstGuardPage buffer(kSelfRelativeHeaderBytes + kPartHeaderBytes);
+        WriteDescriptorWithTrailingPartHeader(buffer, SE_SELF_RELATIVE,
+            &SECURITY_DESCRIPTOR_RELATIVE::Owner, sidHeader);
+
+        OpenedFile opened;
+        HRESULT hr = CreateFileWithDescriptor(mount, L"\\owner.txt",
+                                              buffer, opened);
+        Assert::AreEqual<HRESULT>(E_INVALIDARG, hr,
+            L"LayerMountCreateFile must reject an owner SID longer than the buffer");
+        Assert::IsTrue(buffer.GuardIntact(),
+            L"Validating the descriptor must not read past the buffer");
+    }
+
+    TEST_METHOD(CreateFile_DaclRunningPastTheBuffer_ReturnsInvalidArgWithoutReadingPastIt) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        constexpr WORD kAclSizeBeyondBuffer = 64;
+        constexpr BYTE kOneAce = 1;
+        constexpr BYTE aclHeader[kPartHeaderBytes] = {
+            ACL_REVISION, 0,
+            static_cast<BYTE>(kAclSizeBeyondBuffer & 0xFF),
+            static_cast<BYTE>(kAclSizeBeyondBuffer >> 8),
+            kOneAce, 0, 0, 0};
+
+        BufferAgainstGuardPage buffer(kSelfRelativeHeaderBytes + kPartHeaderBytes);
+        WriteDescriptorWithTrailingPartHeader(buffer,
+            SE_SELF_RELATIVE | SE_DACL_PRESENT,
+            &SECURITY_DESCRIPTOR_RELATIVE::Dacl, aclHeader);
+
+        OpenedFile opened;
+        HRESULT hr = CreateFileWithDescriptor(mount, L"\\dacl.txt",
+                                              buffer, opened);
+        Assert::AreEqual<HRESULT>(E_INVALIDARG, hr,
+            L"LayerMountCreateFile must reject a DACL longer than the buffer");
+        Assert::IsTrue(buffer.GuardIntact(),
+            L"Validating the descriptor must not read past the buffer");
+    }
+
+    TEST_METHOD(CreateFile_WellFormedDescriptorEndingAtTheBuffer_CreatesTheFile) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        CreatePlainFile(mount, L"\\source.txt");
+        std::vector<BYTE> source = FetchSecurity(mount, L"\\source.txt",
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+            DACL_SECURITY_INFORMATION);
+        const DWORD sourceBytes = ::GetSecurityDescriptorLength(source.data());
+        BufferAgainstGuardPage buffer(sourceBytes);
+        std::memcpy(buffer.Data(), source.data(), sourceBytes);
+
+        OpenedFile opened;
+        HRESULT hr = CreateFileWithDescriptor(mount, L"\\wellformed.txt",
+                                              buffer, opened);
+        Assert::AreEqual<HRESULT>(S_OK, hr,
+            L"LayerMountCreateFile must accept a descriptor that fits its buffer exactly");
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
+        Assert::IsTrue(buffer.GuardIntact(),
+            L"Validating the descriptor must not read past the buffer");
+    }
+
+    TEST_METHOD(CreateFile_SaclOffsetWithoutSaclPresent_CreatesTheFile) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        CreatePlainFile(mount, L"\\source.txt");
+        std::vector<BYTE> source = FetchSecurity(mount, L"\\source.txt",
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+            DACL_SECURITY_INFORMATION);
+        const DWORD sourceBytes = ::GetSecurityDescriptorLength(source.data());
+        BufferAgainstGuardPage buffer(sourceBytes);
+        std::memcpy(buffer.Data(), source.data(), sourceBytes);
+
+        SECURITY_DESCRIPTOR_RELATIVE header{};
+        std::memcpy(&header, buffer.Data(), sizeof(header));
+        Assert::IsTrue((header.Control & SE_SACL_PRESENT) == 0,
+            L"setup: the source descriptor has no SACL");
+        constexpr DWORD kSaclOffsetPastTheBuffer = 0xFFFFFFF0u;
+        header.Sacl = kSaclOffsetPastTheBuffer;
+        std::memcpy(buffer.Data(), &header, sizeof(header));
+
+        OpenedFile opened;
+        HRESULT hr = CreateFileWithDescriptor(mount, L"\\stale-sacl.txt",
+                                              buffer, opened);
+        Assert::AreEqual<HRESULT>(S_OK, hr,
+            L"LayerMountCreateFile must ignore a SACL offset when SE_SACL_PRESENT is clear");
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
+        Assert::IsTrue(buffer.GuardIntact(),
+            L"Validating the descriptor must not read past the buffer");
     }
 
 private:
