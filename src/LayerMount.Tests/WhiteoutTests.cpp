@@ -830,24 +830,10 @@ public:
     TEST_METHOD(MergeDirectoryEntries_SidecarNamedDirCreatedBelowRoot_IsListed) {
         TempLayerEnvironment env(1);
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const PSECURITY_DESCRIPTOR noSecurityDescriptor = nullptr;
-        const UINT64 noAllocationSize = 0;
-        const DWORD untrackedCallerPid = 0;
 
         for (const wchar_t* dir : {L"sub", L"sub\\.overlay"}) {
-            std::unique_ptr<FileContext> ctx;
-            InternalFileInfo info{};
-            ::LayerMount::LayerMount::CreateRequest request{};
-            request.relativePath = dir;
-            request.createOptions = FILE_DIRECTORY_FILE;
-            request.grantedAccess = FILE_ALL_ACCESS;
-            request.fileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-            request.securityDescriptor = noSecurityDescriptor;
-            request.allocationSize = noAllocationSize;
-            request.callerPid = untrackedCallerPid;
-            Assert::IsTrue(NT_SUCCESS(mount.Create(request, &ctx, &info)),
+            Assert::IsTrue(NT_SUCCESS(CreateThroughMount(mount, dir, FILE_DIRECTORY_FILE)),
                 (std::wstring(L"The directory create must succeed: ") + dir).c_str());
-            mount.Close(ctx.get());
         }
 
         auto merged = mount.MergeDirectoryEntries(L"sub").entries;
@@ -963,43 +949,7 @@ public:
         AssertTempIsNTFS();
     }
 
-    static constexpr UINT32 kNoCreateOptions = 0u;
-    static constexpr DWORD kNoCallerPid = 0u;
-    static constexpr UINT64 kNoAllocationSize = 0u;
     static constexpr BOOLEAN kFailIfExists = FALSE;
-    static constexpr PSECURITY_DESCRIPTOR kDefaultSecurity = nullptr;
-
-    static NTSTATUS OpenThroughMount(::LayerMount::LayerMount& mount,
-                                     const std::wstring& path) {
-        std::unique_ptr<FileContext> ctx;
-        InternalFileInfo info{};
-        const NTSTATUS status = mount.Open(path, FILE_READ_DATA,
-                                           kNoCreateOptions, kNoCallerPid,
-                                           &ctx, &info);
-        if (ctx) mount.Close(ctx.get());
-        return status;
-    }
-
-    static NTSTATUS CreateThroughMount(::LayerMount::LayerMount& mount,
-                                       const std::wstring& path,
-                                       UINT32 createOptions) {
-        std::unique_ptr<FileContext> ctx;
-        InternalFileInfo info{};
-        const UINT32 attributes = (createOptions & FILE_DIRECTORY_FILE) != 0
-            ? FILE_ATTRIBUTE_DIRECTORY
-            : FILE_ATTRIBUTE_NORMAL;
-        ::LayerMount::LayerMount::CreateRequest request{};
-        request.relativePath = path;
-        request.createOptions = createOptions;
-        request.grantedAccess = FILE_ALL_ACCESS;
-        request.fileAttributes = attributes;
-        request.securityDescriptor = kDefaultSecurity;
-        request.allocationSize = kNoAllocationSize;
-        request.callerPid = kNoCallerPid;
-        const NTSTATUS status = mount.Create(request, &ctx, &info);
-        if (ctx) mount.Close(ctx.get());
-        return status;
-    }
 
     TEST_METHOD(Open_WhiteoutMarkerInUpper_IsNotFound) {
         TempLayerEnvironment env(1);

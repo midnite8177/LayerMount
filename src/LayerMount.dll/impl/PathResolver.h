@@ -20,6 +20,11 @@ public:
     // Resolve only in lower layers (skip upper). Used by copy-up.
     ResolvedPath ResolveLowerPath(const std::wstring& relativePath) const;
 
+    // Fills every field of CreateResolution for the path. The lower walk
+    // that ResolvePath runs serves as the lower hit, so a path that the
+    // merged resolution follows into the lowers is walked once.
+    CreateResolution ResolveForCreate(const std::wstring& relativePath) const;
+
     // Check if a path exists in the upper layer specifically
     bool ExistsInUpper(const std::wstring& relativePath) const;
 
@@ -33,9 +38,12 @@ public:
     const LayerConfig& Config() const { return config_; }
 
 private:
-    // Internal resolution with redirect depth tracking
+    // Internal resolution with redirect depth tracking. When lowerWalk is
+    // not null and the walk of the lowers for relativePath itself runs, it
+    // receives that walk's result, which equals ResolveLowerPath's.
     ResolvedPath ResolvePathInternal(const std::wstring& relativePath,
-                                     int redirectDepth) const;
+                                     int redirectDepth,
+                                     std::optional<ResolvedPath>* lowerWalk) const;
 
     // Returns the first lower at or after firstLower, in priority order,
     // that holds the path. Returns an empty result when no visible lower

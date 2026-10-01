@@ -60,6 +60,22 @@ public:
         Assert::AreEqual<int>(LM_LAYER_UPPER, static_cast<int>(rp.source));
     }
 
+    TEST_METHOD(CreateFile_OverLowerOnlyFile_ReturnsNameCollisionAndWritesNoUpperFile) {
+        TempLayerEnv     env(1);
+        env.WriteLowerFile(0, L"f.txt", "lower");
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        OpenedFile created;
+        HRESULT hr = CreateOverlayFile(
+            mount.Get(), L"\\f.txt", GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+            FILE_ATTRIBUTE_NORMAL, created);
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_OBJECT_NAME_COLLISION), hr,
+            L"A create over a file that only a lower holds must fail with a name collision");
+        Assert::IsNull(created.handle, L"out handle must remain null on failure");
+        Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\f.txt"),
+            L"A colliding create must write no file in the upper");
+    }
+
     TEST_METHOD(OpenFile_NonExistent_ReturnsFileNotFound) {
         TempLayerEnv   env(0);
         LayerMountHolder  mount = CreateLayerMount(env);

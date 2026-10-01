@@ -34,11 +34,12 @@ PathResolver::PathResolver(const LayerConfig& config,
 // ---------------------------------------------------------------------------
 
 ResolvedPath PathResolver::ResolvePath(const std::wstring& relativePath) const {
-    return ResolvePathInternal(relativePath, 0);
+    return ResolvePathInternal(relativePath, 0, nullptr);
 }
 
 ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
-                                                int redirectDepth) const {
+                                                int redirectDepth,
+                                                std::optional<ResolvedPath>* lowerWalk) const {
     if (redirectDepth > kMaxRedirectDepth) {
         return {};
     }
@@ -70,7 +71,7 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(upperFullPath, &config_);
         if (!metadata.redirect.empty()) {
             // Follow the redirect chain
-            return ResolvePathInternal(metadata.redirect, redirectDepth + 1);
+            return ResolvePathInternal(metadata.redirect, redirectDepth + 1, nullptr);
         }
 
         ResolvedPath result{
@@ -103,6 +104,9 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
     }
 
     const ResolvedPath lowerResult = FindInLowers(normalized, 0);
+    if (lowerWalk != nullptr) {
+        *lowerWalk = lowerResult;
+    }
     if (!lowerResult.Found()) {
         return {};
     }
@@ -157,6 +161,20 @@ ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) co
     }
 
     return FindInLowers(normalized, 0);
+}
+
+// ---------------------------------------------------------------------------
+// ResolveForCreate — merged hit, exact-path whiteout, and lower hit together
+// ---------------------------------------------------------------------------
+
+CreateResolution PathResolver::ResolveForCreate(const std::wstring& relativePath) const {
+    const std::wstring normalized = NormalizePath(relativePath);
+    std::optional<ResolvedPath> lowerWalk;
+    CreateResolution resolution;
+    resolution.merged = ResolvePathInternal(normalized, 0, &lowerWalk);
+    resolution.whiteoutAtPath = whiteoutMgr_.HasWhiteout(normalized, config_.upperPath);
+    resolution.lower = lowerWalk.has_value() ? *lowerWalk : ResolveLowerPath(normalized);
+    return resolution;
 }
 
 ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,

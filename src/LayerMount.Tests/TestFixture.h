@@ -365,6 +365,73 @@ inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD le
 }
 
 // ---------------------------------------------------------------------------
+// Calls into a LayerMount instance with an untracked caller, no create
+// options, and the default security.
+// ---------------------------------------------------------------------------
+
+inline constexpr UINT32 kNoCreateOptions = 0u;
+inline constexpr DWORD kNoCallerPid = 0u;
+inline constexpr UINT64 kNoAllocationSize = 0u;
+inline constexpr PSECURITY_DESCRIPTOR kDefaultSecurity = nullptr;
+
+// Opens path for read through the mount, closes the handle, and returns
+// the open's status.
+inline NTSTATUS OpenThroughMount(::LayerMount::LayerMount& mount,
+                                 const std::wstring& path) {
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    const NTSTATUS status = mount.Open(path, FILE_READ_DATA,
+                                       kNoCreateOptions, kNoCallerPid,
+                                       &ctx, &info);
+    if (ctx) mount.Close(ctx.get());
+    return status;
+}
+
+// Creates path through the mount with full access, closes the handle, and
+// returns the create's status. FILE_DIRECTORY_FILE in createOptions
+// creates a directory.
+inline NTSTATUS CreateThroughMount(::LayerMount::LayerMount& mount,
+                                   const std::wstring& path,
+                                   UINT32 createOptions) {
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    const UINT32 attributes = (createOptions & FILE_DIRECTORY_FILE) != 0
+        ? FILE_ATTRIBUTE_DIRECTORY
+        : FILE_ATTRIBUTE_NORMAL;
+    ::LayerMount::LayerMount::CreateRequest request{};
+    request.relativePath = path;
+    request.createOptions = createOptions;
+    request.grantedAccess = FILE_ALL_ACCESS;
+    request.fileAttributes = attributes;
+    request.securityDescriptor = kDefaultSecurity;
+    request.allocationSize = kNoAllocationSize;
+    request.callerPid = kNoCallerPid;
+    const NTSTATUS status = mount.Create(request, &ctx, &info);
+    if (ctx) mount.Close(ctx.get());
+    return status;
+}
+
+// Opens path through the mount and returns its first 64 bytes from the
+// engine's Read. Fails the test when the open or the read fails.
+inline std::string ReadThroughMount(::LayerMount::LayerMount& mount,
+                                    const std::wstring& path) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    constexpr UINT64 fromStart = 0u;
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    Assert::IsTrue(NT_SUCCESS(mount.Open(path, FILE_READ_DATA, kNoCreateOptions,
+                                         kNoCallerPid, &ctx, &info)),
+        L"ReadThroughMount: the open must succeed");
+    char buffer[64] = {};
+    ULONG transferred = 0;
+    const NTSTATUS readStatus = mount.Read(ctx.get(), buffer, fromStart,
+                                           sizeof(buffer), &transferred);
+    mount.Close(ctx.get());
+    Assert::IsTrue(NT_SUCCESS(readStatus), L"ReadThroughMount: the read must succeed");
+    return std::string(buffer, transferred);
+}
+
+// ---------------------------------------------------------------------------
 // A CopyUp with the objects it depends on, built in dependency order from
 // one config. The members hold `const LayerConfig&`, so the rig owns the
 // config they refer to.

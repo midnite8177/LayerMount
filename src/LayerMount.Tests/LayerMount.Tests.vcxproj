@@ -87,6 +87,7 @@
     <ClCompile Include="CopyUpFailureTests.cpp" />
     <ClCompile Include="CopyUpPreservationTests.cpp" />
     <ClCompile Include="CopyUpTests.cpp" />
+    <ClCompile Include="CreateCollisionTests.cpp" />
     <ClCompile Include="CreateOverWhiteoutTests.cpp" />
     <ClCompile Include="DeleteTests.cpp" />
     <ClCompile Include="LazyMetacopyFidelityTests.cpp" />

@@ -2,7 +2,7 @@
 // away / hidden by an opaque marker" scenarios. These exercise the manager
 // primitives that LayerMount::SCreate composes:
 //   1. Whiteout removal if one exists at the target path
-//   2. Opaque-marker creation when placing a new directory over a lower dir
+//   2. Opaque-marker creation when placing a new directory over a deleted lower dir
 //   3. Parent-directory creation in upper (lazy) when the target is nested
 //
 // End-to-end equivalents (CreateFileW / CreateDirectoryW through a mounted
@@ -158,9 +158,9 @@ public:
     }
 
     // ---------------------------------------------------------------
-    // C4 — create dir over an existing lower directory (no prior delete) → opaque
+    // C4 — create dir where a lower directory was deleted → opaque
     // ---------------------------------------------------------------
-    TEST_METHOD(C4_CreateDirOverLowerDir_OpaqueMarkerSetAndLowerChildrenHidden) {
+    TEST_METHOD(C4_CreateDirWhereLowerDirWasDeleted_OpaqueMarkerSetAndLowerChildrenHidden) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"shared");
         env.WriteFile(env.Lower(0), L"shared\\lc.txt", "lower-child");
@@ -170,13 +170,16 @@ public:
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);
 
+        Assert::IsTrue(wm.CreateWhiteout(L"shared", WhiteoutType::Directory));
+
         SimulateCreateDir(resolver, wm, cache, L"shared");
 
+        Assert::IsFalse(wm.HasWhiteout(L"shared", env.Upper()));
         Assert::IsTrue(wm.IsOpaque(L"shared"),
-            L"Creating a dir over a lower dir must mark upper as opaque");
+            L"Creating a dir over a whited-out lower dir must mark upper as opaque");
 
         Assert::IsFalse(resolver.ResolvePath(L"shared\\lc.txt").Found(),
-            L"Opaque marker must hide the previously-visible lower child");
+            L"Opaque marker must keep the deleted lower directory's child hidden");
     }
 
     // ---------------------------------------------------------------

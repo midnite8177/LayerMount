@@ -73,6 +73,17 @@ struct ResolvedPath {
     }
 };
 
+// What a create needs to know about its target path, from one resolution.
+struct CreateResolution {
+    // The merged view's hit, as ResolvePath returns it.
+    ResolvedPath merged;
+    // True when the upper holds a whiteout for exactly this path.
+    bool whiteoutAtPath = false;
+    // The lower hit, as ResolveLowerPath returns it. A whiteout for exactly
+    // this path, or an opaque ancestor in the upper, does not hide it.
+    ResolvedPath lower;
+};
+
 struct LayerMountStats {
     std::atomic<uint64_t> cacheHits{0};
     std::atomic<uint64_t> cacheMisses{0};
@@ -341,8 +352,11 @@ public:
     // FILE_DIRECTORY_FILE selects directory creation. Applies the
     // self-relative security descriptor that SecurityPolicy picks, and
     // pre-allocates allocationSize bytes when non-zero. Marks a new
-    // directory as opaque when an entry of the same name exists in any
-    // lower layer.
+    // directory as opaque when a whiteout or an opaque ancestor hides a
+    // lower directory of the same name. Returns
+    // STATUS_OBJECT_NAME_COLLISION when the merged view already holds a
+    // path without a stream suffix, and for a stream create when the host
+    // file that the merged view holds already has that stream.
     NTSTATUS Create(const CreateRequest& request,
                     std::unique_ptr<FileContext>* outCtx,
                     InternalFileInfo* outInfo);
@@ -601,11 +615,21 @@ private:
     std::unique_ptr<FileContext> BuildCreate(const CreateRequest& request,
                                              UpperCreate* create) const;
 
+    // The checks Create makes before it writes anything, for the parsed
+    // path in create. Returns STATUS_ACCESS_DENIED for a reserved path or a
+    // process tracker denial, STATUS_FILE_IS_A_DIRECTORY for a directory
+    // create with a stream suffix, and STATUS_OBJECT_NAME_COLLISION for a
+    // collision as Create describes it. Resolves the path into *resolution
+    // once the first three checks pass.
+    NTSTATUS CheckCreatePreconditions(const CreateRequest& request,
+                                      const UpperCreate& create,
+                                      CreateResolution* resolution) const;
+
     // The directory half of Create. Makes the directory in the upper,
     // marks it opaque when lowerIsDirectory, applies the caller's
-    // security descriptor, and opens ctx->handle. A failure after
-    // CreateDirectoryW made the directory removes it again; a directory
-    // that already existed stays.
+    // security descriptor, and opens ctx->handle. An upper directory that
+    // already exists fails the create. A failure after CreateDirectoryW
+    // made the directory removes it again.
     NTSTATUS CreateDirectoryInUpper(const UpperCreate& create, FileContext* ctx);
 
     // The file half of Create. Creates the file, or the stream named by

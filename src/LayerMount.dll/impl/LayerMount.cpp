@@ -1316,28 +1316,17 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
         return STATUS_OBJECT_NAME_INVALID;
     }
 
-    if (IsReservedRelativePath(create.hostNorm)) {
-        return STATUS_ACCESS_DENIED;
-    }
-
-    if (auto tracker = Tracker(); tracker && request.callerPid != 0) {
-        if (!tracker->CheckAccess(request.callerPid, create.hostNorm, OperationType::Create)) {
-            return STATUS_ACCESS_DENIED;
-        }
+    CreateResolution resolution;
+    const NTSTATUS precondition = CheckCreatePreconditions(request, create, &resolution);
+    if (!NT_SUCCESS(precondition)) {
+        return precondition;
     }
 
     const bool isDirectory = (request.createOptions & FILE_DIRECTORY_FILE) != 0;
-    if (isDirectory && !create.streamSuffix.empty()) {
-        return STATUS_FILE_IS_A_DIRECTORY;
-    }
 
-    const bool hadWhiteout =
-        whiteoutMgr_->HasWhiteout(create.hostNorm, config_.upperPath);
-
-    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(create.hostNorm);
-    create.existsInLower = lowerResolved.Found();
+    create.existsInLower = resolution.lower.Found();
     create.lowerIsDirectory = create.existsInLower &&
-        (lowerResolved.attributes & FILE_ATTRIBUTE_DIRECTORY);
+        (resolution.lower.attributes & FILE_ATTRIBUTE_DIRECTORY);
 
     create.upperPath = pathResolver_->GetUpperPath(create.hostNorm);
 
@@ -1368,7 +1357,7 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
 
     // The whiteout goes only after the create succeeds. Removing it
     // earlier would show the lower entry again if the create failed.
-    if (hadWhiteout) {
+    if (resolution.whiteoutAtPath) {
         whiteoutMgr_->RemoveWhiteout(create.hostNorm);
     }
 
@@ -1403,17 +1392,62 @@ std::unique_ptr<FileContext> LayerMount::BuildCreate(const CreateRequest& reques
     return ctx;
 }
 
+namespace {
+
+bool IsDirectoryHit(const ResolvedPath& hit) {
+    return hit.Found() && (hit.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// True when the host file that the merged view holds already has the
+// stream. A directory host returns false and is left to Create's
+// directory check.
+bool HostFileHasStream(const CreateResolution& resolution,
+                       const std::wstring& streamSuffix) {
+    if (!resolution.merged.Found() ||
+        IsDirectoryHit(resolution.merged) || IsDirectoryHit(resolution.lower)) {
+        return false;
+    }
+    const std::wstring streamPath = resolution.merged.absolutePath + streamSuffix;
+    return ::GetFileAttributesW(streamPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+}
+
+NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
+                                              const UpperCreate& create,
+                                              CreateResolution* resolution) const {
+    if (IsReservedRelativePath(create.hostNorm)) {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    if (auto tracker = Tracker(); tracker && request.callerPid != 0) {
+        if (!tracker->CheckAccess(request.callerPid, create.hostNorm, OperationType::Create)) {
+            return STATUS_ACCESS_DENIED;
+        }
+    }
+
+    const bool isDirectory = (request.createOptions & FILE_DIRECTORY_FILE) != 0;
+    if (isDirectory && !create.streamSuffix.empty()) {
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
+
+    *resolution = pathResolver_->ResolveForCreate(create.hostNorm);
+    const bool collides = create.streamSuffix.empty()
+        ? resolution->merged.Found()
+        : HostFileHasStream(*resolution, create.streamSuffix);
+    if (collides) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
                                             FileContext* ctx) {
     DirectoryRollback rollback(create.upperPath);
     if (!::CreateDirectoryW(create.upperPath.c_str(), nullptr)) {
-        DWORD err = ::GetLastError();
-        if (err != ERROR_ALREADY_EXISTS) {
-            return NtStatusFromWin32(err);
-        }
-    } else {
-        rollback.Arm();
+        return NtStatusFromWin32(::GetLastError());
     }
+    rollback.Arm();
 
     if (create.lowerIsDirectory) {
         if (!whiteoutMgr_->SetOpaque(create.normalized)) {
