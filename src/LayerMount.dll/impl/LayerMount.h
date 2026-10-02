@@ -709,8 +709,12 @@ private:
     // overlayfs uses. Returns STATUS_OBJECT_NAME_COLLISION when
     // replaceIfExists is FALSE and the destination exists, then
     // STATUS_INVALID_PARAMETER for a directory whose destination lies
-    // inside its own tree, then DirectoryEmptinessStatus for a directory
-    // onto a directory. Changes nothing.
+    // inside its own tree, then STATUS_DIRECTORY_NOT_EMPTY for an existing
+    // destination that is an ancestor of the source, then
+    // STATUS_NOT_A_DIRECTORY for a directory onto a file and
+    // STATUS_FILE_IS_A_DIRECTORY for a file onto a directory, then
+    // DirectoryEmptinessStatus for a directory onto a directory. Changes
+    // nothing.
     NTSTATUS CheckRenameDestination(const RenamePaths& paths,
                                     bool isDirectory,
                                     BOOLEAN replaceIfExists) const;

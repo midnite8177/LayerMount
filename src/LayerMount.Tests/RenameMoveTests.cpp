@@ -515,12 +515,28 @@ void AssertUpperDirectoryCopiedUp(const TempLayerEnvironment& env, const std::ws
         (L"The upper '" + dir + L"' must carry copy-up metadata").c_str());
 }
 
+bool RootListsAsDirectory(const MergedDirectory& rootListing, const std::wstring& displayName) {
+    return (rootListing.entries.at(ListingKey(displayName)).findData.dwFileAttributes &
+            FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
 void AssertRootShowsOnlyFileNamed(const ::LayerMount::LayerMount& mount, const std::wstring& displayName) {
     AssertOnlyEntryShownAs(mount, L"", displayName);
-    const MergedDirectory listing = mount.MergeDirectoryEntries(L"");
-    Assert::AreEqual<DWORD>(0,
-        listing.entries.at(ListingKey(displayName)).findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY,
+    Assert::IsFalse(RootListsAsDirectory(mount.MergeDirectoryEntries(L""), displayName),
         (L"The root must list " + displayName + L" as a file").c_str());
+}
+
+void AssertRootShowsFileAndDirectory(const ::LayerMount::LayerMount& mount,
+                                     const std::wstring& fileName,
+                                     const std::wstring& directoryName) {
+    AssertEntryShownAs(mount, L"", ListingKey(fileName), fileName);
+    AssertEntryShownAs(mount, L"", ListingKey(directoryName), directoryName);
+    const MergedDirectory listing = mount.MergeDirectoryEntries(L"");
+    Assert::AreEqual(size_t{2}, listing.entries.size(), L"The root must hold two entries");
+    Assert::IsFalse(RootListsAsDirectory(listing, fileName),
+        (L"The root must list " + fileName + L" as a file").c_str());
+    Assert::IsTrue(RootListsAsDirectory(listing, directoryName),
+        (L"The root must list " + directoryName + L" as a directory").c_str());
 }
 
 std::vector<std::wstring> EntriesUnder(const std::wstring& root) {
@@ -576,6 +592,24 @@ bool CreateDirectoryJunction(const std::wstring& junction, const std::wstring& t
     const std::wstring command =
         L"cmd.exe /c mklink /J \"" + junction + L"\" \"" + target + L"\" >nul 2>&1";
     return _wsystem(command.c_str()) == 0;
+}
+
+// Closes ctx after the rename, so a caller can compare the layers afterward.
+void AssertReplaceRenameThroughHandleRefused(::LayerMount::LayerMount& mount,
+                                             FileContext* ctx,
+                                             const std::wstring& newPath,
+                                             NTSTATUS expectedStatus,
+                                             const wchar_t* message) {
+    const NTSTATUS status = mount.Rename(ctx, newPath, kReplaceIfExists, kNoCallerPid);
+    BY_HANDLE_FILE_INFORMATION handleInfo{};
+    const bool handleWorks = ctx->handle != INVALID_HANDLE_VALUE &&
+        ::GetFileInformationByHandle(ctx->handle, &handleInfo) != FALSE;
+    const bool needsReopen = ctx->handleNeedsReopen;
+    mount.Close(ctx);
+
+    AssertStatus(expectedStatus, status, message);
+    Assert::IsTrue(handleWorks, L"The refused rename must leave the handle open");
+    Assert::IsFalse(needsReopen, L"The refused rename must not mark the handle for a reopen");
 }
 
 void AssertDirectoryRenameShowsNewName(DirectoryLayer layer,
@@ -979,17 +1013,8 @@ public:
                                                 kNoCreateOptions, kNoCallerPid, &ctx, &info),
             L"The source directory must open");
 
-        const NTSTATUS status = mount.Rename(ctx.get(), L"dst", kReplaceIfExists, kNoCallerPid);
-        BY_HANDLE_FILE_INFORMATION handleInfo{};
-        const bool handleWorks = ctx->handle != INVALID_HANDLE_VALUE &&
-            ::GetFileInformationByHandle(ctx->handle, &handleInfo) != FALSE;
-        const bool needsReopen = ctx->handleNeedsReopen;
-        mount.Close(ctx.get());
-
-        AssertStatus(STATUS_DIRECTORY_NOT_EMPTY, status,
+        AssertReplaceRenameThroughHandleRefused(mount, ctx.get(), L"dst", STATUS_DIRECTORY_NOT_EMPTY,
             L"A replace rename of an open directory onto a directory with a child must fail");
-        Assert::IsTrue(handleWorks, L"The refused rename must leave the handle open");
-        Assert::IsFalse(needsReopen, L"The refused rename must not mark the handle for a reopen");
     }
 
     TEST_METHOD(RenameDirectory_IntoItsOwnTree_FailsAndChangesNothing) {
@@ -1070,17 +1095,8 @@ public:
             L"The source directory must open");
         const LayerSnapshot upperBefore(env.Upper());
 
-        const NTSTATUS status = mount.Rename(ctx.get(), L"a\\b", kReplaceIfExists, kNoCallerPid);
-        BY_HANDLE_FILE_INFORMATION handleInfo{};
-        const bool handleWorks = ctx->handle != INVALID_HANDLE_VALUE &&
-            ::GetFileInformationByHandle(ctx->handle, &handleInfo) != FALSE;
-        const bool needsReopen = ctx->handleNeedsReopen;
-        mount.Close(ctx.get());
-
-        AssertStatus(STATUS_INVALID_PARAMETER, status,
+        AssertReplaceRenameThroughHandleRefused(mount, ctx.get(), L"a\\b", STATUS_INVALID_PARAMETER,
             L"A rename of an open directory into its own tree must fail");
-        Assert::IsTrue(handleWorks, L"The refused rename must leave the handle open");
-        Assert::IsFalse(needsReopen, L"The refused rename must not mark the handle for a reopen");
         upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
     }
 
@@ -1103,6 +1119,152 @@ public:
             upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
             AssertRootShowsOnlyFileNamed(mount, L"a");
         }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoDirectory_FailsAndChangesNothing) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            for (const DirectoryLayer destinationLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(LayerRoot(env, sourceLayer), L"f.txt", "f");
+                env.CreateDir(LayerRoot(env, destinationLayer), L"dir");
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot upperBefore(env.Upper());
+                const LayerSnapshot lowerBefore(env.Lower(0));
+
+                AssertStatus(STATUS_FILE_IS_A_DIRECTORY,
+                    mount.Rename(L"f.txt", L"dir", kReplaceIfExists, kNoCallerPid),
+                    L"A replace rename of a file onto a directory must fail");
+                upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+                lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+                AssertRootShowsFileAndDirectory(mount, L"f.txt", L"dir");
+            }
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoFile_FailsAndChangesNothing) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            for (const DirectoryLayer destinationLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(LayerRoot(env, sourceLayer), L"dir\\a.txt", "a");
+                env.WriteFile(LayerRoot(env, destinationLayer), L"f.txt", "f");
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot upperBefore(env.Upper());
+                const LayerSnapshot lowerBefore(env.Lower(0));
+
+                AssertStatus(STATUS_NOT_A_DIRECTORY,
+                    mount.Rename(L"dir", L"f.txt", kReplaceIfExists, kNoCallerPid),
+                    L"A replace rename of a directory onto a file must fail");
+                upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+                lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+                AssertRootShowsFileAndDirectory(mount, L"f.txt", L"dir");
+                AssertOnlyEntryShownAs(mount, L"dir", L"a.txt");
+            }
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoItsParentDirectory_FailsWithDirectoryNotEmpty) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"a\\f.txt", "f");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            const LayerSnapshot upperBefore(env.Upper());
+            const LayerSnapshot lowerBefore(env.Lower(0));
+
+            AssertStatus(STATUS_DIRECTORY_NOT_EMPTY,
+                mount.Rename(L"a\\f.txt", L"a", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename of a\\f.txt onto a must fail");
+            upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+            lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+            AssertOnlyEntryShownAs(mount, L"", L"a");
+            AssertOnlyEntryShownAs(mount, L"a", L"f.txt");
+        }
+    }
+
+    TEST_METHOD(Rename_OntoAnExistingEntryOfAnyTypeWithoutReplace_ReportsACollision) {
+        for (const DirectoryLayer layer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, layer), L"f.txt", "f");
+            env.WriteFile(LayerRoot(env, layer), L"dir\\a.txt", "a");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            const LayerSnapshot upperBefore(env.Upper());
+            const LayerSnapshot lowerBefore(env.Lower(0));
+
+            const std::pair<std::wstring, std::wstring> renames[] = {
+                {L"f.txt", L"dir"},
+                {L"dir", L"f.txt"},
+                {L"dir\\a.txt", L"dir"},
+            };
+            for (const auto& [from, to] : renames) {
+                AssertStatus(STATUS_OBJECT_NAME_COLLISION,
+                    mount.Rename(from, to, kFailIfExists, kNoCallerPid),
+                    (L"A rename of " + from + L" onto " + to + L" without replace must report a collision").c_str());
+            }
+            upperBefore.AssertUnchanged(L"The refused renames must write nothing in the upper");
+            lowerBefore.AssertUnchanged(L"The refused renames must write nothing in the lower");
+        }
+    }
+
+    TEST_METHOD(ReplaceRenameOpenFile_OntoDirectory_FailsAndKeepsTheHandleOpen) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"f.txt", "f");
+            env.CreateDir(env.Upper(), L"dir");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            std::unique_ptr<FileContext> ctx;
+            InternalFileInfo info{};
+            AssertStatus(STATUS_SUCCESS, mount.Open(L"f.txt", FILE_READ_DATA | DELETE,
+                                                    kNoCreateOptions, kNoCallerPid, &ctx, &info),
+                L"The source file must open");
+            const LayerSnapshot upperBefore(env.Upper());
+            const LayerSnapshot lowerBefore(env.Lower(0));
+
+            AssertReplaceRenameThroughHandleRefused(mount, ctx.get(), L"dir", STATUS_FILE_IS_A_DIRECTORY,
+                L"A replace rename of an open file onto a directory must fail");
+            upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+            lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+        }
+    }
+
+    TEST_METHOD(ReplaceRenameOpenDirectory_OntoFile_FailsAndKeepsTheHandleOpen) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"dir\\a.txt", "a");
+            env.WriteFile(env.Lower(0), L"f.txt", "f");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            std::unique_ptr<FileContext> ctx;
+            InternalFileInfo info{};
+            AssertStatus(STATUS_SUCCESS, mount.Open(L"dir", FILE_LIST_DIRECTORY | DELETE,
+                                                    kNoCreateOptions, kNoCallerPid, &ctx, &info),
+                L"The source directory must open");
+            const LayerSnapshot upperBefore(env.Upper());
+            const LayerSnapshot lowerBefore(env.Lower(0));
+
+            AssertReplaceRenameThroughHandleRefused(mount, ctx.get(), L"f.txt", STATUS_NOT_A_DIRECTORY,
+                L"A replace rename of an open directory onto a file must fail");
+            upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+            lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoDirectoryJunction_FailsAsForADirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.WriteFile(env.Lower(0), L"f.txt", "f");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_FILE_IS_A_DIRECTORY,
+            mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of a file onto a directory junction must fail");
+        upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+        targetBefore.AssertUnchanged(L"The refused rename must write nothing in the junction target");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\link", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper link must stay a junction");
     }
 
     TEST_METHOD(ReplaceRename_UpperDirectoryThatCannotMove_KeepsTheDestination) {

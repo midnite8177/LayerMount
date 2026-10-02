@@ -1805,7 +1805,15 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
     if (!destResolved.Found()) {
         return STATUS_SUCCESS;
     }
-    if (isDirectory && (destResolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+    if (IsInsideDirectory(paths.oldNorm, paths.newNorm)) {
+        return STATUS_DIRECTORY_NOT_EMPTY;
+    }
+    const bool destinationIsDirectory =
+        (destResolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (isDirectory != destinationIsDirectory) {
+        return isDirectory ? STATUS_NOT_A_DIRECTORY : STATUS_FILE_IS_A_DIRECTORY;
+    }
+    if (isDirectory) {
         return DirectoryEmptinessStatus(paths.newNorm);
     }
     return STATUS_SUCCESS;

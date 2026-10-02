@@ -526,7 +526,7 @@ are copied up on demand.
 
 Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.
-The engine handles six cases:
+The engine handles eight cases. The last two also apply to a file source:
 
 - **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
   if present. When a lower layer has an entry at the destination path,
@@ -560,6 +560,21 @@ The engine handles six cases:
   a non-empty `a\b` returns `STATUS_INVALID_PARAMETER`, not
   `STATUS_DIRECTORY_NOT_EMPTY`. A file source gets no such check. A file
   `a` renamed to `a\b` fails with `STATUS_OBJECT_PATH_NOT_FOUND`.
+- **replace=true onto an ancestor of the source** (`a\f` onto `a`):
+  the engine rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY`
+  before any side effects, as overlayfs returns `ENOTEMPTY`. This
+  applies to a file source and to a directory source.
+- **replace=true onto an entry of the other type**: a file onto a
+  directory fails with `STATUS_FILE_IS_A_DIRECTORY` (overlayfs
+  `EISDIR`), and a directory onto a file fails with
+  `STATUS_NOT_A_DIRECTORY` (overlayfs `ENOTDIR`). Both fail before any
+  side effects, so the engine copies no lower file source up. The engine
+  takes the type of the destination from its merged-view attributes,
+  so a junction or a directory symlink counts as a directory. This
+  differs from overlayfs, where rename does not follow the last path
+  component: there, a file replaces a symlink, and a directory onto a
+  symlink fails with `ENOTDIR`. With replace=false,
+  `STATUS_OBJECT_NAME_COLLISION` comes first.
 
 Recursive copy-up is expensive and is the main reason single-file
 metacopy exists; the engine cannot apply the same trick to directories
