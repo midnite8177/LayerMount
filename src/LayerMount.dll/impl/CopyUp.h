@@ -2,6 +2,7 @@
 
 #include "LayerMount.h"
 #include "LayerPath.h"
+#include "UpperParent.h"
 #include "../abi/CapabilityGate.h"
 #include "../abi/EventEmitter.h"
 
@@ -68,7 +69,8 @@ public:
     NTSTATUS CommitFromWorkDir(const std::wstring& workPath,
                                const std::wstring& finalUpperPath);
 
-    // Creates parent directories as needed. Preserves security, timestamps, data.
+    // Makes the parent exist in the upper first, as EnsureUpperParent does.
+    // Preserves security, timestamps, data.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
 
     // Copy only metadata (security, timestamps) as a sparse file. Data copied on demand.
@@ -83,6 +85,12 @@ public:
     // The upper entry takes the lower entry's name, whatever the case of
     // relativePath.
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);
+
+    // Makes the parent of callerPath exist in the upper, as
+    // UpperParent::Ensure does. Returns STATUS_OBJECT_PATH_NOT_FOUND and
+    // writes nothing when the merged view hides a parent that a lower holds
+    // as a directory.
+    NTSTATUS EnsureUpperParent(const CallerPath& callerPath);
 
     // Copies the lower tree and the old upper shadow to the new upper path,
     // marks it opaque, and whites out the old path. A junction or directory
@@ -120,8 +128,6 @@ private:
 
     NTSTATUS OverlayUpperShadow(const std::wstring& oldUpperPath,
                                 const std::wstring& newUpperPath);
-
-    NTSTATUS EnsureParentDirectories(const std::wstring& relativePath);
 
     NTSTATUS CopyTreePreservingMetadata(const std::wstring& srcAbs,
                                          const std::wstring& dstAbs);
@@ -175,6 +181,7 @@ private:
         LM_CAP_MULTIPLE_STREAMS | LM_CAP_NTFS_ACLS
     };
     ::LayerMount::abi::EventEmitter* events_ = nullptr;
+    UpperParent upperParent_;
 
     std::atomic<uint64_t> workCounter_{0};
 

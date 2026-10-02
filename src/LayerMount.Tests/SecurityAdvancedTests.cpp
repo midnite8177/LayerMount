@@ -1,16 +1,3 @@
-// Owner / SACL / inheritance ACL coverage. Addresses audit gap:
-//   MetadataPreservationTests checks DACL preservation and SetSecurity via
-//   the mount. Missing: owner propagation beyond DACL, SACL (audit) ACEs,
-//   and inherited ACE behavior on directories and their children.
-//
-// Risk this covers:
-//   - An owner-restricted lower file that copy-ups with a different owner
-//     changes who has take-ownership / admin rights on the upper copy.
-//   - SACL audit rules drop on copy-up, defeating compliance controls.
-//   - Inherited deny-ACEs on a lower directory do not carry to its upper
-//     shadow, so a renamed or copy-upped child silently gains access that
-//     the original access control intended to block.
-
 #include "pch.h"
 #include "TestFixture.h"
 
@@ -115,6 +102,34 @@ bool HasInheritedAceForSid(const std::wstring& path, PSID target) {
         if (::EqualSid(aceSid, target)) return true;
     }
     return false;
+}
+
+constexpr const wchar_t* kUpperRootHoldsEveryoneAce =
+    L"[SKIP] The upper root already holds an ACE for Everyone. The upper Foo would "
+    L"inherit it whether or not copy-up carried the lower ACL.";
+
+// Grants and does not deny, because a deny ACE blocks the test's own copy-up create.
+DWORD GrantEveryoneInheritableReadAttributes(const std::wstring& path, PSID everyone) {
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = FILE_READ_ATTRIBUTES;
+    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(everyone);
+
+    PACL dacl = nullptr;
+    const DWORD aclStatus = ::SetEntriesInAclW(1, &ea, nullptr, &dacl);
+    if (aclStatus != ERROR_SUCCESS) {
+        return aclStatus;
+    }
+    const DWORD setStatus = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()),
+                                                    SE_FILE_OBJECT,
+                                                    DACL_SECURITY_INFORMATION |
+                                                        UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                                    nullptr, nullptr, dacl, nullptr);
+    ::LocalFree(dacl);
+    return setStatus;
 }
 
 }
@@ -229,28 +244,8 @@ public:
         EveryoneSid everyone;
         Assert::IsNotNull(everyone.sid);
 
-        // Use an inheritable ALLOW ACE for Everyone granting a specific rare
-        // bit (FILE_READ_ATTRIBUTES). A DENY ACE would block the test's own
-        // copy-up create from succeeding — we want to test ACE propagation,
-        // not access control on the test harness itself.
-        EXPLICIT_ACCESSW ea{};
-        ea.grfAccessPermissions = FILE_READ_ATTRIBUTES;
-        ea.grfAccessMode = GRANT_ACCESS;
-        ea.grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
-        ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-        ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
-        ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(everyone.sid);
-
-        PACL dacl = nullptr;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            ::SetEntriesInAclW(1, &ea, nullptr, &dacl));
-        const std::wstring dirPath = env.Lower(0) + L"\\src-secured";
-        ::SetNamedSecurityInfoW(const_cast<LPWSTR>(dirPath.c_str()),
-                                  SE_FILE_OBJECT,
-                                  DACL_SECURITY_INFORMATION |
-                                      UNPROTECTED_DACL_SECURITY_INFORMATION,
-                                  nullptr, nullptr, dacl, nullptr);
-        ::LocalFree(dacl);
+            GrantEveryoneInheritableReadAttributes(env.Lower(0) + L"\\src-secured", everyone.sid));
 
         const std::wstring lowerKid = env.Lower(0) + L"\\src-secured\\kid.txt";
         if (!HasInheritedAceForSid(lowerKid, everyone.sid)) {
@@ -274,6 +269,73 @@ public:
             L"After directory rename from lower, child files must retain "
             L"(or re-inherit via auto-inheritance) the parent's inheritable "
             L"ACE. Missing = access-control state silently weakened by rename.");
+    }
+
+    TEST_METHOD(Create_UnderLowerDirectory_UpperDirectoryCarriesTheLowersAce) {
+        LayerMountTests::TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+
+        EveryoneSid everyone;
+        Assert::IsNotNull(everyone.sid);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            GrantEveryoneInheritableReadAttributes(env.Lower(0) + L"\\Foo", everyone.sid));
+        if (CountDaclAcesForSid(env.Upper(), everyone.sid) != 0) {
+            Logger::WriteMessage(kUpperRootHoldsEveryoneAce);
+            return;
+        }
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"foo\\b.txt", kNoCreateOptions),
+            L"A create under the lower directory must succeed");
+
+        Assert::IsTrue(CountDaclAcesForSid(env.Upper() + L"\\Foo", everyone.sid) > 0,
+            L"The upper Foo must carry the lower Foo's ACE for Everyone");
+    }
+
+    TEST_METHOD(Rename_LowerFileIntoLowerDirectory_UpperDirectoryCarriesTheLowersAce) {
+        LayerMountTests::TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        env.WriteFile(env.Lower(0), L"b.txt", "y");
+
+        EveryoneSid everyone;
+        Assert::IsNotNull(everyone.sid);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            GrantEveryoneInheritableReadAttributes(env.Lower(0) + L"\\Foo", everyone.sid));
+        if (CountDaclAcesForSid(env.Upper(), everyone.sid) != 0) {
+            Logger::WriteMessage(kUpperRootHoldsEveryoneAce);
+            return;
+        }
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower file into the lower directory must succeed");
+
+        Assert::IsTrue(CountDaclAcesForSid(env.Upper() + L"\\Foo", everyone.sid) > 0,
+            L"The upper Foo must carry the lower Foo's ACE for Everyone");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryIntoLowerDirectory_UpperDirectoryCarriesTheLowersAce) {
+        LayerMountTests::TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        env.WriteFile(env.Lower(0), L"x\\c.txt", "y");
+
+        EveryoneSid everyone;
+        Assert::IsNotNull(everyone.sid);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            GrantEveryoneInheritableReadAttributes(env.Lower(0) + L"\\Foo", everyone.sid));
+        if (CountDaclAcesForSid(env.Upper(), everyone.sid) != 0) {
+            Logger::WriteMessage(kUpperRootHoldsEveryoneAce);
+            return;
+        }
+
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"x", L"foo\\x", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory into the lower directory must succeed");
+
+        Assert::IsTrue(CountDaclAcesForSid(env.Upper() + L"\\Foo", everyone.sid) > 0,
+            L"The upper Foo must carry the lower Foo's ACE for Everyone");
     }
 
     // CopySecurityDescriptor requests SACL_SECURITY_INFORMATION when the
@@ -321,8 +383,6 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"audited.txt")));
 
-        // Query SACL on upper file. Today this returns empty / no SACL
-        // because CopySecurityDescriptor doesn't request SACL.
         const std::wstring upperPath = env.Upper() + L"\\audited.txt";
         DWORD size = 0;
         ::GetFileSecurityW(upperPath.c_str(), SACL_SECURITY_INFORMATION,

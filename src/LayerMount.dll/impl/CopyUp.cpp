@@ -703,7 +703,11 @@ CopyUp::CopyUp(ConfigRef config,
     , pathResolver_(pathResolver)
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache)
-    , stats_(stats) {
+    , stats_(stats)
+    , upperParent_(config, pathResolver, cache,
+                   [this](const std::wstring& normalizedPath) {
+                       return CopyUpDirectory(normalizedPath);
+                   }) {
     EnableFileSystemPrivileges();
 }
 
@@ -847,11 +851,9 @@ static NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
     // symlinks, an empty file.
     const bool isDir = (srcAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (isDir) {
-        if (!CreateDirectoryW(dstAbsolute.c_str(), nullptr)) {
-            DWORD err = GetLastError();
-            if (err != ERROR_ALREADY_EXISTS) {
-                return ::LayerMount::NtStatusFromWin32(err);
-            }
+        const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbsolute);
+        if (!NT_SUCCESS(dirStatus)) {
+            return dirStatus;
         }
     } else {
         HANDLE dstCreate = CreateFileW(dstAbsolute.c_str(), GENERIC_WRITE, 0,
@@ -1046,7 +1048,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    NTSTATUS status = EnsureParentDirectories(normalized);
+    NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1191,7 +1193,7 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    NTSTATUS status = EnsureParentDirectories(normalized);
+    NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1390,7 +1392,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    NTSTATUS status = EnsureParentDirectories(normalized);
+    NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1417,11 +1419,9 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     srcHandle.Reset();
 
     // Create directory in upper layer (no work-dir atomic rename for dirs)
-    if (!CreateDirectoryW(upperPath.c_str(), nullptr)) {
-        DWORD err = GetLastError();
-        if (err != ERROR_ALREADY_EXISTS) {
-            return ::LayerMount::NtStatusFromWin32(err);
-        }
+    status = CreateDirectoryOrUseExisting(upperPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
     status = ApplyDirectoryLayout(upperPath, srcAttrs);
@@ -1537,7 +1537,7 @@ NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldCallerPath,
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    NTSTATUS parentStatus = EnsureParentDirectories(newNorm);
+    NTSTATUS parentStatus = upperParent_.Ensure(CallerPath(newCallerPath));
     if (!NT_SUCCESS(parentStatus)) {
         return parentStatus;
     }
@@ -1663,7 +1663,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const std::wstring& oldCallerPath,
         const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
         if (source.Found() && (source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
             !capabilities_.HasReparsePoints()) {
-            NTSTATUS status = EnsureParentDirectories(normalized);
+            NTSTATUS status = upperParent_.Ensure(CallerPath(newCallerPath));
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -1892,24 +1892,9 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
 NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
                              const std::wstring& dstAbs,
                              const LayerConfig* config) {
-    if (!::CreateDirectoryW(dstAbs.c_str(), nullptr)) {
-        DWORD err = ::GetLastError();
-        if (err != ERROR_ALREADY_EXISTS) {
-            return ::LayerMount::NtStatusFromWin32(err);
-        }
-        // ERROR_ALREADY_EXISTS covers both an existing directory, which the
-        // copy overlays into, and an existing file, which is a type
-        // collision. Without this check, a tree rename into a destination
-        // where `dst\child` is a file treats the file as a directory and
-        // fails every child copy with PATH_NOT_FOUND. Return
-        // STATUS_OBJECT_NAME_COLLISION so the caller can tear down.
-        DWORD existingAttrs = ::GetFileAttributesW(dstAbs.c_str());
-        if (existingAttrs == INVALID_FILE_ATTRIBUTES) {
-            return ::LayerMount::NtStatusFromWin32(::GetLastError());
-        }
-        if ((existingAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            return STATUS_OBJECT_NAME_COLLISION;
-        }
+    const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
+    if (!NT_SUCCESS(dirStatus)) {
+        return dirStatus;
     }
 
     DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
@@ -2092,44 +2077,8 @@ NTSTATUS CopyUp::CopyDirectoryTree(const std::wstring& srcAbs,
     return walkStatus;
 }
 
-NTSTATUS CopyUp::EnsureParentDirectories(const std::wstring& relativePath) {
-    std::filesystem::path relPath(relativePath);
-    if (!relPath.has_parent_path()) {
-        return STATUS_SUCCESS;
-    }
-
-    std::wstring parentRel = relPath.parent_path().wstring();
-    if (parentRel.empty()) {
-        return STATUS_SUCCESS;
-    }
-
-    std::wstring parentNorm = NormalizePath(parentRel);
-    if (parentNorm.empty()) {
-        return STATUS_SUCCESS;
-    }
-
-    // Check if parent already exists in upper
-    if (pathResolver_.ExistsInUpper(parentNorm)) {
-        return STATUS_SUCCESS;
-    }
-
-    // Recursively ensure grandparent exists, then copy-up parent
-    NTSTATUS status = EnsureParentDirectories(parentNorm);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    // Check if parent exists in a lower layer — if so, copy-up the directory
-    ResolvedPath parentResolved = pathResolver_.ResolveLowerPath(parentNorm);
-    if (parentResolved.Found() &&
-        (parentResolved.attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        return CopyUpDirectory(parentNorm);
-    }
-
-    // Parent doesn't exist anywhere — just create it in upper layer
-    std::wstring parentUpperPath = pathResolver_.GetUpperPath(parentNorm);
-    EnsureDirectoryExists(parentUpperPath);
-    return STATUS_SUCCESS;
+NTSTATUS CopyUp::EnsureUpperParent(const CallerPath& callerPath) {
+    return upperParent_.Ensure(callerPath);
 }
 
 bool CopyUp::CopySecurityDescriptor(const std::wstring& srcPath,

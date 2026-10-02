@@ -44,6 +44,11 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
                         ReplaceExisting replace);
 
+// Creates a directory at path. A directory already there is success. Any
+// other entry there returns STATUS_OBJECT_NAME_COLLISION, so no caller
+// goes on to treat a file as a directory.
+NTSTATUS CreateDirectoryOrUseExisting(const std::wstring& path);
+
 // Returns the FindFirstFileW search pattern for dirRelativePath in the
 // layer at layerPath. The pattern never holds a doubled separator.
 std::wstring JoinLayerScanPath(const std::wstring& layerPath,

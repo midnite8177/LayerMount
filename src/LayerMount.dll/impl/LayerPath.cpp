@@ -101,6 +101,24 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
     return STATUS_SUCCESS;
 }
 
+NTSTATUS CreateDirectoryOrUseExisting(const std::wstring& path) {
+    if (::CreateDirectoryW(path.c_str(), nullptr)) {
+        return STATUS_SUCCESS;
+    }
+    const DWORD createErr = ::GetLastError();
+    if (createErr != ERROR_ALREADY_EXISTS) {
+        return NtStatusFromWin32(createErr);
+    }
+    const DWORD existingAttrs = ::GetFileAttributesW(path.c_str());
+    if (existingAttrs == INVALID_FILE_ATTRIBUTES) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+    if ((existingAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    return STATUS_SUCCESS;
+}
+
 std::wstring JoinLayerScanPath(const std::wstring& layerPath,
                                const std::wstring& dirRelativePath) {
     return JoinDirPath(layerPath,

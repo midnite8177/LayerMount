@@ -499,6 +499,13 @@ void AssertListedDirectoryWithChild(const ::LayerMount::LayerMount& mount,
         (L"The listing of '" + displayName + L"' must hold " + childKey).c_str());
 }
 
+void AssertUpperDirectoryCopiedUp(const TempLayerEnvironment& env, const std::wstring& dir) {
+    const LayerMountMetadata metadata =
+        MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\" + dir, nullptr);
+    Assert::IsFalse(metadata.originLayer.empty(),
+        (L"The upper '" + dir + L"' must carry copy-up metadata").c_str());
+}
+
 std::vector<std::wstring> EntriesUnder(const std::wstring& root) {
     std::vector<std::wstring> entries;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
@@ -584,6 +591,62 @@ public:
             L"The rename of x to DIR\\y must succeed");
         AssertOnlyEntryShownAs(mount, L"", L"Dir");
         AssertOnlyEntryShownAs(mount, L"Dir", L"y");
+        AssertUpperDirectoryCopiedUp(env, L"Dir");
+    }
+
+    TEST_METHOD(Rename_LowerFileIntoLowerOnlyParent_CopiesTheParentUpInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        env.WriteFile(env.Lower(0), L"b.txt", "y");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
+            L"The rename of b.txt to foo\\b.txt must succeed");
+        AssertListedDirectoryWithChild(mount, L"Foo", L"a.txt");
+        AssertListedDirectoryWithChild(mount, L"Foo", L"b.txt");
+        AssertUpperDirectoryCopiedUp(env, L"Foo");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryIntoParentInNoLayer_ListsTheParentInTheCallersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"x\\a.txt", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"x", L"NewParent\\y", kFailIfExists, kNoCallerPid),
+            L"The rename of x to NewParent\\y must succeed");
+        AssertOnlyEntryShownAs(mount, L"", L"NewParent");
+        AssertOnlyEntryShownAs(mount, L"NewParent", L"y");
+    }
+
+    TEST_METHOD(Rename_LowerFileIntoWhitedOutLowerDirectory_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        env.WriteFile(env.Lower(0), L"b.txt", "y");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
+            L"A rename into a whited-out directory must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryIntoDirectoryHiddenByOpaqueAncestor_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\Sub\\a.txt", "x");
+        env.WriteFile(env.Lower(0), L"x\\b.txt", "y");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"x", L"d\\sub\\x", kFailIfExists, kNoCallerPid),
+            L"A rename into a directory that an opaque ancestor hides must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(CaseOnlyRename_LowerJunctionWithoutReparseSupport_CopiesTheTargetTreeUp) {
@@ -698,6 +761,56 @@ public:
 
         AssertOnlyEntryShownAs(mount, L"", L"Outer");
         AssertOnlyEntryShownAs(mount, L"outer", L"Inner");
+    }
+
+    TEST_METHOD(Create_UnderLowerDirectory_CopiesTheDirectoryUpInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"foo\\b.txt", kNoCreateOptions),
+            L"A create under the lower directory must succeed");
+
+        AssertListedDirectoryWithChild(mount, L"Foo", L"a.txt");
+        AssertListedDirectoryWithChild(mount, L"Foo", L"b.txt");
+        AssertUpperDirectoryCopiedUp(env, L"Foo");
+    }
+
+    TEST_METHOD(Create_UnderWhitedOutLowerDirectory_FailsAndWritesNoParent) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            CreateThroughMount(mount, L"foo\\b.txt", kNoCreateOptions),
+            L"A create under a whited-out directory must fail");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"foo"),
+            L"The failed create must write no parent directory in the upper");
+    }
+
+    TEST_METHOD(Create_UnderLowerDirectoryHiddenByOpaqueAncestor_FailsAndWritesNoParent) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\Sub\\a.txt", "x");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            CreateThroughMount(mount, L"d\\sub\\b.txt", kNoCreateOptions),
+            L"A create under a directory that an opaque ancestor hides must fail");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"d\\sub"),
+            L"The failed create must write no parent directory in the upper");
+    }
+
+    TEST_METHOD(Create_UnderParentInNoLayer_ListsTheParentInTheCallersCase) {
+        TempLayerEnvironment env(1);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            CreateThroughMount(mount, L"NewParent\\b.txt", kNoCreateOptions),
+            L"A create under a parent in no layer must succeed");
+
+        AssertOnlyEntryShownAs(mount, L"", L"NewParent");
     }
 
     TEST_METHOD(WriteOpen_UnderLowerDirectoryInAnUnlistableParent_CopiesUp) {

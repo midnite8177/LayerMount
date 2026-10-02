@@ -1269,9 +1269,9 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
 
     create.upperPath = pathResolver_->GetUpperPath(create.hostNorm);
 
-    std::filesystem::path parentDir = std::filesystem::path(create.upperPath).parent_path();
-    if (!parentDir.empty()) {
-        EnsureDirectoryExists(parentDir.wstring());
+    const NTSTATUS parentStatus = copyUp_->EnsureUpperParent(CallerPath(request.relativePath));
+    if (!NT_SUCCESS(parentStatus)) {
+        return parentStatus;
     }
 
     std::unique_ptr<FileContext> ctx = BuildCreate(request, &create);
@@ -2068,8 +2068,12 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
     const std::wstring newNorm = NormalizePath(newRelativePath);
     const bool lowerHasSource = pathResolver_->ResolveLowerPath(oldNorm).Found();
 
+    // Before CopyUpFile, so a rename into a hidden parent fails without copying the source up.
+    NTSTATUS status = copyUp_->EnsureUpperParent(CallerPath(newRelativePath));
+    if (!NT_SUCCESS(status)) return status;
+
     if (!pathResolver_->ExistsInUpper(oldNorm)) {
-        NTSTATUS status = copyUp_->CopyUpFile(oldNorm);
+        status = copyUp_->CopyUpFile(oldNorm);
         if (!NT_SUCCESS(status)) return status;
     }
 
@@ -2078,10 +2082,7 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
     const std::wstring newUpperPath =
         BuildUpperPathPreserveCase(config_.upperPath, newRelativePath);
 
-    EnsureDirectoryExists(
-        std::filesystem::path(newUpperPath).parent_path().wstring());
-
-    NTSTATUS status = MoveUpperEntry(
+    status = MoveUpperEntry(
         WithStoredLeafName(oldUpperPath, oldUpperPath), newUpperPath,
         replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No);
     if (!NT_SUCCESS(status)) return status;
