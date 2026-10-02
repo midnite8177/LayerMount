@@ -602,8 +602,8 @@ private:
         std::wstring hostNorm;
         std::wstring streamSuffix;
         std::wstring upperPath;
-        bool existsInLower = false;
         bool lowerIsDirectory = false;
+        bool lowerIsVisible = false;
         UINT32 grantedAccess = 0;
         UINT32 fileAttributes = 0;
         PSECURITY_DESCRIPTOR securityDescriptor = nullptr;
@@ -640,8 +640,11 @@ private:
     NTSTATUS CreateFileInUpper(const UpperCreate& create, FileContext* ctx);
 
     // Makes the host file of a stream create a full file in the upper: a
-    // lower-only host copies up, and a metacopy shell fills. The fill
-    // comes first so that the lower's streams cannot land over the new one.
+    // host that the merged view shows from a lower copies up, and a
+    // metacopy shell fills. A host that a whiteout or an opaque ancestor
+    // hides stays absent, and the stream create then makes an empty host.
+    // Runs before the stream create, so a copy-up or a fill cannot bring
+    // the lower's streams in over the new one.
     NTSTATUS PrepareStreamHost(const UpperCreate& create, FileContext* ctx);
 
     // Copies a lower file or directory up for a write-capable open and

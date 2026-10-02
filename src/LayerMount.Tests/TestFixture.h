@@ -431,6 +431,21 @@ inline std::string ReadThroughMount(::LayerMount::LayerMount& mount,
     return std::string(buffer, transferred);
 }
 
+// Opens path through the mount and returns the file size that the open
+// reports. ReadThroughMount fails on an empty file, because the engine's
+// Read returns STATUS_END_OF_FILE there. Fails the test when the open fails.
+inline UINT64 FileSizeThroughMount(::LayerMount::LayerMount& mount,
+                                   const std::wstring& path) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    Assert::IsTrue(NT_SUCCESS(mount.Open(path, FILE_READ_DATA, kNoCreateOptions,
+                                         kNoCallerPid, &ctx, &info)),
+        L"FileSizeThroughMount: the open must succeed");
+    mount.Close(ctx.get());
+    return info.FileSize;
+}
+
 // ---------------------------------------------------------------------------
 // A CopyUp with the objects it depends on, built in dependency order from
 // one config. The members hold `const LayerConfig&`, so the rig owns the

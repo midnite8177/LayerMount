@@ -1302,6 +1302,27 @@ NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm,
     return copyUp_->CopyUpFile(hostNorm);
 }
 
+namespace {
+
+bool IsDirectoryHit(const ResolvedPath& hit) {
+    return hit.Found() && (hit.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// True when the host file that the merged view holds already has the
+// stream. A directory host returns false and is left to Create's
+// directory check.
+bool HostFileHasStream(const CreateResolution& resolution,
+                       const std::wstring& streamSuffix) {
+    if (!resolution.merged.Found() ||
+        IsDirectoryHit(resolution.merged) || IsDirectoryHit(resolution.lower)) {
+        return false;
+    }
+    const std::wstring streamPath = resolution.merged.absolutePath + streamSuffix;
+    return ::GetFileAttributesW(streamPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+}
+
 NTSTATUS LayerMount::Create(const CreateRequest& request,
                            std::unique_ptr<FileContext>* outCtx,
                            InternalFileInfo* outInfo) {
@@ -1324,19 +1345,20 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
 
     const bool isDirectory = (request.createOptions & FILE_DIRECTORY_FILE) != 0;
 
-    create.existsInLower = resolution.lower.Found();
-    create.lowerIsDirectory = create.existsInLower &&
-        (resolution.lower.attributes & FILE_ATTRIBUTE_DIRECTORY);
+    create.lowerIsDirectory = IsDirectoryHit(resolution.lower);
+    create.lowerIsVisible = resolution.merged.Found() &&
+        resolution.merged.source == LayerSource::Lower;
 
     create.upperPath = pathResolver_->GetUpperPath(create.hostNorm);
 
-    // Catches a host path that is a directory when the caller did not pass FILE_DIRECTORY_FILE.
+    // Catches a host path that the merged view shows as a directory when the
+    // caller did not pass FILE_DIRECTORY_FILE. A hidden lower directory does not count.
     if (!create.streamSuffix.empty()) {
         const DWORD upperAttrs = ::GetFileAttributesW(create.upperPath.c_str());
         const bool upperIsDir =
             (upperAttrs != INVALID_FILE_ATTRIBUTES) &&
             (upperAttrs & FILE_ATTRIBUTE_DIRECTORY);
-        if (upperIsDir || create.lowerIsDirectory) {
+        if (upperIsDir || IsDirectoryHit(resolution.merged)) {
             return STATUS_FILE_IS_A_DIRECTORY;
         }
     }
@@ -1390,27 +1412,6 @@ std::unique_ptr<FileContext> LayerMount::BuildCreate(const CreateRequest& reques
     ctx->ownerPid = request.callerPid;
     ctx->createOptions = request.createOptions;
     return ctx;
-}
-
-namespace {
-
-bool IsDirectoryHit(const ResolvedPath& hit) {
-    return hit.Found() && (hit.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-}
-
-// True when the host file that the merged view holds already has the
-// stream. A directory host returns false and is left to Create's
-// directory check.
-bool HostFileHasStream(const CreateResolution& resolution,
-                       const std::wstring& streamSuffix) {
-    if (!resolution.merged.Found() ||
-        IsDirectoryHit(resolution.merged) || IsDirectoryHit(resolution.lower)) {
-        return false;
-    }
-    const std::wstring streamPath = resolution.merged.absolutePath + streamSuffix;
-    return ::GetFileAttributesW(streamPath.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
 }
 
 NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
@@ -1524,7 +1525,7 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
 
 NTSTATUS LayerMount::PrepareStreamHost(const UpperCreate& create, FileContext* ctx) {
     if (!pathResolver_->ExistsInUpper(create.hostNorm)) {
-        if (create.existsInLower && !create.lowerIsDirectory) {
+        if (create.lowerIsVisible && !create.lowerIsDirectory) {
             return copyUp_->CopyUpFile(create.hostNorm);
         }
         return STATUS_SUCCESS;
