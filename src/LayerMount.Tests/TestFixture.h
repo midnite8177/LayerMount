@@ -320,6 +320,29 @@ inline std::wstring StoredLeafName(const std::wstring& path) {
     return fd.cFileName;
 }
 
+inline std::vector<std::wstring> EntriesUnder(const std::wstring& root) {
+    std::vector<std::wstring> entries;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        entries.push_back(fs::relative(entry.path(), root).wstring());
+    }
+    return entries;
+}
+
+class LayerSnapshot {
+public:
+    explicit LayerSnapshot(const std::wstring& root)
+        : root_(root), entries_(EntriesUnder(root)) {}
+
+    void AssertUnchanged(const wchar_t* message) const {
+        Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
+            entries_ == EntriesUnder(root_), message);
+    }
+
+private:
+    std::wstring root_;
+    std::vector<std::wstring> entries_;
+};
+
 // The layer-relative path of the whiteout marker that hides relativePath:
 // L"a\\b\\c.txt" gives L"a\\b\\.wh.c.txt".
 inline std::wstring WhiteoutMarkerPath(const std::wstring& relativePath) {
@@ -344,6 +367,11 @@ inline bool CreateDirectoryJunction(const std::wstring& junction, const std::wst
 inline bool CreateDirectorySymlink(const std::wstring& link, const std::wstring& target) {
     return ::CreateSymbolicLinkW(link.c_str(), target.c_str(),
         SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+}
+
+inline bool CreateFileSymlink(const std::wstring& link, const std::wstring& target) {
+    return ::CreateSymbolicLinkW(link.c_str(), target.c_str(),
+        SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
 }
 
 using LinkCreator = bool (*)(const std::wstring& link, const std::wstring& target);

@@ -1,15 +1,14 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "StreamTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+using LayerMountTestShared::HasStream;
 
 namespace LayerMountAbiTests {
 
-// ADS write-path coverage. These tests exercise the stream-aware code paths
-// added to Create / Open / Overwrite / Delete / Rename / UpdateContextPath
-// after the EnumerateStreams (read-side) work shipped. The parser tests
-// pin TryParseStreamPath's rejects so future loosening of the validator is
-// caught at the ABI surface.
+// The stream paths of Create, Open, Overwrite, Delete, Rename and
+// UpdateContextPath. The parser tests pin the names TryParseStreamPath rejects.
 
 namespace {
 
@@ -40,15 +39,6 @@ std::string ReadRawStream(const std::wstring& path) {
     ::ReadFile(h, buf, sizeof(buf), &read, nullptr);
     ::CloseHandle(h);
     return std::string(buf, read);
-}
-
-bool StreamExistsOnDisk(const std::wstring& fullStreamPath) {
-    HANDLE h = ::CreateFileW(fullStreamPath.c_str(),
-        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    ::CloseHandle(h);
-    return true;
 }
 
 } // namespace
@@ -192,7 +182,7 @@ public:
         // host.txt:secret:$DATA is equivalent to host.txt:secret per NTFS.
         Assert::AreEqual<HRESULT>(S_OK,
             CreateThroughEngine(mount.Get(), L"\\host.txt:secret:$DATA"));
-        Assert::IsTrue(StreamExistsOnDisk(env.Upper() + L"\\host.txt:secret"),
+        Assert::IsTrue(HasStream(env.Upper() + L"\\host.txt:secret"),
             L":$DATA suffix must round-trip to a plain :secret stream on disk");
     }
 
@@ -252,10 +242,10 @@ public:
             (env.Upper() + L"\\host.txt").c_str());
         Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES, upperAttrs,
             L"writable stream create must have copied the host up");
-        Assert::IsTrue(StreamExistsOnDisk(
+        Assert::IsTrue(HasStream(
             env.Upper() + L"\\host.txt:pre-existing"),
             L"existing lower ADS must be preserved through copy-up (no metacopy ADS-drop)");
-        Assert::IsTrue(StreamExistsOnDisk(
+        Assert::IsTrue(HasStream(
             env.Upper() + L"\\host.txt:new-stream"),
             L"newly created stream must land on the upper host");
     }
@@ -285,7 +275,7 @@ public:
             L"metacopy shell on upper");
         // Sanity: pre-stream-Create, the lower-only :keep-me should NOT
         // have been carried up yet (still a metacopy shell).
-        Assert::IsFalse(StreamExistsOnDisk(upperHost + L":keep-me"),
+        Assert::IsFalse(HasStream(upperHost + L":keep-me"),
             L":keep-me must not be on upper yet -- metacopy shell only");
         ::LayerMountCloseFile(host.handle);
 
@@ -300,10 +290,10 @@ public:
         Assert::AreEqual<UINT32>(9u, userWritten);
         ::LayerMountCloseFile(userStream.handle);
 
-        Assert::IsTrue(StreamExistsOnDisk(upperHost + L":keep-me"),
+        Assert::IsTrue(HasStream(upperHost + L":keep-me"),
             L"the stream Create carries the lower ADS up; a later "
             L"main-stream open is too late");
-        Assert::IsTrue(StreamExistsOnDisk(upperHost + L":user-stream"),
+        Assert::IsTrue(HasStream(upperHost + L":user-stream"),
             L"newly created user stream must be on the upper host");
         Assert::AreEqual<std::string>("USER-DATA",
             ReadRawStream(upperHost + L":user-stream"));
@@ -371,9 +361,9 @@ public:
         Assert::AreEqual<HRESULT>(S_OK,
             ::LayerMountDeleteFile(mount.Get(), L"\\host.txt:s1"));
 
-        Assert::IsFalse(StreamExistsOnDisk(env.Upper() + L"\\host.txt:s1"),
+        Assert::IsFalse(HasStream(env.Upper() + L"\\host.txt:s1"),
             L":s1 should have been removed");
-        Assert::IsTrue(StreamExistsOnDisk(env.Upper() + L"\\host.txt:s2"),
+        Assert::IsTrue(HasStream(env.Upper() + L"\\host.txt:s2"),
             L":s2 must remain after deleting :s1");
         DWORD hostAttrs = ::GetFileAttributesW(
             (env.Upper() + L"\\host.txt").c_str());
@@ -391,7 +381,7 @@ public:
         Assert::IsTrue(IsFileNotFoundHr(hr),
             L"stream delete on a lower-only host should surface as NotFound");
         // Confirm the lower stream is untouched.
-        Assert::IsTrue(StreamExistsOnDisk(env.Lower(0) + L"\\host.txt:hidden"),
+        Assert::IsTrue(HasStream(env.Lower(0) + L"\\host.txt:hidden"),
             L"lower stream must be untouched by the rejected delete");
     }
 
@@ -455,7 +445,7 @@ public:
         Assert::AreEqual<std::string>("post",
             ReadRawStream(env.Upper() + L"\\host2.txt:s1"),
             L"open stream handle must follow the host through the rename");
-        Assert::IsFalse(StreamExistsOnDisk(env.Upper() + L"\\host.txt:s1"),
+        Assert::IsFalse(HasStream(env.Upper() + L"\\host.txt:s1"),
             L"old path must no longer carry the stream");
     }
 

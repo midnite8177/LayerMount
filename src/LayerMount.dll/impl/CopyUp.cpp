@@ -864,15 +864,20 @@ static NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
     return STATUS_SUCCESS;
 }
 
-// A link gets no opaque marker and no copy-up metadata, as overlayfs gives a
-// symlink no opaque xattr. The marker file, and a stream when the metadata
-// store uses ADS, would go through the link into its target.
+// A link gets no opaque marker, as overlayfs gives a symlink no opaque xattr.
+// It also gets no copy-up metadata in either metadata store, so the upper link
+// reports its own file ID. The marker file, and an ADS metadata stream, would
+// go through the link into its target.
 static NTSTATUS CopyLowerLinkWithoutOverlayMarkers(const ResolvedPath& source,
                                                    const std::wstring& upperPath) {
     const NTSTATUS status =
         CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
     if (!NT_SUCCESS(status)) {
-        ::RemoveDirectoryW(upperPath.c_str());
+        if ((source.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            ::RemoveDirectoryW(upperPath.c_str());
+        } else {
+            ::DeleteFileW(upperPath.c_str());
+        }
     }
     return status;
 }
@@ -887,32 +892,11 @@ NTSTATUS CopyUp::WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::CopyUpReparseEntry(const std::wstring& normalized,
-                                    const ResolvedPath& source,
-                                    const std::wstring& upperPath) {
-    NTSTATUS reparseStatus =
-        CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
-    if (!NT_SUCCESS(reparseStatus)) {
-        return reparseStatus;
-    }
-
-    // Write bookkeeping metadata + cache invalidation + stats, mirroring
-    // the regular copy-up flow's tail. Timestamps/attrs are inherited by
-    // the link entry when FSCTL_SET_REPARSE_POINT lands. Metadata
-    // persistence is part of the copy-up transaction: without a valid
-    // origin/stable-id record, later resolution treats the reparse as a
-    // foreign creation, breaking rename-fanout and stable-file-id
-    // reporting. On failure, tear down the staged reparse point so the
-    // caller can retry from a clean state.
-    LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
-    if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
-        const DWORD err = ::GetLastError();
-        if ((source.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            ::RemoveDirectoryW(upperPath.c_str());
-        } else {
-            ::DeleteFileW(upperPath.c_str());
-        }
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+NTSTATUS CopyUp::CopyUpLinkAndRecord(const std::wstring& normalized,
+                                     const CopyUpTarget& target) {
+    const NTSTATUS status = CopyLowerLinkWithoutOverlayMarkers(target.source, target.upperPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
     cache_.InvalidateWithAncestors(normalized);
@@ -1054,12 +1038,10 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     const ResolvedPath& source = target.source;
     const std::wstring& upperPath = target.upperPath;
 
-    // Reparse-point short-circuit: if the source carries a reparse tag, we
-    // want to carry the TAG up (preserving symlink/junction semantics), not
-    // copy the data behind the link. Regular file-data copy would follow the
-    // reparse point on Windows and land an opaque file full of target data.
+    // A data copy would follow the link and put the target's data in a plain
+    // upper file.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpReparseEntry(normalized, source, upperPath);
+        return CopyUpLinkAndRecord(normalized, target);
     }
 
     ScopedHandle srcHandle(CreateFileW(
@@ -1395,7 +1377,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     // Without this branch a lower junction or directory symlink copies up as
     // a plain empty directory and loses its reparse tag.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpReparseEntry(normalized, source, upperPath);
+        return CopyUpLinkAndRecord(normalized, target);
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());

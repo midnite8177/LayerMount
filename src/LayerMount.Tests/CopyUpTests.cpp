@@ -7,13 +7,53 @@
 #include <winioctl.h>
 #include <set>
 
+#include "StreamTestHelpers.h"
+
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::HasOverlayStream;
 
 namespace LayerMountTests {
 
 static_assert(RefusesTemporaryConfig<CopyUp, PathResolver&, WhiteoutManager&, Cache&, LayerMountStats&>,
     "CopyUp keeps a reference to its LayerConfig");
+
+namespace {
+
+void AssertUpperLinkReadsThroughToTarget(const TempLayerEnvironment& env,
+                                         const std::wstring& linkName,
+                                         const std::wstring& readPath,
+                                         const std::string& targetContent,
+                                         const std::wstring& target) {
+    Assert::IsTrue(HasAttribute(env.Upper() + L"\\" + linkName, FILE_ATTRIBUTE_REPARSE_POINT),
+        (L"The upper " + linkName + L" must be a link").c_str());
+    Assert::AreEqual(targetContent, env.ReadFile(env.Upper(), readPath),
+        (L"The upper " + linkName + L" must point to the lower link's target").c_str());
+    Assert::IsFalse(HasOverlayStream(target),
+        L"The copy-up must write no :overlay stream onto the link target");
+}
+
+void AssertLowerDirectoryLinkCopiesUpAsALink(LinkCreator createLink) {
+    TempLayerEnvironment env(1);
+    env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+    const std::wstring target = env.Root() + L"\\target";
+    if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", target)) {
+        return;
+    }
+    LayerConfig config = env.MakeConfig();
+    Assert::IsTrue((config.hostCapabilities & LM_CAP_ADS) != 0,
+        L"The metadata store must use ADS");
+    CopyUpRig rig(config);
+    const LayerSnapshot targetBefore(target);
+
+    AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"link"),
+        L"The copy-up of the lower directory link must succeed");
+
+    AssertUpperLinkReadsThroughToTarget(env, L"link", L"link\\inside.txt", "inside", target);
+    targetBefore.AssertUnchanged(L"The copy-up must not change the link target's entries");
+}
+
+}
 
 TEST_CLASS(CopyUpTests) {
 public:
@@ -169,9 +209,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"target.txt", "target");
         const std::wstring lowerLink = env.Lower(0) + L"\\Link.TXT";
-        if (!::CreateSymbolicLinkW(lowerLink.c_str(), L"target.txt",
-                                   SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
-            Logger::WriteMessage(L"[SKIP] the lower file symlink could not be created");
+        if (!LinkCreatedOrSkipped(CreateFileSymlink, lowerLink, L"target.txt")) {
             return;
         }
 
@@ -185,6 +223,24 @@ public:
             L"The upper must hold the symlink");
         Assert::AreEqual(std::wstring(L"Link.TXT"), StoredLeafName(upperLink),
             L"The upper symlink must keep the lower's name");
+    }
+
+    TEST_METHOD(CopyUpFile_LowerFileSymlinkWithAds_CopiesTheLinkAndWritesNoStreamOntoItsTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target.txt", "target");
+        const std::wstring target = env.Root() + L"\\target.txt";
+        if (!LinkCreatedOrSkipped(CreateFileSymlink, env.Lower(0) + L"\\link.txt", target)) {
+            return;
+        }
+        LayerConfig config = env.MakeConfig();
+        Assert::IsTrue((config.hostCapabilities & LM_CAP_ADS) != 0,
+            L"The metadata store must use ADS");
+        CopyUpRig rig(config);
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"link.txt"),
+            L"The copy-up of the lower file symlink must succeed");
+
+        AssertUpperLinkReadsThroughToTarget(env, L"link.txt", L"link.txt", "target", target);
     }
 
     TEST_METHOD(CopyUpFile_ExtendedWorkDirWithTrailingSeparator_CopiesContentToUpper) {
@@ -389,6 +445,14 @@ public:
             L"Dir CreationTime not preserved");
         Assert::IsTrue(::CompareFileTime(&srcWrite, &dstWrite) == 0,
             L"Dir LastWriteTime not preserved");
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerJunctionWithAds_CopiesTheLinkAndWritesNoStreamOntoItsTarget) {
+        AssertLowerDirectoryLinkCopiesUpAsALink(CreateDirectoryJunction);
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerDirectorySymlinkWithAds_CopiesTheLinkAndWritesNoStreamOntoItsTarget) {
+        AssertLowerDirectoryLinkCopiesUpAsALink(CreateDirectorySymlink);
     }
 
     TEST_METHOD(RenameUpperDirectory_MovesDirectoryOnly) {

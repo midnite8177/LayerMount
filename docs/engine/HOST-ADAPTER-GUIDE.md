@@ -111,10 +111,11 @@ every bit its target actually supports and no more.
   `LM_CAP_CASE_SENSITIVE`. A host adapter clears any of these bits to
   declare the corresponding limitation. None of them gates an engine
   fallback; clearing one records the limitation for whatever
-  reads `hostCapabilities` back, and nothing more. A rename of a lower
-  junction or directory symlink copies it up as a link with no opaque
-  marker, with or without `LM_CAP_REPARSE_POINTS`, as overlayfs copies
-  up a symlink.
+  reads `hostCapabilities` back, and nothing more. A copy-up or a
+  rename of a lower junction or symlink copies it up as a link with no
+  opaque marker and no metadata record, with or without
+  `LM_CAP_REPARSE_POINTS`. Overlayfs also copies up a symlink as a
+  symlink.
 
 NTFS compression has no capability bit. A copy-up of a compressed lower
 file sets compression on the upper copy and ignores a refusal, on every

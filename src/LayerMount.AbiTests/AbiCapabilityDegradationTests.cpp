@@ -1,7 +1,10 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "StreamTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+using LayerMountTestShared::HasOverlayStream;
+using LayerMountTestShared::HasStream;
 
 namespace LayerMountAbiTests {
 
@@ -29,19 +32,6 @@ bool HasSidecarMetadataJson(const std::wstring& upperRoot) {
     return false;
 }
 
-bool HasStream(const std::wstring& streamPath) {
-    HANDLE h = ::CreateFileW(streamPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-                             nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    ::CloseHandle(h);
-    return true;
-}
-
-bool HasLayerMountAds(const std::wstring& upperFile) {
-    return HasStream(upperFile + L":overlay");
-}
-
 struct EventSink {
     std::mutex                mu;
     std::vector<LM_EVENT_TYPE> types;
@@ -65,6 +55,35 @@ bool CreateDirectoryJunction(const std::wstring& junction,
     std::wstring cmd = L"cmd.exe /c mklink /J \"" + junction +
                        L"\" \"" + target + L"\" >nul 2>&1";
     return _wsystem(cmd.c_str()) == 0;
+}
+
+// Writes inside.txt holding "inside-payload" into target and creates the
+// lower junction "link" to target. Logs a skip and returns false when the
+// junction cannot be created.
+bool BuildLowerJunction(const TempLayerEnv& env, const std::wstring& target) {
+    std::filesystem::create_directories(target);
+    { std::ofstream f(target + L"\\inside.txt"); f << "inside-payload"; }
+    if (!CreateDirectoryJunction(env.Lower(0) + L"\\link", target)) {
+        Logger::WriteMessage(L"Skipping: could not create junction (mklink failed)");
+        return false;
+    }
+    return true;
+}
+
+// Asserts that upperLink is a link and that the file at readPath, reached
+// through it, holds expectedPayload on its first line.
+void AssertUpperLink(const std::wstring& upperLink,
+                     const std::wstring& readPath,
+                     const std::string& expectedPayload) {
+    const DWORD attrs = ::GetFileAttributesW(upperLink.c_str());
+    Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, attrs,
+        (L"The upper must hold " + upperLink).c_str());
+    Assert::AreNotEqual<DWORD>(0, attrs & FILE_ATTRIBUTE_REPARSE_POINT,
+        (L"The upper " + upperLink + L" must be a link").c_str());
+    std::string payload;
+    { std::ifstream f(readPath); std::getline(f, payload); }
+    Assert::AreEqual(expectedPayload, payload,
+        (L"The upper " + upperLink + L" must point to the link target").c_str());
 }
 
 } // namespace
@@ -93,7 +112,7 @@ public:
         Assert::IsTrue(HasSidecarMetadataJson(env.Upper()),
             L"With LM_CAP_ADS cleared, a *.meta.json sidecar must exist "
             L"under <upper>\\.overlay\\");
-        Assert::IsFalse(HasLayerMountAds(upperFile),
+        Assert::IsFalse(HasOverlayStream(upperFile),
             L"No :overlay ADS stream should be created when LM_CAP_ADS is cleared");
     }
 
@@ -108,21 +127,59 @@ public:
             ::LayerMountEnsureInUpperLayer(mount.Get(), L"\\foo.txt"));
 
         const std::wstring upperFile = env.Upper() + L"\\foo.txt";
-        Assert::IsTrue(HasLayerMountAds(upperFile),
+        Assert::IsTrue(HasOverlayStream(upperFile),
             L"With LM_CAP_ADS set, a :overlay ADS must be present on the "
             L"upper-layer file");
         Assert::IsFalse(HasSidecarMetadataJson(env.Upper()),
             L"Sidecar *.meta.json must NOT appear when LM_CAP_ADS is set");
     }
 
+    TEST_METHOD(DefaultAds_EnsureInUpperLayerOnLowerJunction_CopiesTheLinkAndWritesNoStreamOntoItsTarget) {
+        TempLayerEnv env(1);
+        const std::wstring target = env.Root() + L"\\target";
+        if (!BuildLowerJunction(env, target)) {
+            return;
+        }
+
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnsureInUpperLayer(mount.Get(), L"\\link"),
+            L"The copy-up of a lower junction must succeed with LM_CAP_ADS set");
+
+        AssertUpperLink(env.Upper() + L"\\link", env.Upper() + L"\\link\\inside.txt",
+                        "inside-payload");
+        Assert::IsFalse(HasOverlayStream(target),
+            L"The copy-up must write no :overlay stream onto the junction target");
+    }
+
+    TEST_METHOD(DefaultAds_EnsureInUpperLayerOnLowerFileSymlink_CopiesTheLinkAndWritesNoStreamOntoItsTarget) {
+        TempLayerEnv env(1);
+        const std::wstring target = env.Root() + L"\\target.txt";
+        { std::ofstream f(target); f << "target-payload"; }
+        const std::wstring lowerLink = env.Lower(0) + L"\\link.txt";
+        if (!::CreateSymbolicLinkW(lowerLink.c_str(), target.c_str(),
+                                   SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+            Logger::WriteMessage(L"Skipping: could not create the file symlink");
+            return;
+        }
+
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnsureInUpperLayer(mount.Get(), L"\\link.txt"),
+            L"The copy-up of a lower file symlink must succeed with LM_CAP_ADS set");
+
+        const std::wstring upperLink = env.Upper() + L"\\link.txt";
+        AssertUpperLink(upperLink, upperLink, "target-payload");
+        Assert::IsFalse(HasOverlayStream(target),
+            L"The copy-up must write no :overlay stream onto the symlink target");
+    }
+
     TEST_METHOD(ClearReparsePoints_RenameLowerJunction_CopiesTheLinkAndWritesNoOpaqueMarkerIntoItsTarget) {
         TempLayerEnv env(1);
         const std::wstring target = env.Root() + L"\\target";
-        std::filesystem::create_directories(target);
-        { std::ofstream f(target + L"\\inside.txt"); f << "inside-payload"; }
-
-        if (!CreateDirectoryJunction(env.Lower(0) + L"\\link", target)) {
-            Logger::WriteMessage(L"Skipping: could not create junction (mklink failed)");
+        if (!BuildLowerJunction(env, target)) {
             return;
         }
 
@@ -145,16 +202,8 @@ public:
         Assert::AreEqual<HRESULT>(S_OK, hr,
             L"The rename of a lower junction must succeed without reparse-point support");
 
-        const DWORD attrs =
-            ::GetFileAttributesW((env.Upper() + L"\\link-renamed").c_str());
-        Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, attrs,
-            L"The upper must hold link-renamed");
-        Assert::AreNotEqual<DWORD>(0, attrs & FILE_ATTRIBUTE_REPARSE_POINT,
-            L"The upper link-renamed must be a link");
-        std::string payload;
-        { std::ifstream f(env.Upper() + L"\\link-renamed\\inside.txt"); std::getline(f, payload); }
-        Assert::AreEqual(std::string("inside-payload"), payload,
-            L"The upper link-renamed must point to the junction target");
+        AssertUpperLink(env.Upper() + L"\\link-renamed",
+                        env.Upper() + L"\\link-renamed\\inside.txt", "inside-payload");
         Assert::IsFalse(std::filesystem::exists(target + L"\\.wh..wh..opq"),
             L"The rename must write no opaque marker file into the junction target");
         Assert::IsFalse(HasStream(target + L":overlay.opaque"),

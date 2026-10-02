@@ -706,6 +706,9 @@ struct LayerMountMetadata {
 file ID, captured at copy-up time and replayed in `FillFileInfoFromHandle`
 so callers that rely on the index for identity tracking (e.g. open-by-id
 shims) see a consistent value before and after copy-up.
+A copied-up link (a junction, a directory symlink or a file symlink) gets
+no metadata record, because an ADS write on it goes through the link into
+its target. Its file ID changes at copy-up.
 
 ### Two backends, one dispatcher
 

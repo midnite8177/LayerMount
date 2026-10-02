@@ -524,28 +524,6 @@ void AssertRootShowsFileAndDirectory(const ::LayerMount::LayerMount& mount,
         (L"The root must list " + directoryName + L" as a directory").c_str());
 }
 
-std::vector<std::wstring> EntriesUnder(const std::wstring& root) {
-    std::vector<std::wstring> entries;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
-        entries.push_back(std::filesystem::relative(entry.path(), root).wstring());
-    }
-    return entries;
-}
-
-class LayerSnapshot {
-public:
-    explicit LayerSnapshot(const std::wstring& root)
-        : root_(root), entries_(EntriesUnder(root)) {}
-
-    void AssertUnchanged(const wchar_t* message) const {
-        Assert::IsTrue(entries_ == EntriesUnder(root_), message);
-    }
-
-private:
-    std::wstring root_;
-    std::vector<std::wstring> entries_;
-};
-
 enum class LowerChildHiding {
     Whiteout,
     OpaqueMarker,
@@ -2161,6 +2139,27 @@ public:
         AssertListedDirectoryWithChild(mount, L"Foo", L"a.txt");
         AssertListedDirectoryWithChild(mount, L"Foo", L"b.txt");
         AssertUpperDirectoryCopiedUp(env, L"Foo");
+    }
+
+    TEST_METHOD(Create_UnderLowerJunction_CreatesTheChildInTheJunctionTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        const std::wstring target = env.Root() + L"\\target";
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link", target)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"link\\child.txt", kNoCreateOptions),
+            L"A create under the lower junction must succeed");
+
+        Assert::IsTrue(env.FileExists(target, L"child.txt"),
+            L"The create must put child.txt in the junction target");
+        AssertEntryShownAs(mount, L"link", L"child.txt", L"child.txt");
+        Assert::IsTrue(HasAttribute(env.Lower(0) + L"\\link", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The lower link must stay a junction");
+        lowerBefore.AssertUnchanged(L"The create must not change the lower's entries");
     }
 
     TEST_METHOD(Create_UnderWhitedOutLowerDirectory_FailsAndWritesNoParent) {

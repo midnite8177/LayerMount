@@ -224,9 +224,7 @@ private:
     // STATUS_OBJECT_NAME_NOT_FOUND when no visible lower holds normalized.
     NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target);
 
-    NTSTATUS CopyUpReparseEntry(const std::wstring& normalized,
-                                const ResolvedPath& source,
-                                const std::wstring& upperPath);
+    NTSTATUS CopyUpLinkAndRecord(const std::wstring& normalized, const CopyUpTarget& target);
 
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
                                 ScopedHandle& srcHandle,
