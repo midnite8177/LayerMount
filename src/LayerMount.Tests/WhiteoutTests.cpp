@@ -470,6 +470,23 @@ public:
         Assert::IsTrue(sub.entries.count(L"nested.txt") == 1,
             L"The listing must show the entry in the subdirectory of the lower");
     }
+
+    TEST_METHOD(MergeDirectoryEntries_OpaqueMarkerAtRootOfExtendedFormLowerWithTrailingSeparator_HidesDeeperLowers) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L".wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"deep.txt", "lower1");
+        auto config = env.MakeConfig();
+        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0) + L"\\";
+        ::LayerMount::LayerMount mount(config);
+
+        auto merged = mount.MergeDirectoryEntries(L"").entries;
+
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the entry at the root of the opaque lower");
+        Assert::IsTrue(merged.count(L"deep.txt") == 0,
+            L"The opaque marker at the root of the lower must hide the deeper lower's entry");
+    }
 };
 
 TEST_CLASS(OpaqueDirectoryTests) {

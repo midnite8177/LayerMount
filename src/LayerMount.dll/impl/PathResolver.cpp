@@ -77,7 +77,7 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         return cached.value();
     }
 
-    std::wstring upperFullPath = config_.upperPath + L"\\" + normalized;
+    std::wstring upperFullPath = JoinLayerPath(config_.upperPath, normalized);
     DWORD upperAttrs = GetFileAttributesW(upperFullPath.c_str());
     const DWORD upperProbeError = ::GetLastError();
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
@@ -183,7 +183,7 @@ ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) co
     }
 
     if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath) ||
-        HasNonDirectorySelfOrAncestorInLayer(ParentDir(normalized), config_.upperPath)) {
+        HasNonDirectorySelfOrAncestorInLayer(config_.upperPath, ParentDir(normalized))) {
         return {};
     }
 
@@ -212,7 +212,7 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
             break;
         }
 
-        std::wstring fullPath = lowerPath + L"\\" + normalized;
+        std::wstring fullPath = JoinLayerPath(lowerPath, normalized);
         DWORD attrs = GetFileAttributesW(fullPath.c_str());
         const DWORD probeError = ::GetLastError();
         if (attrs != INVALID_FILE_ATTRIBUTES) {
@@ -236,40 +236,40 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
 
 bool PathResolver::ExistsInUpper(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
-    std::wstring fullPath = config_.upperPath + L"\\" + normalized;
+    std::wstring fullPath = JoinLayerPath(config_.upperPath, normalized);
     return GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
     if (normalized.empty()) return config_.upperPath;
-    return config_.upperPath + L"\\" + normalized;
+    return JoinLayerPath(config_.upperPath, normalized);
 }
 
 bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
 
-    std::vector<std::pair<int, DWORD>> found;  // layer index (-1=upper), attributes
+    std::vector<DWORD> foundAttrs;
 
-    std::wstring upperPath = config_.upperPath + L"\\" + normalized;
+    std::wstring upperPath = JoinLayerPath(config_.upperPath, normalized);
     DWORD upperAttrs = GetFileAttributesW(upperPath.c_str());
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        found.push_back({-1, upperAttrs});
+        foundAttrs.push_back(upperAttrs);
     }
 
-    for (size_t i = 0; i < config_.lowerPaths.size(); ++i) {
-        std::wstring lowerPath = config_.lowerPaths[i] + L"\\" + normalized;
+    for (const std::wstring& lowerRoot : config_.lowerPaths) {
+        std::wstring lowerPath = JoinLayerPath(lowerRoot, normalized);
         DWORD lowerAttrs = GetFileAttributesW(lowerPath.c_str());
         if (lowerAttrs != INVALID_FILE_ATTRIBUTES) {
-            found.push_back({static_cast<int>(i), lowerAttrs});
+            foundAttrs.push_back(lowerAttrs);
         }
     }
 
-    if (found.size() < 2) return false;
+    if (foundAttrs.size() < 2) return false;
 
-    bool firstIsDir = (found[0].second & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    for (size_t i = 1; i < found.size(); ++i) {
-        bool isDir = (found[i].second & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    bool firstIsDir = IsDirectory(foundAttrs[0]);
+    for (size_t i = 1; i < foundAttrs.size(); ++i) {
+        bool isDir = IsDirectory(foundAttrs[i]);
         if (isDir != firstIsDir) {
             return true;
         }

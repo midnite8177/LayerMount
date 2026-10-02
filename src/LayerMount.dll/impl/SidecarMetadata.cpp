@@ -1,4 +1,5 @@
 #include "SidecarMetadata.h"
+#include "LayerPath.h"
 
 #include <bcrypt.h>
 #include <nlohmann/json.hpp>
@@ -13,7 +14,6 @@ namespace LayerMount {
 
 namespace {
 
-constexpr const wchar_t* kSidecarSubdir = L"\\.overlay\\";
 constexpr const wchar_t* kMetaSuffix    = L".meta.json";
 constexpr const wchar_t* kOpaqueSuffix  = L".opaque";
 
@@ -111,21 +111,12 @@ std::wstring SidecarBase(const std::wstring& filePath, const std::wstring& upper
     std::wstring keyed = LowerCase(filePath);
     std::wstring hash = Sha1Hex(WideToUtf8(keyed));
     if (hash.empty()) return {};
-    std::wstring base = upperRoot;
-    base.append(kSidecarSubdir);
-    base.append(hash);
-    return base;
+    return JoinLayerPath(upperRoot, kSidecarDirName) + L"\\" + hash;
 }
 
 bool EnsureSidecarDir(const std::wstring& upperRoot) {
-    std::wstring dir = upperRoot;
-    dir.append(kSidecarSubdir);
-    // Strip trailing slash for filesystem::create_directory
-    while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) {
-        dir.pop_back();
-    }
     std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
+    std::filesystem::create_directories(JoinLayerPath(upperRoot, kSidecarDirName), ec);
     return !ec;
 }
 

@@ -6,6 +6,7 @@
 #include "TestFixture.h"
 
 #include "MetadataADS.h"
+#include "SidecarMetadata.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
@@ -236,12 +237,23 @@ public:
         Assert::IsTrue(MetadataADS::RemoveOpaqueADS(dir, nullptr));
         Assert::IsFalse(MetadataADS::HasOpaqueADS(dir, nullptr));
     }
-
-    // Note: a previously-planned test `WriteLayerMountMetadata_FileDoesNotExist_ReturnsFalse`
-    // was removed — NTFS semantics allow creating a base file implicitly when
-    // writing to its ADS (CreateFileW on "path:stream" with CREATE_ALWAYS). That
-    // behavior is acceptable for this layer; the overlay never writes metadata
-    // for files it hasn't just created or opened itself.
 };
 
-} // namespace LayerMountTests
+TEST_CLASS(SidecarMetadataTests) {
+public:
+    TEST_METHOD(WriteThenRead_ExtendedFormUpperWithTrailingSeparator_RoundTrips) {
+        TempLayerEnvironment env(0);
+        env.WriteFile(env.Upper(), L"a.txt", "x");
+        const std::wstring upperRoot = L"\\\\?\\" + env.Upper() + L"\\";
+        const std::wstring filePath = upperRoot + L"a.txt";
+        LayerMountMetadata written;
+        written.metacopy = true;
+
+        Assert::IsTrue(SidecarMetadata::Write(filePath, written, upperRoot),
+            L"The sidecar write under an upper that ends in a separator must succeed");
+        Assert::IsTrue(SidecarMetadata::Read(filePath, upperRoot).metacopy,
+            L"The sidecar read must return the metacopy flag that the write stored");
+    }
+};
+
+}

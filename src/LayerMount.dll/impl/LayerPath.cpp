@@ -9,21 +9,23 @@ std::wstring LayerDirWithSeparator(const std::wstring& layerPath) {
     return !layerPath.empty() && layerPath.back() == L'\\' ? layerPath : layerPath + L"\\";
 }
 
-std::wstring JoinLayerScanPath(const std::wstring& layerPath,
-                               const std::wstring& dirRelativePath) {
-    const std::wstring layerDir = LayerDirWithSeparator(layerPath);
-    return dirRelativePath.empty()
-        ? layerDir + L"*"
-        : layerDir + dirRelativePath + L"\\*";
+std::wstring JoinLayerPath(const std::wstring& layerPath,
+                           const std::wstring& relativePath) {
+    return LayerDirWithSeparator(layerPath) + relativePath;
 }
 
-bool HasNonDirectorySelfOrAncestorInLayer(const std::wstring& dirRelativePath,
-                                          const std::wstring& layerPath) {
-    const std::wstring layerDir = LayerDirWithSeparator(layerPath);
+std::wstring JoinLayerScanPath(const std::wstring& layerPath,
+                               const std::wstring& dirRelativePath) {
+    return JoinLayerPath(layerPath,
+                         dirRelativePath.empty() ? L"*" : dirRelativePath + L"\\*");
+}
+
+bool HasNonDirectorySelfOrAncestorInLayer(const std::wstring& layerPath,
+                                          const std::wstring& dirRelativePath) {
     fs::path walked;
     for (const fs::path& component : fs::path(dirRelativePath)) {
         walked /= component;
-        const DWORD attrs = GetFileAttributesW((layerDir + walked.wstring()).c_str());
+        const DWORD attrs = GetFileAttributesW(JoinLayerPath(layerPath, walked.wstring()).c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES) {
             const DWORD error = ::GetLastError();
             return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
@@ -40,7 +42,7 @@ LowerVisibility LowersBelow(const LayerDirectory& dir, DirectoryProbe probe) {
         return LowerVisibility::HiddenByOpaqueMarker;
     }
     if (probe == DirectoryProbe::Missed &&
-        HasNonDirectorySelfOrAncestorInLayer(dir.dirNorm, dir.layerPath)) {
+        HasNonDirectorySelfOrAncestorInLayer(dir.layerPath, dir.dirNorm)) {
         return LowerVisibility::HiddenByNonDirectory;
     }
     return LowerVisibility::Visible;

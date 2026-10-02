@@ -304,6 +304,76 @@ public:
 
         Assert::IsFalse(resolver.HasTypeConflict(L"alone.txt"));
     }
+
+    TEST_METHOD(ResolvePath_ExtendedFormLowerWithTrailingSeparator_ResolvesFileAtLowerRoot) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"own.txt", "lower0");
+        auto config = env.MakeConfig();
+        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0) + L"\\";
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+
+        ResolvedPath result = resolver.ResolvePath(L"own.txt");
+
+        Assert::IsTrue(result.Found(), L"The file at the root of the lower must resolve");
+        Assert::IsTrue(result.source == LayerSource::Lower,
+            L"The file must resolve from the lower that holds it");
+        Assert::AreEqual(0, result.lowerIndex,
+            L"The file must resolve from the first lower");
+        Assert::AreEqual(L"\\\\?\\" + env.Lower(0) + L"\\own.txt", result.absolutePath,
+            L"The resolved path must have one separator after the lower root");
+    }
+
+    TEST_METHOD(ResolvePath_WhiteoutAtRootOfExtendedFormLowerWithTrailingSeparator_HidesDeeperLowersFile) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"a.txt"), "");
+        env.WriteFile(env.Lower(1), L"a.txt", "lower1");
+        auto config = env.MakeConfig();
+        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0) + L"\\";
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+
+        ResolvedPath result = resolver.ResolvePath(L"a.txt");
+
+        Assert::IsFalse(result.Found(),
+            L"The whiteout at the root of the lower must hide a.txt in the deeper lower");
+    }
+
+    TEST_METHOD(ResolvePath_OpaqueDirectoryInExtendedFormLowerWithTrailingSeparator_HidesDeeperLowersFile) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
+        env.WriteFile(env.Lower(1), L"sub\\x.txt", "lower1");
+        auto config = env.MakeConfig();
+        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0) + L"\\";
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+
+        ResolvedPath result = resolver.ResolvePath(L"sub\\x.txt");
+
+        Assert::IsFalse(result.Found(),
+            L"The opaque directory in the lower must hide sub\\x.txt in the deeper lower");
+    }
+
+    TEST_METHOD(ResolvePath_ExtendedFormUpperWithTrailingSeparator_ResolvesFileInUpper) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"up.txt", "upper");
+        auto config = env.MakeConfig();
+        config.upperPath = L"\\\\?\\" + env.Upper() + L"\\";
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+
+        ResolvedPath result = resolver.ResolvePath(L"up.txt");
+
+        Assert::IsTrue(result.Found(), L"The file in the upper must resolve");
+        Assert::IsTrue(result.source == LayerSource::Upper,
+            L"The file must resolve from the upper that holds it");
+        Assert::AreEqual(L"\\\\?\\" + env.Upper() + L"\\up.txt", result.absolutePath,
+            L"The resolved path must have one separator after the upper root");
+    }
 };
 
-} // namespace LayerMountTests
+}

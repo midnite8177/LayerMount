@@ -1,6 +1,7 @@
 #include "WhiteoutManager.h"
 #include "MetadataADS.h"
 #include "Cache.h"
+#include "LayerPath.h"
 #include "../abi/EventEmitter.h"
 
 #include <string_view>
@@ -49,8 +50,7 @@ std::wstring WhiteoutManager::GetWhiteoutFileName(const std::wstring& relativePa
 
 std::wstring WhiteoutManager::GetWhiteoutFullPath(const std::wstring& layerPath,
                                                    const std::wstring& relativePath) {
-    std::wstring whRelative = GetWhiteoutFileName(relativePath);
-    return layerPath + L"\\" + whRelative;
+    return JoinLayerPath(layerPath, GetWhiteoutFileName(relativePath));
 }
 
 bool WhiteoutManager::HasWhiteout(const std::wstring& relativePath,
@@ -146,31 +146,28 @@ bool WhiteoutManager::IsOpaque(const std::wstring& dirRelativePath) const {
 
 bool WhiteoutManager::IsOpaqueInLayer(const std::wstring& dirRelativePath,
                                        const std::wstring& layerPath) const {
-    std::wstring dirFullPath = layerPath + L"\\" + dirRelativePath;
+    std::wstring dirFullPath = JoinLayerPath(layerPath, dirRelativePath);
 
-    // Check ADS marker (fast)
     if (MetadataADS::HasOpaqueADS(dirFullPath, &config_)) {
         return true;
     }
 
-    // Check sentinel file
-    std::wstring opqPath = dirFullPath + L"\\" + kOpaqueMarkerFile;
+    std::wstring opqPath = JoinLayerPath(dirFullPath, kOpaqueMarkerFile);
     return GetFileAttributesW(opqPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
-    std::wstring dirFullPath = config_.upperPath + L"\\" + dirRelativePath;
+    std::wstring dirFullPath = JoinLayerPath(config_.upperPath, dirRelativePath);
 
-    // Ensure the directory itself exists
     EnsureDirectoryExists(dirFullPath);
 
-    // Write both markers for compatibility
     bool adsOk = MetadataADS::SetOpaqueADS(dirFullPath, &config_);
 
-    // Create sentinel file. Use FILE_FLAG_BACKUP_SEMANTICS for the same
-    // reason as CreateWhiteout above: the target directory may have an
-    // inherited DENY-WRITE ACE we need to bypass via SE_RESTORE_NAME.
-    std::wstring opqPath = dirFullPath + L"\\" + kOpaqueMarkerFile;
+    // A layer image packs the marker file but not the ADS marker, so the
+    // file keeps the directory opaque in a lower unpacked from this upper.
+    // FILE_FLAG_BACKUP_SEMANTICS lets SE_RESTORE_NAME pass an inherited
+    // DENY-WRITE ACE on the directory; without it, the create fails there.
+    std::wstring opqPath = JoinLayerPath(dirFullPath, kOpaqueMarkerFile);
     HANDLE h = CreateFileW(
         opqPath.c_str(),
         GENERIC_WRITE,
@@ -186,7 +183,6 @@ bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
         CloseHandle(h);
     }
 
-    // Invalidate cache — opaque hides entire subtree
     if (cache_) {
         cache_->Invalidate(NormalizePath(dirRelativePath));
     }
@@ -195,15 +191,11 @@ bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
 }
 
 bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
-    std::wstring dirFullPath = config_.upperPath + L"\\" + dirRelativePath;
+    std::wstring dirFullPath = JoinLayerPath(config_.upperPath, dirRelativePath);
 
-    // RemoveOpaqueADS removes the marker from both the ADS and the sidecar
-    // backend; on non-ADS hosts the sidecar is the authoritative marker. If
-    // either fails for any reason other than the marker being already absent,
-    // the directory is still logically opaque and we must not report success.
     const bool adsOk = MetadataADS::RemoveOpaqueADS(dirFullPath, &config_);
 
-    std::wstring opqPath = dirFullPath + L"\\" + kOpaqueMarkerFile;
+    std::wstring opqPath = JoinLayerPath(dirFullPath, kOpaqueMarkerFile);
     bool legacyOk = true;
     if (!DeleteFileW(opqPath.c_str())) {
         if (GetLastError() != ERROR_FILE_NOT_FOUND) {
@@ -211,8 +203,6 @@ bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
         }
     }
 
-    // Invalidate cache regardless — partial removals still change directory
-    // state, and future lookups must not observe the stale opaque cache entry.
     if (cache_) {
         cache_->Invalidate(NormalizePath(dirRelativePath));
     }
