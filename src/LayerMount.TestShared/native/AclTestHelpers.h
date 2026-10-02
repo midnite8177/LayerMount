@@ -66,37 +66,45 @@ inline void AddDenyAce(const std::wstring& path,
         L"the directory's DACL takes the deny ACE");
 }
 
-// Denies FILE_LIST_DIRECTORY to Everyone on one directory, without
-// inheritance, and restores the directory's original DACL on destruction.
-// Declare it after the test's layer environment so the DACL comes back
-// before the environment removes its tree.
-class DirectoryListingDenied {
+// Denies accessMask to Everyone on one file or directory, without
+// inheritance, and restores the original DACL on destruction. Declare it
+// after the test's layer environment so the DACL comes back before the
+// environment removes its tree.
+class AccessDenied {
 public:
-    explicit DirectoryListingDenied(const std::wstring& path) : path_(path) {
+    AccessDenied(const std::wstring& path, DWORD accessMask) : path_(path) {
         using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
             ::GetNamedSecurityInfoW(path_.c_str(), SE_FILE_OBJECT,
                                     DACL_SECURITY_INFORMATION,
                                     nullptr, nullptr, &originalDacl_, nullptr,
                                     &originalSd_),
-            L"GetNamedSecurityInfoW reads the directory's DACL");
-        AddDenyAce(path_, FILE_LIST_DIRECTORY, NO_INHERITANCE);
+            L"GetNamedSecurityInfoW reads the original DACL");
+        AddDenyAce(path_, accessMask, NO_INHERITANCE);
     }
 
-    ~DirectoryListingDenied() {
+    ~AccessDenied() {
         ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path_.c_str()), SE_FILE_OBJECT,
                                 DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
                                 nullptr, nullptr, originalDacl_, nullptr);
         ::LocalFree(originalSd_);
     }
 
-    DirectoryListingDenied(const DirectoryListingDenied&) = delete;
-    DirectoryListingDenied& operator=(const DirectoryListingDenied&) = delete;
+    AccessDenied(const AccessDenied&) = delete;
+    AccessDenied& operator=(const AccessDenied&) = delete;
 
 private:
     std::wstring path_;
     PACL originalDacl_ = nullptr;
     PSECURITY_DESCRIPTOR originalSd_ = nullptr;
+};
+
+// Denies FILE_LIST_DIRECTORY to Everyone on one directory, as AccessDenied
+// does.
+class DirectoryListingDenied : public AccessDenied {
+public:
+    explicit DirectoryListingDenied(const std::wstring& path)
+        : AccessDenied(path, FILE_LIST_DIRECTORY) {}
 };
 
 // Makes the calling thread impersonate a copy of the process token with

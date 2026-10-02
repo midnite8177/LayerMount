@@ -30,6 +30,64 @@ void CleanupWorkspace(const std::wstring& root) {
     std::filesystem::remove_all(root, ec);
 }
 
+// Runs format.com /FS:FAT32 on the volume and returns its exit code, or the
+// Win32 error when format.com does not start or does not finish in a minute.
+DWORD FormatFat32(const std::wstring& volumeGuid) {
+    std::wstring volume = volumeGuid;
+    if (!volume.empty() && volume.back() == L'\\') volume.pop_back();
+    std::wstring cmdLine = L"format.com " + volume + L" /FS:FAT32 /Q /Y /X /V:LMFAT";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!::CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE,
+                          CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return ::GetLastError();
+    }
+    DWORD exitCode = ERROR_TIMEOUT;
+    if (::WaitForSingleObject(pi.hProcess, 60000) == WAIT_OBJECT_0) {
+        ::GetExitCodeProcess(pi.hProcess, &exitCode);
+    } else {
+        ::TerminateProcess(pi.hProcess, 1);
+        ::WaitForSingleObject(pi.hProcess, INFINITE);
+    }
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+    return exitCode;
+}
+
+// Creates a VHD at vhdPath, attaches it read-write, and gives its one volume
+// a FAT32 file system. volumeGuid receives the volume's \\?\Volume{GUID}\
+// path. The attach ends when the handle closes.
+void MakeFat32Volume(LayerMount::VHD::VHDLayerManager& mgr,
+                     const std::wstring& vhdPath,
+                     LayerMount::VHD::VhdHandle& handle,
+                     std::wstring& volumeGuid) {
+    LayerMount::VHD::VhdHandle createHandle;
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+        mgr.CreateVHD(vhdPath, 100ULL * 1024 * 1024, /*dynamic*/ true, createHandle));
+    createHandle.Close();
+    std::wstring physicalPath;
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+        mgr.AttachVHD(vhdPath, /*readOnly*/ false, handle, physicalPath,
+                       LayerMount::VHD::AttachLifetime::ProcessScoped,
+                       /*suppressDriveLetter=*/ true));
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.InitializeVHD(physicalPath, vhdPath),
+        L"InitializeVHD must partition the disk and create its volume");
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+        LayerMount::VHD::GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid));
+    volumeGuid = LayerMount::VHD::EnsureTrailingBackslash(volumeGuid);
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, FormatFat32(volumeGuid),
+        L"format.com must give the volume a FAT32 file system");
+
+    wchar_t fsName[MAX_PATH] = {};
+    Assert::IsTrue(::GetVolumeInformationW(volumeGuid.c_str(), nullptr, 0, nullptr, nullptr,
+                                           nullptr, fsName, MAX_PATH) != FALSE,
+        L"GetVolumeInformationW must read the formatted volume");
+    Assert::AreEqual(std::wstring(L"FAT32"), std::wstring(fsName),
+        L"The test volume must be FAT32");
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -308,6 +366,110 @@ public:
 
         reattachHandle.Close();
         CleanupWorkspace(root);
+    }
+
+    TEST_METHOD(ResolvePath_FileInVhdLowerOverDeeperLowerDirectory_HidesDeeperChildren) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+
+        const std::wstring root = MakeVhdWorkspace();
+        const std::wstring src = root + L"\\src";
+        const std::wstring vhd = root + L"\\vhd\\layer.vhdx";
+        std::filesystem::create_directories(src + L"\\layer");
+        { std::ofstream(src + L"\\layer\\d") << "vhd"; }
+
+        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0));
+        LayerMount::VHD::VhdHandle handle;
+        std::wstring physicalPath;
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            mgr.AttachVHD(vhd, /*readOnly*/ true, handle, physicalPath,
+                           LayerMount::VHD::AttachLifetime::ProcessScoped,
+                           /*suppressDriveLetter=*/ true));
+        std::wstring volumeGuid;
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            LayerMount::VHD::GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid));
+
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\inner.txt", "deeper");
+        auto config = env.MakeConfig();
+        config.lowerPaths.insert(config.lowerPaths.begin(),
+                                 LayerMount::VHD::EnsureTrailingBackslash(volumeGuid) + L"layer");
+        ::LayerMount::Cache cache;
+        ::LayerMount::WhiteoutManager wm(config, &cache);
+        ::LayerMount::PathResolver resolver(config, wm, cache);
+        const ::LayerMount::ResolvedPath file = resolver.ResolvePath(L"d");
+        const bool childFound = resolver.ResolvePath(L"d\\inner.txt").Found();
+
+        mgr.DetachVHD(vhd);
+        handle.Close();
+        CleanupWorkspace(root);
+
+        Assert::IsTrue(file.Found() && file.lowerIndex == 0, L"The VHD lower's file must resolve");
+        Assert::IsFalse(childFound,
+            L"The file in the VHD lower must hide the children of the deeper lower's directory");
+    }
+
+    TEST_METHOD(ResolvePath_FileInFat32LowerOverDeeperLowerDirectory_HidesDeeperChildren) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+
+        const std::wstring root = MakeVhdWorkspace();
+        const std::wstring vhd = root + L"\\vhd\\fat32.vhdx";
+        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VhdHandle handle;
+        std::wstring volumeGuid;
+        MakeFat32Volume(mgr, vhd, handle, volumeGuid);
+
+        TempLayerEnvironment env(1);
+        const std::wstring fatLayer = volumeGuid + L"layer";
+        env.WriteFile(fatLayer, L"d", "fat32");
+        env.WriteFile(env.Lower(0), L"d\\inner.txt", "deeper");
+        auto config = env.MakeConfig();
+        config.lowerPaths.insert(config.lowerPaths.begin(), fatLayer);
+        ::LayerMount::Cache cache;
+        ::LayerMount::WhiteoutManager wm(config, &cache);
+        ::LayerMount::PathResolver resolver(config, wm, cache);
+        const ::LayerMount::ResolvedPath file = resolver.ResolvePath(L"d");
+        const bool childFound = resolver.ResolvePath(L"d\\inner.txt").Found();
+
+        mgr.DetachVHD(vhd);
+        handle.Close();
+        CleanupWorkspace(root);
+
+        Assert::IsTrue(file.Found() && file.lowerIndex == 0, L"The FAT32 lower's file must resolve");
+        Assert::IsFalse(childFound,
+            L"The file in the FAT32 lower must hide the children of the deeper lower's directory");
+    }
+
+    TEST_METHOD(ResolvePath_FileInUpperOverFat32LowerDirectory_HidesLowerChildren) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+
+        const std::wstring root = MakeVhdWorkspace();
+        const std::wstring vhd = root + L"\\vhd\\fat32.vhdx";
+        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VhdHandle handle;
+        std::wstring volumeGuid;
+        MakeFat32Volume(mgr, vhd, handle, volumeGuid);
+
+        TempLayerEnvironment env(0);
+        const std::wstring fatLayer = volumeGuid + L"layer";
+        env.WriteFile(fatLayer, L"d\\inner.txt", "fat32");
+        env.WriteFile(env.Upper(), L"d", "upper");
+        auto config = env.MakeConfig();
+        config.lowerPaths.push_back(fatLayer);
+        ::LayerMount::Cache cache;
+        ::LayerMount::WhiteoutManager wm(config, &cache);
+        ::LayerMount::PathResolver resolver(config, wm, cache);
+        const ::LayerMount::ResolvedPath lowerDir = resolver.ResolveLowerPath(L"d");
+        const bool childFound = resolver.ResolvePath(L"d\\inner.txt").Found();
+
+        mgr.DetachVHD(vhd);
+        handle.Close();
+        CleanupWorkspace(root);
+
+        Assert::IsTrue(lowerDir.Found() && (lowerDir.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+            L"The FAT32 lower's directory must resolve through the lower lookup");
+        Assert::IsFalse(childFound,
+            L"The upper file must hide the children of the FAT32 lower's directory");
     }
 };
 

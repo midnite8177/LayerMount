@@ -312,6 +312,38 @@ public:
                             L"System must no longer list the deleted snapshot");
         });
     }
+
+    TEST_METHOD(ResolvePath_FileInSnapshotLowerOverDeeperLowerDirectory_HidesDeeperChildren) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"d", "snapshot");
+        env.WriteFile(env.Lower(1), L"d\\inner.txt", "deeper");
+        RunOnComFreeThread([&env] {
+            ComInit com;
+            Assert::IsTrue(com.Initialized(), L"COM must initialize on a fresh thread");
+
+            LayerMount::VSS::VSSManager mgr;
+            std::wstring snapId;
+            std::wstring devicePath;
+            VSS_SKIP_OR_FAIL_ON_FAILURE(
+                mgr.CreateSnapshot(TempVolumePath(), /*persistent*/ false, snapId, devicePath),
+                L"VSS CreateSnapshot");
+
+            auto config = env.MakeConfig();
+            config.lowerPaths[0] = devicePath + env.Lower(0).substr(2);
+            ::LayerMount::Cache cache;
+            ::LayerMount::WhiteoutManager wm(config, &cache);
+            ::LayerMount::PathResolver resolver(config, wm, cache);
+            const ::LayerMount::ResolvedPath file = resolver.ResolvePath(L"d");
+            const bool childFound = resolver.ResolvePath(L"d\\inner.txt").Found();
+
+            Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.CleanupNonPersistent());
+            Assert::IsTrue(file.Found() && file.lowerIndex == 0,
+                L"The snapshot lower's file must resolve");
+            Assert::IsFalse(childFound,
+                L"The file in the snapshot lower must hide the children of the deeper lower's directory");
+        });
+    }
 };
 
 } // namespace LayerMountTests

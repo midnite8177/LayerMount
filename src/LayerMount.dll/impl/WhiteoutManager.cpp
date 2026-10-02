@@ -276,13 +276,4 @@ bool WhiteoutManager::HasWhitedOutAncestorInLayer(const std::wstring& relativePa
     return false;
 }
 
-std::wstring JoinLayerScanPath(const std::wstring& layerPath,
-                               const std::wstring& dirRelativePath) {
-    const std::wstring layerDir =
-        !layerPath.empty() && layerPath.back() == L'\\' ? layerPath : layerPath + L"\\";
-    return dirRelativePath.empty()
-        ? layerDir + L"*"
-        : layerDir + dirRelativePath + L"\\*";
-}
-
 }

@@ -29,8 +29,49 @@ public:
             L"The create must remove the whiteout");
         Assert::AreEqual(UINT64{0}, FileSizeThroughMount(mount, L"d"),
             L"The mount must show the new empty file");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\inner.txt"),
+            L"The new file must hide the children of the deleted lower directory");
         Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"d\\inner.txt"),
             L"The create must leave the lower directory's child as it was");
+    }
+
+    TEST_METHOD(FileCreatedOverWhitedOutLowerDirectory_HidesChildrenFromDeleteRenameAndListing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\inner.txt", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"d"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d", kNoCreateOptions),
+            L"A file create-new over a whited-out lower directory must succeed");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, mount.Delete(L"d\\inner.txt", kNoCallerPid),
+            L"A delete must not find a child of the deleted lower directory");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND,
+            mount.Rename(L"d\\inner.txt", L"moved.txt", kFailIfExists, kNoCallerPid),
+            L"A rename must not find a child of the deleted lower directory");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"d").entries.empty(),
+            L"A listing at the new file must show no child of the deleted lower directory");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"d\\inner.txt"),
+            L"The delete and the rename must leave the lower child as it was");
+    }
+
+    TEST_METHOD(Delete_FileCreatedOverWhitedOutLowerDirectory_WritesWhiteoutBack) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\inner.txt", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"d"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d", kNoCreateOptions),
+            L"A file create-new over a whited-out lower directory must succeed");
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"d", kNoCallerPid),
+            L"The delete of the new upper file must succeed");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"d"),
+            L"The delete must remove the upper file");
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
+            L"The delete must write a whiteout, because the lower still holds the directory");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d"),
+            L"After the delete the mount must hide the lower directory");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\inner.txt"),
+            L"After the delete the mount must hide the lower directory's child");
     }
 
     TEST_METHOD(CreateDirectory_OverWhitedOutLowerFile_IsNotOpaque) {

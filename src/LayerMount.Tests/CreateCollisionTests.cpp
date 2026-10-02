@@ -156,6 +156,8 @@ public:
             L"The stream create must write an empty host file in the upper");
         Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
             L"The stream create must remove the whiteout");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\f.txt"),
+            L"The host file must hide the children of the deleted lower directory");
     }
 
     TEST_METHOD(CreateStream_ExistingStreamOnLowerOnlyFile_CollidesAndWritesNothing) {

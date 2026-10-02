@@ -280,8 +280,10 @@ or rename it. See "Path safety guards". Directory merging in
 
 1. Enumerates upper. For each `.wh.<name>` it sees, it strips the prefix
    and adds `<name>` to a `whitedOutNames` set, then *skips* the marker
-   itself. An upper that has no directory at the path, or has a file
-   there, adds nothing, and the merge goes on to the lowers. A scan that
+   itself. An upper that has no directory at the path adds nothing, and
+   the merge goes on to the lowers. An upper that has a file at the path,
+   or at an ancestor's path, adds nothing and stops the merge before the
+   lowers, because the file hides everything under its path. A scan that
    fails in any other way, at the first read or mid-stream, adds nothing
    from the upper and stops the merge before the lowers, because a
    whiteout that the scan did not read can hide a lower's entry. The
@@ -289,8 +291,9 @@ or rename it. See "Path safety guards". Directory merging in
 2. For each lower, it enumerates the directory once. It adds the names
    that the lower's whiteouts hide to the same set, and it holds the
    lower's entries back until the scan ends. A lower that has no
-   directory at the path, or has a file there, adds nothing, and the
-   merge goes on to the next lower. A scan that fails in any other way,
+   directory at the path adds nothing, and the merge goes on to the next
+   lower. A lower that has a file at the path, or at an ancestor's path,
+   adds nothing and stops the merge. A scan that fails in any other way,
    at the first read or mid-stream, stops the merge, because a whiteout
    that the scan did not read can hide an entry in a deeper lower. The
    merge then returns the scan's status and no entries, not the entries
@@ -338,11 +341,19 @@ algorithm (in `impl/PathResolver.cpp`):
     descendant as whited-out as well.
 6.  If any ancestor in upper is opaque, return not-found
     (the ancestor's opacity hides the lower content).
+6a. If any ancestor in upper is a file, return not-found. The file
+    hides the lower content under its path. An ancestor whose
+    attributes the engine cannot read, for a reason other than a
+    missing path, also hides it. A step-4 probe that missed with
+    ERROR_FILE_NOT_FOUND skips this check, because that error means
+    the parent exists as a directory.
 7.  For each lower in priority order:
       a. Whiteout in this lower => stop iterating.
       b. Whitedout ancestor in this lower => stop iterating.
       c. Probe this lower; on hit, capture and break.
       d. Opaque ancestor in this lower => stop after this lower.
+      e. File ancestor, or unreadable ancestor, in this lower => stop
+         after this lower.
 8.  If a lower hit was captured, scan the deeper lowers that stay
     visible for type conflicts (file vs. directory) and log via
     OutputDebugStringW (the resolved entry still wins; the log is
@@ -351,7 +362,7 @@ algorithm (in `impl/PathResolver.cpp`):
 ```
 
 `ResolveLowerPath` does not probe the upper. It runs steps 2, 2b, 2c,
-2d, 5a and 7 only, it does not use the cache, and an empty path is not
+2d, 5a, 6a and 7 only, it does not use the cache, and an empty path is not
 found. Create, delete, copy-up and rename use it when the engine needs
 the *lower* state independent of any upper shadow.
 

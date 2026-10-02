@@ -62,10 +62,8 @@ public:
     bool SetOpaque(const std::wstring& dirRelativePath);
     bool RemoveOpaque(const std::wstring& dirRelativePath);
 
-    // Walk ancestors upward; return true if any ancestor is opaque in upper layer
     bool HasOpaqueAncestor(const std::wstring& relativePath) const;
 
-    // Walk ancestors upward; return true if any ancestor is opaque in a specific layer
     bool HasOpaqueAncestorInLayer(const std::wstring& relativePath,
                                   const std::wstring& layerPath) const;
 
@@ -74,8 +72,7 @@ public:
 
     // Walk ancestors upward; return true if any ancestor has a whiteout marker in
     // the given layer. A whiteout at a directory path hides every descendant from
-    // that layer downward — callers in the resolver use this to stop surfacing
-    // lower-layer content beneath a deleted directory.
+    // that layer downward.
     bool HasWhitedOutAncestorInLayer(const std::wstring& relativePath,
                                      const std::wstring& layerPath) const;
 
@@ -92,12 +89,4 @@ private:
     ::LayerMount::abi::EventEmitter* events_ = nullptr;
 };
 
-// Returns the FindFirstFileW search pattern for dirRelativePath in the
-// layer at layerPath. The pattern never holds a doubled separator, because
-// FindFirstFileW refuses one in an extended-form (\\?\) path, though a plain
-// path accepts one. A layerPath that ends in a separator, such as a drive
-// root or a shadow-copy device root, gets no second one.
-std::wstring JoinLayerScanPath(const std::wstring& layerPath,
-                               const std::wstring& dirRelativePath);
-
-} // namespace LayerMount
+}

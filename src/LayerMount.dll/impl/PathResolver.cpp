@@ -2,6 +2,7 @@
 #include "WhiteoutManager.h"
 #include "MetadataADS.h"
 #include "Cache.h"
+#include "LayerPath.h"
 
 namespace LayerMount {
 
@@ -13,6 +14,26 @@ bool IsResolvablePath(const std::wstring& normalized) {
 
 bool IsDirectory(DWORD attributes) {
     return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::wstring ParentDir(const std::wstring& normalized) {
+    return std::filesystem::path(normalized).parent_path().wstring();
+}
+
+// Whether the lowers below the layer can hold the path after the layer's
+// probe of it missed with probeError. A miss with ERROR_FILE_NOT_FOUND
+// reached the parent directory (NTFS: a non-directory component gives
+// ERROR_PATH_NOT_FOUND).
+LowerVisibility LowersBelowMiss(const WhiteoutManager& whiteoutMgr,
+                                const std::wstring& layerPath,
+                                const std::wstring& normalized,
+                                DWORD probeError) {
+    const std::wstring parent = ParentDir(normalized);
+    // A top-level path has no ancestor directory in the layer to hide it.
+    if (parent.empty()) return LowerVisibility::Visible;
+    const DirectoryProbe parentProbe =
+        probeError == ERROR_FILE_NOT_FOUND ? DirectoryProbe::Found : DirectoryProbe::Missed;
+    return LowersBelow(LayerDirectory{whiteoutMgr, layerPath, parent}, parentProbe);
 }
 
 }
@@ -58,6 +79,7 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
 
     std::wstring upperFullPath = config_.upperPath + L"\\" + normalized;
     DWORD upperAttrs = GetFileAttributesW(upperFullPath.c_str());
+    const DWORD upperProbeError = ::GetLastError();
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
         LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(upperFullPath, &config_);
         if (!metadata.redirect.empty()) {
@@ -75,20 +97,25 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         return result;
     }
 
-    // A whiteout for the path or for an ancestor in the upper hides the path
-    // in every lower.
-    if (whiteoutMgr_.HasWhiteout(normalized, config_.upperPath) ||
-        whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
+    switch (HidingInUpper(normalized, upperProbeError)) {
+    case UpperHiding::Whiteout: {
         ResolvedPath whiteout;
         whiteout.isWhiteout = true;
         cache_.Put(normalized, whiteout);
         return whiteout;
     }
-
-    if (whiteoutMgr_.HasOpaqueAncestor(normalized)) {
+    case UpperHiding::NonDirectory:
+        if (lowerWalk != nullptr) {
+            *lowerWalk = ResolvedPath{};
+        }
+        [[fallthrough]];
+    case UpperHiding::OpaqueMarker: {
         ResolvedPath notFound;
         cache_.Put(normalized, notFound);
         return notFound;
+    }
+    case UpperHiding::None:
+        break;
     }
 
     const ResolvedPath lowerResult = FindInLowers(normalized, 0);
@@ -102,6 +129,23 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
     LogTypeConflictInDeeperLowers(normalized, lowerResult);
     cache_.Put(normalized, lowerResult);
     return lowerResult;
+}
+
+PathResolver::UpperHiding PathResolver::HidingInUpper(const std::wstring& normalized,
+                                                     DWORD upperProbeError) const {
+    if (whiteoutMgr_.HasWhiteout(normalized, config_.upperPath) ||
+        whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
+        return UpperHiding::Whiteout;
+    }
+    switch (LowersBelowMiss(whiteoutMgr_, config_.upperPath, normalized, upperProbeError)) {
+    case LowerVisibility::HiddenByOpaqueMarker:
+        return UpperHiding::OpaqueMarker;
+    case LowerVisibility::HiddenByNonDirectory:
+        return UpperHiding::NonDirectory;
+    case LowerVisibility::Visible:
+        break;
+    }
+    return UpperHiding::None;
 }
 
 void PathResolver::LogTypeConflictInDeeperLowers(const std::wstring& normalized,
@@ -138,9 +182,8 @@ ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) co
         return {};
     }
 
-    // An upper-layer whiteout on any ancestor short-circuits lower iteration —
-    // the whole subtree is logically deleted from the overlay.
-    if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
+    if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath) ||
+        HasNonDirectorySelfOrAncestorInLayer(ParentDir(normalized), config_.upperPath)) {
         return {};
     }
 
@@ -171,6 +214,7 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
 
         std::wstring fullPath = lowerPath + L"\\" + normalized;
         DWORD attrs = GetFileAttributesW(fullPath.c_str());
+        const DWORD probeError = ::GetLastError();
         if (attrs != INVALID_FILE_ATTRIBUTES) {
             return ResolvedPath{
                 fullPath,
@@ -181,9 +225,8 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
             };
         }
 
-        // This check must follow the probe. Before the probe, it hides the
-        // entries of the lower that holds the opaque marker.
-        if (whiteoutMgr_.HasOpaqueAncestorInLayer(normalized, lowerPath)) {
+        if (LowersBelowMiss(whiteoutMgr_, lowerPath, normalized, probeError) !=
+            LowerVisibility::Visible) {
             break;
         }
     }
@@ -235,4 +278,4 @@ bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
     return false;
 }
 
-} // namespace LayerMount
+}

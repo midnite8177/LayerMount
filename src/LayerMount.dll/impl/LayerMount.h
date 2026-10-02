@@ -78,8 +78,10 @@ struct CreateResolution {
     ResolvedPath overlayHit;
     // True when the upper holds a whiteout for exactly this path.
     bool whiteoutAtPath = false;
-    // The lower hit, as ResolveLowerPath returns it. A whiteout for exactly
-    // this path, or an opaque ancestor in the upper, does not hide it.
+    // The lower hit, as ResolveLowerPath returns it. An upper entry at this
+    // path, a whiteout for exactly this path, or an opaque ancestor in the
+    // upper does not hide it. A whiteout or a non-directory at an ancestor in
+    // the upper does.
     ResolvedPath lower;
 };
 

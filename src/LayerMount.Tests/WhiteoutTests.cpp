@@ -9,6 +9,7 @@
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
 using LayerMountTestShared::DirectoryListingDenied;
 using LayerMountTestShared::AssertListingDenied;
@@ -28,6 +29,12 @@ struct ResolverUnderTest {
     WhiteoutManager wm;
     PathResolver resolver;
 };
+
+DWORD AttributesProbeError(const std::wstring& path) {
+    return ::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES
+        ? ::GetLastError()
+        : ERROR_SUCCESS;
+}
 
 void AssertEveryListedEntryResolves(const TempLayerEnvironment& env,
                                     const std::wstring& dir,
@@ -236,6 +243,65 @@ public:
         Assert::IsTrue(result.source == LayerSource::Lower);
     }
 
+    TEST_METHOD(PathResolve_FileInUpperOverLowerDirectory_HidesLowerChildren) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\inner.txt", "lower");
+        env.WriteFile(env.Upper(), L"d", "upper");
+
+        ResolverUnderTest r(env);
+
+        const ResolvedPath child = r.resolver.ResolvePath(L"d\\inner.txt");
+        Assert::IsFalse(child.Found(), L"The upper file must hide the children of the lower directory");
+        Assert::IsFalse(child.isWhiteout, L"A path under an upper file is plain not-found, not a whiteout");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"d\\inner.txt").Found(),
+            L"The upper file must hide the children of the lower directory from the lower lookup");
+        const ResolvedPath lowerDir = r.resolver.ResolveLowerPath(L"d");
+        Assert::IsTrue(lowerDir.Found() && (lowerDir.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+            L"The lower lookup of the path itself must still find the lower directory");
+    }
+
+    TEST_METHOD(PathResolve_FileInLowerOverDeeperLowerDirectory_HidesDeeperChildren) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"d", "lower0");
+        env.WriteFile(env.Lower(1), L"d\\inner.txt", "lower1");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"d\\inner.txt").Found(),
+            L"The file in the higher lower must hide the children of the deeper lower's directory");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"d\\inner.txt").Found(),
+            L"The file in the higher lower must hide the children of the deeper lower's directory");
+    }
+
+    TEST_METHOD(PathResolve_DirectoryInUpperOverLowerFileOverDeeperDirectory_HidesDeeperChildren) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Upper(), L"d\\own.txt", "upper");
+        env.WriteFile(env.Lower(0), L"d", "lower0");
+        env.WriteFile(env.Lower(1), L"d\\inner.txt", "lower1");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsTrue(r.resolver.ResolvePath(L"d\\own.txt").Found(),
+            L"The upper directory's own child must resolve");
+        Assert::IsFalse(r.resolver.ResolvePath(L"d\\inner.txt").Found(),
+            L"The lower file must hide the children of the deeper lower's directory");
+    }
+
+    TEST_METHOD(PathResolve_UpperAncestorUnreadable_HidesLowerChild) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Upper(), L"a");
+        env.WriteFile(env.Lower(0), L"a\\b\\inner.txt", "lower");
+        DirectoryListingDenied rootListingDenied(env.Upper());
+        AccessDenied attributesDenied(env.Upper() + L"\\a", FILE_READ_ATTRIBUTES);
+        ResolverUnderTest r(env);
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, AttributesProbeError(env.Upper() + L"\\a"),
+            L"The deny ACEs must make the upper ancestor's attributes unreadable");
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"a\\b\\inner.txt").Found(),
+            L"An upper ancestor that the walk cannot read can be a file, so it must hide the lower child");
+    }
+
 };
 
 TEST_CLASS(WhiteoutDirectoryEnumerationTests) {
@@ -279,16 +345,51 @@ public:
             L"An unreadable upper can hold whiteouts, so a failed upper scan must give no entries");
     }
 
-    TEST_METHOD(MergeDirectoryEntries_FileInLowerAtListedDir_ShowsDeeperLowersEntries) {
+    TEST_METHOD(MergeDirectoryEntries_FileInLowerAtListedDir_HidesDeeperLowersEntries) {
         TempLayerEnvironment env(2);
         env.WriteFile(env.Lower(0), L"sub", "lower0");
         env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        auto merged = mount.MergeDirectoryEntries(L"sub").entries;
+        const MergedDirectory merged = mount.MergeDirectoryEntries(L"sub");
 
-        Assert::IsTrue(merged.count(L"below.txt") == 1,
-            L"A file in a lower where the listed directory should be must not hide the deeper lower's entry");
+        AssertStatus(STATUS_SUCCESS, merged.status, L"The merge must succeed");
+        Assert::IsTrue(merged.entries.count(L"below.txt") == 0,
+            L"A file in a lower where the listed directory should be must hide the deeper lower's entry");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_FileInUpperAtListedDirOrAncestor_ListsNoLowerEntries) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"d", "upper");
+        env.WriteFile(env.Lower(0), L"d\\inner.txt", "lower");
+        env.WriteFile(env.Lower(0), L"d\\sub\\deep.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        const MergedDirectory atDir = mount.MergeDirectoryEntries(L"d");
+        const MergedDirectory underDir = mount.MergeDirectoryEntries(L"d\\sub");
+
+        AssertStatus(STATUS_SUCCESS, atDir.status, L"The merge at the upper file must succeed");
+        Assert::IsTrue(atDir.entries.empty(),
+            L"An upper file at the listed directory must hide the lower directory's entries");
+        AssertStatus(STATUS_SUCCESS, underDir.status, L"The merge under the upper file must succeed");
+        Assert::IsTrue(underDir.entries.empty(),
+            L"An upper file at an ancestor of the listed directory must hide the lower entries");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_DirectoryInUpperOverLowerFileOverDeeperDirectory_ListsNoDeeperEntries) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Upper(), L"d\\own.txt", "upper");
+        env.WriteFile(env.Lower(0), L"d", "lower0");
+        env.WriteFile(env.Lower(1), L"d\\inner.txt", "lower1");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        const MergedDirectory merged = mount.MergeDirectoryEntries(L"d");
+
+        AssertStatus(STATUS_SUCCESS, merged.status, L"The merge must succeed");
+        Assert::IsTrue(merged.entries.count(L"own.txt") == 1, L"The merge must list the upper's entry");
+        Assert::IsTrue(merged.entries.count(L"inner.txt") == 0,
+            L"The lower file must hide the deeper lower directory's entries");
+        AssertEveryListedEntryResolves(env, L"d", merged.entries);
     }
 
     TEST_METHOD(MergeDirectoryEntries_WhiteoutsInLower_HideTheirNamesInDeeperLower) {
@@ -946,8 +1047,6 @@ public:
     TEST_CLASS_INITIALIZE(ClassInit) {
         AssertTempIsNTFS();
     }
-
-    static constexpr BOOLEAN kFailIfExists = FALSE;
 
     TEST_METHOD(Open_WhiteoutMarkerInUpper_IsNotFound) {
         TempLayerEnvironment env(1);
