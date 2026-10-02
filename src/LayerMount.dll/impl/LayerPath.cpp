@@ -42,6 +42,12 @@ std::wstring NormalizePathPreserveCase(const std::wstring& path) {
     return result;
 }
 
+bool IsInsideDirectory(std::wstring_view pathNorm, std::wstring_view dirNorm) {
+    return pathNorm.size() > dirNorm.size() &&
+           pathNorm.compare(0, dirNorm.size(), dirNorm) == 0 &&
+           pathNorm[dirNorm.size()] == L'\\';
+}
+
 std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
                                         const std::wstring& relativePath) {
     std::wstring preserved = NormalizePathPreserveCase(relativePath);

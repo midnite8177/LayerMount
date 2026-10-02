@@ -463,14 +463,16 @@ public:
     // whiteout at the old path when a lower still holds it. A rename to
     // the identical name succeeds and changes nothing.
     // replaceIfExists FALSE fails with STATUS_OBJECT_NAME_COLLISION when
-    // the destination already exists. A directory rename with
-    // replaceIfExists TRUE onto a directory fails with
-    // STATUS_DIRECTORY_NOT_EMPTY when the merged view shows a child of the
-    // destination. When it shows none, Rename moves the upper destination
-    // into the work directory before the move, puts it back when the move
-    // fails, and removes it when the move succeeds. The FileContext
-    // overload makes the destination checks before it closes ctx->handle,
-    // so a refused rename leaves the handle open.
+    // the destination already exists. Otherwise a directory rename to a
+    // path inside the directory's own tree fails with
+    // STATUS_INVALID_PARAMETER, even when the destination is a non-empty
+    // directory. A directory rename with replaceIfExists TRUE onto a
+    // directory fails with STATUS_DIRECTORY_NOT_EMPTY when the merged view
+    // shows a child of the destination. When it shows none, Rename moves
+    // the upper destination into the work directory before the move, puts
+    // it back when the move fails, and removes it when the move succeeds.
+    // The FileContext overload makes the destination checks before it
+    // closes ctx->handle, so a refused rename leaves the handle open.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
                     const std::wstring& newRelativePath,
                     BOOLEAN replaceIfExists,
@@ -693,17 +695,23 @@ private:
     // STATUS_SUCCESS otherwise.
     NTSTATUS DirectoryEmptinessStatus(const std::wstring& dirNorm) const;
 
+    // The source and destination paths of a rename, in NormalizePath form.
+    struct RenamePaths {
+        const std::wstring& oldNorm;
+        const std::wstring& newNorm;
+    };
+
     // The checks of a rename that need no lookup of the source or the
     // destination: stream names, reserved paths and the access tracker.
-    NTSTATUS CheckRenameRequest(const std::wstring& oldNorm,
-                                const std::wstring& newNorm,
-                                DWORD callerPid);
+    NTSTATUS CheckRenameRequest(const RenamePaths& paths, DWORD callerPid);
 
-    // The merged-view checks of a rename destination. Returns
-    // STATUS_OBJECT_NAME_COLLISION when replaceIfExists is FALSE and the
-    // destination exists, and DirectoryEmptinessStatus for a directory
+    // The merged-view checks of a rename destination, in the order that
+    // overlayfs uses. Returns STATUS_OBJECT_NAME_COLLISION when
+    // replaceIfExists is FALSE and the destination exists, then
+    // STATUS_INVALID_PARAMETER for a directory whose destination lies
+    // inside its own tree, then DirectoryEmptinessStatus for a directory
     // onto a directory. Changes nothing.
-    NTSTATUS CheckRenameDestination(const std::wstring& newNorm,
+    NTSTATUS CheckRenameDestination(const RenamePaths& paths,
                                     bool isDirectory,
                                     BOOLEAN replaceIfExists) const;
 

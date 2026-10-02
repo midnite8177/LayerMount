@@ -526,7 +526,7 @@ are copied up on demand.
 
 Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.
-The engine handles five cases:
+The engine handles six cases:
 
 - **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
   if present. When a lower layer has an entry at the destination path,
@@ -552,6 +552,14 @@ The engine handles five cases:
 - **rename to a destination that already exists in the merged view
   (with replace=false)**: the engine rejects the rename with
   `STATUS_OBJECT_NAME_COLLISION` before any side effects.
+- **rename to a path inside the source directory's own tree**
+  (`a` to `a\b` or `a\new\b`): the engine rejects the rename with
+  `STATUS_INVALID_PARAMETER` before any side effects, as NTFS does. The
+  collision check above runs first, so replace=false onto an existing
+  `a\b` still returns `STATUS_OBJECT_NAME_COLLISION`. Replace=true onto
+  a non-empty `a\b` returns `STATUS_INVALID_PARAMETER`, not
+  `STATUS_DIRECTORY_NOT_EMPTY`. A file source gets no such check. A file
+  `a` renamed to `a\b` fails with `STATUS_OBJECT_PATH_NOT_FOUND`.
 
 Recursive copy-up is expensive and is the main reason single-file
 metacopy exists; the engine cannot apply the same trick to directories

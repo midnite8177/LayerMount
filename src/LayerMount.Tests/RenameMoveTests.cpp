@@ -531,6 +531,20 @@ std::vector<std::wstring> EntriesUnder(const std::wstring& root) {
     return entries;
 }
 
+class LayerSnapshot {
+public:
+    explicit LayerSnapshot(const std::wstring& root)
+        : root_(root), entries_(EntriesUnder(root)) {}
+
+    void AssertUnchanged(const wchar_t* message) const {
+        Assert::IsTrue(entries_ == EntriesUnder(root_), message);
+    }
+
+private:
+    std::wstring root_;
+    std::vector<std::wstring> entries_;
+};
+
 enum class LowerChildHiding {
     Whiteout,
     OpaqueMarker,
@@ -668,13 +682,12 @@ public:
         env.WriteFile(env.Lower(0), L"b.txt", "y");
         env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
             L"A rename into a whited-out directory must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(Rename_LowerFileUnderLowerFile_FailsAndWritesNothing) {
@@ -682,13 +695,12 @@ public:
         env.WriteFile(env.Lower(0), L"Foo", "x");
         env.WriteFile(env.Lower(0), L"b.txt", "y");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
             L"A rename to a path under a lower file must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(Rename_LowerDirectoryUnderLowerFile_FailsAndWritesNothing) {
@@ -696,13 +708,12 @@ public:
         env.WriteFile(env.Lower(0), L"Foo", "x");
         env.WriteFile(env.Lower(0), L"x\\a.txt", "y");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"x", L"foo\\x", kFailIfExists, kNoCallerPid),
             L"A rename of a directory to a path under a lower file must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(Rename_LowerFileUnderWhitedOutLowerFile_FailsAndWritesNothing) {
@@ -711,13 +722,12 @@ public:
         env.WriteFile(env.Lower(0), L"b.txt", "y");
         env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
             L"A rename to a path under a whited-out lower file must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(Rename_LowerDirectoryIntoDirectoryHiddenByOpaqueAncestor_FailsAndWritesNothing) {
@@ -726,13 +736,12 @@ public:
         env.WriteFile(env.Lower(0), L"x\\b.txt", "y");
         env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"x", L"d\\sub\\x", kFailIfExists, kNoCallerPid),
             L"A rename into a directory that an opaque ancestor hides must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(Rename_UpperDirectoryIntoLowerOnlyParent_CopiesTheParentUpInTheLowersCase) {
@@ -766,13 +775,12 @@ public:
         env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
         env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"bar", L"foo\\bar", kFailIfExists, kNoCallerPid),
             L"A rename into a whited-out directory must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(Rename_UpperDirectoryIntoDirectoryHiddenByOpaqueAncestor_FailsAndWritesNothing) {
@@ -781,13 +789,12 @@ public:
         env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
         env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"bar", L"d\\sub\\bar", kFailIfExists, kNoCallerPid),
             L"A rename into a directory that an opaque ancestor hides must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(Rename_UpperDirectoryUnderLowerFile_FailsAndWritesNothing) {
@@ -795,13 +802,12 @@ public:
         env.WriteFile(env.Lower(0), L"Foo", "x");
         env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"bar", L"foo\\bar", kFailIfExists, kNoCallerPid),
             L"A rename of a directory to a path under a lower file must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed rename must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
     TEST_METHOD(CaseOnlyRename_LowerJunctionWithoutReparseSupport_CopiesTheTargetTreeUp) {
@@ -835,7 +841,7 @@ public:
         env.CreateDir(env.Lower(0), L"Foo");
         env.WriteFile(env.Lower(0), L"Bar.txt", "x");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
             AssertStatus(STATUS_SUCCESS, mount.Rename(L"Foo", L"Foo", replace, kNoCallerPid),
@@ -844,8 +850,7 @@ public:
                 L"The rename of Bar.txt to Bar.txt must succeed");
         }
 
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"A rename to the same name must not copy up or write a whiteout");
+        upperBefore.AssertUnchanged(L"A rename to the same name must not copy up or write a whiteout");
     }
 
     TEST_METHOD(RenameOpenFile_LowerFileToItsOwnName_KeepsReadingTheFile) {
@@ -889,13 +894,12 @@ public:
             env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
             env.WriteFile(env.Upper(), L"dst\\extra.txt", "extra");
             ::LayerMount::LayerMount mount(env.MakeConfig());
-            const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+            const LayerSnapshot upperBefore(env.Upper());
 
             AssertStatus(STATUS_DIRECTORY_NOT_EMPTY,
                 mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
                 L"A replace rename onto a directory with an upper child must fail");
-            Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-                L"The failed rename must write nothing in the upper");
+            upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
             AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
             AssertOnlyEntryShownAs(mount, L"dst", L"extra.txt");
         }
@@ -907,13 +911,12 @@ public:
             env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
             env.WriteFile(env.Lower(0), L"dst\\extra.txt", "extra");
             ::LayerMount::LayerMount mount(env.MakeConfig());
-            const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+            const LayerSnapshot upperBefore(env.Upper());
 
             AssertStatus(STATUS_DIRECTORY_NOT_EMPTY,
                 mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
                 L"A replace rename onto a directory with a lower child must fail");
-            Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-                L"The failed rename must write nothing in the upper");
+            upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
             AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
             AssertOnlyEntryShownAs(mount, L"dst", L"extra.txt");
         }
@@ -987,6 +990,119 @@ public:
             L"A replace rename of an open directory onto a directory with a child must fail");
         Assert::IsTrue(handleWorks, L"The refused rename must leave the handle open");
         Assert::IsFalse(needsReopen, L"The refused rename must not mark the handle for a reopen");
+    }
+
+    TEST_METHOD(RenameDirectory_IntoItsOwnTree_FailsAndChangesNothing) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            for (const bool withUpperChild : {false, true}) {
+                for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                    for (const std::wstring destination : {L"a\\b", L"A\\new\\b"}) {
+                        TempLayerEnvironment env(1);
+                        env.WriteFile(LayerRoot(env, sourceLayer), L"a\\x.txt", "x");
+                        if (withUpperChild) {
+                            env.WriteFile(env.Upper(), L"a\\up.txt", "up");
+                        }
+                        ::LayerMount::LayerMount mount(env.MakeConfig());
+                        const LayerSnapshot upperBefore(env.Upper());
+                        const LayerSnapshot lowerBefore(env.Lower(0));
+
+                        AssertStatus(STATUS_INVALID_PARAMETER,
+                            mount.Rename(L"a", destination, replace, kNoCallerPid),
+                            (L"The rename of a to " + destination + L" must fail").c_str());
+                        upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+                        lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+                        AssertOnlyEntryShownAs(mount, L"", L"a");
+                        AssertEntryShownAs(mount, L"a", L"x.txt", L"x.txt");
+                        if (withUpperChild) {
+                            AssertEntryShownAs(mount, L"a", L"up.txt", L"up.txt");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    TEST_METHOD(ReplaceRenameDirectory_OntoADirectoryInItsOwnTree_FailsAndKeepsIt) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            for (const bool destinationHasChild : {false, true}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(LayerRoot(env, sourceLayer), L"a\\x.txt", "x");
+                env.CreateDir(LayerRoot(env, sourceLayer), L"a\\b");
+                if (destinationHasChild) {
+                    env.WriteFile(LayerRoot(env, sourceLayer), L"a\\b\\c.txt", "c");
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot upperBefore(env.Upper());
+
+                AssertStatus(STATUS_INVALID_PARAMETER,
+                    mount.Rename(L"a", L"a\\b", kReplaceIfExists, kNoCallerPid),
+                    L"A replace rename of a onto a\\b must fail");
+                upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+                AssertOnlyEntryShownAs(mount, L"", L"a");
+                AssertEntryShownAs(mount, L"a", L"b", L"b");
+                AssertEntryShownAs(mount, L"a", L"x.txt", L"x.txt");
+            }
+        }
+    }
+
+    TEST_METHOD(RenameDirectory_OntoAnEntryInItsOwnTreeWithoutReplace_ReportsACollision) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(LayerRoot(env, sourceLayer), L"a\\b");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            const LayerSnapshot upperBefore(env.Upper());
+
+            AssertStatus(STATUS_OBJECT_NAME_COLLISION,
+                mount.Rename(L"a", L"a\\b", kFailIfExists, kNoCallerPid),
+                L"A rename of a onto an existing a\\b without replace must report a collision");
+            upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+        }
+    }
+
+    TEST_METHOD(RenameOpenDirectory_IntoItsOwnTree_FailsAndKeepsTheHandleOpen) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"a\\x.txt", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"a", FILE_LIST_DIRECTORY | DELETE,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The source directory must open");
+        const LayerSnapshot upperBefore(env.Upper());
+
+        const NTSTATUS status = mount.Rename(ctx.get(), L"a\\b", kReplaceIfExists, kNoCallerPid);
+        BY_HANDLE_FILE_INFORMATION handleInfo{};
+        const bool handleWorks = ctx->handle != INVALID_HANDLE_VALUE &&
+            ::GetFileInformationByHandle(ctx->handle, &handleInfo) != FALSE;
+        const bool needsReopen = ctx->handleNeedsReopen;
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_INVALID_PARAMETER, status,
+            L"A rename of an open directory into its own tree must fail");
+        Assert::IsTrue(handleWorks, L"The refused rename must leave the handle open");
+        Assert::IsFalse(needsReopen, L"The refused rename must not mark the handle for a reopen");
+        upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(RenameDirectory_ToANameThatStartsWithItsName_ListsTheNewName) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            AssertDirectoryRenameShowsNewName(sourceLayer, L"a", L"ab", kFailIfExists);
+        }
+    }
+
+    TEST_METHOD(RenameFile_ToAPathUnderItself_FailsWithPathNotFound) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"a", "x");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            const LayerSnapshot upperBefore(env.Upper());
+
+            AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+                mount.Rename(L"a", L"a\\b", kFailIfExists, kNoCallerPid),
+                L"A rename of a file to a path under itself must fail");
+            upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+            AssertRootShowsOnlyFileNamed(mount, L"a");
+        }
     }
 
     TEST_METHOD(ReplaceRename_UpperDirectoryThatCannotMove_KeepsTheDestination) {
@@ -1133,13 +1249,12 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"Foo", "x");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             CreateThroughMount(mount, L"foo\\b.txt", kNoCreateOptions),
             L"A create under a lower file must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed create must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed create must write nothing in the upper");
         AssertRootShowsOnlyFileNamed(mount, L"Foo");
     }
 
@@ -1147,13 +1262,12 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"Foo", "x");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             CreateThroughMount(mount, L"foo\\bar\\b.txt", kNoCreateOptions),
             L"A create two levels under a lower file must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed create must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed create must write nothing in the upper");
         AssertRootShowsOnlyFileNamed(mount, L"Foo");
     }
 
@@ -1162,13 +1276,12 @@ public:
         env.WriteFile(env.Lower(0), L"Foo", "x");
         env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+        const LayerSnapshot upperBefore(env.Upper());
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             CreateThroughMount(mount, L"foo\\b.txt", kNoCreateOptions),
             L"A create under a whited-out lower file must fail");
-        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
-            L"The failed create must write nothing in the upper");
+        upperBefore.AssertUnchanged(L"The failed create must write nothing in the upper");
     }
 
     TEST_METHOD(Create_UnderParentInNoLayer_ListsTheParentInTheCallersCase) {

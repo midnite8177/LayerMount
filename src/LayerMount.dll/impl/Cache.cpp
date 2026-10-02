@@ -1,4 +1,5 @@
 #include "Cache.h"
+#include "LayerPath.h"
 
 #include <algorithm>
 #include <intrin.h>
@@ -70,14 +71,12 @@ void Cache::Put(const std::wstring& relativePath, const ResolvedPath& resolved) 
 
 void Cache::Invalidate(const std::wstring& relativePath) {
     std::wstring key = NormalizePath(relativePath);
-    std::wstring prefix = key + L"\\";
 
     std::unique_lock lock(mutex_);
     entries_.erase(key);
 
-    // Remove all descendants (prefix match)
     for (auto it = entries_.begin(); it != entries_.end(); ) {
-        if (it->first.compare(0, prefix.size(), prefix) == 0) {
+        if (IsInsideDirectory(it->first, key)) {
             it = entries_.erase(it);
         } else {
             ++it;
@@ -91,7 +90,6 @@ void Cache::Invalidate(const std::wstring& relativePath) {
 
 void Cache::InvalidateWithAncestors(const std::wstring& relativePath) {
     std::wstring key = NormalizePath(relativePath);
-    std::wstring descendantPrefix = key + L"\\";
 
     // Build the set of ancestor keys
     std::vector<std::wstring> ancestors;
@@ -111,15 +109,12 @@ void Cache::InvalidateWithAncestors(const std::wstring& relativePath) {
 
         bool shouldRemove = false;
 
-        // Exact match
         if (entryKey == key) {
             shouldRemove = true;
         }
-        // Descendant (starts with key\)
-        else if (entryKey.compare(0, descendantPrefix.size(), descendantPrefix) == 0) {
+        else if (IsInsideDirectory(entryKey, key)) {
             shouldRemove = true;
         }
-        // Ancestor match
         else {
             for (const auto& anc : ancestors) {
                 if (entryKey == anc) {

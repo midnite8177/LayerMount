@@ -2,6 +2,8 @@
 
 #include "LayerMount.h"
 
+#include <string_view>
+
 namespace LayerMount {
 
 class WhiteoutManager;
@@ -22,6 +24,12 @@ std::wstring JoinDirPath(const std::wstring& dirPath,
 // Returns path with backslash separators and no leading or trailing
 // separator. Unlike NormalizePath, it keeps the case of path.
 std::wstring NormalizePathPreserveCase(const std::wstring& path);
+
+// Whether pathNorm names an entry below dirNorm, at a separator boundary,
+// so "a\b" is inside "a" and "ab" is not. Both paths are in the same
+// NormalizePath or NormalizePathPreserveCase form. A path is not inside
+// itself, and an empty dirNorm holds nothing.
+bool IsInsideDirectory(std::wstring_view pathNorm, std::wstring_view dirNorm);
 
 // An empty or all-separator relativePath returns upperRoot. An entry
 // created at the result keeps the caller's case.
