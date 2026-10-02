@@ -2226,7 +2226,7 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
 
     if (isDirectory && isSameLogicalPath) {
         status = copyUp_->RenameDirectoryCase(CallerPath(oldRelativePath),
-                                              CallerPath(newRelativePath));
+                                              CallerPath(newRelativePath), kinds.source);
     } else if (isDirectory) {
         status = RenameDirectoryEntry(oldRelativePath, newRelativePath, kinds.source, route,
                                       replaceIfExists, destHadWhiteout);

@@ -133,8 +133,8 @@ public:
     // Copies the lower tree and the old upper shadow to the new upper path,
     // marks it opaque, and removes the old upper entry. The caller writes the
     // whiteout at the old path. sourceKind is Directory or Link. A Link
-    // source, when the upper supports reparse points, is copied as a link,
-    // without its upper shadow and without opacity.
+    // source is copied as a link, without its upper shadow and without
+    // opacity.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view. The new upper entry gets its
     // name in newCallerPath's case.
@@ -178,12 +178,12 @@ public:
     // place to newCallerPath's case. RenameLowerDirectory and
     // RenameUpperDirectory do not fit, because old and new name the same
     // entry, so they would copy the tree onto itself, delete it and white
-    // it out. The move needs no replace flag for the same reason. A lower
-    // junction or directory symlink, when the upper lacks reparse-point
-    // support, is copied up as a plain opaque directory holding its
-    // target's tree.
+    // it out. The move needs no replace flag for the same reason. sourceKind
+    // is Directory or Link. A lower Link source goes to the new name as a
+    // link, with no copy-up metadata and no opaque marker.
     NTSTATUS RenameDirectoryCase(const CallerPath& oldCallerPath,
-                                 const CallerPath& newCallerPath);
+                                 const CallerPath& newCallerPath,
+                                 RenameEntryKind sourceKind);
 
 private:
     bool DestinationExistsInMerged(const std::wstring& normalizedPath) const;

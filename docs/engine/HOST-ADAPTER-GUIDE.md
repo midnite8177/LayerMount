@@ -82,11 +82,11 @@ The filesystem host rejects it before the engine sees it.
 
 ## Capability bits and fallbacks
 
-`LM_HOST_CAPABILITIES` (LayerMount.h:132-140) is a bitfield a host
+`LM_HOST_CAPABILITIES` (LayerMount.h:132-144) is a bitfield a host
 adapter passes in `LM_CONFIG::hostCapabilities` (or to
 `LayerMountCreateTransient`) to declare what its target filesystem host
 and upper-layer file system actually support. Clearing a bit activates
-the fallback below it; a host adapter that wants full fidelity sets
+the fallback listed for it, where there is one; a host adapter that wants full fidelity sets
 every bit its target actually supports and no more.
 
 - `LM_CAP_ADS`. Without it, the metadata dispatcher stores copy-up and
@@ -102,23 +102,19 @@ every bit its target actually supports and no more.
   a copy-up of a sparse lower file. With it, the upper copy is sparse,
   or the copy-up fails with the volume's error. Without it, the upper
   copy is dense.
-- `LM_CAP_REPARSE_POINTS`. Without it, renaming a directory whose
-  source is a reparse point falls through to a full recursive copy that
-  copies the link target's contents into a regular directory. The data
-  survives; the link semantics do not. With the bit set, the same
-  rename takes a short-circuited copy-up that preserves the reparse
-  point instead. The engine emits one `LM_EVT_WARNING` for each rename
-  that takes the degraded path.
 - `LM_CAP_NTFS_ACLS`. Without it, a security read returns a synthetic
   security descriptor instead of one read from the upper, and a
   security write silently no-ops and returns success instead of
   failing. A create ignores the security descriptor it gets, and the
   new file or directory keeps the security it inherits from its parent.
-- `LM_CAP_MULTIPLE_STREAMS` and `LM_CAP_CASE_SENSITIVE`. A host adapter
-  clears either bit to declare the corresponding limitation. Neither
-  bit currently gates any engine fallback; clearing it records the
-  limitation for whatever reads `hostCapabilities` back, and nothing
-  more.
+- `LM_CAP_REPARSE_POINTS`, `LM_CAP_MULTIPLE_STREAMS` and
+  `LM_CAP_CASE_SENSITIVE`. A host adapter clears any of these bits to
+  declare the corresponding limitation. None of them gates an engine
+  fallback; clearing one records the limitation for whatever
+  reads `hostCapabilities` back, and nothing more. A rename of a lower
+  junction or directory symlink copies it up as a link with no opaque
+  marker, with or without `LM_CAP_REPARSE_POINTS`, as overlayfs copies
+  up a symlink.
 
 NTFS compression has no capability bit. A copy-up of a compressed lower
 file sets compression on the upper copy and ignores a refusal, on every
@@ -269,10 +265,10 @@ adapter must never call `LayerMountSetEventCallback(handle, NULL, ...)`
 from inside the callback itself. The drain would wait for a call that
 is waiting for it, which never resolves.
 
-The four event types (`LM_EVENT_TYPE`, LayerMount.h:151-156):
+The four event types (`LM_EVENT_TYPE`, LayerMount.h:154-159):
 
-- `LM_EVT_WARNING`. A non-fatal degradation, such as the reparse-point
-  fallback above.
+- `LM_EVT_WARNING`. Reserved for a non-fatal degradation. The engine
+  emits none.
 - `LM_EVT_COPY_UP`. A file or directory was copied up from a lower into
   the upper.
 - `LM_EVT_WHITEOUT_CREATED`. A whiteout marker was written.
@@ -318,7 +314,7 @@ A filesystem host callback surface is typically NTSTATUS-shaped, not
 HRESULT-shaped. `LayerMountHResultToNtStatus(hr, outStatus)`
 (`LayerMount.HResultToNtStatus`) converts any HRESULT the engine
 returns into the matching NTSTATUS using the engine's own internal
-table (LayerMount.h:571-588), so a host adapter bridging to that
+table (LayerMount.h:598-616), so a host adapter bridging to that
 surface calls this instead of maintaining a translation table of its
 own. It never fails. It always returns `S_OK` and writes `*outStatus`,
 except when `outStatus` is null, which returns `E_POINTER`.

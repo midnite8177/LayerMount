@@ -19,7 +19,6 @@ public:
     constexpr UINT32 Raw() const noexcept { return bits_; }
 
     constexpr bool HasAds() const noexcept              { return (bits_ & LM_CAP_ADS) != 0; }
-    constexpr bool HasReparsePoints() const noexcept    { return (bits_ & LM_CAP_REPARSE_POINTS) != 0; }
     constexpr bool HasSparseFiles() const noexcept      { return (bits_ & LM_CAP_SPARSE_FILES) != 0; }
     constexpr bool HasMultipleStreams() const noexcept  { return (bits_ & LM_CAP_MULTIPLE_STREAMS) != 0; }
     constexpr bool HasNtfsAcls() const noexcept         { return (bits_ & LM_CAP_NTFS_ACLS) != 0; }

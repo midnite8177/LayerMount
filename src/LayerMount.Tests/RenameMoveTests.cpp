@@ -635,6 +635,35 @@ void AssertListsOnlyTheLinkTarget(const ::LayerMount::LayerMount& mount, const s
         (L"The listing of '" + dir + L"' must hold the link target's directory").c_str());
 }
 
+constexpr UINT32 kCapabilitiesWithoutReparsePoints =
+    LM_CAP_ADS | LM_CAP_SPARSE_FILES | LM_CAP_MULTIPLE_STREAMS | LM_CAP_NTFS_ACLS;
+constexpr UINT32 kCapabilitiesWithReparsePoints =
+    kCapabilitiesWithoutReparsePoints | LM_CAP_REPARSE_POINTS;
+
+void AssertLowerLinkRenameCopiesTheLink(LinkCreator createLink, const std::wstring& oldName,
+                                        const std::wstring& newName,
+                                        UINT32 hostCapabilities) {
+    TempLayerEnvironment env(1);
+    env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+    const std::wstring target = env.Root() + L"\\target";
+    if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\" + oldName, target)) {
+        return;
+    }
+    LayerConfig config = env.MakeConfig();
+    config.hostCapabilities = hostCapabilities;
+    ::LayerMount::LayerMount mount(config);
+    const LayerSnapshot targetBefore(target);
+
+    AssertStatus(STATUS_SUCCESS, mount.Rename(oldName, newName, kFailIfExists, kNoCallerPid),
+        (L"The rename of " + oldName + L" to " + newName + L" must succeed").c_str());
+
+    Assert::IsTrue(HasAttribute(env.Upper() + L"\\" + newName, FILE_ATTRIBUTE_REPARSE_POINT),
+        (L"The upper " + newName + L" must be a link").c_str());
+    AssertNoOpaqueMarkerIn(target);
+    targetBefore.AssertUnchanged(L"The rename must not change the link target's entries");
+    AssertListedDirectoryWithChild(mount, newName, L"inside.txt");
+}
+
 // Denies FILE_ADD_FILE on the upper root and disables SE_BACKUP_NAME and
 // SE_RESTORE_NAME on the thread. A whiteout marker then cannot go into the
 // upper root, but a directory or a link can still move there. Declare it
@@ -920,30 +949,29 @@ public:
         upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
     }
 
-    TEST_METHOD(CaseOnlyRename_LowerJunctionWithoutReparseSupport_CopiesTheTargetTreeUp) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"target\\inside.txt", "inside");
-        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\Link",
-                                  env.Lower(0) + L"\\target")) {
-            return;
-        }
-        LayerConfig config = env.MakeConfig();
-        config.hostCapabilities = LM_CAP_ADS | LM_CAP_SPARSE_FILES | LM_CAP_MULTIPLE_STREAMS |
-                                  LM_CAP_NTFS_ACLS;
-        ::LayerMount::LayerMount mount(config);
+    TEST_METHOD(Rename_LowerJunctionWithoutReparseSupport_CopiesTheLinkWithoutAnOpaqueMarker) {
+        AssertLowerLinkRenameCopiesTheLink(
+            CreateDirectoryJunction, L"link", L"moved", kCapabilitiesWithoutReparsePoints);
+    }
 
-        AssertStatus(STATUS_SUCCESS, mount.Rename(L"Link", L"LINK", kFailIfExists, kNoCallerPid),
-            L"The rename of Link to LINK must succeed");
+    TEST_METHOD(Rename_LowerDirectorySymlinkWithoutReparseSupport_CopiesTheLinkWithoutAnOpaqueMarker) {
+        AssertLowerLinkRenameCopiesTheLink(
+            CreateDirectorySymlink, L"link", L"moved", kCapabilitiesWithoutReparsePoints);
+    }
 
-        const DWORD attrs = ::GetFileAttributesW((env.Upper() + L"\\LINK").c_str());
-        Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, attrs, L"The upper must hold LINK");
-        Assert::AreEqual<DWORD>(0, attrs & FILE_ATTRIBUTE_REPARSE_POINT,
-            L"An upper without reparse-point support must get a plain directory");
-        Assert::AreEqual(std::string("inside"), env.ReadFile(env.Upper(), L"LINK\\inside.txt"),
-            L"The upper directory must hold the junction target's files");
-        Assert::IsFalse(env.FileExists(env.Lower(0), L"target\\.wh..wh..opq"),
-            L"The rename must not write into the junction target in the lower");
-        AssertEntryShownAs(mount, L"", L"link", L"LINK");
+    TEST_METHOD(CaseOnlyRename_LowerJunctionWithoutReparseSupport_CopiesTheLinkWithoutAnOpaqueMarker) {
+        AssertLowerLinkRenameCopiesTheLink(
+            CreateDirectoryJunction, L"Link", L"LINK", kCapabilitiesWithoutReparsePoints);
+    }
+
+    TEST_METHOD(CaseOnlyRename_LowerDirectorySymlinkWithoutReparseSupport_CopiesTheLinkWithoutAnOpaqueMarker) {
+        AssertLowerLinkRenameCopiesTheLink(
+            CreateDirectorySymlink, L"Link", L"LINK", kCapabilitiesWithoutReparsePoints);
+    }
+
+    TEST_METHOD(CaseOnlyRename_LowerJunctionWithReparseSupport_CopiesTheLinkWithoutAnOpaqueMarker) {
+        AssertLowerLinkRenameCopiesTheLink(
+            CreateDirectoryJunction, L"Link", L"LINK", kCapabilitiesWithReparsePoints);
     }
 
     TEST_METHOD(Rename_LowerEntryToItsOwnName_LeavesTheUpperUntouched) {

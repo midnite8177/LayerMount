@@ -8,8 +8,8 @@ namespace LayerMount;
 /// <summary>
 /// Host-declared capabilities of the target file system and the upper
 /// layer, set on <see cref="LayerMountConfig.Capabilities"/>. Combine
-/// members with <c>|</c>. Clearing a bit turns on the fallback
-/// documented on that member.
+/// members with <c>|</c>. Clearing a bit declares the limitation. A
+/// member that gates a fallback documents it.
 /// </summary>
 [Flags]
 public enum HostCapabilities : uint
@@ -25,11 +25,10 @@ public enum HostCapabilities : uint
     Ads              = 0x00000001u,
 
     /// <summary>
-    /// Reparse points on the upper layer. Without it, renaming a
-    /// directory whose source is a reparse point falls through to a
-    /// full recursive copy. The data survives, but the link semantics
-    /// do not. With it, a short-circuited copy-up preserves the reparse
-    /// point.
+    /// Reparse points on the upper layer. Clearing it records the
+    /// limitation. It gates no engine fallback. A
+    /// rename of a lower junction or directory symlink copies it up as
+    /// a link either way.
     /// </summary>
     ReparsePoints    = 0x00000002u,
 
@@ -82,8 +81,7 @@ public enum LayerSource : uint
 public enum LayerMountEventType : uint
 {
     /// <summary>
-    /// A non-fatal degradation, such as the reparse-point capability
-    /// fallback.
+    /// Reserved for a non-fatal degradation. The engine emits none.
     /// </summary>
     Warning          = 0,
 

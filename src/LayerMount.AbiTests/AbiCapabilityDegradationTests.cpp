@@ -29,16 +29,17 @@ bool HasSidecarMetadataJson(const std::wstring& upperRoot) {
     return false;
 }
 
-// Try to open the :overlay ADS on a given upper-layer file. Returns true
-// when the stream exists (opened with CreateFileW), false otherwise.
-bool HasLayerMountAds(const std::wstring& upperFile) {
-    const std::wstring adsPath = upperFile + L":overlay";
-    HANDLE h = ::CreateFileW(adsPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+bool HasStream(const std::wstring& streamPath) {
+    HANDLE h = ::CreateFileW(streamPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                              nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     ::CloseHandle(h);
     return true;
+}
+
+bool HasLayerMountAds(const std::wstring& upperFile) {
+    return HasStream(upperFile + L":overlay");
 }
 
 struct EventSink {
@@ -114,22 +115,17 @@ public:
             L"Sidecar *.meta.json must NOT appear when LM_CAP_ADS is set");
     }
 
-    TEST_METHOD(ClearReparsePoints_RenameReparseSourceDirectory_FiresWarning) {
+    TEST_METHOD(ClearReparsePoints_RenameLowerJunction_CopiesTheLinkAndWritesNoOpaqueMarkerIntoItsTarget) {
         TempLayerEnv env(1);
-        // Seed lower with <target> dir containing a file + a <link> junction
-        // pointing at it.
-        const std::wstring lower  = env.Lower(0);
-        const std::wstring target = lower + L"\\target";
+        const std::wstring target = env.Root() + L"\\target";
         std::filesystem::create_directories(target);
         { std::ofstream f(target + L"\\inside.txt"); f << "inside-payload"; }
 
-        const std::wstring junction = lower + L"\\link";
-        if (!CreateDirectoryJunction(junction, target)) {
+        if (!CreateDirectoryJunction(env.Lower(0) + L"\\link", target)) {
             Logger::WriteMessage(L"Skipping: could not create junction (mklink failed)");
             return;
         }
 
-        // Capability: LM_CAP_REPARSE_POINTS cleared.
         const UINT32 caps = LM_CAP_ADS
                           | LM_CAP_SPARSE_FILES
                           | LM_CAP_MULTIPLE_STREAMS
@@ -143,27 +139,32 @@ public:
         constexpr BOOL replaceIfExists = FALSE;
         HRESULT hr = ::LayerMountRenameFile(
             mount.Get(), L"\\link", L"\\link-renamed", replaceIfExists);
-        // Clear callback before asserting (covers both success and failure).
+        // An assert that throws destroys sink before mount, so clear it first.
         (void)::LayerMountSetEventCallback(mount.Get(), nullptr, nullptr);
 
         Assert::AreEqual<HRESULT>(S_OK, hr,
-            L"Rename should succeed even when reparse caps are degraded");
+            L"The rename of a lower junction must succeed without reparse-point support");
 
-        // Assert the warning fired.
+        const DWORD attrs =
+            ::GetFileAttributesW((env.Upper() + L"\\link-renamed").c_str());
+        Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, attrs,
+            L"The upper must hold link-renamed");
+        Assert::AreNotEqual<DWORD>(0, attrs & FILE_ATTRIBUTE_REPARSE_POINT,
+            L"The upper link-renamed must be a link");
+        std::string payload;
+        { std::ifstream f(env.Upper() + L"\\link-renamed\\inside.txt"); std::getline(f, payload); }
+        Assert::AreEqual(std::string("inside-payload"), payload,
+            L"The upper link-renamed must point to the junction target");
+        Assert::IsFalse(std::filesystem::exists(target + L"\\.wh..wh..opq"),
+            L"The rename must write no opaque marker file into the junction target");
+        Assert::IsFalse(HasStream(target + L":overlay.opaque"),
+            L"The rename must write no opaque stream onto the junction target");
+
         std::lock_guard<std::mutex> lock(sink.mu);
-        bool sawWarning = false;
-        for (size_t i = 0; i < sink.types.size(); ++i) {
-            if (sink.types[i] == LM_EVT_WARNING &&
-                sink.messages[i].find(L"forced full recursive copy-up") !=
-                    std::wstring::npos) {
-                sawWarning = true;
-                break;
-            }
+        for (const LM_EVENT_TYPE type : sink.types) {
+            Assert::AreNotEqual<int>(LM_EVT_WARNING, type,
+                L"The rename must emit no warning");
         }
-        Assert::IsTrue(sawWarning,
-            L"LM_CAP_REPARSE_POINTS cleared + reparse-source rename must "
-            L"emit LM_EVT_WARNING with the 'forced full recursive copy-up' "
-            L"message");
     }
 };
 

@@ -83,7 +83,7 @@ lowers from layer images that already carry whiteouts.
 
 **No silent scope drop.** If a requested capability cannot be honored,
 the engine surfaces the failure (or, where the ABI documents a
-fallback, executes that fallback explicitly and emits an event). It
+fallback, executes that fallback explicitly). It
 does not silently downgrade. Examples:
 - A whiteout that cannot be persisted causes the surrounding `Delete` to
   fail, because returning success would let the lower entry resurface.
@@ -951,7 +951,8 @@ inversions. Unknown codes map to `STATUS_UNSUCCESSFUL`.
 `LayerMountSetEventCallback` installs a `LM_EVENT_CALLBACK` that the
 engine fans out for four event types:
 
-- `LM_EVT_WARNING` — non-fatal degradation.
+- `LM_EVT_WARNING` — reserved for a non-fatal degradation; the engine
+  emits none.
 - `LM_EVT_COPY_UP` — every successful copy-up commit.
 - `LM_EVT_WHITEOUT_CREATED` — every persisted whiteout marker.
 - `LM_EVT_ACCESS_DENIED` — every denied process-tracker decision.

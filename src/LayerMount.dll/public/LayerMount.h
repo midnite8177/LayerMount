@@ -130,8 +130,9 @@ typedef struct LM_IMAGE_HANDLE__*        LM_IMAGE_HANDLE;
  * ------------------------------------------------------------------------- */
 
 /* Host-declared capabilities. Bitfield -- combine with |.
- * Clearing a bit activates the documented capability fallback (see the
- * per-capability documentation below). */
+ * Clearing a bit declares the limitation. Clearing LM_CAP_ADS,
+ * LM_CAP_SPARSE_FILES or LM_CAP_NTFS_ACLS also activates a fallback.
+ * docs/engine/HOST-ADAPTER-GUIDE.md describes each bit. */
 typedef enum LM_HOST_CAPABILITIES {
     LM_CAP_NONE             = 0x00000000u,
     LM_CAP_ADS              = 0x00000001u,

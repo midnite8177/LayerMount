@@ -67,7 +67,7 @@ For the deeper engine architecture (path resolution, whiteouts, copy-up flavors,
 - **VHD / VHDX layers** — attach a virtual disk at mount time and use its volume GUID as a high-priority lower. See [docs/engine/LAYER-SOURCES.md](docs/engine/LAYER-SOURCES.md) for how to create, attach, list, and clean these up.
 - **VSS snapshot layers** — take a Volume Shadow Copy at mount time and use it as a read-only lower without holding open file handles. See [docs/engine/LAYER-SOURCES.md](docs/engine/LAYER-SOURCES.md) for how to create, list, and clean these up.
 - **`.lmnt` layer images** — pack a directory tree into a portable zstd-compressed image with a SHA-256 checksum in the header; supports differential packs against a base directory and multi-image manifests. See [docs/engine/LAYER-IMAGE-FORMAT.md](docs/engine/LAYER-IMAGE-FORMAT.md) for the byte-level format.
-- **Capability-gated fallbacks** — opt out of ADS, reparse points, sparse files, multiple streams, or NTFS ACLs and the engine routes around the missing feature instead of erroring.
+- **Capability-gated fallbacks** — opt out of ADS, sparse files, or NTFS ACLs and the engine routes around the missing feature instead of erroring.
 - **Reparse-point and ADS preservation** — both surface on copy-up.
 - **ACL preservation** — DACL on every copy-up; SACL too when the process holds `SE_SECURITY_NAME`.
 - **Per-process access tracking** — optional access log and JSON-rule-driven gating, keyed by `(pid, image path, creation time)`.

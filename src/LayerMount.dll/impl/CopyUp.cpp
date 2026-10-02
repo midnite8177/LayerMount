@@ -18,11 +18,6 @@
 
 namespace {
 
-constexpr const wchar_t* kReparseTreeCopyWarning =
-    L"Directory rename of a reparse-point source forced full "
-    L"recursive copy-up: upper layer lacks LM_CAP_REPARSE_POINTS, "
-    L"link semantics will not be preserved.";
-
 NTSTATUS RecordFillFailure(const std::wstring& relativePath, const wchar_t* stage,
                            NTSTATUS status) {
     wchar_t statusText[16] = {};
@@ -869,6 +864,19 @@ static NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
     return STATUS_SUCCESS;
 }
 
+// A link gets no opaque marker and no copy-up metadata, as overlayfs gives a
+// symlink no opaque xattr. The marker file, and a stream when the metadata
+// store uses ADS, would go through the link into its target.
+static NTSTATUS CopyLowerLinkWithoutOverlayMarkers(const ResolvedPath& source,
+                                                   const std::wstring& upperPath) {
+    const NTSTATUS status =
+        CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
+    if (!NT_SUCCESS(status)) {
+        ::RemoveDirectoryW(upperPath.c_str());
+    }
+    return status;
+}
+
 NTSTATUS CopyUp::WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
                                             const LayerMountMetadata& metadata) {
     if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
@@ -1531,11 +1539,8 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
         return destinationStatus;
     }
 
-    // Copy a link as a link and never make it opaque. SetOpaque would write
-    // its marker through the link into the external target.
-    if (sourceKind == RenameEntryKind::Link && capabilities_.HasReparsePoints()) {
-        NTSTATUS rpStatus = CopyUpReparsePointEntry(
-            source.absolutePath, newUpperPath, source.attributes);
+    if (sourceKind == RenameEntryKind::Link) {
+        NTSTATUS rpStatus = CopyLowerLinkWithoutOverlayMarkers(source, newUpperPath);
         if (!NT_SUCCESS(rpStatus)) {
             return rpStatus;
         }
@@ -1545,11 +1550,6 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
         cache_.InvalidateWithAncestors(oldNorm);
         cache_.InvalidateWithAncestors(newNorm);
         return STATUS_SUCCESS;
-    }
-
-    if (sourceKind == RenameEntryKind::Link && !capabilities_.HasReparsePoints() &&
-        events_ != nullptr) {
-        events_->Emit(LM_EVT_WARNING, S_OK, oldNorm.c_str(), kReparseTreeCopyWarning);
     }
 
     NTSTATUS copyStatus = CopyTreePreservingMetadata(
@@ -1707,28 +1707,22 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
 }
 
 NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
-                                     const CallerPath& newCallerPath) {
+                                     const CallerPath& newCallerPath,
+                                     RenameEntryKind sourceKind) {
     const std::wstring normalized = NormalizePath(oldCallerPath.Text());
     const std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(newCallerPath);
 
-    if (!pathResolver_.ExistsInUpper(normalized)) {
+    if (sourceKind == RenameEntryKind::Link && !pathResolver_.ExistsInUpper(normalized)) {
         const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
-        if (source.Found() && (source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
-            !capabilities_.HasReparsePoints()) {
+        if (source.Found()) {
             NTSTATUS status = EnsureUpperParent(NormalizePath(newCallerPath.Text()));
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            if (events_ != nullptr) {
-                events_->Emit(LM_EVT_WARNING, S_OK, normalized.c_str(), kReparseTreeCopyWarning);
-            }
-            status = CopyDirectoryTree(source.absolutePath, newUpperPath);
+            status = CopyLowerLinkWithoutOverlayMarkers(source, newUpperPath);
             if (!NT_SUCCESS(status)) {
-                std::error_code ec;
-                std::filesystem::remove_all(newUpperPath, ec);
                 return status;
             }
-            whiteoutMgr_.SetOpaque(normalized);
             cache_.InvalidateWithAncestors(normalized);
             return STATUS_SUCCESS;
         }
