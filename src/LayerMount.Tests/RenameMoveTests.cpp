@@ -285,28 +285,6 @@ public:
                          env.ReadFile(env.Upper(), L"renamed.bin"));
     }
 
-    TEST_METHOD(RenameCrossDir_NewParentMissing_ParentIsCreated) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"foo.txt", "payload");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-
-        Assert::IsTrue(NT_SUCCESS(
-            SimulateLowerFileRename(cu, resolver, wm, cache,
-                                    L"foo.txt", L"sub\\deeper\\moved.txt",
-                                    ReplaceExisting::No)));
-
-        Assert::IsTrue(env.FileExists(env.Upper(), L"sub\\deeper\\moved.txt"));
-        Assert::AreEqual(std::string("payload"),
-                         env.ReadFile(env.Upper(), L"sub\\deeper\\moved.txt"));
-        Assert::IsTrue(wm.HasWhiteout(L"foo.txt", env.Upper()));
-    }
-
     TEST_METHOD(RenameInsideOpaqueDir_SucceedsAndOpacityPreserved) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"box");
@@ -761,16 +739,30 @@ public:
         AssertUpperDirectoryCopiedUp(env, L"Foo");
     }
 
-    TEST_METHOD(Rename_LowerDirectoryIntoParentInNoLayer_ListsTheParentInTheCallersCase) {
+    TEST_METHOD(Rename_LowerDirectoryIntoParentInNoLayer_FailsAndWritesNothing) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"x\\a.txt", "x");
         ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
 
-        AssertStatus(STATUS_SUCCESS,
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"x", L"NewParent\\y", kFailIfExists, kNoCallerPid),
-            L"The rename of x to NewParent\\y must succeed");
-        AssertOnlyEntryShownAs(mount, L"", L"NewParent");
-        AssertOnlyEntryShownAs(mount, L"NewParent", L"y");
+            L"A rename into a parent in no layer must fail");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+        AssertOnlyEntryShownAs(mount, L"", L"x");
+    }
+
+    TEST_METHOD(Rename_LowerFileIntoParentInNoLayer_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"b.txt", "y");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"b.txt", L"NewParent\\b.txt", kFailIfExists, kNoCallerPid),
+            L"A rename of a file into a parent in no layer must fail");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+        AssertOnlyEntryShownAs(mount, L"", L"b.txt");
     }
 
     TEST_METHOD(Rename_LowerFileIntoWhitedOutLowerDirectory_FailsAndWritesNothing) {
@@ -874,16 +866,17 @@ public:
         targetBefore.AssertUnchanged(L"The failed rename must write nothing in the junction target");
     }
 
-    TEST_METHOD(Rename_UpperDirectoryIntoParentInNoLayer_ListsTheParentInTheCallersCase) {
+    TEST_METHOD(Rename_UpperDirectoryIntoParentInNoLayer_FailsAndWritesNothing) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
         ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
 
-        AssertStatus(STATUS_SUCCESS,
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"bar", L"NewParent\\bar", kFailIfExists, kNoCallerPid),
-            L"The rename of bar to NewParent\\bar must succeed");
-        AssertOnlyEntryShownAs(mount, L"", L"NewParent");
-        AssertOnlyEntryShownAs(mount, L"NewParent", L"bar");
+            L"A rename into a parent in no layer must fail");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+        AssertOnlyEntryShownAs(mount, L"", L"bar");
     }
 
     TEST_METHOD(Rename_UpperDirectoryIntoWhitedOutLowerDirectory_FailsAndWritesNothing) {
@@ -2207,15 +2200,27 @@ public:
         upperBefore.AssertUnchanged(L"The failed create must write nothing in the upper");
     }
 
-    TEST_METHOD(Create_UnderParentInNoLayer_ListsTheParentInTheCallersCase) {
+    TEST_METHOD(Create_UnderParentInNoLayer_FailsAndWritesNothing) {
         TempLayerEnvironment env(1);
         ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            CreateThroughMount(mount, L"NewParent\\b.txt", kNoCreateOptions),
+            L"A create under a parent in no layer must fail");
+        upperBefore.AssertUnchanged(L"The failed create must write nothing in the upper");
+    }
+
+    TEST_METHOD(Create_UnderParentCreatedThroughTheOverlay_Succeeds) {
+        TempLayerEnvironment env(1);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"NewParent", FILE_DIRECTORY_FILE),
+            L"The create of the directory NewParent must succeed");
 
         AssertStatus(STATUS_SUCCESS,
             CreateThroughMount(mount, L"NewParent\\b.txt", kNoCreateOptions),
-            L"A create under a parent in no layer must succeed");
-
-        AssertOnlyEntryShownAs(mount, L"", L"NewParent");
+            L"A create under a directory made through the overlay must succeed");
+        AssertOnlyEntryShownAs(mount, L"NewParent", L"b.txt");
     }
 
     TEST_METHOD(WriteOpen_UnderLowerDirectoryInAnUnlistableParent_CopiesUp) {

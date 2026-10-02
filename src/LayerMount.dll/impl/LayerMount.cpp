@@ -1280,7 +1280,7 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
     create.upperPath =
         pathResolver_->GetUpperPathForNewEntry(CallerPath(create.path.callerHost));
 
-    const NTSTATUS parentStatus = copyUp_->EnsureUpperParent(CallerPath(request.relativePath));
+    const NTSTATUS parentStatus = copyUp_->EnsureUpperParent(NormalizePath(request.relativePath));
     if (!NT_SUCCESS(parentStatus)) {
         return parentStatus;
     }
@@ -2074,8 +2074,8 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
     const std::wstring newNorm = NormalizePath(newRelativePath);
     const bool lowerHasSource = pathResolver_->ResolveLowerPath(oldNorm).Found();
 
-    // Before CopyUpFile, so a rename into a hidden parent fails without copying the source up.
-    NTSTATUS status = copyUp_->EnsureUpperParent(CallerPath(newRelativePath));
+    // Before CopyUpFile, so a refused parent leaves the upper unchanged.
+    NTSTATUS status = copyUp_->EnsureUpperParent(newNorm);
     if (!NT_SUCCESS(status)) return status;
 
     if (!pathResolver_->ExistsInUpper(oldNorm)) {

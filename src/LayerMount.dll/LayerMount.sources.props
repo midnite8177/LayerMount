@@ -69,7 +69,6 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\PathResolver.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\ProcessTracker.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\SecurityPolicy.h" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)impl\UpperParent.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\Cache.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\CopyUp.cpp" />
@@ -80,7 +79,6 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\PathResolver.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\ProcessTracker.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\SecurityPolicy.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)impl\UpperParent.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.cpp" />
   </ItemGroup>
 

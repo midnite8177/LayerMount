@@ -688,11 +688,7 @@ CopyUp::CopyUp(ConfigRef config,
     , pathResolver_(pathResolver)
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache)
-    , stats_(stats)
-    , upperParent_(pathResolver, cache,
-                   [this](const std::wstring& normalizedPath) {
-                       return CopyUpDirectory(normalizedPath);
-                   }) {
+    , stats_(stats) {
     EnableFileSystemPrivileges();
 }
 
@@ -1016,7 +1012,7 @@ NTSTATUS CopyUp::PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarge
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    const NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
+    const NTSTATUS status = EnsureUpperParent(normalized);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1468,11 +1464,11 @@ bool CopyUp::DestinationExistsInMerged(const std::wstring& normalizedPath) const
 
 NTSTATUS CopyUp::PrepareRenameDestination(const CallerPath& newCallerPath,
                                           ReplaceExisting replace) {
-    if (replace == ReplaceExisting::No &&
-        DestinationExistsInMerged(NormalizePath(newCallerPath.Text()))) {
+    const std::wstring newNormalized = NormalizePath(newCallerPath.Text());
+    if (replace == ReplaceExisting::No && DestinationExistsInMerged(newNormalized)) {
         return STATUS_OBJECT_NAME_COLLISION;
     }
-    return upperParent_.Ensure(newCallerPath);
+    return EnsureUpperParent(newNormalized);
 }
 
 NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
@@ -1719,7 +1715,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
         const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
         if (source.Found() && (source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
             !capabilities_.HasReparsePoints()) {
-            NTSTATUS status = upperParent_.Ensure(newCallerPath);
+            NTSTATUS status = EnsureUpperParent(NormalizePath(newCallerPath.Text()));
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -2131,8 +2127,22 @@ NTSTATUS CopyUp::CopyDirectoryTree(const std::wstring& srcAbs,
     return walkStatus;
 }
 
-NTSTATUS CopyUp::EnsureUpperParent(const CallerPath& callerPath) {
-    return upperParent_.Ensure(callerPath);
+NTSTATUS CopyUp::EnsureUpperParent(const std::wstring& normalizedPath) {
+    const size_t separator = normalizedPath.find_last_of(L'\\');
+    if (separator == std::wstring::npos) {
+        return STATUS_SUCCESS;
+    }
+    const std::wstring parent = normalizedPath.substr(0, separator);
+    if (pathResolver_.ExistsInUpper(parent)) {
+        return STATUS_SUCCESS;
+    }
+
+    const ResolvedPath shown = pathResolver_.ResolvePath(parent);
+    if (!shown.Found() || shown.source != LayerSource::Lower ||
+        (shown.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return STATUS_OBJECT_PATH_NOT_FOUND;
+    }
+    return CopyUpDirectory(parent);
 }
 
 bool CopyUp::CopySecurityDescriptor(const std::wstring& srcPath,

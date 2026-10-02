@@ -186,16 +186,6 @@ ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) co
     return FindInLowers(*normalized, 0);
 }
 
-bool PathResolver::IsLowerEntryHiddenByWhiteoutOrOpaqueAncestor(const std::wstring& relativePath) const {
-    const std::optional<std::wstring> normalized = ResolvableNormalized(relativePath);
-    if (!normalized.has_value()) {
-        return false;
-    }
-    const UpperHiding hiding = HidingInUpper(*normalized);
-    const bool hiddenByMarker = hiding == UpperHiding::Whiteout || hiding == UpperHiding::OpaqueMarker;
-    return hiddenByMarker && FindInLowers(*normalized, 0).Found();
-}
-
 CreateResolution PathResolver::ResolveForCreate(const std::wstring& relativePath) const {
     const std::wstring normalized = NormalizePath(relativePath);
     std::optional<ResolvedPath> lowerWalk;

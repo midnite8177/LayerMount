@@ -420,10 +420,7 @@ algorithm (in `impl/PathResolver.cpp`):
 steps 2, 2b, 2c, 2d, 5a, 6, 6a and 7 only, it does not use the cache, and an
 empty path is not found. Create, delete, copy-up and rename use it when the
 engine needs the *lower* state independent of an upper entry at the path
-itself. `IsLowerEntryHiddenByWhiteoutOrOpaqueAncestor` is true when a lower
-holds the path but a whiteout or an opaque ancestor in the upper hides it.
-`UpperParent::Ensure` uses it to refuse a parent that the overlay does not
-show.
+itself.
 
 The redirect step (4) is the metacopy mechanism. After a `Rename` of an
 entry that lived in a lower layer, the engine writes a metacopy stub

@@ -22,12 +22,6 @@ public:
     // the upper does, and the upper root counts as an ancestor of every path.
     ResolvedPath ResolveLowerPath(const std::wstring& relativePath) const;
 
-    // True when a lower holds the path and the upper hides it with a whiteout
-    // at the path or at an ancestor, or with an opaque ancestor. False when
-    // only a non-directory or link ancestor hides it. The upper must hold no
-    // entry at the path.
-    bool IsLowerEntryHiddenByWhiteoutOrOpaqueAncestor(const std::wstring& relativePath) const;
-
     CreateResolution ResolveForCreate(const std::wstring& relativePath) const;
 
     bool ExistsInUpper(const std::wstring& relativePath) const;

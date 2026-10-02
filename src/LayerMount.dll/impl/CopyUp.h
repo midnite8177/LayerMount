@@ -2,7 +2,6 @@
 
 #include "LayerMount.h"
 #include "LayerPath.h"
-#include "UpperParent.h"
 #include "../abi/CapabilityGate.h"
 #include "../abi/EventEmitter.h"
 
@@ -106,8 +105,8 @@ public:
     NTSTATUS CommitFromWorkDir(const std::wstring& workPath,
                                const std::wstring& finalUpperPath);
 
-    // Makes the parent exist in the upper first, as EnsureUpperParent does.
-    // Preserves security, timestamps, data.
+    // Copies a lower parent directory up first. Preserves security,
+    // timestamps, data.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
 
     // Copy only metadata (security, timestamps) as a sparse file. Data copied on demand.
@@ -123,9 +122,13 @@ public:
     // relativePath.
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);
 
-    // Makes the parent of callerPath exist in the upper, as
-    // UpperParent::Ensure does.
-    NTSTATUS EnsureUpperParent(const CallerPath& callerPath);
+    // Returns success when the parent of normalizedPath is in the upper.
+    // Copies the parent up when the overlay shows it as a lower directory,
+    // so the upper entry takes the lower's name. Returns
+    // STATUS_OBJECT_PATH_NOT_FOUND and writes nothing for every other
+    // parent. Overlayfs fails with ENOTDIR when the parent or an ancestor
+    // is a file, and with ENOENT when the overlay shows no parent.
+    NTSTATUS EnsureUpperParent(const std::wstring& normalizedPath);
 
     // Copies the lower tree and the old upper shadow to the new upper path,
     // marks it opaque, and removes the old upper entry. The caller writes the
@@ -140,10 +143,10 @@ public:
                                   RenameEntryKind sourceKind,
                                   ReplaceExisting replace);
 
-    // Before the move, makes the new parent exist in the upper, as
-    // UpperParent::Ensure does. Moves the upper directory and carries its
-    // opaque marker. Marks the moved entry opaque when a lower layer has
-    // its new path, so lower children of a replaced destination stay
+    // Fails with STATUS_OBJECT_PATH_NOT_FOUND and writes nothing when
+    // EnsureUpperParent refuses the new parent. Moves the upper directory
+    // and carries its opaque marker. Marks the moved entry opaque when a
+    // lower layer has its new path, so lower children of a replaced destination stay
     // hidden. sourceKind is Directory or Link. A moved Link never becomes
     // opaque, because the marker would go into its target. The moved entry
     // gets its name in newCallerPath's case. When a lower layer has the old
@@ -257,7 +260,6 @@ private:
         LM_CAP_MULTIPLE_STREAMS | LM_CAP_NTFS_ACLS
     };
     ::LayerMount::abi::EventEmitter* events_ = nullptr;
-    UpperParent upperParent_;
 
     std::atomic<uint64_t> workCounter_{0};
 
