@@ -148,8 +148,7 @@ public:
         ::LayerMount::LayerMount mount(config);
         const MergedDirectory merged = mount.MergeDirectoryEntries(L"box");
 
-        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS), static_cast<long>(merged.status),
-            L"The merge of a readable directory must succeed");
+        AssertStatus(STATUS_SUCCESS, merged.status, L"The merge of a readable directory must succeed");
         Assert::IsTrue(merged.entries.empty(),
             L"With every lower child whited-out, the merged dir view is empty");
     }
@@ -168,8 +167,7 @@ public:
 
         ::LayerMount::LayerMount mount(config);
         const MergedDirectory merged = mount.MergeDirectoryEntries(L"sd");
-        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS), static_cast<long>(merged.status),
-            L"The merge of a readable directory must succeed");
+        AssertStatus(STATUS_SUCCESS, merged.status, L"The merge of a readable directory must succeed");
         Assert::IsTrue(merged.entries.empty());
 
         SimulateDirDelete(resolver, wm, cache, L"sd");
@@ -238,14 +236,12 @@ public:
 
     TEST_METHOD(CanDelete_DirOpaqueInLowerWithEntries_ReturnsDirectoryNotEmpty) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
         env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
 
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(
-            static_cast<long>(STATUS_DIRECTORY_NOT_EMPTY),
-            static_cast<long>(mount.CanDelete(L"sub", 0)),
+        AssertStatus(STATUS_DIRECTORY_NOT_EMPTY, mount.CanDelete(L"sub", 0),
             L"A directory that is opaque in a lower and has entries there is not empty");
     }
 
@@ -258,9 +254,7 @@ public:
         BackupPrivilegeDisabledOnThread noBackupPrivilege;
         AssertListingDenied(env.Upper() + L"\\sub");
 
-        Assert::AreEqual(
-            static_cast<long>(STATUS_ACCESS_DENIED),
-            static_cast<long>(mount.CanDelete(L"sub", 0)),
+        AssertStatus(STATUS_ACCESS_DENIED, mount.CanDelete(L"sub", 0),
             L"A directory the upper cannot list must not count as empty");
     }
 
@@ -273,9 +267,7 @@ public:
         BackupPrivilegeDisabledOnThread noBackupPrivilege;
         AssertListingDenied(env.Lower(0) + L"\\sub");
 
-        Assert::AreEqual(
-            static_cast<long>(STATUS_ACCESS_DENIED),
-            static_cast<long>(mount.CanDelete(L"sub", 0)),
+        AssertStatus(STATUS_ACCESS_DENIED, mount.CanDelete(L"sub", 0),
             L"A directory a lower cannot list must not count as empty");
     }
 
@@ -299,9 +291,7 @@ public:
         }
         mount.Close(ctx.get());
 
-        Assert::AreEqual(
-            static_cast<long>(STATUS_ACCESS_DENIED), static_cast<long>(status),
-            L"An open directory the upper cannot list must not count as empty");
+        AssertStatus(STATUS_ACCESS_DENIED, status, L"An open directory the upper cannot list must not count as empty");
     }
 
     TEST_METHOD(CanDeleteContext_LowerDirUnreadable_ReturnsTheScanFailure) {
@@ -324,9 +314,7 @@ public:
         }
         mount.Close(ctx.get());
 
-        Assert::AreEqual(
-            static_cast<long>(STATUS_ACCESS_DENIED), static_cast<long>(status),
-            L"An open directory a lower cannot list must not count as empty");
+        AssertStatus(STATUS_ACCESS_DENIED, status, L"An open directory a lower cannot list must not count as empty");
     }
 
     TEST_METHOD(Delete_EmptyUpperDirUnreadable_FailsAndKeepsTheLowerEntry) {
@@ -343,8 +331,7 @@ public:
             status = mount.Delete(L"sub", 0);
         }
 
-        Assert::AreEqual(
-            static_cast<long>(STATUS_ACCESS_DENIED), static_cast<long>(status),
+        AssertStatus(STATUS_ACCESS_DENIED, status,
             L"Deleting a directory the upper cannot list must fail with the scan's status");
         Assert::IsTrue(env.FileExists(env.Upper(), L"sub"),
             L"A failed delete must leave the upper directory");

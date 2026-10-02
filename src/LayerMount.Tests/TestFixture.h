@@ -331,6 +331,26 @@ inline bool HasAttribute(const std::wstring& path, DWORD flag) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
 }
 
+// The layer-relative path of the whiteout marker that hides relativePath:
+// L"a\\b\\c.txt" gives L"a\\b\\.wh.c.txt".
+inline std::wstring WhiteoutMarkerPath(const std::wstring& relativePath) {
+    const size_t separator = relativePath.find_last_of(L'\\');
+    if (separator == std::wstring::npos) return L".wh." + relativePath;
+    return relativePath.substr(0, separator + 1) + L".wh." + relativePath.substr(separator + 1);
+}
+
+// The layer-relative path of the marker file that makes relativeDirectory
+// opaque: L"d" gives L"d\\.wh..wh..opq".
+inline std::wstring OpaqueMarkerPath(const std::wstring& relativeDirectory) {
+    return relativeDirectory + L"\\.wh..wh..opq";
+}
+
+// Fails the test with message when the two NTSTATUS values differ.
+inline void AssertStatus(NTSTATUS expected, NTSTATUS actual, const wchar_t* message) {
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual(
+        static_cast<long>(expected), static_cast<long>(actual), message);
+}
+
 // Set NTFS compression on the file or directory at path. Returns false when
 // the open or the FSCTL fails.
 inline bool EnableCompression(const std::wstring& path) {

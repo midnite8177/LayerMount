@@ -89,7 +89,7 @@ public:
 
         Assert::IsTrue(wm.CreateWhiteout(L"foo.txt", WhiteoutType::File));
 
-        std::wstring whPath = env.Upper() + L"\\.wh.foo.txt";
+        std::wstring whPath = env.Upper() + L"\\" + WhiteoutMarkerPath(L"foo.txt");
         DWORD attrs = ::GetFileAttributesW(whPath.c_str());
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, attrs, L"Whiteout file should exist");
         Assert::IsTrue((attrs & FILE_ATTRIBUTE_HIDDEN) != 0, L"Expected HIDDEN attribute");
@@ -109,7 +109,7 @@ public:
             ::GetFileAttributesW(parentDir.c_str()),
             L"Parent directory should be auto-created");
 
-        std::wstring whPath = env.Upper() + L"\\sub\\.wh.foo.txt";
+        std::wstring whPath = env.Upper() + L"\\" + WhiteoutMarkerPath(L"sub\\foo.txt");
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW(whPath.c_str()),
             L"Nested whiteout should exist");
@@ -140,7 +140,7 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        std::wstring lowerWh = env.Lower(0) + L"\\.wh.foo.txt";
+        std::wstring lowerWh = env.Lower(0) + L"\\" + WhiteoutMarkerPath(L"foo.txt");
         HANDLE h = ::CreateFileW(lowerWh.c_str(), GENERIC_WRITE, 0, nullptr,
                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         ::CloseHandle(h);
@@ -256,8 +256,7 @@ public:
 
         const MergedDirectory merged = mount.MergeDirectoryEntries(L"sub");
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED), static_cast<long>(merged.status),
-            L"A failed lower scan must report the scan's status");
+        AssertStatus(STATUS_ACCESS_DENIED, merged.status, L"A failed lower scan must report the scan's status");
         Assert::IsTrue(merged.entries.empty(),
             L"A failed lower scan must give no entries, not the upper's entries alone");
     }
@@ -265,7 +264,7 @@ public:
     TEST_METHOD(MergeDirectoryEntries_UpperDirUnreadable_ReturnsTheScanFailure) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Upper(), L"sub\\up.txt", "upper");
-        env.WriteFile(env.Upper(), L"sub\\.wh.gone.txt", "");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"sub\\gone.txt"), "");
         env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower0");
         env.WriteFile(env.Lower(0), L"sub\\below.txt", "lower0");
         DirectoryListingDenied denied(env.Upper() + L"\\sub");
@@ -275,8 +274,7 @@ public:
 
         const MergedDirectory merged = mount.MergeDirectoryEntries(L"sub");
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED), static_cast<long>(merged.status),
-            L"A failed upper scan must report the scan's status");
+        AssertStatus(STATUS_ACCESS_DENIED, merged.status, L"A failed upper scan must report the scan's status");
         Assert::IsTrue(merged.entries.empty(),
             L"An unreadable upper can hold whiteouts, so a failed upper scan must give no entries");
     }
@@ -295,8 +293,8 @@ public:
 
     TEST_METHOD(MergeDirectoryEntries_WhiteoutsInLower_HideTheirNamesInDeeperLower) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"sub\\.wh.a.txt", "");
-        env.WriteFile(env.Lower(0), L"sub\\.wh.b.txt", "");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"sub\\a.txt"), "");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"sub\\b.txt"), "");
         env.WriteFile(env.Lower(1), L"sub\\a.txt", "lower1");
         env.WriteFile(env.Lower(1), L"sub\\b.txt", "lower1");
         env.WriteFile(env.Lower(1), L"sub\\c.txt", "lower1");
@@ -333,7 +331,7 @@ public:
 
     TEST_METHOD(MergeDirectoryEntries_RootOfExtendedFormLowerPath_AppliesThatLowersWhiteouts) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L".wh.a.txt", "");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"a.txt"), "");
         env.WriteFile(env.Lower(0), L"own.txt", "lower0");
         env.WriteFile(env.Lower(1), L"a.txt", "lower1");
         env.WriteFile(env.Lower(1), L"deep.txt", "lower1");
@@ -362,11 +360,11 @@ public:
         const MergedDirectory root = mount.MergeDirectoryEntries(L"");
         const MergedDirectory sub = mount.MergeDirectoryEntries(L"sub");
 
-        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS), static_cast<long>(root.status),
+        AssertStatus(STATUS_SUCCESS, root.status,
             L"The root scan of a lower path that ends in a separator must succeed");
         Assert::IsTrue(root.entries.count(L"own.txt") == 1,
             L"The listing must show the entry at the root of the lower");
-        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS), static_cast<long>(sub.status),
+        AssertStatus(STATUS_SUCCESS, sub.status,
             L"The subdirectory scan of a lower path that ends in a separator must succeed");
         Assert::IsTrue(sub.entries.count(L"nested.txt") == 1,
             L"The listing must show the entry in the subdirectory of the lower");
@@ -404,7 +402,7 @@ public:
 
         wm.SetOpaque(L"sub");
 
-        std::wstring marker = env.Upper() + L"\\sub\\.wh..wh..opq";
+        std::wstring marker = env.Upper() + L"\\" + OpaqueMarkerPath(L"sub");
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW(marker.c_str()),
             L"SetOpaque should create .wh..wh..opq sentinel file");
@@ -428,7 +426,7 @@ public:
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"sub");
 
-        std::wstring marker = env.Upper() + L"\\sub\\.wh..wh..opq";
+        std::wstring marker = env.Upper() + L"\\" + OpaqueMarkerPath(L"sub");
         HANDLE h = ::CreateFileW(marker.c_str(), GENERIC_WRITE, 0, nullptr,
                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         ::CloseHandle(h);
@@ -483,7 +481,7 @@ public:
         std::wstring dirPath = env.Upper() + L"\\sub";
         Assert::IsFalse(MetadataADS::HasOpaqueADS(dirPath, nullptr), L"the opaque marker is gone");
 
-        std::wstring marker = env.Upper() + L"\\sub\\.wh..wh..opq";
+        std::wstring marker = env.Upper() + L"\\" + OpaqueMarkerPath(L"sub");
         Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW(marker.c_str()),
             L"Sentinel file should be removed");
@@ -514,7 +512,7 @@ public:
 
     TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_DirOpaqueInLayer_ReturnsTrue) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"d\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"d"), "");
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -525,7 +523,7 @@ public:
 
     TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_AncestorOpaqueInLayer_ReturnsTrue) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"a\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"a"), "");
         env.CreateDir(env.Lower(0), L"a\\b\\c");
 
         auto config = env.MakeConfig();
@@ -537,7 +535,7 @@ public:
 
     TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_OpaqueOnlyInOtherLayer_ReturnsFalse) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Upper(), L"a\\.wh..wh..opq", "");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"a"), "");
         env.CreateDir(env.Lower(0), L"a\\b");
 
         auto config = env.MakeConfig();
@@ -626,7 +624,7 @@ public:
 
     TEST_METHOD(MergeDirectoryEntries_DirOpaqueInLower_ShowsThatLowersEntriesAndHidesDeeperLower) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
         env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
         env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
 
@@ -642,7 +640,7 @@ public:
     TEST_METHOD(MergeDirectoryEntries_DirOpaqueInMiddleLower_ShowsLowersAboveAndHidesLowersBelow) {
         TempLayerEnvironment env(3);
         env.WriteFile(env.Lower(0), L"sub\\top.txt", "lower0");
-        env.WriteFile(env.Lower(1), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(1), OpaqueMarkerPath(L"sub"), "");
         env.WriteFile(env.Lower(1), L"sub\\middle.txt", "lower1");
         env.WriteFile(env.Lower(2), L"sub\\bottom.txt", "lower2");
 
@@ -659,8 +657,8 @@ public:
 
     TEST_METHOD(MergeDirectoryEntries_DirOpaqueInLowerWithWhiteout_WhiteoutHidesNameInThatLowerAndBelow) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
-        env.WriteFile(env.Lower(0), L"sub\\.wh.gone.txt", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"sub\\gone.txt"), "");
         env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower0");
         env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
         env.WriteFile(env.Lower(1), L"sub\\gone.txt", "lower1");
@@ -679,7 +677,7 @@ public:
 
     TEST_METHOD(MergeDirectoryEntries_DirOpaqueInLower_OpaqueMarkerFileNotListed) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
         env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
 
         ::LayerMount::LayerMount mount(env.MakeConfig());
@@ -693,7 +691,7 @@ public:
 
     TEST_METHOD(MergeDirectoryEntries_AncestorOpaqueInLower_ShowsThatLowersEntriesAndHidesDeeperLower) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"d\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"d"), "");
         env.WriteFile(env.Lower(0), L"d\\sub\\own.txt", "lower0");
         env.WriteFile(env.Lower(1), L"d\\sub\\below.txt", "lower1");
 
@@ -710,7 +708,7 @@ public:
 
     TEST_METHOD(MergeDirectoryEntries_AncestorOpaqueInUpper_ShowsUpperEntriesAndHidesEveryLower) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Upper(), L"d\\.wh..wh..opq", "");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
         env.WriteFile(env.Upper(), L"d\\sub\\up.txt", "upper");
         env.WriteFile(env.Lower(0), L"d\\sub\\low0.txt", "lower0");
         env.WriteFile(env.Lower(1), L"d\\sub\\low1.txt", "lower1");
@@ -730,7 +728,7 @@ public:
 
     TEST_METHOD(PathResolve_DirOpaqueInLower_ResolvesChildOfThatLowerAndHidesChildOfDeeperLower) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
         env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
         env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
 
@@ -749,7 +747,7 @@ public:
 
     TEST_METHOD(ResolveLowerPath_DirOpaqueInLower_ResolvesChildOfThatLowerAndHidesChildOfDeeperLower) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
         env.WriteFile(env.Lower(0), L"sub\\own.txt", "lower0");
         env.WriteFile(env.Lower(1), L"sub\\below.txt", "lower1");
 
@@ -768,8 +766,8 @@ public:
 
     TEST_METHOD(PathResolve_DirOpaqueInLowerWithWhiteoutForChild_HidesChild) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
-        env.WriteFile(env.Lower(0), L"sub\\.wh.gone.txt", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"sub\\gone.txt"), "");
         env.WriteFile(env.Lower(0), L"sub\\gone.txt", "lower0");
         env.WriteFile(env.Lower(1), L"sub\\gone.txt", "lower1");
 
@@ -783,8 +781,8 @@ public:
 
     TEST_METHOD(PathResolve_DirOpaqueInLowerWithWhiteoutForAncestor_HidesDescendant) {
         TempLayerEnvironment env(2);
-        env.WriteFile(env.Lower(0), L"a\\.wh..wh..opq", "");
-        env.WriteFile(env.Lower(0), L"a\\.wh.b", "");
+        env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"a"), "");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"a\\b"), "");
         env.WriteFile(env.Lower(0), L"a\\b\\c.txt", "lower0");
         env.WriteFile(env.Lower(1), L"a\\b\\c.txt", "lower1");
 
@@ -956,9 +954,8 @@ public:
         env.WriteFile(env.Upper(), L"sub\\.wh.name", "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
-                         static_cast<long>(OpenThroughMount(mount, L"sub\\.wh.name")),
-                         L"Opening a whiteout marker in the upper must report not found");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"sub\\.wh.name"),
+            L"Opening a whiteout marker in the upper must report not found");
     }
 
     TEST_METHOD(Open_OpaqueMarkerInLower_IsNotFound) {
@@ -966,9 +963,8 @@ public:
         env.WriteFile(env.Lower(0), L"sub\\.wh..wh..opq", "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
-                         static_cast<long>(OpenThroughMount(mount, L"sub\\.wh..wh..opq")),
-                         L"Opening an opaque marker in a lower must report not found");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"sub\\.wh..wh..opq"),
+            L"Opening an opaque marker in a lower must report not found");
     }
 
     TEST_METHOD(MergeDirectoryEntries_UpperCaseMarkerInLower_IsNotListed) {
@@ -1008,8 +1004,7 @@ public:
 
         const MergedDirectory merged = mount.MergeDirectoryEntries(L"sub\\.wh.x");
 
-        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS), static_cast<long>(merged.status),
-            L"A marker-named directory is a reserved path, not a failed scan");
+        AssertStatus(STATUS_SUCCESS, merged.status, L"A marker-named directory is a reserved path, not a failed scan");
         Assert::IsTrue(merged.entries.empty(),
             L"A marker-named directory must list no entries");
     }
@@ -1020,9 +1015,8 @@ public:
         env.WriteFile(env.Lower(0), L"sub\\name", "lower");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
-                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh.name", kNoCreateOptions)),
-                         L"Creating a whiteout marker name must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED, CreateThroughMount(mount, L"sub\\.wh.name", kNoCreateOptions),
+            L"Creating a whiteout marker name must be denied");
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.name"),
             L"A denied create must write no marker in the upper");
         Assert::IsTrue(NT_SUCCESS(OpenThroughMount(mount, L"sub\\name")),
@@ -1035,9 +1029,8 @@ public:
         env.WriteFile(env.Lower(0), L"sub\\lower.txt", "lower");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
-                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh..wh..opq", kNoCreateOptions)),
-                         L"Creating the opaque marker name must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED, CreateThroughMount(mount, L"sub\\.wh..wh..opq", kNoCreateOptions),
+            L"Creating the opaque marker name must be denied");
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh..wh..opq"),
             L"A denied create must write no opaque marker in the upper");
         Assert::IsTrue(NT_SUCCESS(OpenThroughMount(mount, L"sub\\lower.txt")),
@@ -1049,9 +1042,8 @@ public:
         env.CreateDir(env.Upper(), L"sub");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
-                         static_cast<long>(CreateThroughMount(mount, L"sub\\.WH.name", kNoCreateOptions)),
-                         L"Creating a marker name spelled in upper case must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED, CreateThroughMount(mount, L"sub\\.WH.name", kNoCreateOptions),
+            L"Creating a marker name spelled in upper case must be denied");
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.name"),
             L"A denied create must write no marker in the upper");
     }
@@ -1061,9 +1053,8 @@ public:
         env.CreateDir(env.Upper(), L"sub");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
-                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh.name:stream", kNoCreateOptions)),
-                         L"Creating a stream on a marker name must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED, CreateThroughMount(mount, L"sub\\.wh.name:stream", kNoCreateOptions),
+            L"Creating a stream on a marker name must be denied");
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.name"),
             L"A denied create must write no marker in the upper");
     }
@@ -1073,9 +1064,8 @@ public:
         env.CreateDir(env.Upper(), L"sub");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
-                         static_cast<long>(CreateThroughMount(mount, L"sub\\.wh.dir", FILE_DIRECTORY_FILE)),
-                         L"Creating a directory with a marker name must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED, CreateThroughMount(mount, L"sub\\.wh.dir", FILE_DIRECTORY_FILE),
+            L"Creating a directory with a marker name must be denied");
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.dir"),
             L"A denied create must write no directory in the upper");
     }
@@ -1085,10 +1075,8 @@ public:
         env.WriteFile(env.Upper(), L"sub\\a.txt", "upper");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
-                         static_cast<long>(mount.Rename(L"sub\\a.txt", L"sub\\.wh.a.txt",
-                                                        kFailIfExists, kNoCallerPid)),
-                         L"Renaming onto a marker name must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED, mount.Rename(L"sub\\a.txt", L"sub\\.wh.a.txt", kFailIfExists, kNoCallerPid),
+            L"Renaming onto a marker name must be denied");
         Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"sub\\a.txt"),
             L"A denied rename must leave the source in place");
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.a.txt"),
@@ -1109,8 +1097,7 @@ public:
                                              kFailIfExists, kNoCallerPid);
         mount.Close(ctx.get());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED), static_cast<long>(status),
-            L"Renaming an open file onto a marker name must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED, status, L"Renaming an open file onto a marker name must be denied");
         Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"sub\\a.txt"),
             L"A denied rename must leave the source in place");
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\.wh.a.txt"),
@@ -1131,8 +1118,7 @@ public:
         const std::wstring pathAfter = ctx->relativePath;
         mount.Close(ctx.get());
 
-        Assert::AreEqual(static_cast<long>(STATUS_INVALID_PARAMETER), static_cast<long>(status),
-            L"Moving an open context onto a marker name must be rejected");
+        AssertStatus(STATUS_INVALID_PARAMETER, status, L"Moving an open context onto a marker name must be rejected");
         Assert::AreEqual(std::wstring(L"sub\\a.txt"), pathAfter,
             L"A rejected update must leave the context path unchanged");
     }
@@ -1143,14 +1129,12 @@ public:
         env.WriteFile(env.Upper(), L"sub\\.wh.gone.txt", "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
-                         static_cast<long>(mount.Delete(L"sub\\.wh.gone.txt", kNoCallerPid)),
-                         L"Deleting a whiteout marker must report not found");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, mount.Delete(L"sub\\.wh.gone.txt", kNoCallerPid),
+            L"Deleting a whiteout marker must report not found");
         Assert::IsTrue(env.FileExists(env.Upper(), L"sub\\.wh.gone.txt"),
             L"A refused delete must leave the marker in place");
-        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
-                         static_cast<long>(OpenThroughMount(mount, L"sub\\gone.txt")),
-                         L"A refused delete must keep the lower file hidden");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"sub\\gone.txt"),
+            L"A refused delete must keep the lower file hidden");
     }
 
     TEST_METHOD(Rename_FromMarkerName_IsDeniedAndLeavesMarker) {
@@ -1159,15 +1143,13 @@ public:
         env.WriteFile(env.Upper(), L"sub\\.wh.gone.txt", "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        Assert::AreEqual(static_cast<long>(STATUS_ACCESS_DENIED),
-                         static_cast<long>(mount.Rename(L"sub\\.wh.gone.txt", L"sub\\back.txt",
-                                                        kFailIfExists, kNoCallerPid)),
-                         L"Renaming a marker must be denied");
+        AssertStatus(STATUS_ACCESS_DENIED,
+                     mount.Rename(L"sub\\.wh.gone.txt", L"sub\\back.txt", kFailIfExists, kNoCallerPid),
+                     L"Renaming a marker must be denied");
         Assert::IsTrue(env.FileExists(env.Upper(), L"sub\\.wh.gone.txt"),
             L"A denied rename must leave the marker in place");
-        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
-                         static_cast<long>(OpenThroughMount(mount, L"sub\\gone.txt")),
-                         L"A denied rename must keep the lower file hidden");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"sub\\gone.txt"),
+            L"A denied rename must keep the lower file hidden");
     }
 };
 

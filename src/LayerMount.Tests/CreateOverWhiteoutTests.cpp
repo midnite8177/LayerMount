@@ -1,13 +1,9 @@
 #include "pch.h"
 #include "TestFixture.h"
 
-#include "PathResolver.h"
-#include "WhiteoutManager.h"
-#include "Cache.h"
 #include "MetadataADS.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
-using namespace LayerMount;
 
 namespace LayerMountTests {
 
@@ -17,247 +13,91 @@ public:
         AssertTempIsNTFS();
     }
 
-    static std::wstring SimulateCreateFile(PathResolver& resolver,
-                                           WhiteoutManager& wm,
-                                           Cache& cache,
-                                           const std::wstring& norm,
-                                           const std::string& content) {
-        if (wm.HasWhiteout(norm, resolver.Config().upperPath)) {
-            wm.RemoveWhiteout(norm);
-        }
-        const std::wstring upperPath = resolver.GetUpperPath(norm);
-        EnsureDirectoryExists(
-            std::filesystem::path(upperPath).parent_path().wstring());
-        HANDLE h = ::CreateFileW(upperPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                                 CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-        Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, h,
-            L"SimulateCreateFile: CreateFileW failed");
-        DWORD written = 0;
-        ::WriteFile(h, content.data(), static_cast<DWORD>(content.size()),
-                    &written, nullptr);
-        ::CloseHandle(h);
-        cache.InvalidateWithAncestors(norm);
-        return upperPath;
-    }
-
-    static void SimulateCreateDir(PathResolver& resolver,
-                                  WhiteoutManager& wm,
-                                  Cache& cache,
-                                  const std::wstring& norm) {
-        if (wm.HasWhiteout(norm, resolver.Config().upperPath)) {
-            wm.RemoveWhiteout(norm);
-        }
-        ResolvedPath lower = resolver.ResolveLowerPath(norm);
-        const bool lowerIsDir =
-            lower.Found() && (lower.attributes & FILE_ATTRIBUTE_DIRECTORY);
-
-        const std::wstring upperPath = resolver.GetUpperPath(norm);
-        EnsureDirectoryExists(upperPath);
-
-        if (lowerIsDir) {
-            wm.SetOpaque(norm);
-        }
-        cache.InvalidateWithAncestors(norm);
-    }
-
-    TEST_METHOD(CreateFileOverWhiteoutForDeletedLowerFile_WhiteoutRemoved) {
+    TEST_METHOD(CreateFile_OverWhitedOutLowerDirectory_IsEmptyUpperFile) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"f.txt", "old-lower");
+        env.WriteFile(env.Lower(0), L"d\\inner.txt", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"d"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        // Simulate prior delete.
-        Assert::IsTrue(wm.CreateWhiteout(L"f.txt", WhiteoutType::File));
-        Assert::IsFalse(resolver.ResolvePath(L"f.txt").Found());
-
-        SimulateCreateFile(resolver, wm, cache, L"f.txt", "new-upper");
-
-        Assert::IsFalse(wm.HasWhiteout(L"f.txt", env.Upper()),
-            L"Whiteout must be removed so the new file is visible");
-        ResolvedPath r = resolver.ResolvePath(L"f.txt");
-        Assert::IsTrue(r.Found());
-        Assert::IsTrue(r.source == LayerSource::Upper);
-        Assert::AreEqual(std::string("new-upper"),
-                         env.ReadFile(env.Upper(), L"f.txt"));
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d", kNoCreateOptions),
+            L"A file create-new over a whited-out lower directory must succeed");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"d"),
+            L"The create must write the new file in the upper");
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\d", FILE_ATTRIBUTE_DIRECTORY),
+            L"The create must write a file, not a directory");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
+            L"The create must remove the whiteout");
+        Assert::AreEqual(UINT64{0}, FileSizeThroughMount(mount, L"d"),
+            L"The mount must show the new empty file");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"d\\inner.txt"),
+            L"The create must leave the lower directory's child as it was");
     }
 
-    TEST_METHOD(CreateFileWhereLowerDirWasDeleted_TypeFlipsToFile) {
+    TEST_METHOD(CreateDirectory_OverWhitedOutLowerFile_IsNotOpaque) {
         TempLayerEnvironment env(1);
-        env.CreateDir(env.Lower(0), L"wasdir");
-        env.WriteFile(env.Lower(0), L"wasdir\\inner.txt", "inner");
+        env.WriteFile(env.Lower(0), L"f", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"f"), "");
+        const auto config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        Assert::IsTrue(wm.CreateWhiteout(L"wasdir", WhiteoutType::Directory));
-
-        SimulateCreateFile(resolver, wm, cache, L"wasdir", "i-am-a-file-now");
-
-        Assert::IsFalse(wm.HasWhiteout(L"wasdir", env.Upper()));
-        Assert::AreEqual(std::string("i-am-a-file-now"),
-                         env.ReadFile(env.Upper(), L"wasdir"));
-
-        // The path now resolves to a file in the upper layer.
-        ResolvedPath rSelf = resolver.ResolvePath(L"wasdir");
-        Assert::IsTrue(rSelf.Found());
-        Assert::IsTrue(rSelf.source == LayerSource::Upper);
-        Assert::IsTrue((rSelf.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0);
-
-        // Note: whether the resolver actively hides lower children under a
-        // type-flip (file-in-upper shadows dir-in-lower's children) is a
-        // separate PathResolver concern tracked independently from this test
-        // and not asserted here. The lower dir/files remain untouched on disk.
-        Assert::IsTrue(env.FileExists(env.Lower(0), L"wasdir\\inner.txt"));
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"f", FILE_DIRECTORY_FILE),
+            L"A directory create-new over a whited-out lower file must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\f", FILE_ATTRIBUTE_DIRECTORY),
+            L"The create must write the new directory in the upper");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"f")),
+            L"The create must remove the whiteout");
+        Assert::IsFalse(env.FileExists(env.Upper(), OpaqueMarkerPath(L"f")),
+            L"A directory over a lower file has no lower children to hide, so it must not be opaque");
+        Assert::IsFalse(::LayerMount::MetadataADS::HasOpaqueADS(env.Upper() + L"\\f", &config),
+            L"The new directory must have no opaque metadata marker");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"f"),
+            L"The create must leave the lower file as it was");
     }
 
-    TEST_METHOD(CreateDirWhereLowerFileWasDeleted_NoOpaqueMarker) {
+    TEST_METHOD(CreateFile_OverWhitedOutLowerFileInNestedDirectory_IsEmptyUpperFile) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"wasfile", "lower-file");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        Assert::IsTrue(wm.CreateWhiteout(L"wasfile", WhiteoutType::File));
-
-        SimulateCreateDir(resolver, wm, cache, L"wasfile");
-
-        Assert::IsFalse(wm.HasWhiteout(L"wasfile", env.Upper()));
-        Assert::IsFalse(wm.IsOpaque(L"wasfile"),
-            L"No opaque marker needed — lower at this path is a file, not a dir");
-        Assert::IsTrue(env.FileExists(env.Upper(), L"wasfile"));
-    }
-
-    TEST_METHOD(CreateDirWhereLowerDirWasDeleted_OpaqueMarkerSetAndLowerChildrenHidden) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Lower(0), L"shared");
-        env.WriteFile(env.Lower(0), L"shared\\lc.txt", "lower-child");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        Assert::IsTrue(wm.CreateWhiteout(L"shared", WhiteoutType::Directory));
-
-        SimulateCreateDir(resolver, wm, cache, L"shared");
-
-        Assert::IsFalse(wm.HasWhiteout(L"shared", env.Upper()));
-        Assert::IsTrue(wm.IsOpaque(L"shared"),
-            L"Creating a dir over a whited-out lower dir must mark upper as opaque");
-
-        Assert::IsFalse(resolver.ResolvePath(L"shared\\lc.txt").Found(),
-            L"Opaque marker must keep the deleted lower directory's child hidden");
-    }
-
-    TEST_METHOD(CreateFileWhereLowerWasRenamedAway_WhiteoutRemoved) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"moved.txt", "lower-content");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        // Simulate the rename-source artifacts: whiteout at the old name.
-        Assert::IsTrue(wm.CreateWhiteout(L"moved.txt", WhiteoutType::File));
-        Assert::IsFalse(resolver.ResolvePath(L"moved.txt").Found());
-
-        SimulateCreateFile(resolver, wm, cache, L"moved.txt", "recreated");
-
-        Assert::IsFalse(wm.HasWhiteout(L"moved.txt", env.Upper()));
-        Assert::AreEqual(std::string("recreated"),
-                         env.ReadFile(env.Upper(), L"moved.txt"));
-    }
-
-    TEST_METHOD(CreateFileWhereLowerDirWasRenamedAway_Ok) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Lower(0), L"olddir");
-        env.WriteFile(env.Lower(0), L"olddir\\x.txt", "x");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        // A dir rename leaves a dir-typed whiteout at old path.
-        Assert::IsTrue(wm.CreateWhiteout(L"olddir", WhiteoutType::Directory));
-
-        SimulateCreateFile(resolver, wm, cache, L"olddir", "new-file-at-old-path");
-
-        Assert::IsFalse(wm.HasWhiteout(L"olddir", env.Upper()));
-        Assert::AreEqual(std::string("new-file-at-old-path"),
-                         env.ReadFile(env.Upper(), L"olddir"));
-    }
-
-    TEST_METHOD(CreateOverWhiteoutInNestedPath_ParentsCreatedOnDemand) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Lower(0), L"a\\b");
         env.WriteFile(env.Lower(0), L"a\\b\\c.txt", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"a\\b\\c.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        // Whiteout the deep file. CreateWhiteout eagerly materializes the parent
-        // chain in upper (so the marker has somewhere to land). The interesting
-        // invariant below is that the create path still succeeds regardless of
-        // whether the parent existed beforehand.
-        Assert::IsTrue(wm.CreateWhiteout(L"a\\b\\c.txt", WhiteoutType::File));
-
-        SimulateCreateFile(resolver, wm, cache, L"a\\b\\c.txt", "new");
-
-        Assert::IsTrue(env.FileExists(env.Upper(), L"a\\b"),
-            L"Parent chain must be created lazily during the create");
-        Assert::IsFalse(wm.HasWhiteout(L"a\\b\\c.txt", env.Upper()));
-        Assert::AreEqual(std::string("new"),
-                         env.ReadFile(env.Upper(), L"a\\b\\c.txt"));
-
-        ResolvedPath r = resolver.ResolvePath(L"a\\b\\c.txt");
-        Assert::IsTrue(r.Found());
-        Assert::IsTrue(r.source == LayerSource::Upper);
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"a\\b\\c.txt", kNoCreateOptions),
+            L"A create-new over a whited-out lower file in a nested directory must succeed");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"a\\b\\c.txt"),
+            L"The create must write the new file in the upper");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"a\\b\\c.txt")),
+            L"The create must remove the whiteout");
+        Assert::AreEqual(UINT64{0}, FileSizeThroughMount(mount, L"a\\b\\c.txt"),
+            L"The mount must show the new empty file, not the lower data");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"a\\b\\c.txt"),
+            L"The create must leave the lower file as it was");
     }
 
-    TEST_METHOD(CreateDeleteCreate_Loop_ConvergesToLatestContent) {
+    TEST_METHOD(CreateDeleteCreate_OverWhitedOutLowerFile_EndsWithEmptyUpperFile) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"loop.txt", "original-lower");
+        env.WriteFile(env.Lower(0), L"f.txt", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"f.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"f.txt", kNoCreateOptions),
+            L"The first create-new over the whited-out lower file must succeed");
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"f.txt", kNoCallerPid),
+            L"The delete of the new upper file must succeed");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"f.txt"),
+            L"The delete must remove the upper file");
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"f.txt")),
+            L"The delete must write a whiteout, because the lower still holds the file");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"f.txt"),
+            L"After the delete the mount must hide the lower file");
 
-        // (1) delete lower-only file — whiteout goes up.
-        Assert::IsTrue(wm.CreateWhiteout(L"loop.txt", WhiteoutType::File));
-
-        // (2) create — whiteout cleared, upper content wins.
-        SimulateCreateFile(resolver, wm, cache, L"loop.txt", "first-upper");
-        Assert::AreEqual(std::string("first-upper"),
-                         env.ReadFile(env.Upper(), L"loop.txt"));
-
-        // (3) delete again — upper removed, whiteout back (because lower still exists).
-        ::DeleteFileW(resolver.GetUpperPath(L"loop.txt").c_str());
-        if (resolver.ResolveLowerPath(L"loop.txt").Found()) {
-            Assert::IsTrue(wm.CreateWhiteout(L"loop.txt", WhiteoutType::File));
-        }
-        cache.InvalidateWithAncestors(L"loop.txt");
-
-        // (4) create again.
-        SimulateCreateFile(resolver, wm, cache, L"loop.txt", "second-upper");
-        Assert::AreEqual(std::string("second-upper"),
-                         env.ReadFile(env.Upper(), L"loop.txt"));
-        Assert::IsFalse(wm.HasWhiteout(L"loop.txt", env.Upper()));
-        Assert::AreEqual(std::string("original-lower"),
-                         env.ReadFile(env.Lower(0), L"loop.txt"),
-            L"Lower must be untouched through the whole cycle");
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"f.txt", kNoCreateOptions),
+            L"The second create-new over the whited-out lower file must succeed");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"f.txt")),
+            L"The second create must remove the whiteout");
+        Assert::AreEqual(UINT64{0}, FileSizeThroughMount(mount, L"f.txt"),
+            L"The mount must show the new empty file, not the lower data");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"f.txt"),
+            L"Creates and deletes through the mount must leave the lower file as it was");
     }
 };
 
-} // namespace LayerMountTests
+}
