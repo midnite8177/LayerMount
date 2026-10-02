@@ -463,7 +463,14 @@ public:
     // whiteout at the old path when a lower still holds it. A rename to
     // the identical name succeeds and changes nothing.
     // replaceIfExists FALSE fails with STATUS_OBJECT_NAME_COLLISION when
-    // the destination already exists.
+    // the destination already exists. A directory rename with
+    // replaceIfExists TRUE onto a directory fails with
+    // STATUS_DIRECTORY_NOT_EMPTY when the merged view shows a child of the
+    // destination. When it shows none, Rename moves the upper destination
+    // into the work directory before the move, puts it back when the move
+    // fails, and removes it when the move succeeds. The FileContext
+    // overload makes the destination checks before it closes ctx->handle,
+    // so a refused rename leaves the handle open.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
                     const std::wstring& newRelativePath,
                     BOOLEAN replaceIfExists,
@@ -685,6 +692,20 @@ private:
     // STATUS_DIRECTORY_NOT_EMPTY when any entry is visible, and
     // STATUS_SUCCESS otherwise.
     NTSTATUS DirectoryEmptinessStatus(const std::wstring& dirNorm) const;
+
+    // The checks of a rename that need no lookup of the source or the
+    // destination: stream names, reserved paths and the access tracker.
+    NTSTATUS CheckRenameRequest(const std::wstring& oldNorm,
+                                const std::wstring& newNorm,
+                                DWORD callerPid);
+
+    // The merged-view checks of a rename destination. Returns
+    // STATUS_OBJECT_NAME_COLLISION when replaceIfExists is FALSE and the
+    // destination exists, and DirectoryEmptinessStatus for a directory
+    // onto a directory. Changes nothing.
+    NTSTATUS CheckRenameDestination(const std::wstring& newNorm,
+                                    bool isDirectory,
+                                    BOOLEAN replaceIfExists) const;
 
     LayerConfig config_;
     ::LayerMount::abi::CapabilityGate capabilities_;

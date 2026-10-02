@@ -44,6 +44,11 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
                         ReplaceExisting replace);
 
+// Removes the upper entry at path. A directory goes with its whole tree.
+// A junction or a symbolic link goes, and its target stays. A path that
+// does not exist is success.
+NTSTATUS RemoveUpperEntry(const std::wstring& path);
+
 // Creates a directory at path. A directory already there is success. Any
 // other entry there returns STATUS_OBJECT_NAME_COLLISION, so no caller
 // goes on to treat a file as a directory.

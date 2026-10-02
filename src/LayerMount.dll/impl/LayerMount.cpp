@@ -1796,6 +1796,22 @@ NTSTATUS LayerMount::DirectoryEmptinessStatus(const std::wstring& dirNorm) const
     return STATUS_SUCCESS;
 }
 
+NTSTATUS LayerMount::CheckRenameDestination(const std::wstring& newNorm,
+                                            bool isDirectory,
+                                            BOOLEAN replaceIfExists) const {
+    const ResolvedPath destResolved = pathResolver_->ResolvePath(newNorm);
+    if (!destResolved.Found()) {
+        return STATUS_SUCCESS;
+    }
+    if (!replaceIfExists) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    if (isDirectory && (destResolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return DirectoryEmptinessStatus(newNorm);
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid) {
     std::wstring normalized = NormalizePath(relativePath);
 
@@ -1926,30 +1942,14 @@ NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
     const bool lowerHasIt = lowerResolved.Found();
 
     const std::wstring upperPath = pathResolver_->GetUpperPath(hostNorm);
-    DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
-    if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        if (isDirectory) {
-            if (whiteoutMgr_->IsOpaque(normalized)) {
-                whiteoutMgr_->RemoveOpaque(normalized);
-            }
-            std::error_code ec;
-            std::filesystem::remove_all(upperPath, ec);
-            if (ec) {
-                if (!::RemoveDirectoryW(upperPath.c_str())) {
-                    const DWORD rmErr = ::GetLastError();
-                    if (rmErr != ERROR_FILE_NOT_FOUND && rmErr != ERROR_PATH_NOT_FOUND) {
-                        cache_->InvalidateWithAncestors(normalized);
-                        return NtStatusFromWin32(rmErr);
-                    }
-                }
-            }
-        } else {
-            if (!::DeleteFileW(upperPath.c_str())) {
-                DWORD err = ::GetLastError();
-                if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
-                    return NtStatusFromWin32(err);
-                }
-            }
+    if (::GetFileAttributesW(upperPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (isDirectory && whiteoutMgr_->IsOpaque(normalized)) {
+            whiteoutMgr_->RemoveOpaque(normalized);
+        }
+        const NTSTATUS removal = RemoveUpperEntry(upperPath);
+        if (!NT_SUCCESS(removal)) {
+            cache_->InvalidateWithAncestors(normalized);
+            return removal;
         }
     }
 
@@ -2003,12 +2003,6 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
     ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
     const bool isDirectory = resolved.Found() &&
         (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    const bool openedAsReparsePoint =
-        (ctx->createOptions & FILE_OPEN_REPARSE_POINT) != 0 &&
-        resolved.Found() &&
-        (resolved.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-    const bool deleteAsLink = openedAsReparsePoint &&
-        resolved.Found();
     ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(normalized);
     const bool lowerHasIt = lowerResolved.Found();
 
@@ -2016,34 +2010,16 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
     ctx->handleNeedsReopen = false;
 
     const std::wstring upperPath = pathResolver_->GetUpperPath(normalized);
-    DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
+    const DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        if ((upperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            if (whiteoutMgr_->IsOpaque(normalized)) {
-                whiteoutMgr_->RemoveOpaque(normalized);
-            }
-            if (deleteAsLink ||
-                (upperAttrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                if (!::RemoveDirectoryW(upperPath.c_str())) {
-                    DWORD err = ::GetLastError();
-                    if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
-                        return NtStatusFromWin32(err);
-                    }
-                }
-            } else {
-                std::error_code ec;
-                std::filesystem::remove_all(upperPath, ec);
-                if (ec) {
-                    ::RemoveDirectoryW(upperPath.c_str());
-                }
-            }
-        } else {
-            if (!::DeleteFileW(upperPath.c_str())) {
-                DWORD err = ::GetLastError();
-                if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
-                    return NtStatusFromWin32(err);
-                }
-            }
+        if ((upperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+            whiteoutMgr_->IsOpaque(normalized)) {
+            whiteoutMgr_->RemoveOpaque(normalized);
+        }
+        const NTSTATUS removal = RemoveUpperEntry(upperPath);
+        if (!NT_SUCCESS(removal)) {
+            cache_->InvalidateWithAncestors(normalized);
+            return removal;
         }
     }
 
@@ -2101,24 +2077,17 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
-                           const std::wstring& newRelativePath,
-                           BOOLEAN replaceIfExists,
-                           DWORD callerPid) {
-    std::wstring oldNorm = NormalizePath(oldRelativePath);
-    std::wstring newNorm = NormalizePath(newRelativePath);
-    const bool isSameLogicalPath = oldNorm == newNorm;
-
-    {
-        std::wstring oldHostNorm, oldStreamSuffix;
-        std::wstring newHostNorm, newStreamSuffix;
-        if (!TryParseStreamPath(oldNorm, oldHostNorm, oldStreamSuffix) ||
-            !TryParseStreamPath(newNorm, newHostNorm, newStreamSuffix)) {
-            return STATUS_OBJECT_NAME_INVALID;
-        }
-        if (!oldStreamSuffix.empty() || !newStreamSuffix.empty()) {
-            return STATUS_INVALID_PARAMETER;
-        }
+NTSTATUS LayerMount::CheckRenameRequest(const std::wstring& oldNorm,
+                                        const std::wstring& newNorm,
+                                        DWORD callerPid) {
+    std::wstring oldHostNorm, oldStreamSuffix;
+    std::wstring newHostNorm, newStreamSuffix;
+    if (!TryParseStreamPath(oldNorm, oldHostNorm, oldStreamSuffix) ||
+        !TryParseStreamPath(newNorm, newHostNorm, newStreamSuffix)) {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    if (!oldStreamSuffix.empty() || !newStreamSuffix.empty()) {
+        return STATUS_INVALID_PARAMETER;
     }
 
     if (IsReservedRelativePath(oldNorm) || IsReservedRelativePath(newNorm)) {
@@ -2130,6 +2099,19 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
             return STATUS_ACCESS_DENIED;
         }
     }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
+                           const std::wstring& newRelativePath,
+                           BOOLEAN replaceIfExists,
+                           DWORD callerPid) {
+    std::wstring oldNorm = NormalizePath(oldRelativePath);
+    std::wstring newNorm = NormalizePath(newRelativePath);
+    const bool isSameLogicalPath = oldNorm == newNorm;
+
+    const NTSTATUS requestStatus = CheckRenameRequest(oldNorm, newNorm, callerPid);
+    if (!NT_SUCCESS(requestStatus)) return requestStatus;
 
     ResolvedPath sourceResolved = pathResolver_->ResolvePath(oldNorm);
     if (!sourceResolved.Found()) {
@@ -2142,17 +2124,20 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
     const bool isDirectory =
         (sourceResolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-    if (!replaceIfExists && !isSameLogicalPath) {
-        ResolvedPath destResolved = pathResolver_->ResolvePath(newNorm);
-        if (destResolved.Found()) {
-            return STATUS_OBJECT_NAME_COLLISION;
+    NTSTATUS status = STATUS_SUCCESS;
+    RenameDestinationAside destinationAside;
+    if (!isSameLogicalPath) {
+        status = CheckRenameDestination(newNorm, isDirectory, replaceIfExists);
+        if (!NT_SUCCESS(status)) return status;
+        if (isDirectory && replaceIfExists) {
+            status = copyUp_->SetRenameDestinationAside(newNorm, &destinationAside);
+            if (!NT_SUCCESS(status)) return status;
         }
     }
 
     const bool destHadWhiteout =
         whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath);
 
-    NTSTATUS status = STATUS_SUCCESS;
     if (isDirectory && isSameLogicalPath) {
         status = copyUp_->RenameDirectoryCase(CallerPath(oldRelativePath),
                                               CallerPath(newRelativePath));
@@ -2169,6 +2154,7 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
                                    destHadWhiteout);
     }
     if (!NT_SUCCESS(status)) return status;
+    destinationAside.Commit();
 
     if (destHadWhiteout) {
         whiteoutMgr_->RemoveWhiteout(newNorm);
@@ -2194,9 +2180,16 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
     }
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
+    const bool isDirectory = ctx->isDirectory;
+    if (oldNorm != newNorm) {
+        const NTSTATUS requestStatus = CheckRenameRequest(oldNorm, newNorm, callerPid);
+        if (!NT_SUCCESS(requestStatus)) return requestStatus;
+        const NTSTATUS destinationStatus =
+            CheckRenameDestination(newNorm, isDirectory, replaceIfExists);
+        if (!NT_SUCCESS(destinationStatus)) return destinationStatus;
+    }
     const bool sourceWasInUpper = pathResolver_->ExistsInUpper(oldNorm);
     const std::wstring oldActualPath = ctx->actualPath;
-    const bool isDirectory = ctx->isDirectory;
 
     NTSTATUS status = STATUS_SUCCESS;
     if (isDirectory) {

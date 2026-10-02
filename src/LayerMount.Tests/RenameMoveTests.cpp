@@ -13,6 +13,7 @@
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::AddDenyAce;
 using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
 using LayerMountTestShared::DirectoryListingDenied;
@@ -530,6 +531,32 @@ std::vector<std::wstring> EntriesUnder(const std::wstring& root) {
     return entries;
 }
 
+enum class LowerChildHiding {
+    Whiteout,
+    OpaqueMarker,
+};
+
+// Writes a lower dst\old.txt and an upper dst that hides it, so dst shows
+// no child.
+void WriteDestinationHidingItsLowerChild(const TempLayerEnvironment& env,
+                                         LowerChildHiding hiding) {
+    env.WriteFile(env.Lower(0), L"dst\\old.txt", "old");
+    const std::wstring marker = hiding == LowerChildHiding::Whiteout
+        ? WhiteoutMarkerPath(L"dst\\old.txt")
+        : OpaqueMarkerPath(L"dst");
+    env.WriteFile(env.Upper(), marker, "");
+}
+
+void AssertDestinationStillHidesItsLowerChild(const TempLayerEnvironment& env,
+                                              const ::LayerMount::LayerMount& mount) {
+    Assert::IsTrue(env.FileExists(env.Upper(), L"dst"),
+        L"The failed rename must leave the upper dst");
+    const MergedDirectory listing = mount.MergeDirectoryEntries(L"dst");
+    AssertStatus(STATUS_SUCCESS, listing.status, L"The listing of dst must succeed");
+    Assert::IsTrue(listing.entries.empty(),
+        L"The failed rename must keep the lower child of dst hidden");
+}
+
 // mklink /J needs no symbolic-link privilege.
 bool CreateDirectoryJunction(const std::wstring& junction, const std::wstring& target) {
     const std::wstring command =
@@ -854,6 +881,178 @@ public:
             mount.Rename(L"secured\\Foo", L"secured\\FOO", kFailIfExists, kNoCallerPid),
             L"The rename of secured\\Foo to secured\\FOO must succeed");
         AssertOnlyEntryShownAs(mount, L"secured", L"FOO");
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoDirectoryWithAnUpperChild_FailsAndChangesNothing) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
+            env.WriteFile(env.Upper(), L"dst\\extra.txt", "extra");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+            AssertStatus(STATUS_DIRECTORY_NOT_EMPTY,
+                mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename onto a directory with an upper child must fail");
+            Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+                L"The failed rename must write nothing in the upper");
+            AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+            AssertOnlyEntryShownAs(mount, L"dst", L"extra.txt");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoDirectoryWithALowerChild_FailsAndChangesNothing) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
+            env.WriteFile(env.Lower(0), L"dst\\extra.txt", "extra");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+            AssertStatus(STATUS_DIRECTORY_NOT_EMPTY,
+                mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename onto a directory with a lower child must fail");
+            Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+                L"The failed rename must write nothing in the upper");
+            AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+            AssertOnlyEntryShownAs(mount, L"dst", L"extra.txt");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoEmptyUpperDirectory_ListsOnlyTheSourceChildren) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
+            env.CreateDir(env.Upper(), L"dst");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename onto an empty directory must succeed");
+            AssertOnlyEntryShownAs(mount, L"", L"dst");
+            AssertOnlyEntryShownAs(mount, L"dst", L"a.txt");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoDirectoryWithOnlyWhitedOutChildren_ListsOnlyTheSourceChildren) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
+            env.WriteFile(env.Lower(0), L"dst\\old.txt", "old");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst\\old.txt"), "");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename onto a directory that shows no children must succeed");
+            AssertOnlyEntryShownAs(mount, L"", L"dst");
+            AssertOnlyEntryShownAs(mount, L"dst", L"a.txt");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoEmptyLowerOnlyDirectory_ListsOnlyTheSourceChildren) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
+            env.CreateDir(env.Lower(0), L"dst");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename onto an empty lower directory must succeed");
+            AssertOnlyEntryShownAs(mount, L"", L"dst");
+            AssertOnlyEntryShownAs(mount, L"dst", L"a.txt");
+        }
+    }
+
+    TEST_METHOD(ReplaceRenameOpenDirectory_OntoDirectoryWithAChild_FailsAndKeepsTheHandleOpen) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+        env.WriteFile(env.Upper(), L"dst\\extra.txt", "extra");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"src", FILE_LIST_DIRECTORY | DELETE,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The source directory must open");
+
+        const NTSTATUS status = mount.Rename(ctx.get(), L"dst", kReplaceIfExists, kNoCallerPid);
+        BY_HANDLE_FILE_INFORMATION handleInfo{};
+        const bool handleWorks = ctx->handle != INVALID_HANDLE_VALUE &&
+            ::GetFileInformationByHandle(ctx->handle, &handleInfo) != FALSE;
+        const bool needsReopen = ctx->handleNeedsReopen;
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_DIRECTORY_NOT_EMPTY, status,
+            L"A replace rename of an open directory onto a directory with a child must fail");
+        Assert::IsTrue(handleWorks, L"The refused rename must leave the handle open");
+        Assert::IsFalse(needsReopen, L"The refused rename must not mark the handle for a reopen");
+    }
+
+    TEST_METHOD(ReplaceRename_UpperDirectoryThatCannotMove_KeepsTheDestination) {
+        for (const LowerChildHiding hiding : {LowerChildHiding::Whiteout, LowerChildHiding::OpaqueMarker}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+            WriteDestinationHidingItsLowerChild(env, hiding);
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                // An open child without FILE_SHARE_DELETE blocks the move of src.
+                const ScopedHandle heldChild(::CreateFileW(
+                    (env.Upper() + L"\\src\\a.txt").c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, nullptr));
+                Assert::IsTrue(heldChild.IsValid(), L"The test must hold src\\a.txt open");
+                status = mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid);
+            }
+
+            Assert::IsFalse(NT_SUCCESS(status), L"The rename must fail while a child of src is open");
+            AssertDestinationStillHidesItsLowerChild(env, mount);
+            AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_LowerDirectoryThatCannotCopy_KeepsTheDestination) {
+        for (const LowerChildHiding hiding : {LowerChildHiding::Whiteout, LowerChildHiding::OpaqueMarker}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"src\\a.txt", "a");
+            WriteDestinationHidingItsLowerChild(env, hiding);
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                // Without SE_BACKUP_NAME, the deny ACE stops the copy of src\a.txt.
+                AccessDenied unreadableChild(env.Lower(0) + L"\\src\\a.txt", FILE_READ_DATA);
+                BackupPrivilegeDisabledOnThread noBackupPrivilege;
+                status = mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid);
+            }
+
+            Assert::IsFalse(NT_SUCCESS(status), L"The rename must fail when src\\a.txt cannot be read");
+            AssertDestinationStillHidesItsLowerChild(env, mount);
+            AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_UpperJunctionOntoLowerDirectory_WritesNoOpaqueMarkerIntoTheTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.CreateDir(env.Lower(0), L"dst");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"dst", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of an upper junction onto an empty lower directory must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\dst", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper dst must be the moved junction");
+        Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+            L"The rename must write no opaque marker file into the junction target");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Root() + L"\\target", nullptr),
+            L"The rename must write no opaque stream onto the junction target");
     }
 };
 

@@ -526,19 +526,32 @@ are copied up on demand.
 
 Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.
-The engine handles four cases:
+The engine handles five cases:
 
 - **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
-  if present.
-- **lower → upper, replace=false, dest-not-present**: recursive copy
+  if present. When a lower layer has an entry at the destination path,
+  mark the destination opaque. A junction or directory symlink gets no
+  opaque marker, because the marker would go into its target.
+- **lower → upper, dest-not-present**: recursive copy
   via `CopyTreePreservingMetadata` (preserves reparse points, sparse
   bits, and ADS), then mark the destination opaque, then drop a
   whiteout at the source.
-- **lower → upper, replace=true, dest-present-in-upper**: same as
-  above but `remove_all` clears the upper destination first.
-- **rename to a destination that already exists in lower (with
-  replace=false)**: rejected with `STATUS_OBJECT_NAME_COLLISION` before
-  any side effects.
+- **replace=true, dest is a directory with visible children**: a child
+  from the upper or from a lower shows in the merged view. The engine
+  rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY` before any side
+  effects. This applies to an upper source and to a lower source.
+- **replace=true, dest is a directory with no visible children**: an
+  upper directory that holds only whiteouts or an opaque marker is
+  empty. The engine clears the opaque marker of the upper destination
+  and moves the directory into the work directory. Then it does the
+  rename as for a destination that is not present. When the rename
+  fails, the engine moves the destination back and restores its opaque
+  marker. When the rename succeeds, the engine removes the copy in the
+  work directory. The new directory is opaque when a lower layer has
+  the destination path, so no lower child of the old destination shows.
+- **rename to a destination that already exists in the merged view
+  (with replace=false)**: the engine rejects the rename with
+  `STATUS_OBJECT_NAME_COLLISION` before any side effects.
 
 Recursive copy-up is expensive and is the main reason single-file
 metacopy exists; the engine cannot apply the same trick to directories

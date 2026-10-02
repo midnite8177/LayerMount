@@ -589,21 +589,6 @@ NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
     return ExtendToSize(dstHandle, srcSize);
 }
 
-// Deletes path, with its whole tree when it is a directory. Does nothing
-// when path does not exist.
-void RemoveEntry(const std::wstring& path) {
-    const DWORD attrs = ::GetFileAttributesW(path.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
-        return;
-    }
-    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        std::error_code ec;
-        std::filesystem::remove_all(path, ec);
-    } else {
-        ::DeleteFileW(path.c_str());
-    }
-}
-
 }
 
 namespace LayerMount {
@@ -1512,12 +1497,12 @@ NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
 
         if (name.size() > kWhPrefix.size() &&
             std::equal(kWhPrefix.begin(), kWhPrefix.end(), name.begin())) {
-            RemoveEntry(newUpperPath + L"\\" + name.substr(kWhPrefix.size()));
+            RemoveUpperEntry(newUpperPath + L"\\" + name.substr(kWhPrefix.size()));
             continue;
         }
 
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            RemoveEntry(childDst);
+            RemoveUpperEntry(childDst);
         }
         const NTSTATUS childStatus = CopyTreePreservingMetadata(childSrc, childDst);
         if (!NT_SUCCESS(childStatus)) {
@@ -1558,17 +1543,7 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
             return rpStatus;
         }
 
-        // RemoveDirectoryW on a junction or directory symlink removes
-        // the link, not its target.
-        const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
-        const DWORD oldAttrs = ::GetFileAttributesW(oldUpperPath.c_str());
-        if (oldAttrs != INVALID_FILE_ATTRIBUTES) {
-            if ((oldAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                ::RemoveDirectoryW(oldUpperPath.c_str());
-            } else {
-                ::DeleteFileW(oldUpperPath.c_str());
-            }
-        }
+        RemoveUpperEntry(pathResolver_.GetUpperPath(oldNorm));
 
         if (!whiteoutMgr_.CreateWhiteout(oldNorm, WhiteoutType::Directory)) {
             const DWORD whErr = ::GetLastError();
@@ -1641,7 +1616,12 @@ NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
 
     std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
 
-    bool wasOpaque = whiteoutMgr_.IsOpaque(oldNorm);
+    // The opaque marker calls on a junction or directory symlink would
+    // reach its target.
+    const DWORD oldUpperAttrs = ::GetFileAttributesW(oldUpperPath.c_str());
+    const bool isLink = oldUpperAttrs != INVALID_FILE_ATTRIBUTES &&
+                        (oldUpperAttrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    const bool wasOpaque = !isLink && whiteoutMgr_.IsOpaque(oldNorm);
 
     DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
     if (!MoveFileExW(oldUpperPath.c_str(), newUpperPath.c_str(), flags)) {
@@ -1650,12 +1630,88 @@ NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
 
     if (wasOpaque) {
         whiteoutMgr_.RemoveOpaque(oldNorm);
+    }
+    if (!isLink &&
+        (wasOpaque || pathResolver_.ResolveLowerPath(newNorm).Found())) {
         whiteoutMgr_.SetOpaque(newNorm);
     }
 
     cache_.InvalidateWithAncestors(oldNorm);
     cache_.InvalidateWithAncestors(newNorm);
 
+    return STATUS_SUCCESS;
+}
+
+RenameDestinationAside::~RenameDestinationAside() {
+    if (asidePath_.empty()) {
+        return;
+    }
+    if (::GetFileAttributesW(upperPath_.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        RemoveUpperEntry(asidePath_);
+    } else if (NT_SUCCESS(MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No)) &&
+               wasOpaque_) {
+        whiteoutMgr_->SetOpaque(normalizedPath_);
+    }
+    cache_->InvalidateWithAncestors(normalizedPath_);
+}
+
+void RenameDestinationAside::Commit() {
+    if (asidePath_.empty()) {
+        return;
+    }
+    RemoveUpperEntry(asidePath_);
+    asidePath_.clear();
+}
+
+NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
+                                           RenameDestinationAside* aside) {
+    const std::wstring normalizedUpperPath = pathResolver_.GetUpperPath(newNorm);
+    const std::wstring upperPath =
+        WithStoredLeafName(normalizedUpperPath, normalizedUpperPath);
+    const DWORD attrs = ::GetFileAttributesW(upperPath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        const DWORD probeErr = ::GetLastError();
+        if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
+            return STATUS_SUCCESS;
+        }
+        return ::LayerMount::NtStatusFromWin32(probeErr);
+    }
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return STATUS_SUCCESS;
+    }
+
+    // The opaque marker calls on a junction or directory symlink would
+    // reach its target.
+    const bool wasOpaque = (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+                           whiteoutMgr_.IsOpaque(newNorm);
+    if (wasOpaque) {
+        whiteoutMgr_.RemoveOpaque(newNorm);
+    }
+    const std::wstring asidePath = GenerateWorkPath();
+    NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No);
+    if (moveStatus == ::LayerMount::NtStatusFromWin32(ERROR_NOT_SAME_DEVICE)) {
+        // MoveFileExW cannot move a directory to another volume. With the
+        // work directory on another volume, the destination goes at once,
+        // and a failed rename cannot restore it.
+        moveStatus = RemoveUpperEntry(upperPath);
+        cache_.InvalidateWithAncestors(newNorm);
+        return moveStatus;
+    }
+    if (!NT_SUCCESS(moveStatus) && wasOpaque) {
+        whiteoutMgr_.SetOpaque(newNorm);
+    }
+    // Runs on a failed move too, because the marker calls changed the upper.
+    cache_.InvalidateWithAncestors(newNorm);
+    if (!NT_SUCCESS(moveStatus)) {
+        return moveStatus;
+    }
+
+    aside->whiteoutMgr_ = &whiteoutMgr_;
+    aside->cache_ = &cache_;
+    aside->normalizedPath_ = newNorm;
+    aside->upperPath_ = upperPath;
+    aside->asidePath_ = asidePath;
+    aside->wasOpaque_ = wasOpaque;
     return STATUS_SUCCESS;
 }
 

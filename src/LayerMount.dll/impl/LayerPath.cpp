@@ -101,6 +101,34 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
     return STATUS_SUCCESS;
 }
 
+NTSTATUS RemoveUpperEntry(const std::wstring& path) {
+    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        const DWORD probeErr = ::GetLastError();
+        if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
+            return STATUS_SUCCESS;
+        }
+        return NtStatusFromWin32(probeErr);
+    }
+
+    const bool isDirectory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (isDirectory && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+        std::error_code ec;
+        fs::remove_all(path, ec);
+        return ec ? NtStatusFromWin32(static_cast<DWORD>(ec.value())) : STATUS_SUCCESS;
+    }
+
+    const BOOL removed = isDirectory ? ::RemoveDirectoryW(path.c_str())
+                                     : ::DeleteFileW(path.c_str());
+    if (!removed) {
+        const DWORD removeErr = ::GetLastError();
+        if (removeErr != ERROR_FILE_NOT_FOUND && removeErr != ERROR_PATH_NOT_FOUND) {
+            return NtStatusFromWin32(removeErr);
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CreateDirectoryOrUseExisting(const std::wstring& path) {
     if (::CreateDirectoryW(path.c_str(), nullptr)) {
         return STATUS_SUCCESS;

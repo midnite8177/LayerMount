@@ -43,6 +43,33 @@ private:
     HANDLE h_;
 };
 
+// An upper destination directory that CopyUp::SetRenameDestinationAside
+// moved into the work directory. Until Commit runs, the destructor acts on
+// a failed rename. When the destination path is free, it moves the
+// directory back and restores its opaque marker. When the rename placed an
+// entry at the path, it removes the copy in the work directory. Commit
+// removes that copy. An object that holds no directory does nothing.
+class RenameDestinationAside {
+public:
+    RenameDestinationAside() = default;
+    ~RenameDestinationAside();
+
+    RenameDestinationAside(const RenameDestinationAside&) = delete;
+    RenameDestinationAside& operator=(const RenameDestinationAside&) = delete;
+
+    void Commit();
+
+private:
+    friend class CopyUp;
+
+    WhiteoutManager* whiteoutMgr_ = nullptr;
+    Cache* cache_ = nullptr;
+    std::wstring normalizedPath_;
+    std::wstring upperPath_;
+    std::wstring asidePath_;
+    bool wasOpaque_ = false;
+};
+
 class CopyUp {
 public:
     CopyUp(ConfigRef config,
@@ -103,12 +130,27 @@ public:
 
     // Before the move, makes the new parent exist in the upper, as
     // UpperParent::Ensure does. Moves the upper directory and carries its
-    // opaque marker. The moved entry gets its name in newCallerPath's case.
+    // opaque marker. Marks the moved entry opaque when a lower layer has
+    // its new path, so lower children of a replaced destination stay
+    // hidden. A moved junction or directory symlink never becomes opaque,
+    // because the marker would go into its target. The moved entry gets
+    // its name in newCallerPath's case.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view.
     NTSTATUS RenameUpperDirectory(const CallerPath& oldCallerPath,
                                   const CallerPath& newCallerPath,
                                   ReplaceExisting replace);
+
+    // Clears the opaque marker of the upper directory at newNorm and moves
+    // the directory into the work directory, so a replace-rename can put
+    // its source at the path. A junction or directory symlink moves as a
+    // link, and its target keeps its markers. When the upper has no
+    // directory at newNorm, nothing moves and aside stays empty. When the
+    // work directory is on another volume, the method removes the directory
+    // at once and aside stays empty, so a failed rename cannot restore it.
+    // aside must be empty.
+    NTSTATUS SetRenameDestinationAside(const std::wstring& newNorm,
+                                       RenameDestinationAside* aside);
 
     // Renames a directory whose old and new paths differ only in case.
     // Copies a lower directory up first, then renames the upper entry in
