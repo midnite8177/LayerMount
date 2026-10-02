@@ -67,7 +67,8 @@ public:
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
 
-        const NTSTATUS st = cu.RenameUpperDirectory(L"src", L"dst", ReplaceExisting::No);
+        const NTSTATUS st = cu.RenameUpperDirectory(
+            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st));
 
         Assert::IsFalse(env.FileExists(env.Upper(), L"src"));
@@ -89,7 +90,8 @@ public:
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
 
-        Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(L"src", L"dst", ReplaceExisting::No)));
+        Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(
+            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\inner.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\deep\\more.txt"));
@@ -112,7 +114,8 @@ public:
         Assert::IsTrue(wm.SetOpaque(L"src"));
         Assert::IsTrue(wm.IsOpaque(L"src"));
 
-        Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(L"src", L"dst", ReplaceExisting::No)));
+        Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(
+            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No)));
 
         Assert::IsFalse(wm.IsOpaque(L"src"),
             L"Opacity should no longer be reported for the vanished source path");
@@ -172,7 +175,8 @@ public:
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
 
-        Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(L"ld", L"newdir", ReplaceExisting::No)));
+        Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
+            CallerPath(L"ld"), CallerPath(L"newdir"), ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\top.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\nested\\inner.txt"));
@@ -355,7 +359,7 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         const NTSTATUS st = cu.RenameUpperDirectory(
-            L"src", L"dst", ReplaceExisting::No);
+            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -381,7 +385,7 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         const NTSTATUS st = cu.RenameLowerDirectory(
-            L"src", L"dst", ReplaceExisting::No);
+            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st));
@@ -406,7 +410,7 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         const NTSTATUS st = cu.RenameUpperDirectory(
-            L"src", L"dst", ReplaceExisting::No);
+            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st),
             L"Whited-out destination is invisible in merged view — rename "
             L"without replace must succeed, not collision.");
@@ -428,7 +432,7 @@ public:
         // ReplaceExisting::Yes gets past the top-level collision check, so
         // the copy reaches the child conflict.
         const NTSTATUS st = cu.RenameLowerDirectory(
-            L"src", L"dst", ReplaceExisting::Yes);
+            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::Yes);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -700,6 +704,75 @@ public:
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"x", L"d\\sub\\x", kFailIfExists, kNoCallerPid),
             L"A rename into a directory that an opaque ancestor hides must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryIntoLowerOnlyParent_CopiesTheParentUpInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"bar", L"foo\\bar", kFailIfExists, kNoCallerPid),
+            L"The rename of bar to foo\\bar must succeed");
+        AssertListedDirectoryWithChild(mount, L"Foo", L"a.txt");
+        AssertListedDirectoryWithChild(mount, L"Foo", L"bar");
+        AssertUpperDirectoryCopiedUp(env, L"Foo");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryIntoParentInNoLayer_ListsTheParentInTheCallersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"bar", L"NewParent\\bar", kFailIfExists, kNoCallerPid),
+            L"The rename of bar to NewParent\\bar must succeed");
+        AssertOnlyEntryShownAs(mount, L"", L"NewParent");
+        AssertOnlyEntryShownAs(mount, L"NewParent", L"bar");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryIntoWhitedOutLowerDirectory_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo\\a.txt", "x");
+        env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"bar", L"foo\\bar", kFailIfExists, kNoCallerPid),
+            L"A rename into a whited-out directory must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryIntoDirectoryHiddenByOpaqueAncestor_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\Sub\\a.txt", "x");
+        env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"bar", L"d\\sub\\bar", kFailIfExists, kNoCallerPid),
+            L"A rename into a directory that an opaque ancestor hides must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryUnderLowerFile_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo", "x");
+        env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"bar", L"foo\\bar", kFailIfExists, kNoCallerPid),
+            L"A rename of a directory to a path under a lower file must fail");
         Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
             L"The failed rename must write nothing in the upper");
     }

@@ -97,16 +97,17 @@ public:
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view. The new upper entry gets its
     // name in newCallerPath's case.
-    NTSTATUS RenameLowerDirectory(const std::wstring& oldCallerPath,
-                                  const std::wstring& newCallerPath,
+    NTSTATUS RenameLowerDirectory(const CallerPath& oldCallerPath,
+                                  const CallerPath& newCallerPath,
                                   ReplaceExisting replace);
 
-    // Moves the upper directory and carries its opaque marker. The moved
-    // entry gets its name in newCallerPath's case.
+    // Before the move, makes the new parent exist in the upper, as
+    // UpperParent::Ensure does. Moves the upper directory and carries its
+    // opaque marker. The moved entry gets its name in newCallerPath's case.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view.
-    NTSTATUS RenameUpperDirectory(const std::wstring& oldCallerPath,
-                                  const std::wstring& newCallerPath,
+    NTSTATUS RenameUpperDirectory(const CallerPath& oldCallerPath,
+                                  const CallerPath& newCallerPath,
                                   ReplaceExisting replace);
 
     // Renames a directory whose old and new paths differ only in case.
@@ -118,11 +119,17 @@ public:
     // junction or directory symlink, when the upper lacks reparse-point
     // support, is copied up as a plain opaque directory holding its
     // target's tree.
-    NTSTATUS RenameDirectoryCase(const std::wstring& oldCallerPath,
-                                 const std::wstring& newCallerPath);
+    NTSTATUS RenameDirectoryCase(const CallerPath& oldCallerPath,
+                                 const CallerPath& newCallerPath);
 
 private:
     bool DestinationExistsInMerged(const std::wstring& normalizedPath) const;
+
+    // Fails with STATUS_OBJECT_NAME_COLLISION when replace is
+    // ReplaceExisting::No and the destination exists in the merged view.
+    // Then makes the parent of newCallerPath exist in the upper.
+    NTSTATUS PrepareRenameDestination(const CallerPath& newCallerPath,
+                                      ReplaceExisting replace);
 
     NTSTATUS OverlayUpperShadow(const std::wstring& oldUpperPath,
                                 const std::wstring& newUpperPath);

@@ -1478,6 +1478,15 @@ bool CopyUp::DestinationExistsInMerged(const std::wstring& normalizedPath) const
     return destInUpper || (destInLower && !destWhitedOut);
 }
 
+NTSTATUS CopyUp::PrepareRenameDestination(const CallerPath& newCallerPath,
+                                          ReplaceExisting replace) {
+    if (replace == ReplaceExisting::No &&
+        DestinationExistsInMerged(NormalizePath(newCallerPath.Text()))) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    return upperParent_.Ensure(newCallerPath);
+}
+
 NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
                                     const std::wstring& newUpperPath) {
     static constexpr std::wstring_view kWhPrefix(L".wh.");
@@ -1520,26 +1529,22 @@ NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldCallerPath,
-                                      const std::wstring& newCallerPath,
+NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
+                                      const CallerPath& newCallerPath,
                                       ReplaceExisting replace) {
-    std::wstring oldNorm = NormalizePath(oldCallerPath);
-    std::wstring newNorm = NormalizePath(newCallerPath);
+    std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
+    std::wstring newNorm = NormalizePath(newCallerPath.Text());
     std::wstring newUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath);
-
-    if (replace == ReplaceExisting::No && DestinationExistsInMerged(newNorm)) {
-        return STATUS_OBJECT_NAME_COLLISION;
-    }
+        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath.Text());
 
     ResolvedPath source = pathResolver_.ResolveLowerPath(oldNorm);
     if (!source.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    NTSTATUS parentStatus = upperParent_.Ensure(CallerPath(newCallerPath));
-    if (!NT_SUCCESS(parentStatus)) {
-        return parentStatus;
+    NTSTATUS destinationStatus = PrepareRenameDestination(newCallerPath, replace);
+    if (!NT_SUCCESS(destinationStatus)) {
+        return destinationStatus;
     }
 
     // Copy a junction or directory symlink as a link and never make it
@@ -1621,16 +1626,17 @@ NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldCallerPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::RenameUpperDirectory(const std::wstring& oldCallerPath,
-                                      const std::wstring& newCallerPath,
+NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
+                                      const CallerPath& newCallerPath,
                                       ReplaceExisting replace) {
-    std::wstring oldNorm = NormalizePath(oldCallerPath);
-    std::wstring newNorm = NormalizePath(newCallerPath);
+    std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
+    std::wstring newNorm = NormalizePath(newCallerPath.Text());
     std::wstring newUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath);
+        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath.Text());
 
-    if (replace == ReplaceExisting::No && DestinationExistsInMerged(newNorm)) {
-        return STATUS_OBJECT_NAME_COLLISION;
+    NTSTATUS destinationStatus = PrepareRenameDestination(newCallerPath, replace);
+    if (!NT_SUCCESS(destinationStatus)) {
+        return destinationStatus;
     }
 
     std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
@@ -1653,17 +1659,17 @@ NTSTATUS CopyUp::RenameUpperDirectory(const std::wstring& oldCallerPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::RenameDirectoryCase(const std::wstring& oldCallerPath,
-                                     const std::wstring& newCallerPath) {
-    const std::wstring normalized = NormalizePath(oldCallerPath);
+NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
+                                     const CallerPath& newCallerPath) {
+    const std::wstring normalized = NormalizePath(oldCallerPath.Text());
     const std::wstring newUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath);
+        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath.Text());
 
     if (!pathResolver_.ExistsInUpper(normalized)) {
         const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
         if (source.Found() && (source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
             !capabilities_.HasReparsePoints()) {
-            NTSTATUS status = upperParent_.Ensure(CallerPath(newCallerPath));
+            NTSTATUS status = upperParent_.Ensure(newCallerPath);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -1682,13 +1688,13 @@ NTSTATUS CopyUp::RenameDirectoryCase(const std::wstring& oldCallerPath,
         }
     }
 
-    NTSTATUS status = CopyUpDirectory(oldCallerPath);
+    NTSTATUS status = CopyUpDirectory(oldCallerPath.Text());
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
     const std::wstring oldUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, oldCallerPath);
+        BuildUpperPathPreserveCase(config_.upperPath, oldCallerPath.Text());
     status = MoveUpperEntry(WithStoredLeafName(oldUpperPath, oldUpperPath), newUpperPath,
                             ReplaceExisting::No);
     cache_.InvalidateWithAncestors(normalized);

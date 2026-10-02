@@ -2154,13 +2154,16 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
 
     NTSTATUS status = STATUS_SUCCESS;
     if (isDirectory && isSameLogicalPath) {
-        status = copyUp_->RenameDirectoryCase(oldRelativePath, newRelativePath);
+        status = copyUp_->RenameDirectoryCase(CallerPath(oldRelativePath),
+                                              CallerPath(newRelativePath));
     } else if (isDirectory) {
         const ReplaceExisting replace =
             replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No;
+        const CallerPath oldCallerPath(oldRelativePath);
+        const CallerPath newCallerPath(newRelativePath);
         status = pathResolver_->ResolveLowerPath(oldNorm).Found()
-            ? copyUp_->RenameLowerDirectory(oldRelativePath, newRelativePath, replace)
-            : copyUp_->RenameUpperDirectory(oldRelativePath, newRelativePath, replace);
+            ? copyUp_->RenameLowerDirectory(oldCallerPath, newCallerPath, replace)
+            : copyUp_->RenameUpperDirectory(oldCallerPath, newCallerPath, replace);
     } else {
         status = RenameFileInUpper(oldRelativePath, newRelativePath, replaceIfExists,
                                    destHadWhiteout);
