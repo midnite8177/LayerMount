@@ -20,9 +20,8 @@ public:
     // Resolve only in lower layers (skip upper). Used by copy-up.
     ResolvedPath ResolveLowerPath(const std::wstring& relativePath) const;
 
-    // Fills every field of CreateResolution for the path. The lower walk
-    // that ResolvePath runs serves as the lower hit, so a path that the
-    // merged resolution follows into the lowers is walked once.
+    // The lower walk that ResolvePath runs serves as the lower hit, so a
+    // path that the overlay resolves into the lowers is walked once.
     CreateResolution ResolveForCreate(const std::wstring& relativePath) const;
 
     // Check if a path exists in the upper layer specifically

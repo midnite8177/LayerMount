@@ -784,10 +784,12 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(
  * primitives preamble).
  *
  * The create fails with HRESULT_FROM_NT(STATUS_OBJECT_NAME_COLLISION) when
- * the merged view already holds `relativePath`, in any layer. A path that
+ * the overlay already holds `relativePath`, in any layer. A path that
  * a whiteout or an opaque ancestor hides is absent and does not collide.
  * A new named stream on an existing file does not collide. A named stream
  * that the file already has collides, and the create copies nothing up.
+ * A stream create on a file that a whiteout or an opaque ancestor hides
+ * makes a new empty file and does not bring the hidden data back.
  *
  * The create writes the owner, group, DACL and SACL that
  * `securityDescriptor` carries. It drops the SACL unless the filesystem

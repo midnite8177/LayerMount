@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "TestFixture.h"
 
+#include "MetadataADS.h"
+
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
 
@@ -176,6 +178,114 @@ public:
                          L"A create-new of a stream that the lower-only host already has must collide");
         Assert::IsFalse(env.FileExists(env.Upper(), L"f.txt"),
             L"A colliding stream create must not copy the host file up");
+    }
+
+    TEST_METHOD(CreateFile_OverLowerOnlyDirectory_Collides) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\child.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
+                         static_cast<long>(CreateThroughMount(mount, L"d", kNoCreateOptions)),
+                         L"A file create-new over a directory that only a lower holds must collide");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"d"),
+            L"A colliding create must write nothing in the upper");
+    }
+
+    TEST_METHOD(CreateDirectory_OverLowerOnlyFile_Collides) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"f", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
+                         static_cast<long>(CreateThroughMount(mount, L"f", FILE_DIRECTORY_FILE)),
+                         L"A directory create-new over a file that only a lower holds must collide");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"f"),
+            L"A colliding create must write nothing in the upper");
+    }
+
+    TEST_METHOD(CreateFile_OverFileInUpperAndLower_CollidesAndKeepsUpperData) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"f.txt", "lower");
+        env.WriteFile(env.Upper(), L"f.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
+                         static_cast<long>(CreateThroughMount(mount, L"f.txt", kNoCreateOptions)),
+                         L"A create-new over a file that both layers hold must collide");
+        Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"f.txt"),
+            L"A colliding create must leave the upper file as it was");
+    }
+
+    TEST_METHOD(CreateStream_NewStreamOnUpperFile_Succeeds) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"f.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS),
+                         static_cast<long>(CreateThroughMount(mount, L"f.txt:extra", kNoCreateOptions)),
+                         L"A create-new of a new stream on an upper file must succeed");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"f.txt:extra"),
+            L"The stream create must write the stream on the upper file");
+        Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"f.txt"),
+            L"The stream create must leave the upper file's data as it was");
+    }
+
+    TEST_METHOD(CreateDirectory_UnderOpaqueAncestorOverLowerDirectory_IsOpaqueAndHidesLowerChildren) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\e\\c.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\.wh..wh..opq", "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS),
+                         static_cast<long>(CreateThroughMount(mount, L"d\\e", FILE_DIRECTORY_FILE)),
+                         L"A directory create-new under an opaque directory must succeed over a hidden lower directory");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"d\\e\\.wh..wh..opq"),
+            L"The new directory must be opaque");
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_NOT_FOUND),
+                         static_cast<long>(OpenThroughMount(mount, L"d\\e\\c.txt")),
+                         L"The new directory must hide the children of the hidden lower directory");
+    }
+
+    TEST_METHOD(CreateStream_ExistingStreamOnMetacopyShellOrigin_CollidesAndLeavesShellUnfilled) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"f.txt", "lower");
+        env.WriteFile(env.Lower(0), L"f.txt:extra", "stream");
+        {
+            CopyUpRig rig(env.MakeConfig());
+            Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"f.txt")),
+                L"Preconditions: the copy-up must stage a metacopy shell");
+        }
+        const std::wstring shellPath = env.Upper() + L"\\f.txt";
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
+                         static_cast<long>(CreateThroughMount(mount, L"f.txt:extra", kNoCreateOptions)),
+                         L"A create-new of a stream that the shell's origin has must collide");
+        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
+            L"A colliding stream create must not fill the shell");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"f.txt:extra"),
+            L"A colliding stream create must not bring the origin's stream into the upper");
+    }
+
+    TEST_METHOD(CreateStream_NewStreamOnMetacopyShell_FillsShellAndSucceeds) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"f.txt", "lower");
+        {
+            CopyUpRig rig(env.MakeConfig());
+            Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"f.txt")),
+                L"Preconditions: the copy-up must stage a metacopy shell");
+        }
+        const std::wstring shellPath = env.Upper() + L"\\f.txt";
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        Assert::AreEqual(static_cast<long>(STATUS_SUCCESS),
+                         static_cast<long>(CreateThroughMount(mount, L"f.txt:extra", kNoCreateOptions)),
+                         L"A create-new of a new stream on a metacopy shell must succeed");
+        Assert::IsFalse(MetadataADS::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
+            L"The stream create must fill the shell");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Upper(), L"f.txt"),
+            L"The filled shell must hold the origin's data");
     }
 };
 

@@ -73,10 +73,9 @@ struct ResolvedPath {
     }
 };
 
-// What a create needs to know about its target path, from one resolution.
 struct CreateResolution {
-    // The merged view's hit, as ResolvePath returns it.
-    ResolvedPath merged;
+    // The overlay's hit, as ResolvePath returns it.
+    ResolvedPath overlayHit;
     // True when the upper holds a whiteout for exactly this path.
     bool whiteoutAtPath = false;
     // The lower hit, as ResolveLowerPath returns it. A whiteout for exactly
@@ -182,7 +181,7 @@ bool TryParseStreamPath(const std::wstring& normalized,
                         std::wstring& outHostNorm,
                         std::wstring& outStreamSuffix);
 
-// Returns true for a path that the merged view never shows. That is the
+// Returns true for a path that the overlay never shows. That is the
 // sidecar metadata subtree `.overlay` at the overlay root and anything
 // beneath it, and any path with a segment that starts with `kWhiteoutPrefix`
 // in any case, which covers whiteout markers, the opaque marker and anything
@@ -321,7 +320,7 @@ public:
     // those names gets silently renamed to CreateFileW/OpenFileW after
     // preprocessing and shadows the Win32 functions inside the class body.
 
-    // Open an existing file or directory in the merged view. Allocates a
+    // Open an existing file or directory in the overlay. Allocates a
     // FileContext, opens the underlying NT handle (copying up first when a
     // write-bearing access is requested against a lower-only entry), and
     // fills outInfo. Returns the new context via outCtx (caller takes
@@ -352,11 +351,12 @@ public:
     // FILE_DIRECTORY_FILE selects directory creation. Applies the
     // self-relative security descriptor that SecurityPolicy picks, and
     // pre-allocates allocationSize bytes when non-zero. Marks a new
-    // directory as opaque when a whiteout or an opaque ancestor hides a
-    // lower directory of the same name. Returns
-    // STATUS_OBJECT_NAME_COLLISION when the merged view already holds a
-    // path without a stream suffix, and for a stream create when the host
-    // file that the merged view holds already has that stream.
+    // directory as opaque when a whiteout at the path or an opaque ancestor
+    // hides a lower directory of the same name. Returns
+    // STATUS_OBJECT_NAME_COLLISION when the overlay already holds a path
+    // without a stream suffix, and for a stream create when the host file
+    // that the overlay holds already has that stream. A stream that the
+    // origin of a metacopy shell has counts, and the shell does not fill.
     NTSTATUS Create(const CreateRequest& request,
                     std::unique_ptr<FileContext>* outCtx,
                     InternalFileInfo* outInfo);
@@ -446,7 +446,7 @@ public:
     // Path-based rename: moves the entry within the overlay namespace.
     // Source is copied up if it lives only in lower; if lower retains a
     // copy at the old path the helper drops a whiteout there to suppress
-    // it from the merged view. Directory renames go through
+    // it from the overlay. Directory renames go through
     // CopyUp::HandleDirectoryRename. replaceIfExists FALSE fails with
     // STATUS_OBJECT_NAME_COLLISION when the destination already exists.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
@@ -618,9 +618,12 @@ private:
     // The checks Create makes before it writes anything, for the parsed
     // path in create. Returns STATUS_ACCESS_DENIED for a reserved path or a
     // process tracker denial, STATUS_FILE_IS_A_DIRECTORY for a directory
-    // create with a stream suffix, and STATUS_OBJECT_NAME_COLLISION for a
-    // collision as Create describes it. Resolves the path into *resolution
-    // once the first three checks pass.
+    // create with a stream suffix and for a stream create whose host is a
+    // directory in the upper or in the overlay, and
+    // STATUS_OBJECT_NAME_COLLISION for a collision as Create describes it.
+    // A lower directory that a whiteout or an opaque ancestor hides is not
+    // a directory host. Resolves the path into *resolution once the
+    // reserved-path, tracker and directory-stream checks pass.
     NTSTATUS CheckCreatePreconditions(const CreateRequest& request,
                                       const UpperCreate& create,
                                       CreateResolution* resolution) const;
@@ -640,7 +643,7 @@ private:
     NTSTATUS CreateFileInUpper(const UpperCreate& create, FileContext* ctx);
 
     // Makes the host file of a stream create a full file in the upper: a
-    // host that the merged view shows from a lower copies up, and a
+    // host that the overlay shows from a lower copies up, and a
     // metacopy shell fills. A host that a whiteout or an opaque ancestor
     // hides stays absent, and the stream create then makes an empty host.
     // Runs before the stream create, so a copy-up or a fill cannot bring

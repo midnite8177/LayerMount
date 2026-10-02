@@ -223,12 +223,12 @@ both stores.
 
 The two main producers of opaque markers:
 
-- `Create(rel, FILE_DIRECTORY_FILE, ...)` when a whiteout or an opaque
-  ancestor hides a lower directory of the same name. A create over a
-  lower directory that the merged view still shows fails with
-  `STATUS_OBJECT_NAME_COLLISION` instead. Without the marker, the new
+- `Create` with `FILE_DIRECTORY_FILE` in `createOptions` when a whiteout
+  at the path or an opaque ancestor hides a lower directory of the same
+  name. A create over a lower directory that the overlay still shows
+  fails with `STATUS_OBJECT_NAME_COLLISION` instead. Without the marker, the new
   (empty) upper directory would expose the hidden lower contents through
-  the merged view again.
+  the overlay again.
 - `CopyUp::HandleDirectoryRename` when the source directory came from a
   lower layer. After the recursive copy, the destination is opaque so
   subsequent merges don't re-pull files from the lower-layer source

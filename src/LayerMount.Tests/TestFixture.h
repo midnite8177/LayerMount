@@ -364,11 +364,6 @@ inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD le
     return buf;
 }
 
-// ---------------------------------------------------------------------------
-// Calls into a LayerMount instance with an untracked caller, no create
-// options, and the default security.
-// ---------------------------------------------------------------------------
-
 inline constexpr UINT32 kNoCreateOptions = 0u;
 inline constexpr DWORD kNoCallerPid = 0u;
 inline constexpr UINT64 kNoAllocationSize = 0u;

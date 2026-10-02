@@ -1,13 +1,3 @@
-// Unit tests for the "create at a path that was previously deleted / renamed
-// away / hidden by an opaque marker" scenarios. These exercise the manager
-// primitives that LayerMount::SCreate composes:
-//   1. Whiteout removal if one exists at the target path
-//   2. Opaque-marker creation when placing a new directory over a deleted lower dir
-//   3. Parent-directory creation in upper (lazy) when the target is nested
-//
-// End-to-end equivalents (CreateFileW / CreateDirectoryW through a mounted
-// overlay) live in the host adapter's integration test suite.
-
 #include "pch.h"
 #include "TestFixture.h"
 
@@ -27,8 +17,6 @@ public:
         AssertTempIsNTFS();
     }
 
-    // Mirror of SCreate's file-creation flow: clear a stale whiteout, ensure
-    // parent, then create. Returns the created-path for convenience.
     static std::wstring SimulateCreateFile(PathResolver& resolver,
                                            WhiteoutManager& wm,
                                            Cache& cache,
@@ -52,8 +40,6 @@ public:
         return upperPath;
     }
 
-    // Mirror of SCreate's directory-creation flow: clear stale whiteout,
-    // create dir, set opaque marker iff the path shadows a lower directory.
     static void SimulateCreateDir(PathResolver& resolver,
                                   WhiteoutManager& wm,
                                   Cache& cache,
@@ -74,10 +60,7 @@ public:
         cache.InvalidateWithAncestors(norm);
     }
 
-    // ---------------------------------------------------------------
-    // C1 — create file at a path previously deleted in lower: whiteout cleared
-    // ---------------------------------------------------------------
-    TEST_METHOD(C1_CreateFileOverWhiteoutForDeletedLowerFile_WhiteoutRemoved) {
+    TEST_METHOD(CreateFileOverWhiteoutForDeletedLowerFile_WhiteoutRemoved) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"f.txt", "old-lower");
 
@@ -101,10 +84,7 @@ public:
                          env.ReadFile(env.Upper(), L"f.txt"));
     }
 
-    // ---------------------------------------------------------------
-    // C2 — create file at path where a lower directory was deleted
-    // ---------------------------------------------------------------
-    TEST_METHOD(C2_CreateFileWhereLowerDirWasDeleted_TypeFlipsToFile) {
+    TEST_METHOD(CreateFileWhereLowerDirWasDeleted_TypeFlipsToFile) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"wasdir");
         env.WriteFile(env.Lower(0), L"wasdir\\inner.txt", "inner");
@@ -135,10 +115,7 @@ public:
         Assert::IsTrue(env.FileExists(env.Lower(0), L"wasdir\\inner.txt"));
     }
 
-    // ---------------------------------------------------------------
-    // C3 — create directory at path where lower file was deleted: whiteout cleared, no opaque
-    // ---------------------------------------------------------------
-    TEST_METHOD(C3_CreateDirWhereLowerFileWasDeleted_NoOpaqueMarker) {
+    TEST_METHOD(CreateDirWhereLowerFileWasDeleted_NoOpaqueMarker) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"wasfile", "lower-file");
 
@@ -157,10 +134,7 @@ public:
         Assert::IsTrue(env.FileExists(env.Upper(), L"wasfile"));
     }
 
-    // ---------------------------------------------------------------
-    // C4 — create dir where a lower directory was deleted → opaque
-    // ---------------------------------------------------------------
-    TEST_METHOD(C4_CreateDirWhereLowerDirWasDeleted_OpaqueMarkerSetAndLowerChildrenHidden) {
+    TEST_METHOD(CreateDirWhereLowerDirWasDeleted_OpaqueMarkerSetAndLowerChildrenHidden) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"shared");
         env.WriteFile(env.Lower(0), L"shared\\lc.txt", "lower-child");
@@ -182,16 +156,7 @@ public:
             L"Opaque marker must keep the deleted lower directory's child hidden");
     }
 
-    // ---------------------------------------------------------------
-    // C5 — recreate file at path whose lower entry was "renamed away"
-    //
-    // When a lower-layer file is renamed via SRename, the old path gets both
-    // a whiteout AND a redirect metadata ADS pointing at the new location. The
-    // create-over path should still remove the whiteout marker. The redirect
-    // ADS lives on the (upper) whiteout marker, so removing the marker also
-    // removes the redirect.
-    // ---------------------------------------------------------------
-    TEST_METHOD(C5_CreateFileWhereLowerWasRenamedAway_WhiteoutAndRedirectGone) {
+    TEST_METHOD(CreateFileWhereLowerWasRenamedAway_WhiteoutRemoved) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"moved.txt", "lower-content");
 
@@ -211,10 +176,7 @@ public:
                          env.ReadFile(env.Upper(), L"moved.txt"));
     }
 
-    // ---------------------------------------------------------------
-    // C6 — recreate file where a lower directory was "renamed away"
-    // ---------------------------------------------------------------
-    TEST_METHOD(C6_CreateFileWhereLowerDirWasRenamedAway_Ok) {
+    TEST_METHOD(CreateFileWhereLowerDirWasRenamedAway_Ok) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"olddir");
         env.WriteFile(env.Lower(0), L"olddir\\x.txt", "x");
@@ -234,10 +196,7 @@ public:
                          env.ReadFile(env.Upper(), L"olddir"));
     }
 
-    // ---------------------------------------------------------------
-    // C8 — create-over-whiteout in a nested path with lazy parent creation
-    // ---------------------------------------------------------------
-    TEST_METHOD(C8_CreateOverWhiteoutInNestedPath_ParentsCreatedOnDemand) {
+    TEST_METHOD(CreateOverWhiteoutInNestedPath_ParentsCreatedOnDemand) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"a\\b");
         env.WriteFile(env.Lower(0), L"a\\b\\c.txt", "lower");
@@ -266,9 +225,6 @@ public:
         Assert::IsTrue(r.source == LayerSource::Upper);
     }
 
-    // ---------------------------------------------------------------
-    // Extra — create/delete/create idempotency at the manager level
-    // ---------------------------------------------------------------
     TEST_METHOD(CreateDeleteCreate_Loop_ConvergesToLatestContent) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"loop.txt", "original-lower");

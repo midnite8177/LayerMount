@@ -17,10 +17,6 @@ bool IsDirectory(DWORD attributes) {
 
 }
 
-// ---------------------------------------------------------------------------
-// Construction
-// ---------------------------------------------------------------------------
-
 PathResolver::PathResolver(const LayerConfig& config,
                            WhiteoutManager& whiteoutMgr,
                            Cache& cache)
@@ -28,10 +24,6 @@ PathResolver::PathResolver(const LayerConfig& config,
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache) {
 }
-
-// ---------------------------------------------------------------------------
-// ResolvePath — public entry point
-// ---------------------------------------------------------------------------
 
 ResolvedPath PathResolver::ResolvePath(const std::wstring& relativePath) const {
     return ResolvePathInternal(relativePath, 0, nullptr);
@@ -67,10 +59,8 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
     std::wstring upperFullPath = config_.upperPath + L"\\" + normalized;
     DWORD upperAttrs = GetFileAttributesW(upperFullPath.c_str());
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        // Check for redirect in ADS metadata
         LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(upperFullPath, &config_);
         if (!metadata.redirect.empty()) {
-            // Follow the redirect chain
             return ResolvePathInternal(metadata.redirect, redirectDepth + 1, nullptr);
         }
 
@@ -96,8 +86,6 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
     }
 
     if (whiteoutMgr_.HasOpaqueAncestor(normalized)) {
-        // An ancestor directory in the upper layer is opaque —
-        // all lower layers are hidden for this subtree
         ResolvedPath notFound;
         cache_.Put(normalized, notFound);
         return notFound;
@@ -142,10 +130,6 @@ void PathResolver::LogTypeConflictInDeeperLowers(const std::wstring& normalized,
     }
 }
 
-// ---------------------------------------------------------------------------
-// ResolveLowerPath — skip upper layer
-// ---------------------------------------------------------------------------
-
 ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
     if (normalized.empty()) return {};
@@ -155,7 +139,7 @@ ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) co
     }
 
     // An upper-layer whiteout on any ancestor short-circuits lower iteration —
-    // the whole subtree is logically deleted from the merged view.
+    // the whole subtree is logically deleted from the overlay.
     if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
         return {};
     }
@@ -163,15 +147,11 @@ ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) co
     return FindInLowers(normalized, 0);
 }
 
-// ---------------------------------------------------------------------------
-// ResolveForCreate — merged hit, exact-path whiteout, and lower hit together
-// ---------------------------------------------------------------------------
-
 CreateResolution PathResolver::ResolveForCreate(const std::wstring& relativePath) const {
     const std::wstring normalized = NormalizePath(relativePath);
     std::optional<ResolvedPath> lowerWalk;
     CreateResolution resolution;
-    resolution.merged = ResolvePathInternal(normalized, 0, &lowerWalk);
+    resolution.overlayHit = ResolvePathInternal(normalized, 0, &lowerWalk);
     resolution.whiteoutAtPath = whiteoutMgr_.HasWhiteout(normalized, config_.upperPath);
     resolution.lower = lowerWalk.has_value() ? *lowerWalk : ResolveLowerPath(normalized);
     return resolution;
@@ -211,19 +191,11 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
     return {};
 }
 
-// ---------------------------------------------------------------------------
-// ExistsInUpper
-// ---------------------------------------------------------------------------
-
 bool PathResolver::ExistsInUpper(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
     std::wstring fullPath = config_.upperPath + L"\\" + normalized;
     return GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
-
-// ---------------------------------------------------------------------------
-// GetUpperPath
-// ---------------------------------------------------------------------------
 
 std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
@@ -231,14 +203,9 @@ std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const 
     return config_.upperPath + L"\\" + normalized;
 }
 
-// ---------------------------------------------------------------------------
-// HasTypeConflict
-// ---------------------------------------------------------------------------
-
 bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
 
-    // Collect attributes from all layers
     std::vector<std::pair<int, DWORD>> found;  // layer index (-1=upper), attributes
 
     std::wstring upperPath = config_.upperPath + L"\\" + normalized;
@@ -257,7 +224,6 @@ bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
 
     if (found.size() < 2) return false;
 
-    // Check if any pair disagrees on directory vs file
     bool firstIsDir = (found[0].second & FILE_ATTRIBUTE_DIRECTORY) != 0;
     for (size_t i = 1; i < found.size(); ++i) {
         bool isDir = (found[i].second & FILE_ATTRIBUTE_DIRECTORY) != 0;
