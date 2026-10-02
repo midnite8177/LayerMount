@@ -460,7 +460,8 @@ public:
 
     // Path-based rename: moves the entry within the overlay namespace.
     // Source is copied up if it lives only in lower. Rename drops a
-    // whiteout at the old path when a lower still holds it.
+    // whiteout at the old path when a lower still holds it. A rename to
+    // the identical name succeeds and changes nothing.
     // replaceIfExists FALSE fails with STATUS_OBJECT_NAME_COLLISION when
     // the destination already exists.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
@@ -599,8 +600,11 @@ public:
 private:
     std::shared_ptr<ProcessTracker> TryMakeProcessTracker();
 
-    // Opens the root directory on the upper layer's own path. The root
-    // has no lower origin, so no copy-up and no fill apply.
+    NTSTATUS RenameFileInUpper(const std::wstring& oldRelativePath,
+                               const std::wstring& newRelativePath,
+                               BOOLEAN replaceIfExists,
+                               bool destHadWhiteout);
+
     NTSTATUS OpenRoot(UINT32 grantedAccess,
                       UINT32 createOptions,
                       DWORD callerPid,

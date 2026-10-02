@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LayerMount.h"
+#include "LayerPath.h"
 #include "../abi/CapabilityGate.h"
 #include "../abi/EventEmitter.h"
 
@@ -41,8 +42,6 @@ private:
     HANDLE h_;
 };
 
-enum class ReplaceExisting { No, Yes };
-
 class CopyUp {
 public:
     CopyUp(ConfigRef config,
@@ -81,6 +80,8 @@ public:
     NTSTATUS CompleteLazyCopyUp(const std::wstring& relativePath);
 
     // Copy a directory entry (not contents) from a lower layer to the upper layer.
+    // The upper entry takes the lower entry's name, whatever the case of
+    // relativePath.
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);
 
     // Copies the lower tree and the old upper shadow to the new upper path,
@@ -88,107 +89,79 @@ public:
     // symlink source, when the upper supports reparse points, is copied as
     // a link, without its upper shadow and without opacity.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
-    // destination exists in the merged view.
-    NTSTATUS RenameLowerDirectory(const std::wstring& oldRelativePath,
-                                  const std::wstring& newRelativePath,
+    // destination exists in the merged view. The new upper entry gets its
+    // name in newCallerPath's case.
+    NTSTATUS RenameLowerDirectory(const std::wstring& oldCallerPath,
+                                  const std::wstring& newCallerPath,
                                   ReplaceExisting replace);
 
-    // Moves the upper directory and carries its opaque marker.
+    // Moves the upper directory and carries its opaque marker. The moved
+    // entry gets its name in newCallerPath's case.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view.
-    NTSTATUS RenameUpperDirectory(const std::wstring& oldRelativePath,
-                                  const std::wstring& newRelativePath,
+    NTSTATUS RenameUpperDirectory(const std::wstring& oldCallerPath,
+                                  const std::wstring& newCallerPath,
                                   ReplaceExisting replace);
 
+    // Renames a directory whose old and new paths differ only in case.
+    // Copies a lower directory up first, then renames the upper entry in
+    // place to newCallerPath's case. RenameLowerDirectory and
+    // RenameUpperDirectory do not fit, because old and new name the same
+    // entry, so they would copy the tree onto itself, delete it and white
+    // it out. The move needs no replace flag for the same reason. A lower
+    // junction or directory symlink, when the upper lacks reparse-point
+    // support, is copied up as a plain opaque directory holding its
+    // target's tree.
+    NTSTATUS RenameDirectoryCase(const std::wstring& oldCallerPath,
+                                 const std::wstring& newCallerPath);
+
 private:
-    // A lower entry under a whiteout does not count.
     bool DestinationExistsInMerged(const std::wstring& normalizedPath) const;
 
-    // Copies each old upper entry over newUpperPath. Skips the opaque marker
-    // and deletes each whited-out name instead of copying its whiteout,
-    // because the destination becomes opaque and those markers are redundant.
     NTSTATUS OverlayUpperShadow(const std::wstring& oldUpperPath,
                                 const std::wstring& newUpperPath);
 
-    // Ensure all ancestor directories exist in the upper layer, copying up as needed.
     NTSTATUS EnsureParentDirectories(const std::wstring& relativePath);
 
-    // Recursively copy a directory tree from srcAbs to dstAbs preserving child
-    // metadata that std::filesystem::copy drops: reparse points (symlinks /
-    // junctions) stay as links, sparse files stay sparse, ADS ride along with
-    // their base file.
     NTSTATUS CopyTreePreservingMetadata(const std::wstring& srcAbs,
                                          const std::wstring& dstAbs);
+
+    NTSTATUS CopyDirectoryTree(const std::wstring& srcAbs,
+                               const std::wstring& dstAbs);
 
     bool CopySecurityDescriptor(const std::wstring& srcPath, const std::wstring& dstPath);
 
     bool CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle);
 
-    // Write the copy-up bookkeeping metadata to upperPath. On failure,
-    // delete upperPath and return the failure status. Without this
-    // metadata the upper file looks like a foreign creation to later
-    // resolution, and a metacopy shell without its metacopy flag set
-    // serves its zero-filled data as real content on the next read.
     NTSTATUS WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
                                         const LayerMountMetadata& metadata);
 
-    // Mark dstHandle sparse so a metacopy placeholder allocates no data
-    // blocks. On failure, close dstHandle, delete workPath, and return the
-    // failure status. A non-sparse placeholder inflates the upper volume
-    // and breaks the metacopy contract.
     NTSTATUS MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
                                           const std::wstring& workPath);
 
-    // A Win32 call that removes one upper entry by path: DeleteFileW for
-    // a file, RemoveDirectoryW for a directory.
-    using RemoveUpperEntryFn = BOOL (WINAPI*)(LPCWSTR);
-
-    // Copy a reparse-point source (symlink / junction) to the upper layer
-    // as a link, write the copy-up metadata, invalidate the cache, and
-    // record the copy-up. On a metadata failure, call removeUpperEntry
-    // on the staged link and return the failure status.
     NTSTATUS CopyUpReparseEntry(const std::wstring& normalized,
                                 const ResolvedPath& source,
-                                RemoveUpperEntryFn removeUpperEntry);
+                                const std::wstring& upperPath);
 
-    // Stage a full copy of the source at workPath. On failure after the
-    // create, delete workPath and return the failure status.
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
                                 ScopedHandle& srcHandle,
                                 DWORD srcAttrs,
                                 const std::wstring& workPath);
 
-    // Finish a committed upper file: copy the user alternate data
-    // streams, write the copy-up metadata, and restore the source
-    // timestamps and attributes through basicInfo. On failure, delete
-    // upperPath and return the failure status.
     NTSTATUS FinishCommittedFile(const std::wstring& sourcePath,
                                  const std::wstring& upperPath,
                                  FileBasicInfoGuard& basicInfo);
 
-    // Stage a metacopy shell at workPath. On failure after the create,
-    // delete workPath and return the failure status.
     NTSTATUS StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
                                          const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
                                          const std::wstring& workPath);
 
-    // Copy the origin data through srcHandle into the shell at upperPath,
-    // clear the sparse attribute when the origin is not sparse, and close
-    // both handles. On failure, return the failure status and leave the
-    // shell in place with its metacopy flag set.
     NTSTATUS FillMetacopyShell(ScopedHandle& srcHandle,
                                const std::wstring& upperPath);
 
-    // Copy the user alternate data streams from the origin to the filled
-    // shell and clear the metacopy flag in metadata. On failure, return
-    // the failure status and leave the metacopy flag set so the next
-    // resolution retries the completion.
     NTSTATUS FinishFilledShell(const std::wstring& upperPath,
                                LayerMountMetadata& metadata);
 
-    // Copy the security descriptor and write the copy-up metadata on the
-    // upper directory. On failure, remove upperPath and return the
-    // failure status.
     NTSTATUS SecureAndTagUpperDirectory(const std::wstring& sourcePath,
                                         const std::wstring& upperPath);
 

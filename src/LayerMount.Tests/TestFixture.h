@@ -359,6 +359,7 @@ inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD le
 inline constexpr UINT32 kNoCreateOptions = 0u;
 inline constexpr DWORD kNoCallerPid = 0u;
 inline constexpr BOOLEAN kFailIfExists = FALSE;
+inline constexpr BOOLEAN kReplaceIfExists = TRUE;
 inline constexpr UINT64 kNoAllocationSize = 0u;
 inline constexpr PSECURITY_DESCRIPTOR kDefaultSecurity = nullptr;
 

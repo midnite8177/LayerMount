@@ -18,6 +18,11 @@
 
 namespace {
 
+constexpr const wchar_t* kReparseTreeCopyWarning =
+    L"Directory rename of a reparse-point source forced full "
+    L"recursive copy-up: upper layer lacks LM_CAP_REPARSE_POINTS, "
+    L"link semantics will not be preserved.";
+
 NTSTATUS RecordFillFailure(const std::wstring& relativePath, const wchar_t* stage,
                            NTSTATUS status) {
     wchar_t statusText[16] = {};
@@ -893,8 +898,7 @@ NTSTATUS CopyUp::WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
 
 NTSTATUS CopyUp::CopyUpReparseEntry(const std::wstring& normalized,
                                     const ResolvedPath& source,
-                                    RemoveUpperEntryFn removeUpperEntry) {
-    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
+                                    const std::wstring& upperPath) {
     NTSTATUS reparseStatus =
         CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
     if (!NT_SUCCESS(reparseStatus)) {
@@ -912,7 +916,11 @@ NTSTATUS CopyUp::CopyUpReparseEntry(const std::wstring& normalized,
     LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
     if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
         const DWORD err = ::GetLastError();
-        removeUpperEntry(upperPath.c_str());
+        if ((source.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            ::RemoveDirectoryW(upperPath.c_str());
+        } else {
+            ::DeleteFileW(upperPath.c_str());
+        }
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
     }
 
@@ -1038,7 +1046,6 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    // Ensure parent directories exist in upper layer
     NTSTATUS status = EnsureParentDirectories(normalized);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -1049,10 +1056,9 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     // copy the data behind the link. Regular file-data copy would follow the
     // reparse point on Windows and land an opaque file full of target data.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpReparseEntry(normalized, source, ::DeleteFileW);
+        return CopyUpReparseEntry(normalized, source, pathResolver_.GetUpperPath(normalized));
     }
 
-    // Open source file
     ScopedHandle srcHandle(CreateFileW(
         source.absolutePath.c_str(),
         GENERIC_READ,
@@ -1384,27 +1390,21 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    // Ensure parent directories
     NTSTATUS status = EnsureParentDirectories(normalized);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    // Reparse-point short-circuit (mirror CopyUpFile's symlink handling for
-    // directory reparses — junctions / dir-symlinks). Without this branch a
-    // lower junction copies up as a plain empty directory: the reparse tag
-    // is silently dropped, FSCTL_GET_REPARSE_POINT on the upper entry
-    // returns nothing, and any client expecting the upper to behave as a
-    // junction (or attempting FSCTL_DELETE_REPARSE_POINT on it) sees
-    // ERROR_NOT_A_REPARSE_POINT. The fix is to route directory-reparse
-    // sources through CopyUpReparseEntry, which preserves the tag +
-    // reparse data verbatim.
+    const std::wstring upperPath =
+        WithStoredLeafName(pathResolver_.GetUpperPath(normalized), source.absolutePath);
+
+    // Without this branch a lower junction or directory symlink copies up as
+    // a plain empty directory and loses its reparse tag.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpReparseEntry(normalized, source, ::RemoveDirectoryW);
+        return CopyUpReparseEntry(normalized, source, upperPath);
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
-    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
     ScopedHandle srcHandle(CreateFileW(
         source.absolutePath.c_str(),
         GENERIC_READ,
@@ -1520,12 +1520,13 @@ NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldRelativePath,
-                                      const std::wstring& newRelativePath,
+NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldCallerPath,
+                                      const std::wstring& newCallerPath,
                                       ReplaceExisting replace) {
-    std::wstring oldNorm = NormalizePath(oldRelativePath);
-    std::wstring newNorm = NormalizePath(newRelativePath);
-    std::wstring newUpperPath = pathResolver_.GetUpperPath(newNorm);
+    std::wstring oldNorm = NormalizePath(oldCallerPath);
+    std::wstring newNorm = NormalizePath(newCallerPath);
+    std::wstring newUpperPath =
+        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath);
 
     if (replace == ReplaceExisting::No && DestinationExistsInMerged(newNorm)) {
         return STATUS_OBJECT_NAME_COLLISION;
@@ -1536,7 +1537,10 @@ NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldRelativePath,
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    EnsureDirectoryExists(std::filesystem::path(newUpperPath).parent_path().wstring());
+    NTSTATUS parentStatus = EnsureParentDirectories(newNorm);
+    if (!NT_SUCCESS(parentStatus)) {
+        return parentStatus;
+    }
 
     // Copy a junction or directory symlink as a link and never make it
     // opaque. SetOpaque would write its marker through the link into the
@@ -1575,10 +1579,7 @@ NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldRelativePath,
 
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
         !capabilities_.HasReparsePoints() && events_ != nullptr) {
-        events_->Emit(LM_EVT_WARNING, S_OK, oldNorm.c_str(),
-            L"Directory rename of a reparse-point source forced full "
-            L"recursive copy-up: upper layer lacks LM_CAP_REPARSE_POINTS, "
-            L"link semantics will not be preserved.");
+        events_->Emit(LM_EVT_WARNING, S_OK, oldNorm.c_str(), kReparseTreeCopyWarning);
     }
 
     NTSTATUS copyStatus = CopyTreePreservingMetadata(
@@ -1620,12 +1621,13 @@ NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldRelativePath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::RenameUpperDirectory(const std::wstring& oldRelativePath,
-                                      const std::wstring& newRelativePath,
+NTSTATUS CopyUp::RenameUpperDirectory(const std::wstring& oldCallerPath,
+                                      const std::wstring& newCallerPath,
                                       ReplaceExisting replace) {
-    std::wstring oldNorm = NormalizePath(oldRelativePath);
-    std::wstring newNorm = NormalizePath(newRelativePath);
-    std::wstring newUpperPath = pathResolver_.GetUpperPath(newNorm);
+    std::wstring oldNorm = NormalizePath(oldCallerPath);
+    std::wstring newNorm = NormalizePath(newCallerPath);
+    std::wstring newUpperPath =
+        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath);
 
     if (replace == ReplaceExisting::No && DestinationExistsInMerged(newNorm)) {
         return STATUS_OBJECT_NAME_COLLISION;
@@ -1649,6 +1651,48 @@ NTSTATUS CopyUp::RenameUpperDirectory(const std::wstring& oldRelativePath,
     cache_.InvalidateWithAncestors(newNorm);
 
     return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::RenameDirectoryCase(const std::wstring& oldCallerPath,
+                                     const std::wstring& newCallerPath) {
+    const std::wstring normalized = NormalizePath(oldCallerPath);
+    const std::wstring newUpperPath =
+        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath);
+
+    if (!pathResolver_.ExistsInUpper(normalized)) {
+        const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
+        if (source.Found() && (source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+            !capabilities_.HasReparsePoints()) {
+            NTSTATUS status = EnsureParentDirectories(normalized);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            if (events_ != nullptr) {
+                events_->Emit(LM_EVT_WARNING, S_OK, normalized.c_str(), kReparseTreeCopyWarning);
+            }
+            status = CopyDirectoryTree(source.absolutePath, newUpperPath);
+            if (!NT_SUCCESS(status)) {
+                std::error_code ec;
+                std::filesystem::remove_all(newUpperPath, ec);
+                return status;
+            }
+            whiteoutMgr_.SetOpaque(normalized);
+            cache_.InvalidateWithAncestors(normalized);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    NTSTATUS status = CopyUpDirectory(oldCallerPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    const std::wstring oldUpperPath =
+        BuildUpperPathPreserveCase(config_.upperPath, oldCallerPath);
+    status = MoveUpperEntry(WithStoredLeafName(oldUpperPath, oldUpperPath), newUpperPath,
+                            ReplaceExisting::No);
+    cache_.InvalidateWithAncestors(normalized);
+    return status;
 }
 
 namespace {
@@ -2003,7 +2047,11 @@ NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
         return CopyFilePreservingMetadata(srcAbs, dstAbs, &config_, capabilities_);
     }
 
-    // Top-level directory: ensure dst exists, then recurse.
+    return CopyDirectoryTree(srcAbs, dstAbs);
+}
+
+NTSTATUS CopyUp::CopyDirectoryTree(const std::wstring& srcAbs,
+                                   const std::wstring& dstAbs) {
     NTSTATUS status = CopyDirectoryShell(srcAbs, dstAbs, &config_);
     if (!NT_SUCCESS(status)) return status;
 

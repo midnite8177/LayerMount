@@ -19,6 +19,31 @@ std::wstring DirWithSeparator(const std::wstring& dirPath);
 std::wstring JoinDirPath(const std::wstring& dirPath,
                          const std::wstring& relativePath);
 
+// Returns path with backslash separators and no leading or trailing
+// separator. Unlike NormalizePath, it keeps the case of path.
+std::wstring NormalizePathPreserveCase(const std::wstring& path);
+
+// An empty or all-separator relativePath returns upperRoot. An entry
+// created at the result keeps the caller's case.
+std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
+                                        const std::wstring& relativePath);
+
+// Returns targetPath with its last component replaced by entryPath's name
+// as stored on disk, the name FindFirstFileW reports. Returns targetPath
+// unchanged when the lookup fails. FindFirstFileW needs list access on
+// entryPath's parent, and a failed lookup must not fail a copy-up.
+std::wstring WithStoredLeafName(const std::wstring& targetPath,
+                                const std::wstring& entryPath);
+
+enum class ReplaceExisting { No, Yes };
+
+// Renames an upper file or directory. An inherited deny-write ACE on the
+// upper parent fails the rename with STATUS_ACCESS_DENIED unless the
+// process holds SE_RESTORE_NAME.
+NTSTATUS MoveUpperEntry(const std::wstring& from,
+                        const std::wstring& to,
+                        ReplaceExisting replace);
+
 // Returns the FindFirstFileW search pattern for dirRelativePath in the
 // layer at layerPath. The pattern never holds a doubled separator.
 std::wstring JoinLayerScanPath(const std::wstring& layerPath,

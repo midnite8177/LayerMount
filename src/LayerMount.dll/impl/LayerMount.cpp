@@ -173,26 +173,7 @@ bool LayerConfig::Prepare(std::wstring& error) {
 }
 
 std::wstring NormalizePath(const std::wstring& path) {
-    if (path.empty()) {
-        return {};
-    }
-
-    std::wstring result = path;
-
-    std::replace(result.begin(), result.end(), L'/', L'\\');
-
-    size_t start = 0;
-    while (start < result.size() && result[start] == L'\\') {
-        ++start;
-    }
-    if (start > 0) {
-        result = result.substr(start);
-    }
-
-    while (!result.empty() && result.back() == L'\\') {
-        result.pop_back();
-    }
-
+    std::wstring result = NormalizePathPreserveCase(path);
     if (!result.empty()) {
         CharLowerBuffW(result.data(), static_cast<DWORD>(result.size()));
     }
@@ -786,52 +767,6 @@ inline bool HasWriteAccess(UINT32 access) {
 inline bool HasFileDataAccess(UINT32 access) {
     return (MapFileGenericRights(access) &
             (FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_EXECUTE)) != 0;
-}
-
-std::wstring NormalizePathPreserveCase(const std::wstring& path) {
-    if (path.empty()) {
-        return {};
-    }
-
-    std::wstring result = path;
-    std::replace(result.begin(), result.end(), L'/', L'\\');
-
-    size_t start = 0;
-    while (start < result.size() && result[start] == L'\\') {
-        ++start;
-    }
-    if (start > 0) {
-        result = result.substr(start);
-    }
-
-    while (!result.empty() && result.back() == L'\\') {
-        result.pop_back();
-    }
-
-    return result;
-}
-
-std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
-                                        const std::wstring& relativePath) {
-    std::wstring preserved = NormalizePathPreserveCase(relativePath);
-    if (preserved.empty()) return upperRoot;
-    return JoinDirPath(upperRoot, preserved);
-}
-
-std::wstring GetExistingPathDisplayCase(const std::wstring& absolutePath) {
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = ::FindFirstFileW(absolutePath.c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) {
-        return absolutePath;
-    }
-    ::FindClose(find);
-
-    std::filesystem::path p(absolutePath);
-    std::filesystem::path parent = p.parent_path();
-    if (parent.empty()) {
-        return fd.cFileName;
-    }
-    return (parent / fd.cFileName).wstring();
 }
 
 // A file system serves paging reads on a write-only file object: the cache
@@ -2125,6 +2060,46 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
     return STATUS_SUCCESS;
 }
 
+NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
+                                       const std::wstring& newRelativePath,
+                                       BOOLEAN replaceIfExists,
+                                       bool destHadWhiteout) {
+    const std::wstring oldNorm = NormalizePath(oldRelativePath);
+    const std::wstring newNorm = NormalizePath(newRelativePath);
+    const bool lowerHasSource = pathResolver_->ResolveLowerPath(oldNorm).Found();
+
+    if (!pathResolver_->ExistsInUpper(oldNorm)) {
+        NTSTATUS status = copyUp_->CopyUpFile(oldNorm);
+        if (!NT_SUCCESS(status)) return status;
+    }
+
+    const std::wstring oldUpperPath =
+        BuildUpperPathPreserveCase(config_.upperPath, oldRelativePath);
+    const std::wstring newUpperPath =
+        BuildUpperPathPreserveCase(config_.upperPath, newRelativePath);
+
+    EnsureDirectoryExists(
+        std::filesystem::path(newUpperPath).parent_path().wstring());
+
+    NTSTATUS status = MoveUpperEntry(
+        WithStoredLeafName(oldUpperPath, oldUpperPath), newUpperPath,
+        replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No);
+    if (!NT_SUCCESS(status)) return status;
+
+    if (lowerHasSource) {
+        if (!whiteoutMgr_->CreateWhiteout(oldNorm, WhiteoutType::File)) {
+            const DWORD whErr = ::GetLastError();
+            if (destHadWhiteout) {
+                whiteoutMgr_->RemoveWhiteout(newNorm);
+            }
+            cache_->InvalidateWithAncestors(oldNorm);
+            cache_->InvalidateWithAncestors(newNorm);
+            return whErr ? NtStatusFromWin32(whErr) : STATUS_ACCESS_DENIED;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
                            const std::wstring& newRelativePath,
                            BOOLEAN replaceIfExists,
@@ -2159,11 +2134,12 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
     if (!sourceResolved.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
+    if (NormalizePathPreserveCase(oldRelativePath) ==
+        NormalizePathPreserveCase(newRelativePath)) {
+        return STATUS_SUCCESS;
+    }
     const bool isDirectory =
         (sourceResolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-
-    const bool lowerHasSource = pathResolver_->ResolveLowerPath(oldNorm).Found();
-    const bool upperHasSource = pathResolver_->ExistsInUpper(oldNorm);
 
     if (!replaceIfExists && !isSameLogicalPath) {
         ResolvedPath destResolved = pathResolver_->ResolvePath(newNorm);
@@ -2175,74 +2151,20 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
     const bool destHadWhiteout =
         whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath);
 
-    if (isDirectory) {
+    NTSTATUS status = STATUS_SUCCESS;
+    if (isDirectory && isSameLogicalPath) {
+        status = copyUp_->RenameDirectoryCase(oldRelativePath, newRelativePath);
+    } else if (isDirectory) {
         const ReplaceExisting replace =
             replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No;
-        NTSTATUS status = lowerHasSource
-            ? copyUp_->RenameLowerDirectory(oldNorm, newNorm, replace)
-            : copyUp_->RenameUpperDirectory(oldNorm, newNorm, replace);
-        if (!NT_SUCCESS(status)) return status;
+        status = pathResolver_->ResolveLowerPath(oldNorm).Found()
+            ? copyUp_->RenameLowerDirectory(oldRelativePath, newRelativePath, replace)
+            : copyUp_->RenameUpperDirectory(oldRelativePath, newRelativePath, replace);
     } else {
-        if (!upperHasSource) {
-            NTSTATUS status = copyUp_->CopyUpFile(oldNorm);
-            if (!NT_SUCCESS(status)) return status;
-        }
-
-        std::wstring oldUpperPath = GetExistingPathDisplayCase(
-            BuildUpperPathPreserveCase(config_.upperPath, oldRelativePath));
-        std::wstring newUpperPath =
-            BuildUpperPathPreserveCase(config_.upperPath, newRelativePath);
-
-        EnsureDirectoryExists(
-            std::filesystem::path(newUpperPath).parent_path().wstring());
-
-        DWORD flags = replaceIfExists ? MOVEFILE_REPLACE_EXISTING : 0;
-        if (!::MoveFileExW(oldUpperPath.c_str(), newUpperPath.c_str(), flags)) {
-            const DWORD moveErr = ::GetLastError();
-            if (moveErr != ERROR_ACCESS_DENIED) {
-                return NtStatusFromWin32(moveErr);
-            }
-            // Fallback for restrictive parent ACLs: when CopyUpDirectory
-            // propagated an inherited DENY-WRITE from the lower parent up
-            // to upper\<parent>, MoveFileExW fails the destination DACL
-            // check although the engine owns the upper file. SE_RESTORE_NAME
-            // lets a source handle opened with backup semantics skip that
-            // check through FileRenameInfo.
-            HANDLE src = ::CreateFileW(oldUpperPath.c_str(),
-                GENERIC_READ | DELETE | SYNCHRONIZE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-            if (src == INVALID_HANDLE_VALUE) {
-                return NtStatusFromWin32(::GetLastError());
-            }
-            const size_t pathBytes = newUpperPath.size() * sizeof(wchar_t);
-            std::vector<BYTE> buf(sizeof(FILE_RENAME_INFO) + pathBytes);
-            auto* ri = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
-            ri->ReplaceIfExists = replaceIfExists ? TRUE : FALSE;
-            ri->RootDirectory   = nullptr;
-            ri->FileNameLength  = static_cast<DWORD>(pathBytes);
-            std::memcpy(ri->FileName, newUpperPath.data(), pathBytes);
-            const BOOL renamed = ::SetFileInformationByHandle(
-                src, FileRenameInfo, ri, static_cast<DWORD>(buf.size()));
-            const DWORD renameErr = renamed ? 0 : ::GetLastError();
-            ::CloseHandle(src);
-            if (!renamed) {
-                return NtStatusFromWin32(renameErr);
-            }
-        }
-
-        if (lowerHasSource) {
-            if (!whiteoutMgr_->CreateWhiteout(oldNorm, WhiteoutType::File)) {
-                const DWORD whErr = ::GetLastError();
-                if (destHadWhiteout) {
-                    whiteoutMgr_->RemoveWhiteout(newNorm);
-                }
-                cache_->InvalidateWithAncestors(oldNorm);
-                cache_->InvalidateWithAncestors(newNorm);
-                return whErr ? NtStatusFromWin32(whErr) : STATUS_ACCESS_DENIED;
-            }
-        }
+        status = RenameFileInUpper(oldRelativePath, newRelativePath, replaceIfExists,
+                                   destHadWhiteout);
     }
+    if (!NT_SUCCESS(status)) return status;
 
     if (destHadWhiteout) {
         whiteoutMgr_->RemoveWhiteout(newNorm);
@@ -2262,6 +2184,10 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
     }
 
     const std::wstring oldRelativePath = ctx->relativePath;
+    if (NormalizePathPreserveCase(oldRelativePath) ==
+        NormalizePathPreserveCase(newRelativePath)) {
+        return Rename(oldRelativePath, newRelativePath, replaceIfExists, callerPid);
+    }
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
     const bool sourceWasInUpper = pathResolver_->ExistsInUpper(oldNorm);
@@ -2344,8 +2270,7 @@ NTSTATUS LayerMount::UpdateContextPath(FileContext* ctx,
     if (newStreamSuffix.empty()) {
         newRelativeHostPreserved = newRelativePath;
     } else {
-        // The cut is exact only while NormalizePath and NormalizePathPreserveCase remove the
-        // same characters. newHostNorm is lowercase, so the host is cut from the caller's case.
+        // newHostNorm is lowercase, so the host is cut from the caller's case.
         const std::wstring preserved = NormalizePathPreserveCase(newRelativePath);
         newRelativeHostPreserved =
             preserved.substr(0, preserved.length() - newStreamSuffix.length());

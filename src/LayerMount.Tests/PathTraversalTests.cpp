@@ -1,7 +1,3 @@
-// Unit tests for PathResolver's traversal defenses and normalization.
-// Case-only rename and long-path coverage (which needs a mounted overlay)
-// lives in LayerMount.IntegrationTests::PathSemanticsTests.
-
 #include "pch.h"
 #include "TestFixture.h"
 
