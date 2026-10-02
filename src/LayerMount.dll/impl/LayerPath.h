@@ -2,7 +2,9 @@
 
 #include "LayerMount.h"
 
+#include <string>
 #include <string_view>
+#include <utility>
 
 namespace LayerMount {
 
@@ -20,6 +22,19 @@ std::wstring DirWithSeparator(const std::wstring& dirPath);
 // gives DirWithSeparator(dirPath).
 std::wstring JoinDirPath(const std::wstring& dirPath,
                          const std::wstring& relativePath);
+
+// A path in the case the caller wrote it. A normalized path is lowercase,
+// so the constructor is explicit: a call site that holds only a normalized
+// path has to name the conversion.
+class CallerPath {
+public:
+    explicit CallerPath(std::wstring text) : text_(std::move(text)) {}
+
+    const std::wstring& Text() const noexcept { return text_; }
+
+private:
+    std::wstring text_;
+};
 
 // Returns path with backslash separators and no leading or trailing
 // separator. Unlike NormalizePath, it keeps the case of path.

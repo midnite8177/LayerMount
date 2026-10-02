@@ -1,28 +1,15 @@
 #pragma once
 
 #include "LayerMount.h"
+#include "LayerPath.h"
 
 #include <functional>
 #include <string>
-#include <utility>
 
 namespace LayerMount {
 
 class PathResolver;
 class Cache;
-
-// A path in the case the caller wrote it. A normalized path is lowercase,
-// so the constructor is explicit: a call site that holds only a normalized
-// path has to name the conversion.
-class CallerPath {
-public:
-    explicit CallerPath(std::wstring text) : text_(std::move(text)) {}
-
-    const std::wstring& Text() const noexcept { return text_; }
-
-private:
-    std::wstring text_;
-};
 
 // Copies up the lower directory at a normalized path.
 using CopyUpDirectoryFn = std::function<NTSTATUS(const std::wstring& normalizedPath)>;
@@ -30,8 +17,7 @@ using CopyUpDirectoryFn = std::function<NTSTATUS(const std::wstring& normalizedP
 // Makes the parent of a path exist in the upper.
 class UpperParent {
 public:
-    UpperParent(ConfigRef config,
-                const PathResolver& pathResolver,
+    UpperParent(const PathResolver& pathResolver,
                 Cache& cache,
                 CopyUpDirectoryFn copyUpDirectory);
 
@@ -46,7 +32,6 @@ public:
     NTSTATUS Ensure(const CallerPath& path) const;
 
 private:
-    const LayerConfig& config_;
     const PathResolver& pathResolver_;
     Cache& cache_;
     CopyUpDirectoryFn copyUpDirectory_;

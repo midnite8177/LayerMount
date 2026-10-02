@@ -306,6 +306,18 @@ inline bool HasAttribute(const std::wstring& path, DWORD flag) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
 }
 
+// The name the file system stores for the last component of path, which
+// keeps its case; empty when path does not exist.
+inline std::wstring StoredLeafName(const std::wstring& path) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = ::FindFirstFileW(path.c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    ::FindClose(find);
+    return fd.cFileName;
+}
+
 // The layer-relative path of the whiteout marker that hides relativePath:
 // L"a\\b\\c.txt" gives L"a\\b\\.wh.c.txt".
 inline std::wstring WhiteoutMarkerPath(const std::wstring& relativePath) {

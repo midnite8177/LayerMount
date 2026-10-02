@@ -247,6 +247,20 @@ std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const 
     return JoinDirPath(config_.upperPath, normalized);
 }
 
+std::wstring PathResolver::GetUpperPathForNewEntry(const CallerPath& path) const {
+    return BuildUpperPathPreserveCase(config_.upperPath, path.Text());
+}
+
+std::wstring PathResolver::GetUpperPathForCopyUp(const std::wstring& relativePath,
+                                                 const ResolvedPath& lowerSource) const {
+    return WithStoredLeafName(GetUpperPath(relativePath), lowerSource.absolutePath);
+}
+
+std::wstring PathResolver::GetStoredUpperPath(const std::wstring& relativePath) const {
+    const std::wstring upperPath = BuildUpperPathPreserveCase(config_.upperPath, relativePath);
+    return WithStoredLeafName(upperPath, upperPath);
+}
+
 bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
 

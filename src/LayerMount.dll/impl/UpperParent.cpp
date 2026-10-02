@@ -5,12 +5,10 @@
 
 namespace LayerMount {
 
-UpperParent::UpperParent(ConfigRef config,
-                         const PathResolver& pathResolver,
+UpperParent::UpperParent(const PathResolver& pathResolver,
                          Cache& cache,
                          CopyUpDirectoryFn copyUpDirectory)
-    : config_(config.Get())
-    , pathResolver_(pathResolver)
+    : pathResolver_(pathResolver)
     , cache_(cache)
     , copyUpDirectory_(std::move(copyUpDirectory)) {}
 
@@ -42,8 +40,7 @@ NTSTATUS UpperParent::Ensure(const CallerPath& path) const {
         return status;
     }
 
-    status = CreateDirectoryOrUseExisting(
-        BuildUpperPathPreserveCase(config_.upperPath, parent.Text()));
+    status = CreateDirectoryOrUseExisting(pathResolver_.GetUpperPathForNewEntry(parent));
     if (!NT_SUCCESS(status)) {
         return status;
     }

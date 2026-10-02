@@ -689,7 +689,7 @@ CopyUp::CopyUp(ConfigRef config,
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache)
     , stats_(stats)
-    , upperParent_(config, pathResolver, cache,
+    , upperParent_(pathResolver, cache,
                    [this](const std::wstring& normalizedPath) {
                        return CopyUpDirectory(normalizedPath);
                    }) {
@@ -1010,6 +1010,21 @@ NTSTATUS CopyUp::FinishCommittedFile(const std::wstring& sourcePath,
     return STATUS_SUCCESS;
 }
 
+NTSTATUS CopyUp::PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target) {
+    target->source = pathResolver_.ResolveLowerPath(normalized);
+    if (!target->source.Found()) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    const NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    target->upperPath = pathResolver_.GetUpperPathForCopyUp(normalized, target->source);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     std::wstring normalized = NormalizePath(relativePath);
 
@@ -1027,23 +1042,20 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
-    // Resolve source in lower layers
-    ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
-    if (!source.Found()) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-
-    NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
+    CopyUpTarget target;
+    NTSTATUS status = PrepareCopyUpTarget(normalized, &target);
     if (!NT_SUCCESS(status)) {
         return status;
     }
+    const ResolvedPath& source = target.source;
+    const std::wstring& upperPath = target.upperPath;
 
     // Reparse-point short-circuit: if the source carries a reparse tag, we
     // want to carry the TAG up (preserving symlink/junction semantics), not
     // copy the data behind the link. Regular file-data copy would follow the
     // reparse point on Windows and land an opaque file full of target data.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpReparseEntry(normalized, source, pathResolver_.GetUpperPath(normalized));
+        return CopyUpReparseEntry(normalized, source, upperPath);
     }
 
     ScopedHandle srcHandle(CreateFileW(
@@ -1060,7 +1072,6 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
-    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
     FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), upperPath);
 
     std::wstring workPath = GenerateWorkPath();
@@ -1173,15 +1184,13 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
-    ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
-    if (!source.Found()) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-
-    NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
+    CopyUpTarget target;
+    NTSTATUS status = PrepareCopyUpTarget(normalized, &target);
     if (!NT_SUCCESS(status)) {
         return status;
     }
+    const ResolvedPath& source = target.source;
+    const std::wstring& upperPath = target.upperPath;
 
     // Get source file info for size and timestamps
     WIN32_FILE_ATTRIBUTE_DATA srcAttrs;
@@ -1189,7 +1198,6 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
-    std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
     // CreateFileW below sets the attribute bits on the shell, so the guard
     // carries the times only.
     FileBasicInfoGuard basicInfo(srcAttrs, std::nullopt, upperPath);
@@ -1372,18 +1380,13 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
-    ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
-    if (!source.Found()) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-
-    NTSTATUS status = upperParent_.Ensure(CallerPath(normalized));
+    CopyUpTarget target;
+    NTSTATUS status = PrepareCopyUpTarget(normalized, &target);
     if (!NT_SUCCESS(status)) {
         return status;
     }
-
-    const std::wstring upperPath =
-        WithStoredLeafName(pathResolver_.GetUpperPath(normalized), source.absolutePath);
+    const ResolvedPath& source = target.source;
+    const std::wstring& upperPath = target.upperPath;
 
     // Without this branch a lower junction or directory symlink copies up as
     // a plain empty directory and loses its reparse tag.
@@ -1519,8 +1522,7 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
                                       ReplaceExisting replace) {
     std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
     std::wstring newNorm = NormalizePath(newCallerPath.Text());
-    std::wstring newUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath.Text());
+    std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(newCallerPath);
 
     ResolvedPath source = pathResolver_.ResolveLowerPath(oldNorm);
     if (!source.Found()) {
@@ -1606,8 +1608,7 @@ NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
                                       ReplaceExisting replace) {
     std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
     std::wstring newNorm = NormalizePath(newCallerPath.Text());
-    std::wstring newUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath.Text());
+    std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(newCallerPath);
 
     NTSTATUS destinationStatus = PrepareRenameDestination(newCallerPath, replace);
     if (!NT_SUCCESS(destinationStatus)) {
@@ -1665,9 +1666,7 @@ void RenameDestinationAside::Commit() {
 
 NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
                                            RenameDestinationAside* aside) {
-    const std::wstring normalizedUpperPath = pathResolver_.GetUpperPath(newNorm);
-    const std::wstring upperPath =
-        WithStoredLeafName(normalizedUpperPath, normalizedUpperPath);
+    const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
     const DWORD attrs = ::GetFileAttributesW(upperPath.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
@@ -1718,8 +1717,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
 NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
                                      const CallerPath& newCallerPath) {
     const std::wstring normalized = NormalizePath(oldCallerPath.Text());
-    const std::wstring newUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, newCallerPath.Text());
+    const std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(newCallerPath);
 
     if (!pathResolver_.ExistsInUpper(normalized)) {
         const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
@@ -1749,10 +1747,8 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
         return status;
     }
 
-    const std::wstring oldUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, oldCallerPath.Text());
-    status = MoveUpperEntry(WithStoredLeafName(oldUpperPath, oldUpperPath), newUpperPath,
-                            ReplaceExisting::No);
+    status = MoveUpperEntry(pathResolver_.GetStoredUpperPath(oldCallerPath.Text()),
+                            newUpperPath, ReplaceExisting::No);
     cache_.InvalidateWithAncestors(normalized);
     return status;
 }

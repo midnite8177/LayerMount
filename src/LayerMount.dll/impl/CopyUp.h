@@ -192,6 +192,17 @@ private:
     NTSTATUS MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
                                           const std::wstring& workPath);
 
+    // The lower entry a copy-up reads and the upper path it writes.
+    struct CopyUpTarget {
+        ResolvedPath source;
+        std::wstring upperPath;
+    };
+
+    // Finds the first visible lower that holds normalized, makes the upper
+    // parent exist, and names the upper path after the lower entry. Returns
+    // STATUS_OBJECT_NAME_NOT_FOUND when no visible lower holds normalized.
+    NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target);
+
     NTSTATUS CopyUpReparseEntry(const std::wstring& normalized,
                                 const ResolvedPath& source,
                                 const std::wstring& upperPath);

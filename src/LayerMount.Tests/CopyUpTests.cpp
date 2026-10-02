@@ -165,6 +165,28 @@ public:
             env.ReadFile(env.Upper(), L"foo.txt"));
     }
 
+    TEST_METHOD(CopyUpFile_LowerFileSymlink_NamesTheUpperInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"target.txt", "target");
+        const std::wstring lowerLink = env.Lower(0) + L"\\Link.TXT";
+        if (!::CreateSymbolicLinkW(lowerLink.c_str(), L"target.txt",
+                                   SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+            Logger::WriteMessage(L"[SKIP] the lower file symlink could not be created");
+            return;
+        }
+
+        CopyUpRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"link.txt"),
+            L"The copy-up of the lower file symlink must succeed");
+
+        const std::wstring upperLink = env.Upper() + L"\\link.txt";
+        Assert::IsTrue(HasAttribute(upperLink, FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper must hold the symlink");
+        Assert::AreEqual(std::wstring(L"Link.TXT"), StoredLeafName(upperLink),
+            L"The upper symlink must keep the lower's name");
+    }
+
     TEST_METHOD(CopyUpFile_ExtendedWorkDirWithTrailingSeparator_CopiesContentToUpper) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"foo.txt", "lower content");
@@ -436,6 +458,19 @@ public:
         ::CloseHandle(h);
         Assert::AreEqual(static_cast<LONGLONG>(content.size()), sz.QuadPart,
             L"Logical size should match source");
+    }
+
+    TEST_METHOD(CopyUpMetadataOnly_MixedCaseLowerFile_NamesTheShellInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Lazy.BIN", "x");
+
+        CopyUpRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"lazy.bin"),
+            L"The metadata-only copy-up must succeed");
+
+        Assert::AreEqual(std::wstring(L"Lazy.BIN"), StoredLeafName(env.Upper() + L"\\lazy.bin"),
+            L"The upper shell must keep the lower's name");
     }
 
     TEST_METHOD(CopyUpMetadataOnly_WritesMetacopyADS) {

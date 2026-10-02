@@ -1354,6 +1354,128 @@ public:
         AssertOnlyEntryShownAs(mount, L"foo", L"a.txt");
     }
 
+    TEST_METHOD(WriteOpen_LowerFile_ListsTheFileInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Readme.TXT", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, OpenForWriteAndClose(mount, L"readme.txt"),
+            L"A write open of the lower file must succeed");
+        Assert::AreEqual(std::wstring(L"Readme.TXT"), StoredLeafName(env.Upper() + L"\\readme.txt"),
+            L"The write open must copy the file up under the lower's name");
+
+        AssertOnlyEntryShownAs(mount, L"", L"Readme.TXT");
+    }
+
+    TEST_METHOD(CreateStream_OnLowerFile_ListsTheFileInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Readme.TXT", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            CreateThroughMount(mount, L"readme.txt:notes", kNoCreateOptions),
+            L"A create of a stream on the lower file must succeed");
+        Assert::AreEqual(std::wstring(L"Readme.TXT"), StoredLeafName(env.Upper() + L"\\readme.txt"),
+            L"The stream create must copy the file up under the lower's name");
+
+        AssertOnlyEntryShownAs(mount, L"", L"Readme.TXT");
+    }
+
+    TEST_METHOD(Create_NewFile_ListsTheFileInTheCallersCase) {
+        TempLayerEnvironment env(1);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"NewFile.TXT", kNoCreateOptions),
+            L"A create of a new file must succeed");
+        Assert::AreEqual(std::wstring(L"NewFile.TXT"),
+            StoredLeafName(env.Upper() + L"\\newfile.txt"),
+            L"The create must name the upper file in the caller's case");
+
+        AssertOnlyEntryShownAs(mount, L"", L"NewFile.TXT");
+    }
+
+    TEST_METHOD(Create_NewDirectory_ListsTheDirectoryInTheCallersCase) {
+        TempLayerEnvironment env(1);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"NewDir", FILE_DIRECTORY_FILE),
+            L"A create of a new directory must succeed");
+        Assert::AreEqual(std::wstring(L"NewDir"), StoredLeafName(env.Upper() + L"\\newdir"),
+            L"The create must name the upper directory in the caller's case");
+
+        AssertOnlyEntryShownAs(mount, L"", L"NewDir");
+    }
+
+    TEST_METHOD(OverwriteOpen_LowerFile_ListsTheFileInTheLowersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Readme.TXT", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        constexpr UINT32 keepAttributes = 0u;
+        constexpr BOOLEAN mergeAttributes = FALSE;
+
+        std::unique_ptr<::LayerMount::FileContext> ctx;
+        ::LayerMount::InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS,
+            mount.Open(L"readme.txt", FILE_READ_DATA, kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"A read open of the lower file must succeed");
+        const NTSTATUS overwriteStatus = mount.Overwrite(ctx.get(), keepAttributes,
+                                                         mergeAttributes, kNoAllocationSize, &info);
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, overwriteStatus, L"The overwrite of the lower file must succeed");
+        Assert::AreEqual(std::wstring(L"Readme.TXT"), StoredLeafName(env.Upper() + L"\\readme.txt"),
+            L"The overwrite must copy the file up under the lower's name");
+
+        AssertOnlyEntryShownAs(mount, L"", L"Readme.TXT");
+    }
+
+    TEST_METHOD(Create_OverDeletedLowerFile_ListsTheFileInTheCallersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Docs.txt", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"docs.txt", kNoCallerPid),
+            L"The delete of the lower file must succeed");
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"docs.txt")),
+            L"The delete must write a whiteout");
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"DOCS.TXT", kNoCreateOptions),
+            L"A create over the deleted lower file must succeed");
+
+        AssertOnlyEntryShownAs(mount, L"", L"DOCS.TXT");
+    }
+
+    TEST_METHOD(Create_OverDeletedLowerDirectory_ListsTheDirectoryInTheCallersCase) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"Docs");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"docs", kNoCallerPid),
+            L"The delete of the lower directory must succeed");
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"docs")),
+            L"The delete must write a whiteout");
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"DOCS", FILE_DIRECTORY_FILE),
+            L"A create over the deleted lower directory must succeed");
+
+        AssertOnlyEntryShownAs(mount, L"", L"DOCS");
+    }
+
+    TEST_METHOD(CreateStream_NewStream_KeepsTheCallersCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"readme.txt", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            CreateThroughMount(mount, L"readme.txt:Notes", kNoCreateOptions),
+            L"A create of a new stream must succeed");
+
+        std::vector<::LayerMount::InternalStreamInfo> streams;
+        AssertStatus(STATUS_SUCCESS, mount.EnumerateStreams(L"readme.txt", streams),
+            L"The stream listing must succeed");
+        Assert::AreEqual(size_t{1}, streams.size(), L"The file must hold one named stream");
+        Assert::AreEqual(std::wstring(L":Notes:$DATA"), streams[0].name,
+            L"The stream must keep the name in the caller's case");
+    }
+
     TEST_METHOD(WriteOpen_UnderNestedLowerDirectories_ListsEachLevelInTheLowersCase) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"Outer\\Inner\\a.txt", "x");

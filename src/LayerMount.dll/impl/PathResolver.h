@@ -6,6 +6,7 @@ namespace LayerMount {
 
 class WhiteoutManager;
 class Cache;
+class CallerPath;
 
 class PathResolver {
 public:
@@ -24,7 +25,24 @@ public:
 
     bool ExistsInUpper(const std::wstring& relativePath) const;
 
+    // The upper path in lowercase, for a lookup of an entry the upper may
+    // hold. A new upper entry takes its name from GetUpperPathForNewEntry or
+    // GetUpperPathForCopyUp instead.
     std::wstring GetUpperPath(const std::wstring& relativePath) const;
+
+    // The upper path for an entry the caller names, as a create or a rename
+    // destination does. The entry takes its name in path's case, as
+    // overlayfs keeps a name as given.
+    std::wstring GetUpperPathForNewEntry(const CallerPath& path) const;
+
+    // The upper path for a copy-up of lowerSource, the lower entry at
+    // relativePath. The upper entry takes the name lowerSource has on disk.
+    std::wstring GetUpperPathForCopyUp(const std::wstring& relativePath,
+                                       const ResolvedPath& lowerSource) const;
+
+    // The upper path of the upper entry at relativePath, with the last
+    // component as the file system stores it.
+    std::wstring GetStoredUpperPath(const std::wstring& relativePath) const;
 
     bool HasTypeConflict(const std::wstring& relativePath) const;
 

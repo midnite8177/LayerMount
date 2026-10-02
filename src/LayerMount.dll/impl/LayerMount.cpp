@@ -424,7 +424,12 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
     if (pathResolver_->ExistsInUpper(normalized)) {
         const std::wstring upperHostPath = pathResolver_->GetUpperPath(normalized);
         const std::wstring upperFullPath = upperHostPath + ctx->streamSuffix;
-        if (ctx->actualPath != upperFullPath) {
+        // The upper entry keeps the lower's or the caller's case while
+        // GetUpperPath is lowercase, so a case-sensitive compare would
+        // reopen the handle on every call.
+        if (::CompareStringOrdinal(ctx->actualPath.c_str(), static_cast<int>(ctx->actualPath.size()),
+                                   upperFullPath.c_str(), static_cast<int>(upperFullPath.size()),
+                                   TRUE) != CSTR_EQUAL) {
             ctx->actualPath = upperFullPath;
             ctx->writable = true;
             NTSTATUS reopenStatus = ReopenContextHandle(ctx);
@@ -1239,6 +1244,17 @@ bool HostFileHasStream(const ResolvedPath& host,
 
 }
 
+std::optional<StreamPath> ParseStreamPath(const std::wstring& relativePath) {
+    StreamPath path;
+    if (!TryParseStreamPath(NormalizePathPreserveCase(relativePath),
+                            path.callerHost, path.callerStreamSuffix)) {
+        return std::nullopt;
+    }
+    path.hostNorm = CaseFoldedName(path.callerHost);
+    path.streamSuffix = CaseFoldedName(path.callerStreamSuffix);
+    return path;
+}
+
 NTSTATUS LayerMount::Create(const CreateRequest& request,
                            std::unique_ptr<FileContext>* outCtx,
                            InternalFileInfo* outInfo) {
@@ -1247,11 +1263,12 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
     }
     *outCtx = nullptr;
 
-    UpperCreate create;
-    create.normalized = NormalizePath(request.relativePath);
-    if (!TryParseStreamPath(create.normalized, create.hostNorm, create.streamSuffix)) {
+    std::optional<StreamPath> path = ParseStreamPath(request.relativePath);
+    if (!path) {
         return STATUS_OBJECT_NAME_INVALID;
     }
+    UpperCreate create;
+    create.path = std::move(*path);
 
     CreateResolution resolution;
     const NTSTATUS precondition = CheckCreatePreconditions(request, create, &resolution);
@@ -1263,7 +1280,8 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
     create.lowerIsVisible = resolution.overlayHit.Found() &&
         resolution.overlayHit.source == LayerSource::Lower;
 
-    create.upperPath = pathResolver_->GetUpperPath(create.hostNorm);
+    create.upperPath =
+        pathResolver_->GetUpperPathForNewEntry(CallerPath(create.path.callerHost));
 
     const NTSTATUS parentStatus = copyUp_->EnsureUpperParent(CallerPath(request.relativePath));
     if (!NT_SUCCESS(parentStatus)) {
@@ -1282,10 +1300,10 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
     // The whiteout goes only after the create succeeds. Removing it
     // earlier would show the lower entry again if the create failed.
     if (resolution.whiteoutAtPath) {
-        whiteoutMgr_->RemoveWhiteout(create.hostNorm);
+        whiteoutMgr_->RemoveWhiteout(create.path.hostNorm);
     }
 
-    cache_->InvalidateWithAncestors(create.hostNorm);
+    cache_->InvalidateWithAncestors(create.path.hostNorm);
 
     NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
     if (!NT_SUCCESS(status)) {
@@ -1306,9 +1324,9 @@ std::unique_ptr<FileContext> LayerMount::BuildCreate(const CreateRequest& reques
     create->allocationSize = request.allocationSize;
 
     auto ctx = std::make_unique<FileContext>();
-    ctx->relativePath = create->hostNorm;
-    ctx->streamSuffix = create->streamSuffix;
-    ctx->actualPath = create->upperPath + create->streamSuffix;
+    ctx->relativePath = create->path.hostNorm;
+    ctx->streamSuffix = create->path.streamSuffix;
+    ctx->actualPath = create->upperPath + create->path.callerStreamSuffix;
     ctx->isDirectory = IsDirectoryCreate(request);
     ctx->writable = true;
     ctx->ownerPid = request.callerPid;
@@ -1319,26 +1337,26 @@ std::unique_ptr<FileContext> LayerMount::BuildCreate(const CreateRequest& reques
 NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
                                               const UpperCreate& create,
                                               CreateResolution* resolution) const {
-    if (IsReservedRelativePath(create.hostNorm)) {
+    if (IsReservedRelativePath(create.path.hostNorm)) {
         return STATUS_ACCESS_DENIED;
     }
 
     if (auto tracker = Tracker(); tracker && request.callerPid != 0) {
-        if (!tracker->CheckAccess(request.callerPid, create.hostNorm, OperationType::Create)) {
+        if (!tracker->CheckAccess(request.callerPid, create.path.hostNorm, OperationType::Create)) {
             return STATUS_ACCESS_DENIED;
         }
     }
 
-    if (IsDirectoryCreate(request) && !create.streamSuffix.empty()) {
+    if (IsDirectoryCreate(request) && !create.path.streamSuffix.empty()) {
         return STATUS_FILE_IS_A_DIRECTORY;
     }
 
-    *resolution = pathResolver_->ResolveForCreate(create.hostNorm);
-    if (create.streamSuffix.empty()) {
+    *resolution = pathResolver_->ResolveForCreate(create.path.hostNorm);
+    if (create.path.streamSuffix.empty()) {
         return resolution->overlayHit.Found() ? STATUS_OBJECT_NAME_COLLISION : STATUS_SUCCESS;
     }
 
-    const std::wstring upperHostPath = pathResolver_->GetUpperPath(create.hostNorm);
+    const std::wstring upperHostPath = pathResolver_->GetUpperPath(create.path.hostNorm);
     const DWORD upperAttrs = ::GetFileAttributesW(upperHostPath.c_str());
     const bool upperIsDirectory = upperAttrs != INVALID_FILE_ATTRIBUTES &&
         (upperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -1346,7 +1364,7 @@ NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
         return STATUS_FILE_IS_A_DIRECTORY;
     }
     if (resolution->overlayHit.Found() &&
-        HostFileHasStream(resolution->overlayHit, create.streamSuffix, config_)) {
+        HostFileHasStream(resolution->overlayHit, create.path.streamSuffix, config_)) {
         return STATUS_OBJECT_NAME_COLLISION;
     }
     return STATUS_SUCCESS;
@@ -1361,7 +1379,7 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
     rollback.Arm();
 
     if (create.lowerIsDirectory) {
-        if (!whiteoutMgr_->SetOpaque(create.normalized)) {
+        if (!whiteoutMgr_->SetOpaque(create.path.hostNorm)) {
             DWORD err = ::GetLastError();
             return NtStatusFromWin32(err != ERROR_SUCCESS ? err : ERROR_ACCESS_DENIED);
         }
@@ -1390,7 +1408,7 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
 
 NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
                                        FileContext* ctx) {
-    if (!create.streamSuffix.empty()) {
+    if (!create.path.streamSuffix.empty()) {
         NTSTATUS hostStatus = PrepareStreamHost(create, ctx);
         if (!NT_SUCCESS(hostStatus)) {
             return hostStatus;
@@ -1414,7 +1432,7 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
         return resolveStatus;
     }
 
-    if (create.streamSuffix.empty()) {
+    if (create.path.streamSuffix.empty()) {
         NTSTATUS sdStatus = WriteSecurityToNewObject(create.upperPath, create.securityDescriptor);
         if (!NT_SUCCESS(sdStatus)) {
             return sdStatus;
@@ -1434,16 +1452,16 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
 }
 
 NTSTATUS LayerMount::PrepareStreamHost(const UpperCreate& create, FileContext* ctx) {
-    if (!pathResolver_->ExistsInUpper(create.hostNorm)) {
+    if (!pathResolver_->ExistsInUpper(create.path.hostNorm)) {
         if (create.lowerIsVisible) {
-            return copyUp_->CopyUpFile(create.hostNorm);
+            return copyUp_->CopyUpFile(create.path.hostNorm);
         }
         return STATUS_SUCCESS;
     }
     const LayerMountMetadata metadata =
         MetadataStore::ReadLayerMountMetadata(create.upperPath, &config_);
     if (metadata.metacopy) {
-        return FillShell(create.hostNorm, ctx);
+        return FillShell(create.path.hostNorm, ctx);
     }
     return STATUS_SUCCESS;
 }
@@ -2060,13 +2078,11 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
         if (!NT_SUCCESS(status)) return status;
     }
 
-    const std::wstring oldUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, oldRelativePath);
     const std::wstring newUpperPath =
-        BuildUpperPathPreserveCase(config_.upperPath, newRelativePath);
+        pathResolver_->GetUpperPathForNewEntry(CallerPath(newRelativePath));
 
     status = MoveUpperEntry(
-        WithStoredLeafName(oldUpperPath, oldUpperPath), newUpperPath,
+        pathResolver_->GetStoredUpperPath(oldRelativePath), newUpperPath,
         replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No);
     if (!NT_SUCCESS(status)) return status;
 
@@ -2214,7 +2230,7 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
         }
 
         ctx->relativePath = newNorm;
-        ctx->actualPath = BuildUpperPathPreserveCase(config_.upperPath, newRelativePath);
+        ctx->actualPath = pathResolver_->GetUpperPathForNewEntry(CallerPath(newRelativePath));
         ctx->writable = true;
         if (!sourceWasInUpper) {
             ctx->isMetacopyOnly = false;
@@ -2237,7 +2253,7 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
     }
 
     ctx->relativePath = newNorm;
-    ctx->actualPath = BuildUpperPathPreserveCase(config_.upperPath, newRelativePath);
+    ctx->actualPath = pathResolver_->GetUpperPathForNewEntry(CallerPath(newRelativePath));
     ctx->writable = true;
     if (!sourceWasInUpper) {
         ctx->isMetacopyOnly = false;
@@ -2279,8 +2295,8 @@ NTSTATUS LayerMount::UpdateContextPath(FileContext* ctx,
         newRelativeHostPreserved =
             preserved.substr(0, preserved.length() - newStreamSuffix.length());
     }
-    ctx->actualPath        = BuildUpperPathPreserveCase(config_.upperPath,
-                                                         newRelativeHostPreserved)
+    ctx->actualPath        = pathResolver_->GetUpperPathForNewEntry(
+                                 CallerPath(newRelativeHostPreserved))
                               + newStreamSuffix;
     ctx->handleNeedsReopen = true;
     return STATUS_SUCCESS;

@@ -196,6 +196,23 @@ bool TryParseStreamPath(const std::wstring& normalized,
                         std::wstring& outHostNorm,
                         std::wstring& outStreamSuffix);
 
+// A path split into its host and its stream suffix, in two forms. hostNorm
+// and streamSuffix are lowercase, as TryParseStreamPath gives them for a
+// normalized path, and serve as lookup keys. callerHost and
+// callerStreamSuffix keep the case the caller wrote, and name a new entry.
+// Both suffixes are empty when the path names no stream.
+struct StreamPath {
+    std::wstring hostNorm;
+    std::wstring streamSuffix;
+    std::wstring callerHost;
+    std::wstring callerStreamSuffix;
+};
+
+// Parses relativePath in the caller's case under the rules of
+// TryParseStreamPath, which ignore case. Returns std::nullopt where
+// TryParseStreamPath returns false.
+std::optional<StreamPath> ParseStreamPath(const std::wstring& relativePath);
+
 // Returns true for a path that the overlay never shows. That is the
 // sidecar metadata subtree `.overlay` at the overlay root and anything
 // beneath it, and any path with a segment that starts with `kWhiteoutPrefix`
@@ -622,9 +639,7 @@ private:
 
     // What Create resolved for a new entry, and the caller's settings for it.
     struct UpperCreate {
-        std::wstring normalized;
-        std::wstring hostNorm;
-        std::wstring streamSuffix;
+        StreamPath path;
         std::wstring upperPath;
         bool lowerIsDirectory = false;
         bool lowerIsVisible = false;
