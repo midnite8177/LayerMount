@@ -86,13 +86,13 @@ struct ResolvedPath {
     }
 };
 
-// The kind of a rename source or destination. A Link is a directory reparse
-// point whose reparse tag is a name surrogate, such as a junction or a
-// directory symbolic link. Any other directory reparse point is a
-// Directory. A rename does not follow a Link and treats it as a
-// non-directory, as overlayfs treats a symlink. The one exception is that a
-// Link source keeps the directory check that refuses a destination inside
-// its own tree.
+// The kind of an entry, as a rename source or destination or as a component
+// of a layer walk. A Link is a directory reparse point whose reparse tag is a
+// name surrogate, such as a junction or a directory symbolic link. Any other
+// directory reparse point is a Directory. A rename does not follow a Link
+// and treats it as a non-directory, as overlayfs treats a symlink. The one
+// exception is that a Link source keeps the directory check that refuses a
+// destination inside its own tree.
 enum class RenameEntryKind {
     File,
     Directory,
@@ -106,8 +106,8 @@ struct CreateResolution {
     bool whiteoutAtPath = false;
     // The lower hit, as ResolveLowerPath returns it. An upper entry at this
     // path, a whiteout for exactly this path, or an opaque ancestor in the
-    // upper does not hide it. A whiteout or a non-directory at an ancestor in
-    // the upper does.
+    // upper does not hide it. A whiteout, a non-directory or a link at an
+    // ancestor in the upper does.
     ResolvedPath lower;
 };
 

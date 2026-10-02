@@ -259,6 +259,37 @@ The whiteout walk stops below the layer root, since a whiteout names an
 entry and the root has no name. The opaque walk probes the layer root
 too.
 
+### Links in a layer
+
+A junction or a directory symlink in a layer is a non-directory for what
+lies below it, as a symlink is in overlayfs. Such a link is a directory
+reparse point whose reparse tag is a name surrogate. Any other directory
+reparse point stays a directory.
+
+Overlayfs looks up a path one name at a time, and the topmost layer that
+holds a name decides. It follows a symlink only when the symlink is that
+topmost entry. A lower symlink under a higher directory of the same name
+adds nothing, and the lookup stops there, so the deeper lowers add
+nothing either. The engine applies the same rule to links:
+
+- When no higher layer holds the link's name, Win32 follows the link. A
+  listing of the link, or of a directory under it, shows the link
+  target's entries, and a lookup through the link finds an entry in the
+  target. The deeper lowers do not merge under the link, so the listing
+  shows none of their entries and the lookup finds none.
+- When the upper or a higher lower holds the link's name, the lower that
+  holds the link adds nothing under that name, to a listing or to a
+  lookup. The merge and the lookup stop at that lower, so no deeper lower
+  adds anything either. `HasLinkUnderHigherLayerEntry` makes this check
+  for each lower before its scan or its probe.
+
+A link cannot carry an opaque marker, because the marker would go into
+its target. Instead, `LowersBelow` walks the directory's path in the
+layer and stops at a link. A probe or a scan through the link sees the
+target as a directory, so the walk runs even when the layer holds the
+directory. When the walk cannot read a reparse tag, the lowers stay
+hidden, as they do when the walk cannot read a component's attributes.
+
 ### Resurrection windows and ordering
 
 A whiteout that lingers after a successful `Create` would hide the
@@ -292,7 +323,10 @@ or rename it. See "Path safety guards". Directory merging in
    itself. An upper that has no directory at the path adds nothing, and
    the merge goes on to the lowers. An upper that has a file at the path,
    or at an ancestor's path, adds nothing and stops the merge before the
-   lowers, because the file hides everything under its path. A scan that
+   lowers, because the file hides everything under its path. An upper
+   link at the path or at an ancestor's path adds the entries that the
+   scan reads through the link, and stops the merge before the lowers.
+   See "Links in a layer". A scan that
    fails in any other way, at the first read or mid-stream, adds nothing
    from the upper and stops the merge before the lowers, because a
    whiteout that the scan did not read can hide a lower's entry. The
@@ -302,11 +336,15 @@ or rename it. See "Path safety guards". Directory merging in
    lower's entries back until the scan ends. A lower that has no
    directory at the path adds nothing, and the merge goes on to the next
    lower. A lower that has a file at the path, or at an ancestor's path,
-   adds nothing and stops the merge. A scan that fails in any other way,
-   at the first read or mid-stream, stops the merge, because a whiteout
-   that the scan did not read can hide an entry in a deeper lower. The
-   merge then returns the scan's status and no entries, not the entries
-   of the layers above.
+   adds nothing and stops the merge. A lower link at the path or at an
+   ancestor's path adds the entries that the scan reads through the link,
+   and stops the merge, when no higher layer holds the link's name. When
+   the upper or a higher lower holds that name, the lower adds nothing and
+   stops the merge. See "Links in a layer". A scan that fails in any other
+   way, at the first read or mid-stream, stops the merge, because a
+   whiteout that the scan did not read can hide an entry in a deeper
+   lower. The merge then returns the scan's status and no entries, not
+   the entries of the layers above.
 3. After a clean scan, the merge adds a held-back lower entry only if no
    higher layer already produced it AND the name is not in
    `whitedOutNames`, which includes that lower's own whiteouts from
@@ -352,20 +390,23 @@ algorithm (in `impl/PathResolver.cpp`):
 6.  If any ancestor in upper is opaque, return not-found
     (the ancestor's opacity hides the lower content). The upper root
     counts as an ancestor of every path.
-6a. If any ancestor in upper is a file, return not-found. The file
-    hides the lower content under its path. An ancestor whose
-    attributes the engine cannot read, for a reason other than a
-    missing path, also hides it. A step-4 probe that missed with
-    ERROR_FILE_NOT_FOUND skips this check, because that error means
-    the parent exists as a directory.
+6a. If any ancestor in upper is a file or a link, return not-found.
+    The file or the link hides the lower content under its path. An
+    ancestor whose attributes or reparse tag the engine cannot read,
+    for a reason other than a missing path, also hides it. The check
+    runs after every step-4 miss. A miss that reached the parent does
+    not prove that the upper holds the parent as a directory, because
+    the parent can be a link whose target is a directory.
 7.  For each lower in priority order:
       a. Whiteout in this lower => stop iterating.
       b. Whitedout ancestor in this lower => stop iterating.
-      c. Probe this lower; on hit, capture and break.
-      d. Opaque ancestor in this lower, the lower's root included =>
+      c. Link ancestor in this lower whose name the upper or a higher
+         lower also holds => stop iterating.
+      d. Probe this lower; on hit, capture and break.
+      e. Opaque ancestor in this lower, the lower's root included =>
          stop after this lower.
-      e. File ancestor, or unreadable ancestor, in this lower => stop
-         after this lower.
+      f. File ancestor, link ancestor, or unreadable ancestor, in this
+         lower => stop after this lower.
 8.  If a lower hit was captured, scan the deeper lowers that stay
     visible for type conflicts (file vs. directory) and log via
     OutputDebugStringW (the resolved entry still wins; the log is
@@ -577,12 +618,10 @@ The engine handles nine cases. The last three also apply to a file source:
 - **a junction or directory symlink as source or destination**:
   overlayfs does not follow the last path component in a rename, so a
   symlink is a non-directory there. The engine treats a junction or a
-  directory symlink the same way. Such a link is a directory reparse
-  point whose reparse tag is a name surrogate. Any other directory
-  reparse point stays a directory. When the engine cannot read the
-  reparse tag, the rename fails with that error before any side
-  effects. With replace=true, a file or a link replaces a link, and a
-  link replaces a file. A directory onto a link fails with
+  directory symlink the same way. See "Links in a layer". When the
+  engine cannot read the reparse tag, the rename fails with that error
+  before any side effects. With replace=true, a file or a link replaces
+  a link, and a link replaces a file. A directory onto a link fails with
   `STATUS_NOT_A_DIRECTORY`, and a link onto a directory fails with
   `STATUS_FILE_IS_A_DIRECTORY`, both before any side effects. The link
   moves as a link. A lower link copies up as a link and leaves a

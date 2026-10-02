@@ -595,18 +595,6 @@ void AssertDestinationStillHidesItsLowerChild(const TempLayerEnvironment& env,
         L"The failed rename must keep the lower child of dst hidden");
 }
 
-// mklink /J needs no symbolic-link privilege.
-bool CreateDirectoryJunction(const std::wstring& junction, const std::wstring& target) {
-    const std::wstring command =
-        L"cmd.exe /c mklink /J \"" + junction + L"\" \"" + target + L"\" >nul 2>&1";
-    return _wsystem(command.c_str()) == 0;
-}
-
-bool CreateDirectorySymlink(const std::wstring& link, const std::wstring& target) {
-    return ::CreateSymbolicLinkW(link.c_str(), target.c_str(),
-        SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
-}
-
 void AssertNoOpaqueMarkerIn(const std::wstring& directory) {
     Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
         ::GetFileAttributesW(OpaqueMarkerPath(directory).c_str()),
@@ -1584,6 +1572,29 @@ public:
             L"The upper two must be the moved junction");
         AssertListedDirectoryWithChild(mount, L"two", L"a.txt");
         firstBefore.AssertUnchanged(L"The rename must leave the source junction target's entries");
+        secondBefore.AssertUnchanged(L"The rename must leave the replaced junction target's entries");
+    }
+
+    TEST_METHOD(ReplaceRename_JunctionOntoLowerJunction_ShowsOnlyTheMovedLinkTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"first\\a.txt", "a");
+        env.WriteFile(env.Root(), L"second\\b.txt", "b");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\one", env.Root() + L"\\first") ||
+            !CreateDirectoryJunction(env.Lower(0) + L"\\two", env.Root() + L"\\second")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the junctions");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        const LayerSnapshot secondBefore(env.Root() + L"\\second");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"one", L"two", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of an upper junction onto a lower junction must succeed");
+        AssertListedDirectoryWithChild(mount, L"two", L"a.txt");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"two").entries.count(L"b.txt") == 0,
+            L"The moved junction must hide the lower junction target's entries");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
         secondBefore.AssertUnchanged(L"The rename must leave the replaced junction target's entries");
     }
 };

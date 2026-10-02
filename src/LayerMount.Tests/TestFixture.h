@@ -332,6 +332,18 @@ inline std::wstring OpaqueMarkerPath(const std::wstring& relativeDirectory) {
     return relativeDirectory + L"\\.wh..wh..opq";
 }
 
+// mklink /J needs no symbolic-link privilege.
+inline bool CreateDirectoryJunction(const std::wstring& junction, const std::wstring& target) {
+    const std::wstring command =
+        L"cmd.exe /c mklink /J \"" + junction + L"\" \"" + target + L"\" >nul 2>&1";
+    return _wsystem(command.c_str()) == 0;
+}
+
+inline bool CreateDirectorySymlink(const std::wstring& link, const std::wstring& target) {
+    return ::CreateSymbolicLinkW(link.c_str(), target.c_str(),
+        SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+}
+
 inline void AssertStatus(NTSTATUS expected, NTSTATUS actual, const wchar_t* message) {
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual(
         static_cast<long>(expected), static_cast<long>(actual), message);

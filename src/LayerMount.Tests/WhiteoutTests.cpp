@@ -50,6 +50,155 @@ void AssertEveryListedEntryResolves(const TempLayerEnvironment& env,
     }
 }
 
+using LinkCreator = bool (*)(const std::wstring& link, const std::wstring& target);
+
+// Creates the link with createLink, or logs a skip and returns false.
+bool LinkCreatedOrSkipped(LinkCreator createLink,
+                          const std::wstring& link,
+                          const std::wstring& target) {
+    if (createLink(link, target)) {
+        return true;
+    }
+    Logger::WriteMessage((L"[SKIP] the test could not create the link " + link).c_str());
+    return false;
+}
+
+// Creates "link" in the upper for LayerSource::Upper, or in the first lower
+// for LayerSource::Lower, and a directory of the same name in the next layer
+// down. The link targets a directory outside the layers. Logs a skip and
+// returns false when the link cannot be created.
+bool BuildLinkOverDirectory(const TempLayerEnvironment& env,
+                            LayerSource linkSource,
+                            LinkCreator createLink) {
+    const bool linkInUpper = linkSource == LayerSource::Upper;
+    const std::wstring& linkLayer = linkInUpper ? env.Upper() : env.Lower(0);
+    const std::wstring& dirLayer = linkInUpper ? env.Lower(0) : env.Lower(1);
+    env.WriteFile(env.Root(), L"target\\fromtarget.txt", "target");
+    env.WriteFile(env.Root(), L"target\\sub\\fromtarget.txt", "target");
+    env.WriteFile(dirLayer, L"link\\fromlower.txt", "lower");
+    env.WriteFile(dirLayer, L"link\\sub\\fromlower.txt", "lower");
+    return LinkCreatedOrSkipped(createLink, linkLayer + L"\\link", env.Root() + L"\\target");
+}
+
+// Denies accessMask to Everyone on a link itself, not on its target, and
+// restores the link's DACL on destruction. The handle stays open, so the
+// restore needs no open that the deny ACE can refuse. Declare it after the
+// test's layer environment.
+class LinkAccessDenied {
+public:
+    LinkAccessDenied(const std::wstring& link, DWORD accessMask) {
+        link_ = ::CreateFileW(link.c_str(), READ_CONTROL | WRITE_DAC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        Assert::IsTrue(link_ != INVALID_HANDLE_VALUE, L"The link opens for a DACL change");
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            ::GetSecurityInfo(link_, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                              nullptr, nullptr, &originalDacl_, nullptr, &originalSd_),
+            L"GetSecurityInfo reads the link's DACL");
+        LayerMountTestShared::EveryoneSid everyone;
+        Assert::IsNotNull(everyone.sid, L"The Everyone SID allocates");
+        EXPLICIT_ACCESSW deny{};
+        deny.grfAccessPermissions = accessMask;
+        deny.grfAccessMode = DENY_ACCESS;
+        deny.grfInheritance = NO_INHERITANCE;
+        deny.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        deny.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        deny.Trustee.ptstrName = reinterpret_cast<LPWSTR>(everyone.sid);
+        PACL deniedDacl = nullptr;
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+            ::SetEntriesInAclW(1, &deny, originalDacl_, &deniedDacl),
+            L"The deny ACE merges into the link's DACL");
+        const DWORD setResult = ::SetSecurityInfo(link_, SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, deniedDacl, nullptr);
+        ::LocalFree(deniedDacl);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, setResult, L"The link's DACL takes the deny ACE");
+    }
+
+    ~LinkAccessDenied() {
+        ::SetSecurityInfo(link_, SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, originalDacl_, nullptr);
+        ::LocalFree(originalSd_);
+        ::CloseHandle(link_);
+    }
+
+    LinkAccessDenied(const LinkAccessDenied&) = delete;
+    LinkAccessDenied& operator=(const LinkAccessDenied&) = delete;
+
+private:
+    HANDLE link_ = INVALID_HANDLE_VALUE;
+    PACL originalDacl_ = nullptr;
+    PSECURITY_DESCRIPTOR originalSd_ = nullptr;
+};
+
+// Disables SE_RESTORE_NAME on the thread's impersonation token, which
+// BackupPrivilegeDisabledOnThread provides. SE_RESTORE_NAME grants a
+// backup-intent open SYNCHRONIZE past a deny ACE, since FILE_GENERIC_WRITE
+// holds SYNCHRONIZE.
+void DisableRestorePrivilegeOnThread() {
+    HANDLE token = nullptr;
+    Assert::IsTrue(::OpenThreadToken(::GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                                     TRUE, &token) != FALSE,
+        L"The thread holds an impersonation token");
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Attributes = 0;
+    const bool disabled =
+        ::LookupPrivilegeValueW(nullptr, SE_RESTORE_NAME, &privileges.Privileges[0].Luid) &&
+        ::AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), nullptr, nullptr);
+    ::CloseHandle(token);
+    Assert::IsTrue(disabled, L"SE_RESTORE_NAME is disabled on the thread's token");
+}
+
+// Returns the error of an open of the link itself with the access and flags
+// that a reparse tag read uses, or ERROR_SUCCESS.
+DWORD LinkTagOpenError(const std::wstring& link) {
+    HANDLE entry = ::CreateFileW(link.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (entry == INVALID_HANDLE_VALUE) {
+        return ::GetLastError();
+    }
+    ::CloseHandle(entry);
+    return ERROR_SUCCESS;
+}
+
+void AssertLinkHidesLowerChildren(const TempLayerEnvironment& env,
+                                  LayerSource linkSource) {
+    ResolverUnderTest r(env);
+
+    Assert::IsFalse(r.resolver.ResolvePath(L"link\\fromlower.txt").Found(),
+        L"The link must hide the child of the directory below it");
+    Assert::IsFalse(r.resolver.ResolveLowerPath(L"link\\fromlower.txt").Found(),
+        L"The link must hide the child of the directory below it from the lower lookup");
+    Assert::IsFalse(r.resolver.ResolvePath(L"link\\sub\\fromlower.txt").Found(),
+        L"The link must hide the grandchild of the directory below it");
+    const ResolvedPath inTarget = r.resolver.ResolvePath(L"link\\fromtarget.txt");
+    Assert::IsTrue(inTarget.Found(), L"The link target's own child must resolve through the link");
+    Assert::IsTrue(inTarget.source == linkSource,
+        L"The link target's own child must resolve in the layer that holds the link");
+}
+
+void AssertLinkListsOnlyTargetEntries(const TempLayerEnvironment& env) {
+    ::LayerMount::LayerMount mount(env.MakeConfig());
+
+    const MergedDirectory atLink = mount.MergeDirectoryEntries(L"link");
+    const MergedDirectory underLink = mount.MergeDirectoryEntries(L"link\\sub");
+
+    AssertStatus(STATUS_SUCCESS, atLink.status, L"The merge at the link must succeed");
+    Assert::AreEqual<size_t>(2, atLink.entries.size(),
+        L"The listing of the link must hold only the link target's entries");
+    Assert::IsTrue(atLink.entries.count(L"fromtarget.txt") == 1 && atLink.entries.count(L"sub") == 1,
+        L"The listing of the link must hold the link target's entries");
+    AssertEveryListedEntryResolves(env, L"link", atLink.entries);
+    AssertStatus(STATUS_SUCCESS, underLink.status, L"The merge under the link must succeed");
+    Assert::AreEqual<size_t>(1, underLink.entries.size(),
+        L"The listing under the link must hold only the link target's entry");
+    Assert::IsTrue(underLink.entries.count(L"fromtarget.txt") == 1,
+        L"The listing under the link must hold the link target's entry");
+}
+
 void AssertHiddenFromListingAndLookup(const std::map<std::wstring, MergedEntry>& merged,
                                       const PathResolver& resolver,
                                       const std::wstring& listedName,
@@ -304,6 +453,74 @@ public:
             L"The lower file must hide the children of the deeper lower's directory");
     }
 
+    TEST_METHOD(PathResolve_JunctionInUpperOverLowerDirectory_HidesLowerChildren) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+
+        AssertLinkHidesLowerChildren(env, LayerSource::Upper);
+    }
+
+    TEST_METHOD(PathResolve_DirectorySymlinkInUpperOverLowerDirectory_HidesLowerChildren) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectorySymlink)) {
+            return;
+        }
+
+        AssertLinkHidesLowerChildren(env, LayerSource::Upper);
+    }
+
+    TEST_METHOD(PathResolve_JunctionInLowerOverDeeperLowerDirectory_HidesDeeperChildren) {
+        TempLayerEnvironment env(2);
+        if (!BuildLinkOverDirectory(env, LayerSource::Lower, CreateDirectoryJunction)) {
+            return;
+        }
+
+        AssertLinkHidesLowerChildren(env, LayerSource::Lower);
+    }
+
+    TEST_METHOD(PathResolve_DirectoryInUpperOverLowerJunction_HidesTargetAndDeeperLowerChildren) {
+        TempLayerEnvironment env(2);
+        if (!BuildLinkOverDirectory(env, LayerSource::Lower, CreateDirectoryJunction)) {
+            return;
+        }
+        env.WriteFile(env.Upper(), L"link\\fromupper.txt", "upper");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsTrue(r.resolver.ResolvePath(L"link\\fromupper.txt").Found(),
+            L"The upper directory's own child must resolve");
+        for (const wchar_t* hidden : {L"link\\fromtarget.txt", L"link\\sub\\fromtarget.txt",
+                                      L"link\\fromlower.txt", L"link\\sub\\fromlower.txt"}) {
+            Assert::IsFalse(r.resolver.ResolvePath(hidden).Found(),
+                (std::wstring(L"A lower junction under an upper directory must hide ") + hidden).c_str());
+            Assert::IsFalse(r.resolver.ResolveLowerPath(hidden).Found(),
+                (std::wstring(L"A lower junction under an upper directory must hide ") + hidden +
+                 L" from the lower lookup").c_str());
+        }
+    }
+
+    TEST_METHOD(PathResolve_UpperJunctionWithUnreadableReparseTag_HidesLowerChild) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        const std::wstring junction = env.Upper() + L"\\link";
+        LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+        ResolverUnderTest r(env);
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        DisableRestorePrivilegeOnThread();
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, AttributesProbeError(junction),
+            L"The deny ACE must leave the junction's attributes readable");
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+            L"The deny ACE must make the junction's reparse tag unreadable");
+
+        Assert::IsFalse(r.resolver.ResolvePath(L"link\\fromlower.txt").Found(),
+            L"An upper component whose reparse tag the walk cannot read can be a link, "
+            L"so it must hide the lower child");
+    }
+
     TEST_METHOD(PathResolve_UpperAncestorUnreadable_HidesLowerChild) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"a");
@@ -391,6 +608,76 @@ public:
         AssertStatus(STATUS_SUCCESS, underDir.status, L"The merge under the upper file must succeed");
         Assert::IsTrue(underDir.entries.empty(),
             L"An upper file at an ancestor of the listed directory must hide the lower entries");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_JunctionInUpperAtListedDirOrAncestor_ListsOnlyTargetEntries) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+
+        AssertLinkListsOnlyTargetEntries(env);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_DirectorySymlinkInUpperAtListedDirOrAncestor_ListsOnlyTargetEntries) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectorySymlink)) {
+            return;
+        }
+
+        AssertLinkListsOnlyTargetEntries(env);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_JunctionInLowerAtListedDirOrAncestor_ListsNoDeeperEntries) {
+        TempLayerEnvironment env(2);
+        if (!BuildLinkOverDirectory(env, LayerSource::Lower, CreateDirectoryJunction)) {
+            return;
+        }
+
+        AssertLinkListsOnlyTargetEntries(env);
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_DirectoryInUpperOverLowerJunction_ListsOnlyUpperEntries) {
+        TempLayerEnvironment env(2);
+        if (!BuildLinkOverDirectory(env, LayerSource::Lower, CreateDirectoryJunction)) {
+            return;
+        }
+        env.WriteFile(env.Upper(), L"link\\fromupper.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        const MergedDirectory atLink = mount.MergeDirectoryEntries(L"link");
+        const MergedDirectory underLink = mount.MergeDirectoryEntries(L"link\\sub");
+
+        AssertStatus(STATUS_SUCCESS, atLink.status, L"The merge at the upper directory must succeed");
+        Assert::AreEqual<size_t>(1, atLink.entries.size(),
+            L"A lower junction under an upper directory must add no entries to the listing");
+        Assert::IsTrue(atLink.entries.count(L"fromupper.txt") == 1,
+            L"The listing must hold the upper directory's entry");
+        AssertStatus(STATUS_SUCCESS, underLink.status, L"The merge under the upper directory must succeed");
+        Assert::IsTrue(underLink.entries.empty(),
+            L"A lower junction at an ancestor that the upper holds must add no entries to the listing");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_LowerJunctionUnderUpperParentDirectory_ListsTargetEntries) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Upper(), L"p\\fromupper.txt", "upper");
+        env.WriteFile(env.Root(), L"target\\fromtarget.txt", "target");
+        env.WriteFile(env.Lower(1), L"p\\link\\fromlower.txt", "lower");
+        env.CreateDir(env.Lower(0), L"p");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\p\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        const MergedDirectory merged = mount.MergeDirectoryEntries(L"p\\link");
+
+        AssertStatus(STATUS_SUCCESS, merged.status, L"The merge at the lower junction must succeed");
+        Assert::AreEqual<size_t>(1, merged.entries.size(),
+            L"The listing of the lower junction must hold only the junction target's entry");
+        Assert::IsTrue(merged.entries.count(L"fromtarget.txt") == 1,
+            L"A lower junction whose name no higher layer holds must list its target's entry");
+        AssertEveryListedEntryResolves(env, L"p\\link", merged.entries);
     }
 
     TEST_METHOD(MergeDirectoryEntries_DirectoryInUpperOverLowerFileOverDeeperDirectory_ListsNoDeeperEntries) {

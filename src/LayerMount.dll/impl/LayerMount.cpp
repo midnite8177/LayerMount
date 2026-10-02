@@ -637,7 +637,6 @@ struct LayerDirectoryEntry {
 
 struct LayerDirectoryScan {
     NTSTATUS status;
-    DirectoryProbe directory;
     std::vector<std::wstring> whitedOutNames;
     std::vector<LayerDirectoryEntry> entries;
 };
@@ -645,20 +644,17 @@ struct LayerDirectoryScan {
 // Reads one layer's directory in one enumeration. whitedOutNames holds the
 // case-folded names that the layer's whiteouts hide, and entries holds the
 // layer's visible entries. A directory absent from the layer gives
-// STATUS_SUCCESS with DirectoryProbe::Missed and no names. A failed scan
-// gives the status of its Win32 error and holds what it read before the
-// failure.
+// STATUS_SUCCESS and no names. A failed scan gives the status of its Win32
+// error and holds what it read before the failure.
 LayerDirectoryScan ScanLayerDirectory(const std::wstring& layerPath,
                                       const std::wstring& dirNorm) {
-    LayerDirectoryScan scan{STATUS_SUCCESS, DirectoryProbe::Found, {}, {}};
+    LayerDirectoryScan scan{STATUS_SUCCESS, {}, {}};
     WIN32_FIND_DATAW findData;
     const std::wstring searchPath = JoinLayerScanPath(layerPath, dirNorm);
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
         const DWORD openError = ::GetLastError();
-        if (IsDirectoryAbsentError(openError)) {
-            scan.directory = DirectoryProbe::Missed;
-        } else {
+        if (!IsDirectoryAbsentError(openError)) {
             scan.status = ScanFailureStatus(openError);
         }
         return scan;
@@ -710,7 +706,7 @@ NTSTATUS MergeLayerEntries(const LayerDirectory& dir,
     }
     if (source == LayerSource::Upper) AddLayerWhiteouts(scan, merge);
 
-    lowersBelow = LowersBelow(dir, scan.directory);
+    lowersBelow = LowersBelow(dir);
     return STATUS_SUCCESS;
 }
 
@@ -735,10 +731,11 @@ MergedDirectory LayerMount::MergeDirectoryEntries(const std::wstring& dirRelativ
         return MergedDirectory{upperStatus, {}};
     }
 
-    for (const std::wstring& lowerPath : config_.lowerPaths) {
+    for (size_t lower = 0; lower < config_.lowerPaths.size(); ++lower) {
         if (lowersBelow != LowerVisibility::Visible) break;
+        if (HasLinkUnderHigherLayerEntry(config_, lower, dirNorm)) break;
         const NTSTATUS lowerStatus = MergeLayerEntries(
-            LayerDirectory{*whiteoutMgr_, lowerPath, dirNorm}, LayerSource::Lower,
+            LayerDirectory{*whiteoutMgr_, config_.lowerPaths[lower], dirNorm}, LayerSource::Lower,
             merge, lowersBelow);
         if (!NT_SUCCESS(lowerStatus)) {
             return MergedDirectory{lowerStatus, {}};
@@ -1810,24 +1807,6 @@ NTSTATUS LayerMount::DirectoryEmptinessStatus(const std::wstring& dirNorm) const
     return STATUS_SUCCESS;
 }
 
-namespace {
-
-NTSTATUS RenameEntryKindOf(const ResolvedPath& entry, RenameEntryKind* kind) {
-    if ((entry.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        *kind = RenameEntryKind::File;
-        return STATUS_SUCCESS;
-    }
-    bool isLink = false;
-    const NTSTATUS status = IsDirectoryLink(entry.absolutePath, entry.attributes, &isLink);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    *kind = isLink ? RenameEntryKind::Link : RenameEntryKind::Directory;
-    return STATUS_SUCCESS;
-}
-
-}
-
 NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
                                             BOOLEAN replaceIfExists,
                                             RenameKinds* kinds) const {
@@ -1846,7 +1825,8 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
         return STATUS_DIRECTORY_NOT_EMPTY;
     }
     RenameEntryKind destinationKind = RenameEntryKind::File;
-    const NTSTATUS kindStatus = RenameEntryKindOf(destResolved, &destinationKind);
+    const NTSTATUS kindStatus =
+        EntryKindOf(destResolved.absolutePath, destResolved.attributes, &destinationKind);
     if (!NT_SUCCESS(kindStatus)) {
         return kindStatus;
     }
@@ -2169,7 +2149,8 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
         return STATUS_SUCCESS;
     }
     RenameKinds kinds{RenameEntryKind::File, std::nullopt};
-    NTSTATUS status = RenameEntryKindOf(sourceResolved, &kinds.source);
+    NTSTATUS status =
+        EntryKindOf(sourceResolved.absolutePath, sourceResolved.attributes, &kinds.source);
     if (!NT_SUCCESS(status)) return status;
     if (oldNorm != newNorm) {
         status = CheckRenameDestination(paths, replaceIfExists, &kinds);
@@ -2251,7 +2232,8 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
     RenameKinds kinds{RenameEntryKind::File, std::nullopt};
-    NTSTATUS status = RenameEntryKindOf(sourceResolved, &kinds.source);
+    NTSTATUS status =
+        EntryKindOf(sourceResolved.absolutePath, sourceResolved.attributes, &kinds.source);
     if (!NT_SUCCESS(status)) return status;
     if (oldNorm != newNorm) {
         status = CheckRenameDestination(paths, replaceIfExists, &kinds);

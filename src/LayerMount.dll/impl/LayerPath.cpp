@@ -95,6 +95,20 @@ NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLin
     return STATUS_SUCCESS;
 }
 
+NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind* kind) {
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        *kind = RenameEntryKind::File;
+        return STATUS_SUCCESS;
+    }
+    bool isLink = false;
+    const NTSTATUS status = IsDirectoryLink(path, attributes, &isLink);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    *kind = isLink ? RenameEntryKind::Link : RenameEntryKind::Directory;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
                         ReplaceExisting replace,
@@ -194,30 +208,97 @@ std::wstring JoinLayerScanPath(const std::wstring& layerPath,
                        dirRelativePath.empty() ? L"*" : dirRelativePath + L"\\*");
 }
 
-bool HasNonDirectorySelfOrAncestorInLayer(const std::wstring& layerPath,
-                                          const std::wstring& dirRelativePath) {
+namespace {
+
+enum class WalkStop {
+    None,
+    File,
+    Link,
+    Unreadable,
+};
+
+// Where a walk of a path in one layer stopped. component is the path of the
+// component that stopped it, relative to the layer root, and is empty when
+// stop is WalkStop::None.
+struct LayerWalk {
+    WalkStop stop;
+    std::wstring component;
+};
+
+// Walks dirRelativePath from the layer root to the first component that is
+// not a directory, as HasNonDirectoryOrLinkSelfOrAncestorInLayer describes.
+// A component that does not exist ends the walk with WalkStop::None.
+LayerWalk WalkToFirstNonDirectory(const std::wstring& layerPath,
+                                  const std::wstring& dirRelativePath) {
     fs::path walked;
     for (const fs::path& component : fs::path(dirRelativePath)) {
         walked /= component;
-        const DWORD attrs = GetFileAttributesW(JoinDirPath(layerPath, walked.wstring()).c_str());
+        const std::wstring componentPath = JoinDirPath(layerPath, walked.wstring());
+        const DWORD attrs = GetFileAttributesW(componentPath.c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES) {
             const DWORD error = ::GetLastError();
-            return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+                return LayerWalk{WalkStop::None, {}};
+            }
+            return LayerWalk{WalkStop::Unreadable, walked.wstring()};
         }
-        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        RenameEntryKind kind = RenameEntryKind::Directory;
+        if (!NT_SUCCESS(EntryKindOf(componentPath, attrs, &kind))) {
+            return LayerWalk{WalkStop::Unreadable, walked.wstring()};
+        }
+        if (kind == RenameEntryKind::File) {
+            return LayerWalk{WalkStop::File, walked.wstring()};
+        }
+        if (kind == RenameEntryKind::Link) {
+            return LayerWalk{WalkStop::Link, walked.wstring()};
+        }
+    }
+    return LayerWalk{WalkStop::None, {}};
+}
+
+// Whether the layer holds an entry at relativePath. A failure to read the
+// entry's attributes, other than a missing path, counts as holding it, so an
+// unreadable higher layer hides a lower link.
+bool HoldsEntryInLayer(const std::wstring& layerPath, const std::wstring& relativePath) {
+    if (GetFileAttributesW(JoinDirPath(layerPath, relativePath).c_str()) !=
+        INVALID_FILE_ATTRIBUTES) {
+        return true;
+    }
+    const DWORD error = ::GetLastError();
+    return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
+}
+
+}
+
+bool HasNonDirectoryOrLinkSelfOrAncestorInLayer(const std::wstring& layerPath,
+                                                const std::wstring& dirRelativePath) {
+    return WalkToFirstNonDirectory(layerPath, dirRelativePath).stop != WalkStop::None;
+}
+
+bool HasLinkUnderHigherLayerEntry(const LayerConfig& config,
+                                  size_t lowerIndex,
+                                  const std::wstring& dirRelativePath) {
+    const LayerWalk walk = WalkToFirstNonDirectory(config.lowerPaths[lowerIndex], dirRelativePath);
+    if (walk.stop != WalkStop::Link) {
+        return false;
+    }
+    if (HoldsEntryInLayer(config.upperPath, walk.component)) {
+        return true;
+    }
+    for (size_t higher = 0; higher < lowerIndex; ++higher) {
+        if (HoldsEntryInLayer(config.lowerPaths[higher], walk.component)) {
             return true;
         }
     }
     return false;
 }
 
-LowerVisibility LowersBelow(const LayerDirectory& dir, DirectoryProbe probe) {
+LowerVisibility LowersBelow(const LayerDirectory& dir) {
     if (dir.whiteoutMgr.HasOpaqueSelfOrAncestorInLayer(dir.dirNorm, dir.layerPath)) {
         return LowerVisibility::HiddenByOpaqueMarker;
     }
-    if (probe == DirectoryProbe::Missed &&
-        HasNonDirectorySelfOrAncestorInLayer(dir.layerPath, dir.dirNorm)) {
-        return LowerVisibility::HiddenByNonDirectory;
+    if (HasNonDirectoryOrLinkSelfOrAncestorInLayer(dir.layerPath, dir.dirNorm)) {
+        return LowerVisibility::HiddenByNonDirectoryOrLink;
     }
     return LowerVisibility::Visible;
 }

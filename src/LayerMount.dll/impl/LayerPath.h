@@ -67,6 +67,13 @@ std::wstring WithStoredLeafName(const std::wstring& targetPath,
 // *isLink false. INVALID_FILE_ATTRIBUTES returns STATUS_INVALID_PARAMETER.
 NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLink);
 
+// Sets *kind to the kind of the entry at path: File for a non-directory,
+// Link for a link as IsDirectoryLink defines it, and Directory for any other
+// directory. attributes are the entry's own, as IsDirectoryLink takes them.
+// When the reparse tag cannot be read, returns that error and leaves *kind
+// unchanged.
+NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind* kind);
+
 enum class ReplaceExisting { No, Yes };
 
 enum class CopyAcrossVolumes { No, Yes };
@@ -99,12 +106,26 @@ std::wstring JoinLayerScanPath(const std::wstring& layerPath,
                                const std::wstring& dirRelativePath);
 
 // Walks dirRelativePath from the layer root and returns true at the first
-// component that is a non-directory. A component that does not exist ends
-// the walk with false. Any other failure to read a component's attributes
-// returns true, so a layer that the walk cannot read hides what is below
-// it. Costs one GetFileAttributesW per component.
-bool HasNonDirectorySelfOrAncestorInLayer(const std::wstring& layerPath,
-                                          const std::wstring& dirRelativePath);
+// component that is a non-directory or a link. A link is a junction or a
+// directory symbolic link, which overlayfs would see as a symlink. A
+// component that does not exist ends the walk with false. Any other failure
+// to read a component's attributes or reparse tag returns true, so a layer
+// that the walk cannot read hides what is below it. Costs one
+// GetFileAttributesW per component, and one more open for each directory
+// reparse point.
+bool HasNonDirectoryOrLinkSelfOrAncestorInLayer(const std::wstring& layerPath,
+                                                const std::wstring& dirRelativePath);
+
+// Whether the lower at lowerIndex holds a link at dirRelativePath or at an
+// ancestor, at a path that the upper or a higher lower also holds. Overlayfs
+// follows a lower symlink only when no higher layer holds its name. So such
+// a lower adds nothing under dirRelativePath, and no deeper lower does
+// either. Costs the walk of HasNonDirectoryOrLinkSelfOrAncestorInLayer in
+// the lower, and one GetFileAttributesW per higher layer when the walk stops
+// at a link.
+bool HasLinkUnderHigherLayerEntry(const LayerConfig& config,
+                                  size_t lowerIndex,
+                                  const std::wstring& dirRelativePath);
 
 // A directory in one layer. dirNorm is normalized and relative to the layer
 // root; an empty dirNorm is the root.
@@ -114,23 +135,20 @@ struct LayerDirectory {
     const std::wstring& dirNorm;
 };
 
-// Whether a probe or a scan of the layer found the directory as a directory.
-enum class DirectoryProbe {
-    Found,
-    Missed,
-};
-
 enum class LowerVisibility {
     Visible,
     HiddenByOpaqueMarker,
-    HiddenByNonDirectory,
+    HiddenByNonDirectoryOrLink,
 };
 
 // Whether the lowers below the layer can hold entries under the directory.
 // An opaque marker at the directory or at an ancestor in the layer, the
-// layer root included, hides them, and so does a non-directory there. A
-// directory the layer was found to hold has no non-directory at its path or
-// above, so only a miss walks the path.
-LowerVisibility LowersBelow(const LayerDirectory& dir, DirectoryProbe probe);
+// layer root included, hides them, and so does a non-directory or a link
+// there. A scan or a probe through a link finds the link target as a
+// directory, so LowersBelow walks the path even when the layer holds the
+// directory. Every call walks every component of the path, with one
+// GetFileAttributesW per component and one more open per directory reparse
+// point.
+LowerVisibility LowersBelow(const LayerDirectory& dir);
 
 }

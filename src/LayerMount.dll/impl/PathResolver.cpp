@@ -20,18 +20,11 @@ std::wstring ParentDir(const std::wstring& normalized) {
     return std::filesystem::path(normalized).parent_path().wstring();
 }
 
-// Whether the lowers below the layer can hold the path after the layer's
-// probe of it missed with probeError. A miss with ERROR_FILE_NOT_FOUND
-// reached the parent directory (NTFS: a non-directory component gives
-// ERROR_PATH_NOT_FOUND).
-LowerVisibility LowersBelowMiss(const WhiteoutManager& whiteoutMgr,
-                                const std::wstring& layerPath,
-                                const std::wstring& normalized,
-                                DWORD probeError) {
+LowerVisibility LowersBelowParentOf(const WhiteoutManager& whiteoutMgr,
+                                    const std::wstring& layerPath,
+                                    const std::wstring& normalized) {
     const std::wstring parent = ParentDir(normalized);
-    const DirectoryProbe parentProbe =
-        probeError == ERROR_FILE_NOT_FOUND ? DirectoryProbe::Found : DirectoryProbe::Missed;
-    return LowersBelow(LayerDirectory{whiteoutMgr, layerPath, parent}, parentProbe);
+    return LowersBelow(LayerDirectory{whiteoutMgr, layerPath, parent});
 }
 
 }
@@ -77,7 +70,6 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
 
     std::wstring upperFullPath = JoinDirPath(config_.upperPath, normalized);
     DWORD upperAttrs = GetFileAttributesW(upperFullPath.c_str());
-    const DWORD upperProbeError = ::GetLastError();
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
         LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(upperFullPath, &config_);
         if (!metadata.redirect.empty()) {
@@ -95,14 +87,14 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         return result;
     }
 
-    switch (HidingInUpper(normalized, upperProbeError)) {
+    switch (HidingInUpper(normalized)) {
     case UpperHiding::Whiteout: {
         ResolvedPath whiteout;
         whiteout.isWhiteout = true;
         cache_.Put(normalized, whiteout);
         return whiteout;
     }
-    case UpperHiding::NonDirectory:
+    case UpperHiding::NonDirectoryOrLink:
         if (lowerWalk != nullptr) {
             *lowerWalk = ResolvedPath{};
         }
@@ -129,17 +121,16 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
     return lowerResult;
 }
 
-PathResolver::UpperHiding PathResolver::HidingInUpper(const std::wstring& normalized,
-                                                     DWORD upperProbeError) const {
+PathResolver::UpperHiding PathResolver::HidingInUpper(const std::wstring& normalized) const {
     if (whiteoutMgr_.HasWhiteout(normalized, config_.upperPath) ||
         whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
         return UpperHiding::Whiteout;
     }
-    switch (LowersBelowMiss(whiteoutMgr_, config_.upperPath, normalized, upperProbeError)) {
+    switch (LowersBelowParentOf(whiteoutMgr_, config_.upperPath, normalized)) {
     case LowerVisibility::HiddenByOpaqueMarker:
         return UpperHiding::OpaqueMarker;
-    case LowerVisibility::HiddenByNonDirectory:
-        return UpperHiding::NonDirectory;
+    case LowerVisibility::HiddenByNonDirectoryOrLink:
+        return UpperHiding::NonDirectoryOrLink;
     case LowerVisibility::Visible:
         break;
     }
@@ -153,9 +144,8 @@ void PathResolver::LogTypeConflictInDeeperLowers(const std::wstring& normalized,
     ResolvedPath visible = hit;
     for (;;) {
         const size_t lowerIndex = static_cast<size_t>(visible.lowerIndex);
-        // The lower holds the path, so it holds the parent as a directory.
-        if (LowersBelow(LayerDirectory{whiteoutMgr_, config_.lowerPaths[lowerIndex], parent},
-                        DirectoryProbe::Found) != LowerVisibility::Visible) {
+        if (LowersBelow(LayerDirectory{whiteoutMgr_, config_.lowerPaths[lowerIndex], parent}) !=
+            LowerVisibility::Visible) {
             return;
         }
         visible = FindInLowers(normalized, lowerIndex + 1);
@@ -184,7 +174,7 @@ ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) co
     }
 
     if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath) ||
-        HasNonDirectorySelfOrAncestorInLayer(config_.upperPath, ParentDir(normalized))) {
+        HasNonDirectoryOrLinkSelfOrAncestorInLayer(config_.upperPath, ParentDir(normalized))) {
         return {};
     }
 
@@ -203,6 +193,7 @@ CreateResolution PathResolver::ResolveForCreate(const std::wstring& relativePath
 
 ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
                                         size_t firstLower) const {
+    const std::wstring parent = ParentDir(normalized);
     for (size_t i = firstLower; i < config_.lowerPaths.size(); ++i) {
         const std::wstring& lowerPath = config_.lowerPaths[i];
 
@@ -212,10 +203,12 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
         if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, lowerPath)) {
             break;
         }
+        if (HasLinkUnderHigherLayerEntry(config_, i, parent)) {
+            break;
+        }
 
         std::wstring fullPath = JoinDirPath(lowerPath, normalized);
         DWORD attrs = GetFileAttributesW(fullPath.c_str());
-        const DWORD probeError = ::GetLastError();
         if (attrs != INVALID_FILE_ATTRIBUTES) {
             return ResolvedPath{
                 fullPath,
@@ -226,8 +219,7 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
             };
         }
 
-        if (LowersBelowMiss(whiteoutMgr_, lowerPath, normalized, probeError) !=
-            LowerVisibility::Visible) {
+        if (LowersBelowParentOf(whiteoutMgr_, lowerPath, normalized) != LowerVisibility::Visible) {
             break;
         }
     }
