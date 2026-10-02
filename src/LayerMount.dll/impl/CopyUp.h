@@ -87,9 +87,7 @@ public:
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);
 
     // Makes the parent of callerPath exist in the upper, as
-    // UpperParent::Ensure does. Returns STATUS_OBJECT_PATH_NOT_FOUND and
-    // writes nothing when the merged view hides a parent that a lower holds
-    // as a directory.
+    // UpperParent::Ensure does.
     NTSTATUS EnsureUpperParent(const CallerPath& callerPath);
 
     // Copies the lower tree and the old upper shadow to the new upper path,

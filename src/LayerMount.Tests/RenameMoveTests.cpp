@@ -475,6 +475,12 @@ void AssertEntryShownAs(const ::LayerMount::LayerMount& mount,
         (L"The listing of '" + dir + L"' must show the entry as " + displayName).c_str());
 }
 
+std::wstring ListingKey(const std::wstring& displayName) {
+    std::wstring key = displayName;
+    ::CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
+    return key;
+}
+
 void AssertOnlyEntryShownAs(const ::LayerMount::LayerMount& mount,
                             const std::wstring& dir,
                             const std::wstring& displayName) {
@@ -483,9 +489,7 @@ void AssertOnlyEntryShownAs(const ::LayerMount::LayerMount& mount,
         (L"The listing of '" + dir + L"' must succeed").c_str());
     Assert::AreEqual(size_t{1}, listing.entries.size(),
         (L"The listing of '" + dir + L"' must hold one entry").c_str());
-    std::wstring key = displayName;
-    ::CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
-    AssertEntryShownAs(mount, dir, key, displayName);
+    AssertEntryShownAs(mount, dir, ListingKey(displayName), displayName);
 }
 
 void AssertListedDirectoryWithChild(const ::LayerMount::LayerMount& mount,
@@ -504,6 +508,14 @@ void AssertUpperDirectoryCopiedUp(const TempLayerEnvironment& env, const std::ws
         MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\" + dir, nullptr);
     Assert::IsFalse(metadata.originLayer.empty(),
         (L"The upper '" + dir + L"' must carry copy-up metadata").c_str());
+}
+
+void AssertRootShowsOnlyFileNamed(const ::LayerMount::LayerMount& mount, const std::wstring& displayName) {
+    AssertOnlyEntryShownAs(mount, L"", displayName);
+    const MergedDirectory listing = mount.MergeDirectoryEntries(L"");
+    Assert::AreEqual<DWORD>(0,
+        listing.entries.at(ListingKey(displayName)).findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY,
+        (L"The root must list " + displayName + L" as a file").c_str());
 }
 
 std::vector<std::wstring> EntriesUnder(const std::wstring& root) {
@@ -630,6 +642,49 @@ public:
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
             L"A rename into a whited-out directory must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(Rename_LowerFileUnderLowerFile_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo", "x");
+        env.WriteFile(env.Lower(0), L"b.txt", "y");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
+            L"A rename to a path under a lower file must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryUnderLowerFile_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo", "x");
+        env.WriteFile(env.Lower(0), L"x\\a.txt", "y");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"x", L"foo\\x", kFailIfExists, kNoCallerPid),
+            L"A rename of a directory to a path under a lower file must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed rename must write nothing in the upper");
+    }
+
+    TEST_METHOD(Rename_LowerFileUnderWhitedOutLowerFile_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo", "x");
+        env.WriteFile(env.Lower(0), L"b.txt", "y");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"b.txt", L"foo\\b.txt", kFailIfExists, kNoCallerPid),
+            L"A rename to a path under a whited-out lower file must fail");
         Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
             L"The failed rename must write nothing in the upper");
     }
@@ -800,6 +855,48 @@ public:
             L"A create under a directory that an opaque ancestor hides must fail");
         Assert::IsFalse(env.FileExists(env.Upper(), L"d\\sub"),
             L"The failed create must write no parent directory in the upper");
+    }
+
+    TEST_METHOD(Create_UnderLowerFile_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            CreateThroughMount(mount, L"foo\\b.txt", kNoCreateOptions),
+            L"A create under a lower file must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed create must write nothing in the upper");
+        AssertRootShowsOnlyFileNamed(mount, L"Foo");
+    }
+
+    TEST_METHOD(Create_TwoLevelsUnderLowerFile_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo", "x");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            CreateThroughMount(mount, L"foo\\bar\\b.txt", kNoCreateOptions),
+            L"A create two levels under a lower file must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed create must write nothing in the upper");
+        AssertRootShowsOnlyFileNamed(mount, L"Foo");
+    }
+
+    TEST_METHOD(Create_UnderWhitedOutLowerFile_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"Foo", "x");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"Foo"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            CreateThroughMount(mount, L"foo\\b.txt", kNoCreateOptions),
+            L"A create under a whited-out lower file must fail");
+        Assert::IsTrue(upperBefore == EntriesUnder(env.Upper()),
+            L"The failed create must write nothing in the upper");
     }
 
     TEST_METHOD(Create_UnderParentInNoLayer_ListsTheParentInTheCallersCase) {

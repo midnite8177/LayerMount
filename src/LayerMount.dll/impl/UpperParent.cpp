@@ -27,15 +27,14 @@ NTSTATUS UpperParent::Ensure(const CallerPath& path) const {
     }
 
     const ResolvedPath merged = pathResolver_.ResolvePath(parentNorm);
-    if (merged.Found() && merged.source == LayerSource::Lower &&
-        (merged.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        return copyUpDirectory_(parentNorm);
-    }
-    if (!merged.Found()) {
-        const ResolvedPath lower = pathResolver_.ResolveLowerPath(parentNorm);
-        if (lower.Found() && (lower.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+    if (merged.Found() && merged.source == LayerSource::Lower) {
+        if ((merged.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
             return STATUS_OBJECT_PATH_NOT_FOUND;
         }
+        return copyUpDirectory_(parentNorm);
+    }
+    if (!merged.Found() && pathResolver_.ResolveLowerPath(parentNorm).Found()) {
+        return STATUS_OBJECT_PATH_NOT_FOUND;
     }
 
     NTSTATUS status = Ensure(parent);
