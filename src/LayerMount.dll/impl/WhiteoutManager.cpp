@@ -1,5 +1,5 @@
 #include "WhiteoutManager.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "Cache.h"
 #include "LayerPath.h"
 #include "../abi/EventEmitter.h"
@@ -31,6 +31,33 @@ bool AnyDirectoryUpToRoot(fs::path dir, LayerRoot root, const HasMarker& hasMark
         }
     }
     return root == LayerRoot::Probed && hasMarker(std::wstring());
+}
+
+// FILE_FLAG_BACKUP_SEMANTICS lets SE_RESTORE_NAME pass an inherited
+// DENY-WRITE ACE on the parent directory; without it, the create fails there.
+bool CreateHiddenMarkerFile(const std::wstring& path) {
+    HANDLE h = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
+            FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    CloseHandle(h);
+    return true;
+}
+
+bool DeleteMarkerFile(const std::wstring& path) {
+    return DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+}
+
+bool MarkerFileExists(const std::wstring& path) {
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 }
@@ -74,16 +101,13 @@ std::wstring WhiteoutManager::GetWhiteoutFullPath(const std::wstring& layerPath,
 
 bool WhiteoutManager::HasWhiteout(const std::wstring& relativePath,
                                    const std::wstring& layerPath) const {
-    std::wstring whPath = GetWhiteoutFullPath(layerPath, relativePath);
-    return GetFileAttributesW(whPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    return MarkerFileExists(GetWhiteoutFullPath(layerPath, relativePath));
 }
 
 bool WhiteoutManager::HasWhiteoutInAnyLayer(const std::wstring& relativePath) const {
-    // Check upper layer first
     if (HasWhiteout(relativePath, config_.upperPath)) {
         return true;
     }
-    // Check lower layers in priority order
     for (const auto& lower : config_.lowerPaths) {
         if (HasWhiteout(relativePath, lower)) {
             return true;
@@ -100,35 +124,15 @@ bool WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
 
     std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
 
-    // Ensure parent directory exists
     fs::path parentDir = fs::path(whPath).parent_path();
     if (!parentDir.empty()) {
         EnsureDirectoryExists(parentDir.wstring());
     }
 
-    // Create the whiteout marker as a hidden+system zero-byte file.
-    // FILE_FLAG_BACKUP_SEMANTICS honors SE_RESTORE_NAME (enabled in
-    // EnableFileSystemPrivileges) so a parent directory that inherited
-    // a DENY-WRITE ACE from the lower layer does not block our ability to
-    // drop the whiteout marker we own. Without this, renaming or deleting
-    // a lower file under a restrictive parent DACL fails because the
-    // engine can't persist the whiteout that would hide the lower entry.
-    HANDLE h = CreateFileW(
-        whPath.c_str(),
-        GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
-            FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr);
-
-    if (h == INVALID_HANDLE_VALUE) {
+    if (!CreateHiddenMarkerFile(whPath)) {
         return false;
     }
-    CloseHandle(h);
 
-    // Invalidate cache for the affected path
     if (cache_) {
         cache_->InvalidateWithAncestors(NormalizePath(relativePath));
     }
@@ -146,10 +150,8 @@ bool WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
 bool WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
     std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
 
-    if (!DeleteFileW(whPath.c_str())) {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND) {
-            return false;
-        }
+    if (!DeleteMarkerFile(whPath)) {
+        return false;
     }
 
     if (cache_) {
@@ -167,12 +169,11 @@ bool WhiteoutManager::IsOpaqueInLayer(const std::wstring& dirRelativePath,
                                        const std::wstring& layerPath) const {
     std::wstring dirFullPath = JoinDirPath(layerPath, dirRelativePath);
 
-    if (MetadataADS::HasOpaqueADS(dirFullPath, &config_)) {
+    if (MetadataStore::HasOpaqueMetadata(dirFullPath, &config_)) {
         return true;
     }
 
-    std::wstring opqPath = JoinDirPath(dirFullPath, kOpaqueMarkerFile);
-    return GetFileAttributesW(opqPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    return MarkerFileExists(JoinDirPath(dirFullPath, kOpaqueMarkerFile));
 }
 
 bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
@@ -180,53 +181,31 @@ bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
 
     EnsureDirectoryExists(dirFullPath);
 
-    bool adsOk = MetadataADS::SetOpaqueADS(dirFullPath, &config_);
-
-    // A layer image packs the marker file but not the ADS marker, so the
-    // file keeps the directory opaque in a lower unpacked from this upper.
-    // FILE_FLAG_BACKUP_SEMANTICS lets SE_RESTORE_NAME pass an inherited
-    // DENY-WRITE ACE on the directory; without it, the create fails there.
-    std::wstring opqPath = JoinDirPath(dirFullPath, kOpaqueMarkerFile);
-    HANDLE h = CreateFileW(
-        opqPath.c_str(),
-        GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
-            FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr);
-
-    bool fileOk = (h != INVALID_HANDLE_VALUE);
-    if (fileOk) {
-        CloseHandle(h);
-    }
+    bool metadataOk = MetadataStore::SetOpaqueMetadata(dirFullPath, &config_);
+    bool fileOk = CreateHiddenMarkerFile(JoinDirPath(dirFullPath, kOpaqueMarkerFile));
 
     if (cache_) {
         cache_->Invalidate(NormalizePath(dirRelativePath));
     }
 
-    return adsOk || fileOk;
+    // Either marker makes IsOpaqueInLayer report the directory opaque. A
+    // layer image packs the `.wh..wh..opq` file but not the `:overlay.opaque`
+    // stream.
+    return metadataOk || fileOk;
 }
 
 bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
     std::wstring dirFullPath = JoinDirPath(config_.upperPath, dirRelativePath);
 
-    const bool adsOk = MetadataADS::RemoveOpaqueADS(dirFullPath, &config_);
+    const bool metadataOk = MetadataStore::RemoveOpaqueMetadata(dirFullPath, &config_);
 
-    std::wstring opqPath = JoinDirPath(dirFullPath, kOpaqueMarkerFile);
-    bool legacyOk = true;
-    if (!DeleteFileW(opqPath.c_str())) {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND) {
-            legacyOk = false;
-        }
-    }
+    const bool fileOk = DeleteMarkerFile(JoinDirPath(dirFullPath, kOpaqueMarkerFile));
 
     if (cache_) {
         cache_->Invalidate(NormalizePath(dirRelativePath));
     }
 
-    return adsOk && legacyOk;
+    return metadataOk && fileOk;
 }
 
 bool WhiteoutManager::HasOpaqueSelfOrAncestorInLayer(const std::wstring& dirRelativePath,

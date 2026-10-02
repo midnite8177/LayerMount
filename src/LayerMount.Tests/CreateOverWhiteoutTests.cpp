@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "TestFixture.h"
 
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -89,7 +89,7 @@ public:
             L"The create must remove the whiteout");
         Assert::IsFalse(env.FileExists(env.Upper(), OpaqueMarkerPath(L"f")),
             L"A directory over a lower file has no lower children to hide, so it must not be opaque");
-        Assert::IsFalse(::LayerMount::MetadataADS::HasOpaqueADS(env.Upper() + L"\\f", &config),
+        Assert::IsFalse(::LayerMount::MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\f", &config),
             L"The new directory must have no opaque metadata marker");
         Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"f"),
             L"The create must leave the lower file as it was");

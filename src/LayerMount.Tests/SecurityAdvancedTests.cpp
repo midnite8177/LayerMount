@@ -165,7 +165,7 @@ public:
     TEST_METHOD(CopyUp_ChildWithInheritedAce_PreservesInheritedAce) {
         // CopyUp's preservation of inherited ACEs relies on
         // FILE_FLAG_BACKUP_SEMANTICS opens (in CopyAlternateStream and
-        // MetadataADS::WriteAdsOnly) bypassing the inherited DENY-WRITE
+        // MetadataStore::WriteAdsOnly) bypassing the inherited DENY-WRITE
         // ACE when writing ADS / metadata to the upper file. That bypass
         // requires SE_BACKUP_NAME / SE_RESTORE_NAME, which are admin-only
         // privileges enabled by EnableFileSystemPrivileges; on a standard

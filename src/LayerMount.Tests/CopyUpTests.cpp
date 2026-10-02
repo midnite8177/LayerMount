@@ -2,7 +2,7 @@
 #include "TestFixture.h"
 
 #include "CopyUp.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 
 #include <winioctl.h>
 #include <set>
@@ -453,7 +453,7 @@ public:
         rig.copyUp.CopyUpMetadataOnly(L"m.txt");
 
         std::wstring upPath = env.Upper() + L"\\m.txt";
-        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(upPath, nullptr);
+        LayerMountMetadata md = MetadataStore::ReadLayerMountMetadata(upPath, nullptr);
         Assert::IsTrue(md.metacopy, L"metacopy flag should be set");
         Assert::IsFalse(md.originLayer.empty(), L"originLayer should be set");
     }
@@ -529,10 +529,10 @@ public:
 
         rig.copyUp.CopyUpMetadataOnly(L"mc.txt");
         std::wstring upPath = env.Upper() + L"\\mc.txt";
-        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(upPath, nullptr).metacopy);
+        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(upPath, nullptr).metacopy);
 
         rig.copyUp.CompleteLazyCopyUp(L"mc.txt");
-        Assert::IsFalse(MetadataADS::ReadLayerMountMetadata(upPath, nullptr).metacopy,
+        Assert::IsFalse(MetadataStore::ReadLayerMountMetadata(upPath, nullptr).metacopy,
             L"metacopy flag should be cleared after completion");
     }
 

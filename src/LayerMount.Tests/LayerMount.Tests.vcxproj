@@ -71,7 +71,7 @@
       <AdditionalLibraryDirectories>$(VCInstallDir)Auxiliary\VS\UnitTest\lib\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- Unit tests link the static LayerMount-static.lib flavor so they
            keep internal-header access to C++ classes (Cache, CopyUp, PathResolver,
-           WhiteoutManager, MetadataADS, etc.). The static lib is a collection of
+           WhiteoutManager, MetadataStore, etc.). The static lib is a collection of
            .obj files only, so transitive Win32 deps (virtdisk/vssapi/bcrypt/ole32)
            must be named here by the consumer. -->
       <AdditionalDependencies>Microsoft.VisualStudio.TestTools.CppUnitTestFramework.lib;Rpcrt4.lib;virtdisk.lib;vssapi.lib;bcrypt.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -92,7 +92,7 @@
     <ClCompile Include="DeleteTests.cpp" />
     <ClCompile Include="LazyMetacopyFidelityTests.cpp" />
     <ClCompile Include="MaximumAllowedTests.cpp" />
-    <ClCompile Include="MetadataADSTests.cpp" />
+    <ClCompile Include="MetadataStoreTests.cpp" />
     <ClCompile Include="PathResolverTests.cpp" />
     <ClCompile Include="PathTraversalTests.cpp" />
     <ClCompile Include="RenameMoveTests.cpp" />

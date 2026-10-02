@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "TestFixture.h"
 
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
@@ -247,7 +247,7 @@ public:
 
         AssertStatus(STATUS_OBJECT_NAME_COLLISION, CreateThroughMount(mount, L"f.txt:extra", kNoCreateOptions),
             L"A create-new of a stream that the shell's origin has must collide");
-        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
+        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
             L"A colliding stream create must not fill the shell");
         Assert::IsFalse(env.FileExists(env.Upper(), L"f.txt:extra"),
             L"A colliding stream create must not bring the origin's stream into the upper");
@@ -266,7 +266,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"f.txt:extra", kNoCreateOptions),
             L"A create-new of a new stream on a metacopy shell must succeed");
-        Assert::IsFalse(MetadataADS::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
+        Assert::IsFalse(MetadataStore::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
             L"The stream create must fill the shell");
         Assert::AreEqual(std::string("lower"), env.ReadFile(env.Upper(), L"f.txt"),
             L"The filled shell must hold the origin's data");

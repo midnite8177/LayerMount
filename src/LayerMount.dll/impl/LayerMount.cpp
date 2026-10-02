@@ -1,7 +1,7 @@
 #include "LayerMount.h"
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "Cache.h"
 #include "LayerPath.h"
 #include "CopyUp.h"
@@ -590,7 +590,7 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
     fileInfo->IndexNumber    = MakeIndexNumber(info);
 
     if (pathHint && !pathHint->empty()) {
-        const LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(*pathHint, nullptr);
+        const LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(*pathHint, nullptr);
         if (metadata.hasStableIndexNumber) {
             fileInfo->IndexNumber = metadata.stableIndexNumber;
         }
@@ -1151,7 +1151,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
                !streamSuffix.empty()) {
         const std::wstring upperHostPath = pathResolver_->GetUpperPath(hostNorm);
         const LayerMountMetadata metadata =
-            MetadataADS::ReadLayerMountMetadata(upperHostPath, &config_);
+            MetadataStore::ReadLayerMountMetadata(upperHostPath, &config_);
         // A later fill copies the lower's streams over the stream this open writes.
         if (metadata.metacopy) {
             NTSTATUS cpStatus = FillShell(hostNorm, ctx.get());
@@ -1168,7 +1168,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
 
     if (resolved.source == LayerSource::Upper && streamSuffix.empty()) {
         LayerMountMetadata metadata =
-            MetadataADS::ReadLayerMountMetadata(ctx->actualPath, &config_);
+            MetadataStore::ReadLayerMountMetadata(ctx->actualPath, &config_);
         ctx->isMetacopyOnly = metadata.metacopy;
     }
 
@@ -1294,7 +1294,7 @@ bool MetacopyOriginHasStream(const ResolvedPath& host,
         return false;
     }
     const LayerMountMetadata metadata =
-        MetadataADS::ReadLayerMountMetadata(host.absolutePath, &config);
+        MetadataStore::ReadLayerMountMetadata(host.absolutePath, &config);
     return metadata.metacopy && !metadata.originLayer.empty() &&
         StreamExists(metadata.originLayer, streamSuffix);
 }
@@ -1510,7 +1510,7 @@ NTSTATUS LayerMount::PrepareStreamHost(const UpperCreate& create, FileContext* c
         return STATUS_SUCCESS;
     }
     const LayerMountMetadata metadata =
-        MetadataADS::ReadLayerMountMetadata(create.upperPath, &config_);
+        MetadataStore::ReadLayerMountMetadata(create.upperPath, &config_);
     if (metadata.metacopy) {
         return FillShell(create.hostNorm, ctx);
     }

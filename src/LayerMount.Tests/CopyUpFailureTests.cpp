@@ -25,7 +25,7 @@
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
 #include "Cache.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 
 #include <thread>
 #include <atomic>
@@ -249,7 +249,7 @@ public:
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\lazy.bin";
-        LayerMountMetadata before = MetadataADS::ReadLayerMountMetadata(upperPath, nullptr);
+        LayerMountMetadata before = MetadataStore::ReadLayerMountMetadata(upperPath, nullptr);
         Assert::IsTrue(before.metacopy, L"Preconditions: upper is a metacopy");
 
         // Yank the origin source out from under the lazy completer.
@@ -264,7 +264,7 @@ public:
         // silently "completed" zero-padded file. Any subsequent read-path
         // will re-observe the failure, which is the correct behavior (fail
         // loud, not corrupt silently).
-        LayerMountMetadata after = MetadataADS::ReadLayerMountMetadata(upperPath, nullptr);
+        LayerMountMetadata after = MetadataStore::ReadLayerMountMetadata(upperPath, nullptr);
         Assert::IsTrue(after.metacopy,
             L"metacopy flag must not be cleared on failed lazy completion");
     }

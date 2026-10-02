@@ -14,7 +14,7 @@
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
 #include "Cache.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
@@ -311,7 +311,7 @@ public:
 
         // Stage the metacopy, then rename in-upper.
         Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin")));
-        Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(
+        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(
                            env.Upper() + L"\\lazy.bin", nullptr).metacopy);
 
         // Now upper-to-upper rename (source already in upper after metacopy).
@@ -322,7 +322,7 @@ public:
         cache.InvalidateWithAncestors(L"renamed.bin");
 
         // Metacopy flag and logical size must survive the move.
-        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(
+        LayerMountMetadata md = MetadataStore::ReadLayerMountMetadata(
             env.Upper() + L"\\renamed.bin", nullptr);
         Assert::IsTrue(md.metacopy, L"metacopy flag must survive MoveFileExW");
         Assert::IsFalse(md.originLayer.empty(),
@@ -396,7 +396,7 @@ public:
         // Plant a self-referential redirect on the upper dir.
         LayerMountMetadata md;
         md.redirect = L"loop";
-        Assert::IsTrue(MetadataADS::WriteLayerMountMetadata(
+        Assert::IsTrue(MetadataStore::WriteLayerMountMetadata(
                            env.Upper() + L"\\loop", md, nullptr));
 
         auto config = env.MakeConfig();

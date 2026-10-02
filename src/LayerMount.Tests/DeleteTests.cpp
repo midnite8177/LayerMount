@@ -5,7 +5,7 @@
 #include "WhiteoutManager.h"
 #include "Cache.h"
 #include "CopyUp.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "AclTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;

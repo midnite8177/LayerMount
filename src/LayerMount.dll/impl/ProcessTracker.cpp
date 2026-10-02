@@ -38,7 +38,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// UTF-8 / Wide string conversion (local helpers, same pattern as MetadataADS)
+// UTF-8 / Wide string conversion (local helpers, same pattern as MetadataStore)
 // ---------------------------------------------------------------------------
 
 static std::string WideToUtf8(const std::wstring& wide) {

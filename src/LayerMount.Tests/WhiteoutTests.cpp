@@ -4,7 +4,7 @@
 #include "WhiteoutManager.h"
 #include "PathResolver.h"
 #include "Cache.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "AclTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -520,7 +520,7 @@ public:
         Assert::IsTrue(wm.SetOpaque(L"sub"));
 
         std::wstring dirPath = env.Upper() + L"\\sub";
-        Assert::IsTrue(MetadataADS::HasOpaqueADS(dirPath, nullptr),
+        Assert::IsTrue(MetadataStore::HasOpaqueMetadata(dirPath, nullptr),
             L"SetOpaque should write :overlay.opaque ADS");
     }
 
@@ -545,7 +545,7 @@ public:
         env.CreateDir(env.Upper(), L"sub");
 
         std::wstring dirPath = env.Upper() + L"\\sub";
-        Assert::IsTrue(MetadataADS::SetOpaqueADS(dirPath, nullptr));
+        Assert::IsTrue(MetadataStore::SetOpaqueMetadata(dirPath, nullptr));
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -587,7 +587,7 @@ public:
         env.CreateDir(env.Lower(0), L"sub");
 
         std::wstring upperDir = env.Upper() + L"\\sub";
-        MetadataADS::SetOpaqueADS(upperDir, nullptr);
+        MetadataStore::SetOpaqueMetadata(upperDir, nullptr);
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -611,7 +611,7 @@ public:
         Assert::IsTrue(wm.RemoveOpaque(L"sub"));
 
         std::wstring dirPath = env.Upper() + L"\\sub";
-        Assert::IsFalse(MetadataADS::HasOpaqueADS(dirPath, nullptr), L"the opaque marker is gone");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(dirPath, nullptr), L"the :overlay.opaque stream is gone");
 
         std::wstring marker = env.Upper() + L"\\" + OpaqueMarkerPath(L"sub");
         Assert::AreEqual(INVALID_FILE_ATTRIBUTES,

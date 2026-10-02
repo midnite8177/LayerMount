@@ -17,7 +17,7 @@ namespace LayerMount {
 // nothing, and a write picks the store from `LM_CAP_ADS`. A remove
 // cleans both stores so a host can change capabilities and leave no
 // stale entry behind.
-class MetadataADS {
+class MetadataStore {
 public:
     // Read `:overlay` (then sidecar if config present and ADS empty).
     // Returns default `LayerMountMetadata` if neither store has it, and
@@ -42,20 +42,24 @@ public:
         const std::wstring& filePath,
         const LayerConfig* config);
 
-    // Check `:overlay.opaque` (then sidecar opaque marker if config given).
-    static bool HasOpaqueADS(
+    // True when the `:overlay.opaque` stream exists, or, with a config, the
+    // sidecar `.opaque` file. Ignores the `.wh..wh..opq` marker file.
+    static bool HasOpaqueMetadata(
         const std::wstring& directoryPath,
         const LayerConfig* config);
 
-    // Set the opaque marker. Routing same as Write.
-    static bool SetOpaqueADS(
+    // Writes the sidecar `.opaque` file when a config is given and the host
+    // lacks LM_CAP_ADS, otherwise the `:overlay.opaque` stream. Does not
+    // create the `.wh..wh..opq` marker file.
+    static bool SetOpaqueMetadata(
         const std::wstring& directoryPath,
         const LayerConfig* config);
 
-    // Remove the opaque marker from both stores when config is given.
-    static bool RemoveOpaqueADS(
+    // Deletes the `:overlay.opaque` stream, and the sidecar `.opaque` file
+    // too when a config is given. Leaves the `.wh..wh..opq` marker file alone.
+    static bool RemoveOpaqueMetadata(
         const std::wstring& directoryPath,
         const LayerConfig* config);
 };
 
-} // namespace LayerMount
+}

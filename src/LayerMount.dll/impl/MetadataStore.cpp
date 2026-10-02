@@ -1,4 +1,4 @@
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "SidecarMetadata.h"
 #include "../abi/CapabilityGate.h"
 
@@ -6,11 +6,6 @@
 
 namespace LayerMount {
 
-// ---------------------------------------------------------------------------
-// JSON serialization helpers for LayerMountMetadata
-// ---------------------------------------------------------------------------
-
-// FILETIME <-> uint64_t conversion for JSON storage
 static uint64_t FileTimeToUint64(const FILETIME& ft) {
     return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 }
@@ -22,7 +17,6 @@ static FILETIME Uint64ToFileTime(uint64_t val) {
     return ft;
 }
 
-// Convert wstring to UTF-8 for JSON storage
 static std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) return {};
     int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
@@ -36,7 +30,6 @@ static std::string WideToUtf8(const std::wstring& wide) {
     return utf8;
 }
 
-// Convert UTF-8 to wstring
 static std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
     int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
@@ -74,22 +67,13 @@ static LayerMountMetadata JsonToMetadata(const nlohmann::json& j) {
     return m;
 }
 
-// ---------------------------------------------------------------------------
-// MetadataADS implementation
-// ---------------------------------------------------------------------------
-
 namespace {
 
-// Should the dispatcher prefer sidecar over ADS for this call?
 inline bool UseSidecarFor(const LayerConfig* config) {
     if (config == nullptr) return false;
     return !abi::CapabilityGate(config->hostCapabilities).HasAds();
 }
 
-// Is the metadata effectively empty? Used by Read to decide whether to
-// fall through to the sidecar. A default-constructed LayerMountMetadata
-// has opaque=false, metacopy=false, empty redirect, zero timestamp,
-// empty originLayer, hasStableIndexNumber=false, stableIndexNumber=0.
 inline bool IsDefaultMetadata(const LayerMountMetadata& m) {
     return !m.opaque && !m.metacopy && m.redirect.empty()
         && m.copyUpTimestamp.dwLowDateTime == 0
@@ -195,7 +179,6 @@ LayerMountMetadata ReadAdsOnly(const std::wstring& filePath, bool* corrupted) {
         return JsonToMetadata(j);
     }
     catch (const nlohmann::json::exception&) {
-        // Corrupted or non-JSON data -- surface to caller via out-param.
         if (corrupted != nullptr) *corrupted = true;
         return {};
     }
@@ -209,8 +192,8 @@ bool WriteAdsOnly(const std::wstring& filePath, const LayerMountMetadata& metada
     // (enabled in EnableFileSystemPrivileges). Without it, an upper file that
     // inherited a DENY-WRITE ACE from its parent would refuse the
     // `:overlay` stream open even though the process holds the backup
-    // privileges, and the metadata write would fail -- breaking copy-up
-    // of files under restrictive DACLs.
+    // privileges. The metadata write, and with it the copy-up of a file
+    // under a restrictive DACL, would then fail.
     HANDLE h = CreateFileW(
         adsPath.c_str(),
         GENERIC_WRITE,
@@ -239,7 +222,6 @@ bool RemoveAdsOnly(const std::wstring& filePath) {
     if (DeleteFileW(adsPath.c_str())) {
         return true;
     }
-    // Also OK if stream didn't exist
     return GetLastError() == ERROR_FILE_NOT_FOUND;
 }
 
@@ -279,35 +261,27 @@ bool RemoveOpaqueAdsOnly(const std::wstring& directoryPath) {
         return true;
     }
     const DWORD err = GetLastError();
-    // Not-found is "nothing to remove" in both flavors. The ADS stream path
-    // contains `:overlay.opaque`; DeleteFileW can surface either
-    // FILE_NOT_FOUND (base file exists, stream does not) or PATH_NOT_FOUND
-    // (base file / directory does not exist). Treat both as benign so we
-    // don't report failure when the sidecar backend was the one used.
+    // DeleteFileW returns ERROR_FILE_NOT_FOUND when the directory exists
+    // without the stream, and ERROR_PATH_NOT_FOUND when the directory does
+    // not exist. Both mean nothing to remove, which is the normal case when
+    // the sidecar store holds the marker.
     return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
 }
 
-} // namespace
+}
 
-// ---------------------------------------------------------------------------
-// Public dispatcher API. Each routes between ADS and SidecarMetadata
-// based on the optional LayerConfig.
-// ---------------------------------------------------------------------------
-
-LayerMountMetadata MetadataADS::ReadLayerMountMetadata(const std::wstring& filePath,
-                                                 const LayerConfig* config) {
+LayerMountMetadata MetadataStore::ReadLayerMountMetadata(const std::wstring& filePath,
+                                                         const LayerConfig* config) {
     bool adsCorrupted = false;
     LayerMountMetadata fromAds = ReadAdsOnly(filePath, &adsCorrupted);
 
-    // ADS-corruption case must NOT fall back to the sidecar. ReadAdsOnly
-    // sets adsCorrupted when the stream exists (or apparently exists --
-    // sharing violation, ACL denial, multi-GB size, malformed JSON) but
-    // cannot be parsed into usable metadata. Falling through to the
-    // sidecar in that case can resurrect older sidecar metadata (from
-    // before an ADS-mode write took over) and produce an outdated
-    // resolution decision. Reserve sidecar fallback for ADS-absent --
-    // i.e., the cooperative dispatcher case where a host flipped from
-    // sidecar to ADS and we want to honor prior state.
+    // A corrupted ADS must not fall back to the sidecar. ReadAdsOnly sets
+    // adsCorrupted when the stream exists, or seems to exist after a sharing
+    // violation, an ACL denial, a multi-GB size or malformed JSON, but does
+    // not parse into usable metadata. A fallback there can bring back older
+    // sidecar metadata from before an ADS write took over. The fallback is
+    // only for an absent ADS, and it runs even when LM_CAP_ADS is set, so a
+    // host that changed from the sidecar to the ADS keeps its earlier state.
     if (adsCorrupted) {
         return fromAds;
     }
@@ -318,23 +292,20 @@ LayerMountMetadata MetadataADS::ReadLayerMountMetadata(const std::wstring& fileP
     if (!IsDefaultMetadata(fromAds)) {
         return fromAds;
     }
-    // ADS genuinely absent (not corrupted) -- try sidecar transparently.
-    // This holds even when LM_CAP_ADS is set: a host that flipped from
-    // sidecar to ADS still gets prior state honored.
     return SidecarMetadata::Read(filePath, config->upperPath);
 }
 
-bool MetadataADS::WriteLayerMountMetadata(const std::wstring& filePath,
-                                       const LayerMountMetadata& metadata,
-                                       const LayerConfig* config) {
+bool MetadataStore::WriteLayerMountMetadata(const std::wstring& filePath,
+                                            const LayerMountMetadata& metadata,
+                                            const LayerConfig* config) {
     if (UseSidecarFor(config)) {
         return SidecarMetadata::Write(filePath, metadata, config->upperPath);
     }
     return WriteAdsOnly(filePath, metadata);
 }
 
-bool MetadataADS::RemoveLayerMountMetadata(const std::wstring& filePath,
-                                        const LayerConfig* config) {
+bool MetadataStore::RemoveLayerMountMetadata(const std::wstring& filePath,
+                                             const LayerConfig* config) {
     bool adsOk = RemoveAdsOnly(filePath);
     if (config == nullptr) {
         return adsOk;
@@ -343,23 +314,23 @@ bool MetadataADS::RemoveLayerMountMetadata(const std::wstring& filePath,
     return adsOk && sidecarOk;
 }
 
-bool MetadataADS::HasOpaqueADS(const std::wstring& directoryPath,
-                               const LayerConfig* config) {
+bool MetadataStore::HasOpaqueMetadata(const std::wstring& directoryPath,
+                                      const LayerConfig* config) {
     if (HasOpaqueAdsOnly(directoryPath)) return true;
     if (config == nullptr) return false;
     return SidecarMetadata::HasOpaque(directoryPath, config->upperPath);
 }
 
-bool MetadataADS::SetOpaqueADS(const std::wstring& directoryPath,
-                               const LayerConfig* config) {
+bool MetadataStore::SetOpaqueMetadata(const std::wstring& directoryPath,
+                                      const LayerConfig* config) {
     if (UseSidecarFor(config)) {
         return SidecarMetadata::SetOpaque(directoryPath, config->upperPath);
     }
     return SetOpaqueAdsOnly(directoryPath);
 }
 
-bool MetadataADS::RemoveOpaqueADS(const std::wstring& directoryPath,
-                                  const LayerConfig* config) {
+bool MetadataStore::RemoveOpaqueMetadata(const std::wstring& directoryPath,
+                                         const LayerConfig* config) {
     bool adsOk = RemoveOpaqueAdsOnly(directoryPath);
     if (config == nullptr) {
         return adsOk;
@@ -368,4 +339,4 @@ bool MetadataADS::RemoveOpaqueADS(const std::wstring& directoryPath,
     return adsOk && sidecarOk;
 }
 
-} // namespace LayerMount
+}

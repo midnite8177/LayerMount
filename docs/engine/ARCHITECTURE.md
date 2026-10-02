@@ -42,7 +42,7 @@ src/LayerMount.dll/
                   WhiteoutManager.{h,cpp} `.wh.` markers + opaque dirs
                   CopyUp.{h,cpp}       Full + metacopy copy-up + dir rename
                   Cache.{h,cpp}        LRU resolved-path cache
-                  MetadataADS.{h,cpp}  Per-file metadata dispatcher
+                  MetadataStore.{h,cpp} Per-file metadata dispatcher
                   SidecarMetadata.{h,cpp} Non-NTFS metadata fallback store
                   ProcessTracker.{h,cpp} Per-PID access log + rule eval
                   ComScope.{h,cpp}     RAII COM init for VSS
@@ -597,7 +597,7 @@ shims) see a consistent value before and after copy-up.
 
 ### Two backends, one dispatcher
 
-`MetadataADS` is the engine's dispatcher. It picks an NTFS
+`MetadataStore` is the engine's dispatcher. It picks an NTFS
 alternate-data-stream store or a sidecar JSON store, based on the host
 adapter's advertised capability. It falls back to the sidecar store
 when the ADS store has no entry. See

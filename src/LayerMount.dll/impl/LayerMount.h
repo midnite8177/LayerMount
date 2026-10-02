@@ -131,7 +131,7 @@ struct FileContext {
 
 class PathResolver;
 class WhiteoutManager;
-class MetadataADS;
+class MetadataStore;
 class Cache;
 class CopyUp;
 namespace VHD { class VHDLayerManager; }

@@ -17,10 +17,8 @@ namespace {
 constexpr const wchar_t* kMetaSuffix    = L".meta.json";
 constexpr const wchar_t* kOpaqueSuffix  = L".opaque";
 
-// Wide / UTF-8 conversions duplicated from MetadataADS.cpp -- pulling
-// them into a shared header would touch every TU in impl/ for one helper
-// pair; better duplicated and kept local than dragged into the public
-// engine header.
+// MetadataStore.cpp has the same two conversions. A shared header for one
+// helper pair would touch every file in impl/, so each file keeps a copy.
 std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) return {};
     int size = ::WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),

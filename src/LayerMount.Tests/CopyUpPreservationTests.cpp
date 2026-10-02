@@ -7,7 +7,7 @@
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
 #include "Cache.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 
 #include <winioctl.h>
 
@@ -326,7 +326,7 @@ public:
         // Plant a fake bookkeeping stream in lower.
         LayerMountMetadata fake;
         fake.originLayer = L"bogus";
-        MetadataADS::WriteLayerMountMetadata(env.Lower(0) + L"\\book.txt", fake, nullptr);
+        MetadataStore::WriteLayerMountMetadata(env.Lower(0) + L"\\book.txt", fake, nullptr);
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -339,7 +339,7 @@ public:
 
         // Upper's :overlay metadata should reflect copy-up truth, not the
         // fabricated value from lower.
-        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(
+        LayerMountMetadata md = MetadataStore::ReadLayerMountMetadata(
             env.Upper() + L"\\book.txt", nullptr);
         Assert::AreNotEqual(std::wstring(L"bogus"), md.originLayer,
             L"Upper's bookkeeping ADS must be written by copy-up, not inherited");

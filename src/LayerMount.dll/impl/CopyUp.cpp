@@ -2,7 +2,7 @@
 #include "LayerPath.h"
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "Cache.h"
 #include "NtStatusUtil.h"
 #include "ElevationUtil.h"
@@ -876,7 +876,7 @@ static NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
 
 NTSTATUS CopyUp::WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
                                             const LayerMountMetadata& metadata) {
-    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
+    if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
         const DWORD err = ::GetLastError();
         ::DeleteFileW(upperPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
@@ -903,7 +903,7 @@ NTSTATUS CopyUp::CopyUpReparseEntry(const std::wstring& normalized,
     // reporting. On failure, tear down the staged reparse point so the
     // caller can retry from a clean state.
     LayerMountMetadata metadata = MakeCopyUpMetadata(source.absolutePath);
-    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
+    if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
         const DWORD err = ::GetLastError();
         removeUpperEntry(upperPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
@@ -1238,7 +1238,7 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     // before us has already cleared the metacopy flag and may have applied
     // a user-write into upper; re-copying lower bytes here would clobber
     // that write. The post-lock read guarantees we see the winner's commit.
-    LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(upperPath, &config_);
+    LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(upperPath, &config_);
     if (!metadata.metacopy) {
         return STATUS_SUCCESS;
     }
@@ -1357,7 +1357,7 @@ NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
     // landed between the data copy and here. Surface the failure so the
     // caller sees the completion did not commit.
     metadata.metacopy = false;
-    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
+    if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
         const DWORD err = ::GetLastError();
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
     }
@@ -1453,7 +1453,7 @@ NTSTATUS CopyUp::SecureAndTagUpperDirectory(const std::wstring& sourcePath,
     // the upper directory looks like a foreign creation and later
     // resolution can misbehave. Tear down the staged upper directory.
     LayerMountMetadata metadata = MakeCopyUpMetadata(sourcePath);
-    if (!MetadataADS::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
+    if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
         const DWORD err = ::GetLastError();
         ::RemoveDirectoryW(upperPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
@@ -1901,7 +1901,7 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
     // and apps that key off it (build caches, git) see the file as a
     // different object. Tear down the staged destination so the caller
     // can retry from a clean state.
-    if (!MetadataADS::WriteLayerMountMetadata(dstAbs, MakeCopyUpMetadata(srcAbs), config)) {
+    if (!MetadataStore::WriteLayerMountMetadata(dstAbs, MakeCopyUpMetadata(srcAbs), config)) {
         const DWORD err = ::GetLastError();
         ::DeleteFileW(dstAbs.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
@@ -2042,7 +2042,7 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
     // like a foreign creation to later resolution, which can misroute
     // child lookups during subsequent rename fanout. Tear down the
     // staged destination directory so the caller retries cleanly.
-    if (!MetadataADS::WriteLayerMountMetadata(dstAbs, MakeCopyUpMetadata(srcAbs), config)) {
+    if (!MetadataStore::WriteLayerMountMetadata(dstAbs, MakeCopyUpMetadata(srcAbs), config)) {
         const DWORD err = ::GetLastError();
         ::RemoveDirectoryW(dstAbs.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);

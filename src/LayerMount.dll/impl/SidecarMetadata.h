@@ -16,7 +16,7 @@
 //
 // Stateless: every method takes the file/dir path under the upper layer
 // plus the upper root so we can compute the sidecar location. The
-// dispatcher in MetadataADS picks between ADS and sidecar; this module
+// dispatcher in MetadataStore picks between ADS and sidecar; this module
 // just owns the sidecar I/O shape.
 
 #include "LayerMount.h"

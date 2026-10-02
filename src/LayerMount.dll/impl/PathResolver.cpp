@@ -1,6 +1,6 @@
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "Cache.h"
 #include "LayerPath.h"
 
@@ -79,7 +79,7 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
     DWORD upperAttrs = GetFileAttributesW(upperFullPath.c_str());
     const DWORD upperProbeError = ::GetLastError();
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        LayerMountMetadata metadata = MetadataADS::ReadLayerMountMetadata(upperFullPath, &config_);
+        LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(upperFullPath, &config_);
         if (!metadata.redirect.empty()) {
             return ResolvePathInternal(metadata.redirect, redirectDepth + 1, nullptr);
         }

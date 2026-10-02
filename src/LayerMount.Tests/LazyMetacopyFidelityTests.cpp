@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "TestFixture.h"
 
-#include "MetadataADS.h"
+#include "MetadataStore.h"
 #include "LayerMount.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -234,7 +234,7 @@ public:
         const std::wstring upperPath = env.Upper() + L"\\ads.bin";
 
         // The overlay's own :overlay stream should exist (metacopy cleared).
-        LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(upperPath, nullptr);
+        LayerMountMetadata md = MetadataStore::ReadLayerMountMetadata(upperPath, nullptr);
         Assert::IsFalse(md.metacopy,
             L"metacopy flag must clear after successful lazy completion");
 
