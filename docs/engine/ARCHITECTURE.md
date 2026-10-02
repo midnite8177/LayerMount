@@ -228,11 +228,13 @@ both stores.
 The two main producers of opaque markers:
 
 - `Create` with `FILE_DIRECTORY_FILE` in `createOptions` when a whiteout
-  at the path or an opaque ancestor hides a lower directory of the same
-  name. A create over a lower directory that the overlay still shows
-  fails with `STATUS_OBJECT_NAME_COLLISION` instead. Without the marker, the new
-  (empty) upper directory would expose the hidden lower contents through
-  the overlay again.
+  at the path hides a lower directory of the same name. A create over a
+  lower directory that the overlay still shows fails with
+  `STATUS_OBJECT_NAME_COLLISION` instead. Without the marker, the new,
+  empty upper directory would expose the hidden lower contents through
+  the overlay again. An opaque ancestor already hides the lower
+  directory, so a directory created under it gets no marker. Overlayfs
+  likewise sets no marker on a new directory whose parent is not merged.
 - `CopyUp::RenameLowerDirectory`, which renames a directory that a lower
   layer holds. After the recursive copy, the destination is opaque so
   subsequent merges don't re-pull files from the lower-layer source
@@ -414,10 +416,14 @@ algorithm (in `impl/PathResolver.cpp`):
 9.  Cache the result and return.
 ```
 
-`ResolveLowerPath` does not probe the upper. It runs steps 2, 2b, 2c,
-2d, 5a, 6a and 7 only, it does not use the cache, and an empty path is not
-found. Create, delete, copy-up and rename use it when the engine needs
-the *lower* state independent of any upper shadow.
+`ResolveLowerPath` does not probe the upper for the path itself. It runs
+steps 2, 2b, 2c, 2d, 5a, 6, 6a and 7 only, it does not use the cache, and an
+empty path is not found. Create, delete, copy-up and rename use it when the
+engine needs the *lower* state independent of an upper entry at the path
+itself. `IsLowerEntryHiddenByWhiteoutOrOpaqueAncestor` is true when a lower
+holds the path but a whiteout or an opaque ancestor in the upper hides it.
+`UpperParent::Ensure` uses it to refuse a parent that the overlay does not
+show.
 
 The redirect step (4) is the metacopy mechanism. After a `Rename` of an
 entry that lived in a lower layer, the engine writes a metacopy stub

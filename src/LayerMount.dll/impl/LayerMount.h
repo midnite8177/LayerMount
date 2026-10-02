@@ -104,10 +104,7 @@ struct CreateResolution {
     ResolvedPath overlayHit;
     // True when the upper holds a whiteout for exactly this path.
     bool whiteoutAtPath = false;
-    // The lower hit, as ResolveLowerPath returns it. An upper entry at this
-    // path, a whiteout for exactly this path, or an opaque ancestor in the
-    // upper does not hide it. A whiteout, a non-directory or a link at an
-    // ancestor in the upper does.
+    // The lower hit, as ResolveLowerPath returns it.
     ResolvedPath lower;
 };
 
@@ -397,8 +394,8 @@ public:
     // FILE_DIRECTORY_FILE selects directory creation. Applies the
     // self-relative security descriptor that SecurityPolicy picks, and
     // pre-allocates allocationSize bytes when non-zero. Marks a new
-    // directory as opaque when a whiteout at the path or an opaque ancestor
-    // hides a lower directory of the same name. Returns
+    // directory as opaque when a whiteout at the path hides a lower
+    // directory of the same name. Returns
     // STATUS_OBJECT_NAME_COLLISION when the overlay already holds a path
     // without a stream suffix, and for a stream create when the host file
     // that the overlay holds already has that stream. A stream that the

@@ -20,6 +20,14 @@ std::wstring ParentDir(const std::wstring& normalized) {
     return std::filesystem::path(normalized).parent_path().wstring();
 }
 
+std::optional<std::wstring> ResolvableNormalized(const std::wstring& relativePath) {
+    std::wstring normalized = NormalizePath(relativePath);
+    if (normalized.empty() || !IsResolvablePath(normalized)) {
+        return std::nullopt;
+    }
+    return normalized;
+}
+
 LowerVisibility LowersBelowParentOf(const WhiteoutManager& whiteoutMgr,
                                     const std::wstring& layerPath,
                                     const std::wstring& normalized) {
@@ -95,11 +103,10 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         return whiteout;
     }
     case UpperHiding::NonDirectoryOrLink:
+    case UpperHiding::OpaqueMarker: {
         if (lowerWalk != nullptr) {
             *lowerWalk = ResolvedPath{};
         }
-        [[fallthrough]];
-    case UpperHiding::OpaqueMarker: {
         ResolvedPath notFound;
         cache_.Put(normalized, notFound);
         return notFound;
@@ -122,8 +129,14 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
 }
 
 PathResolver::UpperHiding PathResolver::HidingInUpper(const std::wstring& normalized) const {
-    if (whiteoutMgr_.HasWhiteout(normalized, config_.upperPath) ||
-        whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
+    if (whiteoutMgr_.HasWhiteout(normalized, config_.upperPath)) {
+        return UpperHiding::Whiteout;
+    }
+    return UpperAncestorHiding(normalized);
+}
+
+PathResolver::UpperHiding PathResolver::UpperAncestorHiding(const std::wstring& normalized) const {
+    if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
         return UpperHiding::Whiteout;
     }
     switch (LowersBelowParentOf(whiteoutMgr_, config_.upperPath, normalized)) {
@@ -166,19 +179,21 @@ void PathResolver::LogTypeConflictInDeeperLowers(const std::wstring& normalized,
 }
 
 ResolvedPath PathResolver::ResolveLowerPath(const std::wstring& relativePath) const {
-    std::wstring normalized = NormalizePath(relativePath);
-    if (normalized.empty()) return {};
-
-    if (!IsResolvablePath(normalized)) {
+    const std::optional<std::wstring> normalized = ResolvableNormalized(relativePath);
+    if (!normalized.has_value() || UpperAncestorHiding(*normalized) != UpperHiding::None) {
         return {};
     }
+    return FindInLowers(*normalized, 0);
+}
 
-    if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath) ||
-        HasNonDirectoryOrLinkSelfOrAncestorInLayer(config_.upperPath, ParentDir(normalized))) {
-        return {};
+bool PathResolver::IsLowerEntryHiddenByWhiteoutOrOpaqueAncestor(const std::wstring& relativePath) const {
+    const std::optional<std::wstring> normalized = ResolvableNormalized(relativePath);
+    if (!normalized.has_value()) {
+        return false;
     }
-
-    return FindInLowers(normalized, 0);
+    const UpperHiding hiding = HidingInUpper(*normalized);
+    const bool hiddenByMarker = hiding == UpperHiding::Whiteout || hiding == UpperHiding::OpaqueMarker;
+    return hiddenByMarker && FindInLowers(*normalized, 0).Found();
 }
 
 CreateResolution PathResolver::ResolveForCreate(const std::wstring& relativePath) const {

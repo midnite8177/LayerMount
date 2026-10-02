@@ -854,6 +854,26 @@ public:
         AssertUpperDirectoryCopiedUp(env, L"Foo");
     }
 
+    TEST_METHOD(Rename_LowerDirectoryIntoDirectoryWhitedOutUnderUpperJunction_FailsAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\sub"), "");
+        env.WriteFile(env.Lower(0), L"link\\sub\\a.txt", "x");
+        env.WriteFile(env.Lower(0), L"x\\b.txt", "y");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Upper() + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+            mount.Rename(L"x", L"link\\sub\\x", kFailIfExists, kNoCallerPid),
+            L"A rename into a directory that a whiteout under an upper junction hides must fail");
+        upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+        targetBefore.AssertUnchanged(L"The failed rename must write nothing in the junction target");
+    }
+
     TEST_METHOD(Rename_UpperDirectoryIntoParentInNoLayer_ListsTheParentInTheCallersCase) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Upper(), L"bar\\c.txt", "z");
@@ -1770,6 +1790,63 @@ public:
             L"A rename of an opaque upper directory over a lower directory must succeed");
         AssertOnlyEntryShownAs(mount, L"moved", L"upper.txt");
         AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"d", L"moved");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryUnderOpaqueParentOverHiddenLowerDirectory_MovesOnlyTheUpperChildren) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"p\\d\\lower.txt", "lower");
+        env.WriteFile(env.Upper(), L"p\\d\\upper.txt", "upper");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"p"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"p\\d", L"p\\e", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper directory under an opaque parent must succeed");
+        AssertOnlyEntryShownAs(mount, L"p\\e", L"upper.txt");
+        AssertOnlyEntryShownAs(mount, L"p", L"e");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"p\\d")),
+            L"The rename must write no whiteout for a name whose lower entry the opaque parent hides");
+        Assert::IsFalse(env.FileExists(env.Upper(), OpaqueMarkerPath(L"p\\e")),
+            L"The rename must write no opaque marker file into the new name");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\p\\e", nullptr),
+            L"The rename must write no opaque stream onto the new name");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_UpperFileUnderOpaqueParentOverHiddenLowerFile_WritesNoWhiteout) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"p\\f.txt", "lower");
+        env.WriteFile(env.Upper(), L"p\\f.txt", "upper");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"p"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"p\\f.txt", L"p\\g.txt", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper file under an opaque parent must succeed");
+        AssertOnlyEntryShownAs(mount, L"p", L"g.txt");
+        Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"p\\g.txt"),
+            L"The new name must hold the upper file's data");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"p\\f.txt")),
+            L"The rename must write no whiteout for a name whose lower entry the opaque parent hides");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryOntoNameWhoseLowerEntryAnOpaqueParentHides_Succeeds) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"p\\x\\lower.txt", "lower");
+        env.WriteFile(env.Upper(), L"p\\d\\upper.txt", "upper");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"p"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"p\\d", L"p\\x", kFailIfExists, kNoCallerPid),
+            L"A rename onto a name that the overlay does not show must succeed");
+        AssertOnlyEntryShownAs(mount, L"p", L"x");
+        AssertOnlyEntryShownAs(mount, L"p\\x", L"upper.txt");
         lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
     }
 

@@ -219,7 +219,7 @@ public:
             L"The stream create must leave the upper file's data as it was");
     }
 
-    TEST_METHOD(CreateDirectory_UnderOpaqueAncestorOverLowerDirectory_IsOpaqueAndHidesLowerChildren) {
+    TEST_METHOD(CreateDirectory_UnderOpaqueAncestorOverLowerDirectory_IsNotOpaqueAndHidesLowerChildren) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"d\\e\\c.txt", "lower");
         env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
@@ -227,8 +227,10 @@ public:
 
         AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d\\e", FILE_DIRECTORY_FILE),
             L"A directory create-new under an opaque directory must succeed over a hidden lower directory");
-        Assert::IsTrue(env.FileExists(env.Upper(), OpaqueMarkerPath(L"d\\e")),
-            L"The new directory must be opaque");
+        Assert::IsFalse(env.FileExists(env.Upper(), OpaqueMarkerPath(L"d\\e")),
+            L"The new directory must not be opaque, because the opaque ancestor already hides the lower directory");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\d\\e", nullptr),
+            L"The new directory must carry no opaque stream");
         AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\e\\c.txt"),
             L"The new directory must hide the children of the hidden lower directory");
     }

@@ -317,6 +317,52 @@ public:
         AssertStatus(STATUS_ACCESS_DENIED, status, L"An open directory a lower cannot list must not count as empty");
     }
 
+    static void WriteUpperFileOverHiddenLowerFileUnderOpaqueParent(TempLayerEnvironment& env) {
+        env.WriteFile(env.Lower(0), L"p\\x.txt", "lower");
+        env.WriteFile(env.Upper(), L"p\\x.txt", "upper");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"p"), "");
+    }
+
+    static void AssertUpperFileDeletedWithNoWhiteout(TempLayerEnvironment& env) {
+        Assert::IsFalse(env.FileExists(env.Upper(), L"p\\x.txt"),
+            L"The delete must remove the upper file");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"p\\x.txt")),
+            L"The delete must write no whiteout for a name whose lower entry the opaque parent hides");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"p\\x.txt"),
+            L"The delete must leave the lower file as it was");
+    }
+
+    TEST_METHOD(Delete_UpperFileUnderOpaqueParentOverHiddenLowerFile_WritesNoWhiteout) {
+        TempLayerEnvironment env(1);
+        WriteUpperFileOverHiddenLowerFileUnderOpaqueParent(env);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"p\\x.txt", kNoCallerPid),
+            L"The delete of an upper file under an opaque parent must succeed");
+
+        AssertUpperFileDeletedWithNoWhiteout(env);
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"p").entries.empty(),
+            L"The listing of p must show nothing after the delete");
+    }
+
+    TEST_METHOD(DeleteContext_UpperFileUnderOpaqueParentOverHiddenLowerFile_WritesNoWhiteout) {
+        TempLayerEnvironment env(1);
+        WriteUpperFileOverHiddenLowerFileUnderOpaqueParent(env);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"p\\x.txt", FILE_READ_ATTRIBUTES | DELETE,
+                                             kNoCreateOptions, kNoCallerPid, &ctx, &info)),
+            L"Preconditions: the upper file must open for delete");
+
+        const NTSTATUS status = mount.Delete(ctx.get());
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The delete of an open upper file under an opaque parent must succeed");
+        AssertUpperFileDeletedWithNoWhiteout(env);
+    }
+
     TEST_METHOD(Delete_EmptyUpperDirUnreadable_FailsAndKeepsTheLowerEntry) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"sub");

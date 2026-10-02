@@ -16,10 +16,17 @@ public:
 
     ResolvedPath ResolvePath(const std::wstring& relativePath) const;
 
-    // Returns the first visible lower that holds the path. An upper entry at
-    // the path itself does not hide it; a whiteout, a non-directory or a link
-    // at an ancestor in the upper does.
+    // Returns the first visible lower that holds the path. An upper entry, a
+    // whiteout or an opaque marker at the path itself does not hide it. A
+    // whiteout, an opaque marker, a non-directory or a link at an ancestor in
+    // the upper does, and the upper root counts as an ancestor of every path.
     ResolvedPath ResolveLowerPath(const std::wstring& relativePath) const;
+
+    // True when a lower holds the path and the upper hides it with a whiteout
+    // at the path or at an ancestor, or with an opaque ancestor. False when
+    // only a non-directory or link ancestor hides it. The upper must hold no
+    // entry at the path.
+    bool IsLowerEntryHiddenByWhiteoutOrOpaqueAncestor(const std::wstring& relativePath) const;
 
     CreateResolution ResolveForCreate(const std::wstring& relativePath) const;
 
@@ -51,8 +58,8 @@ public:
 private:
     // When lowerWalk is not null, it receives ResolveLowerPath's result for
     // relativePath itself if the call learns it: after the walk of the lowers
-    // runs, or when a non-directory or link ancestor in the upper hides the
-    // lowers.
+    // runs, or when an opaque, non-directory or link ancestor in the upper
+    // hides the lowers.
     ResolvedPath ResolvePathInternal(const std::wstring& relativePath,
                                      int redirectDepth,
                                      std::optional<ResolvedPath>* lowerWalk) const;
@@ -68,6 +75,10 @@ private:
     // probe of the path missed: a whiteout for the path or for an ancestor,
     // an opaque ancestor, or a non-directory or link ancestor.
     UpperHiding HidingInUpper(const std::wstring& normalized) const;
+
+    // Like HidingInUpper, but only the upper's ancestors of the path count.
+    // A whiteout for the path itself does not.
+    UpperHiding UpperAncestorHiding(const std::wstring& normalized) const;
 
     // Returns the first lower at or after firstLower, in priority order,
     // that holds the path. Returns an empty result when no visible lower

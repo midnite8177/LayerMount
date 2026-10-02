@@ -31,7 +31,7 @@ NTSTATUS UpperParent::Ensure(const CallerPath& path) const {
         }
         return copyUpDirectory_(parentNorm);
     }
-    if (!merged.Found() && pathResolver_.ResolveLowerPath(parentNorm).Found()) {
+    if (!merged.Found() && pathResolver_.IsLowerEntryHiddenByWhiteoutOrOpaqueAncestor(parentNorm)) {
         return STATUS_OBJECT_PATH_NOT_FOUND;
     }
 

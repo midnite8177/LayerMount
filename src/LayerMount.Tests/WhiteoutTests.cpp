@@ -312,6 +312,48 @@ public:
             L"The lower lookup of the path itself must still find the lower directory");
     }
 
+    TEST_METHOD(ResolveLowerPath_UnderOpaqueUpperAncestor_FindsNoLowerChildOrGrandchild) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"p\\d\\x.txt", "lower");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"p"), "");
+
+        ResolverUnderTest r(env);
+
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"p\\d").Found(),
+            L"The opaque upper p must hide the lower child p\\d from the lower lookup");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"p\\d\\x.txt").Found(),
+            L"The opaque upper p must hide the lower grandchild p\\d\\x.txt from the lower lookup");
+    }
+
+    TEST_METHOD(ResolveLowerPath_UnderOpaqueUpperRoot_FindsNoLowerEntry) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"top.txt", "lower");
+        env.WriteFile(env.Lower(0), L"d\\x.txt", "lower");
+        env.WriteFile(env.Upper(), L".wh..wh..opq", "");
+
+        ResolverUnderTest r(env);
+
+        for (const wchar_t* hidden : {L"top.txt", L"d", L"d\\x.txt"}) {
+            Assert::IsFalse(r.resolver.ResolveLowerPath(hidden).Found(),
+                (std::wstring(L"The opaque upper root must hide ") + hidden +
+                 L" from the lower lookup").c_str());
+        }
+    }
+
+    TEST_METHOD(ResolveLowerPath_OpaqueMarkerOnThePathItself_StillFindsTheLowerDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"p\\d\\x.txt", "lower");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"p\\d"), "");
+
+        ResolverUnderTest r(env);
+
+        const ResolvedPath lowerDir = r.resolver.ResolveLowerPath(L"p\\d");
+        Assert::IsTrue(lowerDir.Found() && (lowerDir.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+            L"An opaque marker on p\\d itself must not hide the lower p\\d from the lower lookup");
+        Assert::IsFalse(r.resolver.ResolveLowerPath(L"p\\d\\x.txt").Found(),
+            L"The opaque upper p\\d must hide its lower child from the lower lookup");
+    }
+
     TEST_METHOD(PathResolve_FileInLowerOverDeeperLowerDirectory_HidesDeeperChildren) {
         TempLayerEnvironment env(2);
         env.WriteFile(env.Lower(0), L"d", "lower0");
