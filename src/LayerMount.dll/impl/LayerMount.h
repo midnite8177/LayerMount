@@ -157,6 +157,7 @@ struct FileContext {
 
 class PathResolver;
 class WhiteoutManager;
+enum class WhiteoutType;
 class MetadataStore;
 class Cache;
 class CopyUp;
@@ -755,11 +756,51 @@ private:
                                     BOOLEAN replaceIfExists,
                                     RenameKinds* kinds) const;
 
+    // How a rename moves a directory or a link.
+    enum class DirectoryRenameRoute {
+        // Copies the lower up and merges the upper entry into the copy.
+        MergeLower,
+        // No lower entry has the old name.
+        MoveUpper,
+        // An upper entry hides a lower entry at the old name.
+        MoveUpperAndWhiteout,
+    };
+
+    // Sets *route as overlayfs decides it. The top layer decides the kind.
+    // The rename merges the lower only when the upper has no entry at
+    // oldNorm, or when the upper entry is a directory without the opaque
+    // marker over a lower directory. Any other lower entry stays hidden.
+    // When the reparse tag of the lower entry cannot be read, returns that
+    // error and leaves *route unchanged.
+    NTSTATUS DirectoryRenameRouteOf(const std::wstring& oldNorm,
+                                    RenameEntryKind sourceKind,
+                                    DirectoryRenameRoute* route) const;
+
     // The part of a rename after its checks passed.
     NTSTATUS RenameCheckedEntry(const std::wstring& oldRelativePath,
                                 const std::wstring& newRelativePath,
                                 BOOLEAN replaceIfExists,
                                 const RenameKinds& kinds);
+
+    // Moves a directory or a link along route, then writes the whiteout at
+    // the old name for the MergeLower and MoveUpperAndWhiteout routes.
+    NTSTATUS RenameDirectoryEntry(const std::wstring& oldRelativePath,
+                                  const std::wstring& newRelativePath,
+                                  RenameEntryKind sourceKind,
+                                  DirectoryRenameRoute route,
+                                  BOOLEAN replaceIfExists,
+                                  bool destHadWhiteout);
+
+    // Writes a whiteout of the given type at paths.oldNorm after a rename
+    // moved the upper entry from oldUpperPath to paths.newNorm. When the
+    // write fails, moves the entry back to oldUpperPath, so the merged view
+    // is as before the rename, and returns the write error. When the entry
+    // cannot move back and destHadWhiteout is true, removes the whiteout at
+    // paths.newNorm, so the moved entry stays visible.
+    NTSTATUS WhiteOutRenameSource(const RenamePaths& paths,
+                                  WhiteoutType type,
+                                  const std::wstring& oldUpperPath,
+                                  bool destHadWhiteout);
 
     LayerConfig config_;
     ::LayerMount::abi::CapabilityGate capabilities_;

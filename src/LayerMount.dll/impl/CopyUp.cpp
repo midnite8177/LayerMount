@@ -1546,13 +1546,6 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
 
         RemoveUpperEntry(pathResolver_.GetUpperPath(oldNorm));
 
-        if (!whiteoutMgr_.CreateWhiteout(oldNorm, WhiteoutType::Directory)) {
-            const DWORD whErr = ::GetLastError();
-            cache_.InvalidateWithAncestors(oldNorm);
-            cache_.InvalidateWithAncestors(newNorm);
-            return whErr ? ::LayerMount::NtStatusFromWin32(whErr)
-                         : STATUS_ACCESS_DENIED;
-        }
         cache_.InvalidateWithAncestors(oldNorm);
         cache_.InvalidateWithAncestors(newNorm);
         return STATUS_SUCCESS;
@@ -1587,14 +1580,6 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
 
     std::error_code ecRemove;
     std::filesystem::remove_all(oldUpperPath, ecRemove);
-
-    if (!whiteoutMgr_.CreateWhiteout(oldNorm, WhiteoutType::Directory)) {
-        const DWORD whErr = ::GetLastError();
-        cache_.InvalidateWithAncestors(oldNorm);
-        cache_.InvalidateWithAncestors(newNorm);
-        return whErr ? ::LayerMount::NtStatusFromWin32(whErr)
-                     : STATUS_ACCESS_DENIED;
-    }
 
     cache_.InvalidateWithAncestors(oldNorm);
     cache_.InvalidateWithAncestors(newNorm);

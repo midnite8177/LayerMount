@@ -128,9 +128,10 @@ public:
     NTSTATUS EnsureUpperParent(const CallerPath& callerPath);
 
     // Copies the lower tree and the old upper shadow to the new upper path,
-    // marks it opaque, and whites out the old path. sourceKind is Directory
-    // or Link. A Link source, when the upper supports reparse points, is
-    // copied as a link, without its upper shadow and without opacity.
+    // marks it opaque, and removes the old upper entry. The caller writes the
+    // whiteout at the old path. sourceKind is Directory or Link. A Link
+    // source, when the upper supports reparse points, is copied as a link,
+    // without its upper shadow and without opacity.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view. The new upper entry gets its
     // name in newCallerPath's case.
@@ -145,7 +146,8 @@ public:
     // its new path, so lower children of a replaced destination stay
     // hidden. sourceKind is Directory or Link. A moved Link never becomes
     // opaque, because the marker would go into its target. The moved entry
-    // gets its name in newCallerPath's case.
+    // gets its name in newCallerPath's case. When a lower layer has the old
+    // path, the caller writes the whiteout there.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view.
     NTSTATUS RenameUpperDirectory(const CallerPath& oldCallerPath,

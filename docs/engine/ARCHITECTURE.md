@@ -567,7 +567,7 @@ are copied up on demand.
 
 Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.
-The engine handles nine cases. The last three also apply to a file source:
+The engine handles ten cases. The last three also apply to a file source:
 
 - **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
   if present. When a lower layer has an entry at the destination path,
@@ -578,6 +578,15 @@ The engine handles nine cases. The last three also apply to a file source:
   bits, and ADS), then mark the destination opaque, then drop a
   whiteout at the source. A junction or directory symlink copies up as
   a link and gets no opaque marker.
+- **upper source over a lower entry at the same path**: the top layer
+  decides the kind, as in overlayfs. The engine merges the lower into
+  the new name only when the upper entry is a directory without the
+  opaque marker and the lower entry is a directory. In all other
+  cases, the upper entry hides the lower entry. The engine moves the
+  upper entry as for upper → upper and drops a whiteout at the source.
+  It copies nothing up from the lower. When the engine cannot read the
+  reparse tag of the lower entry, the rename fails with that error
+  before any side effects.
 - **replace=true, dest is a directory with visible children**: a child
   from the upper or from a lower shows in the merged view. The engine
   rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY` before any side
@@ -632,6 +641,13 @@ The engine handles nine cases. The last three also apply to a file source:
   work directory on another volume, a file destination moves there as a
   copy, and a link destination goes at once, so a failed rename cannot
   restore it.
+
+`LayerMount` writes the whiteout at the source after the move, for a
+file and for a directory or a link. When that write fails, the engine
+moves the entry back to the source and the rename fails with the write
+error. The merged view stays as it was before the rename, with one
+exception. When a file replaced an upper file, the replaced file does
+not come back.
 
 Recursive copy-up is expensive and is the main reason single-file
 metacopy exists; the engine cannot apply the same trick to directories

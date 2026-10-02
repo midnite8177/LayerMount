@@ -415,7 +415,7 @@ public:
             L"File should move with the directory");
     }
 
-    TEST_METHOD(RenameLowerDirectory_CopiesUpAndCreatesWhiteout) {
+    TEST_METHOD(RenameLowerDirectory_CopiesUpAsOpaque) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"ldir");
         env.WriteFile(env.Lower(0), L"ldir\\file.txt", "lower data");
@@ -430,8 +430,6 @@ public:
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\file.txt"));
 
         Assert::IsTrue(rig.whiteouts.IsOpaque(L"newdir"));
-
-        Assert::IsTrue(rig.whiteouts.HasWhiteout(L"ldir", env.Upper()));
     }
 };
 

@@ -166,7 +166,7 @@ public:
         Assert::IsTrue(rNew.source == LayerSource::Upper);
     }
 
-    TEST_METHOD(LowerOnlyDirRename_RecursiveCopyOpaqueAndWhiteout) {
+    TEST_METHOD(LowerOnlyDirRename_RecursiveCopyAndOpaque) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"ld\\nested");
         env.WriteFile(env.Lower(0), L"ld\\top.txt",            "top");
@@ -189,7 +189,6 @@ public:
                          env.ReadFile(env.Upper(), L"newdir\\nested\\inner.txt"));
 
         Assert::IsTrue(wm.IsOpaque(L"newdir"));
-        Assert::IsTrue(wm.HasWhiteout(L"ld", env.Upper()));
 
         Assert::IsTrue(env.FileExists(env.Lower(0), L"ld\\top.txt"));
         Assert::IsTrue(env.FileExists(env.Lower(0), L"ld\\nested\\inner.txt"));
@@ -603,6 +602,15 @@ void AssertNoOpaqueMarkerIn(const std::wstring& directory) {
         L"The rename must write no opaque stream onto the link target");
 }
 
+void AssertRootShowsOnlyNewNameOverWhiteout(const TempLayerEnvironment& env,
+                                            const ::LayerMount::LayerMount& mount,
+                                            const std::wstring& oldName,
+                                            const std::wstring& newName) {
+    Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(oldName)),
+        L"The rename must leave a whiteout at the old name");
+    AssertOnlyEntryShownAs(mount, L"", newName);
+}
+
 // Closes ctx after the rename, so a caller can compare the layers afterward.
 void AssertReplaceRenameThroughHandleRefused(::LayerMount::LayerMount& mount,
                                              FileContext* ctx,
@@ -634,6 +642,52 @@ void AssertDirectoryRenameShowsNewName(DirectoryLayer layer,
         (L"The rename of " + from + L" to " + to + L" must succeed").c_str());
     AssertListedDirectoryWithChild(mount, to, L"a.txt");
 }
+
+// The target that BuildLinkOverDirectory gives the link holds fromtarget.txt
+// and sub.
+void AssertListsOnlyTheLinkTarget(const ::LayerMount::LayerMount& mount, const std::wstring& dir) {
+    const MergedDirectory listing = mount.MergeDirectoryEntries(dir);
+    AssertStatus(STATUS_SUCCESS, listing.status,
+        (L"The listing of '" + dir + L"' must succeed").c_str());
+    Assert::AreEqual(size_t{2}, listing.entries.size(),
+        (L"The listing of '" + dir + L"' must hold the two entries of the link target").c_str());
+    Assert::IsTrue(listing.entries.count(L"fromtarget.txt") == 1,
+        (L"The listing of '" + dir + L"' must hold the link target's file").c_str());
+    Assert::IsTrue(listing.entries.count(L"sub") == 1,
+        (L"The listing of '" + dir + L"' must hold the link target's directory").c_str());
+}
+
+// Denies FILE_ADD_FILE on the upper root and disables SE_BACKUP_NAME and
+// SE_RESTORE_NAME on the thread. A whiteout marker then cannot go into the
+// upper root, but a directory or a link can still move there. Declare it
+// after the mount, because the mount enables the privileges on the process.
+class UpperRootRefusesNewFiles {
+public:
+    explicit UpperRootRefusesNewFiles(const std::wstring& upper)
+        : addFileDenied_(upper, FILE_ADD_FILE) {
+        DisableRestorePrivilegeOnThread();
+        const std::wstring probe = upper + L"\\probe";
+        Assert::IsTrue(::CreateDirectoryW(probe.c_str(), nullptr) != FALSE &&
+                       ::RemoveDirectoryW(probe.c_str()) != FALSE,
+            L"The upper root must still take a new directory");
+        const HANDLE file = ::CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        const DWORD fileError = file == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
+        if (file != INVALID_HANDLE_VALUE) {
+            ::CloseHandle(file);
+            ::DeleteFileW(probe.c_str());
+        }
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, fileError,
+            L"The upper root must refuse a new file");
+    }
+
+    UpperRootRefusesNewFiles(const UpperRootRefusesNewFiles&) = delete;
+    UpperRootRefusesNewFiles& operator=(const UpperRootRefusesNewFiles&) = delete;
+
+private:
+    AccessDenied addFileDenied_;
+    BackupPrivilegeDisabledOnThread noBackupPrivilege_;
+};
 
 }
 
@@ -856,8 +910,8 @@ public:
     TEST_METHOD(CaseOnlyRename_LowerJunctionWithoutReparseSupport_CopiesTheTargetTreeUp) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"target\\inside.txt", "inside");
-        if (!CreateDirectoryJunction(env.Lower(0) + L"\\Link", env.Lower(0) + L"\\target")) {
-            Logger::WriteMessage(L"[SKIP] mklink /J could not create the lower junction");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\Link",
+                                  env.Lower(0) + L"\\target")) {
             return;
         }
         LayerConfig config = env.MakeConfig();
@@ -1259,8 +1313,8 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
         env.WriteFile(env.Lower(0), L"f.txt", "f");
-        if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
-            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Upper() + L"\\link",
+                                  env.Root() + L"\\target")) {
             return;
         }
         ::LayerMount::LayerMount mount(env.MakeConfig());
@@ -1326,8 +1380,8 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
         env.WriteFile(env.Lower(0), L"f.txt", "f");
-        if (!CreateDirectoryJunction(env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
-            Logger::WriteMessage(L"[SKIP] mklink /J could not create the lower junction");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\target")) {
             return;
         }
         ::LayerMount::LayerMount mount(env.MakeConfig());
@@ -1596,6 +1650,249 @@ public:
             L"The moved junction must hide the lower junction target's entries");
         lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
         secondBefore.AssertUnchanged(L"The rename must leave the replaced junction target's entries");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryOverLowerJunction_MovesOnlyTheUpperDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        env.WriteFile(env.Upper(), L"link\\upper.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"moved", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper directory over a lower junction must succeed");
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper entry at moved must be a directory, not a link");
+        AssertOnlyEntryShownAs(mount, L"moved", L"upper.txt");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"link", L"moved");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
+        AssertNoOpaqueMarkerIn(env.Root() + L"\\target");
+    }
+
+    TEST_METHOD(Rename_UpperJunctionOverLowerDirectory_ListsTheJunctionTarget) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"moved", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper junction over a lower directory must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper entry at moved must be the junction");
+        AssertListsOnlyTheLinkTarget(mount, L"moved");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"link", L"moved");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
+        AssertNoOpaqueMarkerIn(env.Root() + L"\\target");
+    }
+
+    TEST_METHOD(Rename_UpperJunctionOverLowerJunction_ListsTheUpperJunctionTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"first\\a.txt", "a");
+        env.WriteFile(env.Root(), L"second\\b.txt", "b");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Upper() + L"\\link",
+                                  env.Root() + L"\\first") ||
+            !LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\second")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        const LayerSnapshot secondBefore(env.Root() + L"\\second");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"moved", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper junction over a lower junction must succeed");
+        AssertOnlyEntryShownAs(mount, L"moved", L"a.txt");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"link", L"moved");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        secondBefore.AssertUnchanged(L"The rename must leave the lower junction target's entries");
+    }
+
+    TEST_METHOD(Rename_UpperJunctionOverLowerFile_MovesTheJunction) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.WriteFile(env.Lower(0), L"link", "lower");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Upper() + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"moved", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper junction over a lower file must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper entry at moved must be the junction");
+        AssertOnlyEntryShownAs(mount, L"moved", L"inside.txt");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"link", L"moved");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        AssertNoOpaqueMarkerIn(env.Root() + L"\\target");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryOverLowerFile_MovesOnlyTheUpperDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d", "lower");
+        env.WriteFile(env.Upper(), L"d\\upper.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"d", L"moved", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper directory over a lower file must succeed");
+        AssertOnlyEntryShownAs(mount, L"moved", L"upper.txt");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"d", L"moved");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_OpaqueUpperDirectoryOverLowerDirectory_KeepsTheLowerChildrenHidden) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\lower.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\upper.txt", "upper");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"d", L"moved", kFailIfExists, kNoCallerPid),
+            L"A rename of an opaque upper directory over a lower directory must succeed");
+        AssertOnlyEntryShownAs(mount, L"moved", L"upper.txt");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"d", L"moved");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_LowerOnlyDirectory_CopiesTheTreeUpOpaqueAndWhitesOutTheOldName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"ld\\top.txt", "top");
+        env.WriteFile(env.Lower(0), L"ld\\nested\\inner.txt", "inner");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"ld", L"newdir", kFailIfExists, kNoCallerPid),
+            L"A rename of a lower-only directory must succeed");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\top.txt"),
+            L"The upper newdir must hold the lower directory's file");
+        Assert::AreEqual(std::string("inner"), env.ReadFile(env.Upper(), L"newdir\\nested\\inner.txt"),
+            L"The upper newdir must hold the lower directory's nested file");
+        Assert::IsTrue(env.FileExists(env.Upper(), OpaqueMarkerPath(L"newdir")),
+            L"The upper newdir must be opaque");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"ld", L"newdir");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(ReplaceRename_UpperDirectoryOverLowerJunctionWithUnreadableTag_FailsAndChangesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        const std::wstring junction = env.Lower(0) + L"\\link";
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
+            return;
+        }
+        env.WriteFile(env.Upper(), L"link\\upper.txt", "upper");
+        env.CreateDir(env.Upper(), L"dst");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+            BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            DisableRestorePrivilegeOnThread();
+            Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+                L"The deny ACE must make the junction's reparse tag unreadable");
+            status = mount.Rename(L"link", L"dst", kReplaceIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_ACCESS_DENIED, status,
+            L"The rename must fail when the reparse tag of the lower entry cannot be read");
+        upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+        lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"dst").entries.empty(),
+            L"The failed rename must leave dst empty");
+        AssertOnlyEntryShownAs(mount, L"link", L"upper.txt");
+    }
+
+    TEST_METHOD(ReplaceRename_UpperJunctionOverLowerDirectoryOntoUpperFile_ListsTheJunctionTarget) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        env.WriteFile(env.Upper(), L"f.txt", "f");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"f.txt", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of an upper junction over a lower directory onto an upper file must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\f.txt", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper f.txt must be the moved junction, not the replaced file");
+        AssertListsOnlyTheLinkTarget(mount, L"f.txt");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"link", L"f.txt");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
+    }
+
+    TEST_METHOD(Rename_UpperJunctionOverLowerDirectoryWhenTheWhiteoutFails_KeepsTheOldName) {
+        TempLayerEnvironment env(1);
+        if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        env.WriteFile(env.Lower(0), L"moved\\old.txt", "old");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"moved"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const UpperRootRefusesNewFiles noNewFiles(env.Upper());
+            status = mount.Rename(L"link", L"moved", kFailIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_ACCESS_DENIED, status,
+            L"The rename must fail when the whiteout at the old name cannot be written");
+        upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\link", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper link must be the junction again");
+        AssertOnlyEntryShownAs(mount, L"", L"link");
+        AssertListsOnlyTheLinkTarget(mount, L"link");
+        lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWhenTheWhiteoutFails_KeepsTheOldName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "a");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const UpperRootRefusesNewFiles noNewFiles(env.Upper());
+            status = mount.Rename(L"d", L"moved", kFailIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_ACCESS_DENIED, status,
+            L"The rename must fail when the whiteout at the old name cannot be written");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"moved"),
+            L"The failed rename must leave no upper entry at the new name");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
+            L"The failed rename must leave no whiteout at the old name");
+        AssertListedDirectoryWithChild(mount, L"d", L"a.txt");
+        lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
     }
 };
 
