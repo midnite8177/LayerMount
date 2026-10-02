@@ -5,19 +5,19 @@ namespace LayerMount {
 
 namespace fs = std::filesystem;
 
-std::wstring LayerDirWithSeparator(const std::wstring& layerPath) {
-    return !layerPath.empty() && layerPath.back() == L'\\' ? layerPath : layerPath + L"\\";
+std::wstring DirWithSeparator(const std::wstring& dirPath) {
+    return !dirPath.empty() && dirPath.back() == L'\\' ? dirPath : dirPath + L"\\";
 }
 
-std::wstring JoinLayerPath(const std::wstring& layerPath,
-                           const std::wstring& relativePath) {
-    return LayerDirWithSeparator(layerPath) + relativePath;
+std::wstring JoinDirPath(const std::wstring& dirPath,
+                         const std::wstring& relativePath) {
+    return DirWithSeparator(dirPath) + relativePath;
 }
 
 std::wstring JoinLayerScanPath(const std::wstring& layerPath,
                                const std::wstring& dirRelativePath) {
-    return JoinLayerPath(layerPath,
-                         dirRelativePath.empty() ? L"*" : dirRelativePath + L"\\*");
+    return JoinDirPath(layerPath,
+                       dirRelativePath.empty() ? L"*" : dirRelativePath + L"\\*");
 }
 
 bool HasNonDirectorySelfOrAncestorInLayer(const std::wstring& layerPath,
@@ -25,7 +25,7 @@ bool HasNonDirectorySelfOrAncestorInLayer(const std::wstring& layerPath,
     fs::path walked;
     for (const fs::path& component : fs::path(dirRelativePath)) {
         walked /= component;
-        const DWORD attrs = GetFileAttributesW(JoinLayerPath(layerPath, walked.wstring()).c_str());
+        const DWORD attrs = GetFileAttributesW(JoinDirPath(layerPath, walked.wstring()).c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES) {
             const DWORD error = ::GetLastError();
             return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;

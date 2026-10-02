@@ -455,7 +455,7 @@ public:
         env.WriteFile(env.Lower(0), L"own.txt", "lower0");
         env.WriteFile(env.Lower(0), L"sub\\nested.txt", "lower0");
         auto config = env.MakeConfig();
-        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0) + L"\\";
+        config.lowerPaths[0] = ExtendedDirWithSeparator(env.Lower(0));
         ::LayerMount::LayerMount mount(config);
 
         const MergedDirectory root = mount.MergeDirectoryEntries(L"");
@@ -477,7 +477,7 @@ public:
         env.WriteFile(env.Lower(0), L"own.txt", "lower0");
         env.WriteFile(env.Lower(1), L"deep.txt", "lower1");
         auto config = env.MakeConfig();
-        config.lowerPaths[0] = L"\\\\?\\" + env.Lower(0) + L"\\";
+        config.lowerPaths[0] = ExtendedDirWithSeparator(env.Lower(0));
         ::LayerMount::LayerMount mount(config);
 
         auto merged = mount.MergeDirectoryEntries(L"").entries;

@@ -111,12 +111,12 @@ std::wstring SidecarBase(const std::wstring& filePath, const std::wstring& upper
     std::wstring keyed = LowerCase(filePath);
     std::wstring hash = Sha1Hex(WideToUtf8(keyed));
     if (hash.empty()) return {};
-    return JoinLayerPath(upperRoot, kSidecarDirName) + L"\\" + hash;
+    return JoinDirPath(upperRoot, kSidecarDirName) + L"\\" + hash;
 }
 
 bool EnsureSidecarDir(const std::wstring& upperRoot) {
     std::error_code ec;
-    std::filesystem::create_directories(JoinLayerPath(upperRoot, kSidecarDirName), ec);
+    std::filesystem::create_directories(JoinDirPath(upperRoot, kSidecarDirName), ec);
     return !ec;
 }
 

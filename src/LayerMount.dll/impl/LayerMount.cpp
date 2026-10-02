@@ -115,7 +115,7 @@ bool LayerConfig::Validate(std::wstring& error) const {
         return false;
     }
 
-    std::wstring testFile = JoinLayerPath(upperPath, L".layermount_write_test");
+    std::wstring testFile = JoinDirPath(upperPath, L".layermount_write_test");
     HANDLE hTest = CreateFileW(
         testFile.c_str(),
         GENERIC_WRITE,
@@ -817,7 +817,7 @@ std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
                                         const std::wstring& relativePath) {
     std::wstring preserved = NormalizePathPreserveCase(relativePath);
     if (preserved.empty()) return upperRoot;
-    return JoinLayerPath(upperRoot, preserved);
+    return JoinDirPath(upperRoot, preserved);
 }
 
 std::wstring GetExistingPathDisplayCase(const std::wstring& absolutePath) {

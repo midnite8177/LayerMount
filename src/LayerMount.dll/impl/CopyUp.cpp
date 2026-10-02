@@ -1,4 +1,5 @@
 #include "CopyUp.h"
+#include "LayerPath.h"
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
 #include "MetadataADS.h"
@@ -706,22 +707,15 @@ std::wstring CopyUp::GenerateWorkPath() {
     GetSystemTimeAsFileTime(&ft);
     uint64_t timestamp = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 
-    // The temp suffix "#pid.tid.counter.timestamp.tmp" tops out at ~70 chars.
-    // The previous fixed-MAX_PATH buffer would silently truncate when
-    // workDirPath approached 200+ characters (deep deployment roots, NT
-    // \\?\ prefix paths, paths under non-default profile dirs). Truncation
-    // means two concurrent calls can produce IDENTICAL "unique" paths, and
-    // CommitFromWorkDir's CREATE_NEW silently fails or worse — a winner
-    // overwrites a loser's staged file mid-flight. std::wstring sizing
-    // grows as needed and side-steps the buffer-overflow path entirely.
-    wchar_t suffix[96];
-    swprintf_s(suffix, L"\\#%lu.%lu.%llu.%llu.tmp",
-               pid, tid, counter, timestamp);
-    return config_.workDirPath + suffix;
+    // pid, tid and counter make the name unique. Two calls can get the
+    // same timestamp.
+    return JoinDirPath(config_.workDirPath,
+                       L"#" + std::to_wstring(pid) + L"." + std::to_wstring(tid) + L"." +
+                       std::to_wstring(counter) + L"." + std::to_wstring(timestamp) + L".tmp");
 }
 
 void CopyUp::CleanWorkDirectory() {
-    std::wstring searchPath = config_.workDirPath + L"\\#*.tmp";
+    std::wstring searchPath = JoinDirPath(config_.workDirPath, L"#*.tmp");
     WIN32_FIND_DATAW findData;
     HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
@@ -729,7 +723,7 @@ void CopyUp::CleanWorkDirectory() {
     }
 
     do {
-        std::wstring filePath = config_.workDirPath + L"\\" + findData.cFileName;
+        std::wstring filePath = JoinDirPath(config_.workDirPath, findData.cFileName);
         DeleteFileW(filePath.c_str());
     } while (FindNextFileW(hFind, &findData));
 

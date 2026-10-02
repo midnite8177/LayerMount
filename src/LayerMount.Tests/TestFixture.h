@@ -10,16 +10,12 @@
 
 #include <exception>
 #include <functional>
-#include <rpc.h> // UuidCreate / UuidToStringW / RpcStringFreeW (Rpcrt4.lib — linked via vcxproj)
+#include <rpc.h>
 #include <winioctl.h>
 
 namespace LayerMountTests {
 
 namespace fs = std::filesystem;
-
-// ---------------------------------------------------------------------------
-// Unique temp directory helper
-// ---------------------------------------------------------------------------
 
 inline std::wstring MakeUniqueTempRoot() {
     wchar_t tempBuf[MAX_PATH] = {};
@@ -39,10 +35,10 @@ inline std::wstring MakeUniqueTempRoot() {
     return root;
 }
 
-// ---------------------------------------------------------------------------
-// Admin / elevation guard — for unit tests that exercise elevated-only
-// subsystems (VHD / VSS) pulled in from the former integration-test project.
-// ---------------------------------------------------------------------------
+// Prefixes dirPath with \\?\ and appends one separator.
+inline std::wstring ExtendedDirWithSeparator(const std::wstring& dirPath) {
+    return L"\\\\?\\" + dirPath + L"\\";
+}
 
 inline bool IsElevated() {
     HANDLE token = nullptr;
@@ -57,9 +53,8 @@ inline bool IsElevated() {
     return ok && elevation.TokenIsElevated != 0;
 }
 
-// Early-return from a TEST_METHOD if the process is not elevated. Tests that
-// exercise VHDLayerManager / VSSManager need admin because the underlying
-// Win32 APIs (virtdisk, VSS) require SE_BACKUP/SE_RESTORE or full TCB.
+// Logs a skip and returns from the enclosing TEST_METHOD when the process
+// is not elevated.
 #define UNIT_SKIP_IF_NOT_ADMIN()                                               \
     do {                                                                       \
         if (!::LayerMountTests::IsElevated()) {                                 \
@@ -96,21 +91,19 @@ inline bool IsTempNtfs() {
         }                                                                      \
     } while (0)
 
-// ---------------------------------------------------------------------------
-// NTFS guard — call from TEST_CLASS_INITIALIZE in classes that exercise ADS
-// ---------------------------------------------------------------------------
-
+// Fails the test unless %TEMP% is on NTFS. Call it from
+// TEST_CLASS_INITIALIZE in a class that uses Alternate Data Streams.
 inline void AssertTempIsNTFS() {
     wchar_t tempBuf[MAX_PATH] = {};
     ::GetTempPathW(MAX_PATH, tempBuf);
 
-    // GetVolumeInformationW requires the root path — extract drive root (e.g., "C:\").
+    // GetVolumeInformationW takes a volume root such as "C:\", not a subdirectory.
     std::wstring temp(tempBuf);
     std::wstring rootPath;
     if (temp.size() >= 3 && temp[1] == L':' && temp[2] == L'\\') {
         rootPath = temp.substr(0, 3);
     } else {
-        rootPath = temp; // best-effort
+        rootPath = temp;
     }
 
     wchar_t fsName[16] = {};
@@ -122,11 +115,8 @@ inline void AssertTempIsNTFS() {
         L"Tests require %TEMP% to be on NTFS for Alternate Data Stream support");
 }
 
-// ---------------------------------------------------------------------------
-// TempLayerEnvironment — RAII fixture: creates upper, work, lowerN dirs under
-// a unique subdirectory of %TEMP%, cleans up on destruction.
-// ---------------------------------------------------------------------------
-
+// Creates upper, work and lowerN directories under a unique %TEMP%
+// subdirectory, and deletes the tree on destruction.
 class TempLayerEnvironment {
 public:
     explicit TempLayerEnvironment(size_t lowerCount = 1)
@@ -153,37 +143,22 @@ public:
     TempLayerEnvironment(const TempLayerEnvironment&) = delete;
     TempLayerEnvironment& operator=(const TempLayerEnvironment&) = delete;
 
-    // --- accessors ---
     const std::wstring& Root()  const { return root_; }
     const std::wstring& Upper() const { return upper_; }
     const std::wstring& Work()  const { return work_; }
     const std::wstring& Lower(size_t i = 0) const { return lowers_.at(i); }
     size_t LowerCount() const { return lowers_.size(); }
 
-    // NOTE: returns LayerConfig by value. Classes like WhiteoutManager/PathResolver
-    // hold a `const LayerConfig&` member, so callers MUST store the result in a
-    // local variable before constructing those classes — binding to a temporary
-    // dangles and causes heisenbugs. Pattern:
-    //     auto config = env.MakeConfig();
-    //     WhiteoutManager wm(config, &cache);
     LayerMount::LayerConfig MakeConfig() const {
         LayerMount::LayerConfig c;
         c.upperPath   = upper_;
         c.workDirPath = work_;
         c.lowerPaths  = lowers_;
-        // Unit tests here assume ADS-first metadata storage and the other
-        // legacy-on-NTFS optimizations. `hostCapabilities` (default 0)
-        // flips MetadataADS to sidecar-JSON when LM_CAP_ADS is clear.
-        // Set the full legacy bitmask so tests see on-NTFS behavior;
-        // capability-degradation paths are covered separately by
-        // LayerMount.AbiTests::AbiCapabilityDegradationTests.
         c.hostCapabilities = LM_CAP_ADS | LM_CAP_REPARSE_POINTS |
                              LM_CAP_SPARSE_FILES | LM_CAP_MULTIPLE_STREAMS |
                              LM_CAP_NTFS_ACLS;
         return c;
     }
-
-    // --- file helpers ---
 
     void WriteFile(const std::wstring& layer, const std::wstring& rel,
                    const std::string& content) const {
@@ -214,17 +189,6 @@ public:
 
     std::string ReadFile(const std::wstring& layer, const std::wstring& rel) const {
         std::wstring full = layer + L"\\" + rel;
-        // Broad sharing mode: integration tests often inspect an upper layer
-        // file while the overlay's internal ctx handle is still open on it
-        // (host-adapter Close callbacks typically run asynchronously after
-        // user-space completes a sync MoveFileExW / CreateFile call). The
-        // overlay's internal handle
-        // holds GENERIC_READ | GENERIC_WRITE with broad sharing; a reader
-        // that asks for only FILE_SHARE_READ can race into a sharing
-        // violation when the write-granting internal handle hasn't closed
-        // yet. Including SHARE_WRITE | SHARE_DELETE here is compatible with
-        // how every file-reading test uses this helper — it only widens
-        // sharing against concurrent holders, not our own access.
         HANDLE h = ::CreateFileW(full.c_str(), GENERIC_READ,
                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
@@ -264,7 +228,6 @@ inline FILETIME MakeFileTime(WORD year, WORD month, WORD day) {
     return ft;
 }
 
-// Sets the three file times through an attribute-only handle.
 inline void StampFile(const std::wstring& path,
                       const FILETIME& creation,
                       const FILETIME& access,
@@ -325,7 +288,6 @@ inline LONGLONG AllocatedBytes(const std::wstring& path) {
     return (static_cast<LONGLONG>(high) << 32) | low;
 }
 
-// True when the file or directory at path carries the attribute flag.
 inline bool HasAttribute(const std::wstring& path, DWORD flag) {
     const DWORD attrs = ::GetFileAttributesW(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
@@ -345,14 +307,11 @@ inline std::wstring OpaqueMarkerPath(const std::wstring& relativeDirectory) {
     return relativeDirectory + L"\\.wh..wh..opq";
 }
 
-// Fails the test with message when the two NTSTATUS values differ.
 inline void AssertStatus(NTSTATUS expected, NTSTATUS actual, const wchar_t* message) {
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual(
         static_cast<long>(expected), static_cast<long>(actual), message);
 }
 
-// Set NTFS compression on the file or directory at path. Returns false when
-// the open or the FSCTL fails.
 inline bool EnableCompression(const std::wstring& path) {
     HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -366,8 +325,8 @@ inline bool EnableCompression(const std::wstring& path) {
     return ok != FALSE;
 }
 
-// Read length bytes at offset from the file at path. The result is shorter
-// when the file ends inside the range.
+// Returns up to length bytes at offset in the file at path, fewer when the
+// file ends inside the range.
 inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD length) {
     using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
     HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
@@ -448,8 +407,7 @@ inline std::string ReadThroughMount(::LayerMount::LayerMount& mount,
 }
 
 // Opens path through the mount and returns the file size that the open
-// reports. ReadThroughMount fails on an empty file, because the engine's
-// Read returns STATUS_END_OF_FILE there. Fails the test when the open fails.
+// reports. Fails the test when the open fails.
 inline UINT64 FileSizeThroughMount(::LayerMount::LayerMount& mount,
                                    const std::wstring& path) {
     using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
@@ -462,11 +420,8 @@ inline UINT64 FileSizeThroughMount(::LayerMount::LayerMount& mount,
     return info.FileSize;
 }
 
-// ---------------------------------------------------------------------------
-// A CopyUp with the objects it depends on, built in dependency order from
-// one config. The members hold `const LayerConfig&`, so the rig owns the
-// config they refer to.
-// ---------------------------------------------------------------------------
+// A CopyUp and the objects it depends on, all built from a copy of
+// layerConfig that the rig owns.
 struct CopyUpRig {
     explicit CopyUpRig(LayerMount::LayerConfig layerConfig)
         : config(std::move(layerConfig)),
@@ -483,16 +438,6 @@ struct CopyUpRig {
     LayerMount::LayerMountStats  stats;
     LayerMount::CopyUp           copyUp;
 };
-
-// ---------------------------------------------------------------------------
-// Fresh-thread runner for subsystems that need a COM apartment of their own
-// (VSS). The test host's thread already holds an apartment that
-// CoInitializeEx(COINIT_MULTITHREADED) rejects with RPC_E_CHANGED_MODE, so a
-// body that needs MTA runs on a new thread. An assertion failure inside the
-// body is a structured exception (ERROR_ASSERT_FAILED) raised by the
-// framework DLL. The worker catches it, copies the message while the raising
-// frame is still alive, and the calling thread fails the test with it.
-// ---------------------------------------------------------------------------
 
 struct FreshThreadOutcome {
     DWORD              sehCode   = 0;
@@ -522,6 +467,12 @@ inline void RunUnderSehCapture(const std::function<void()>* body,
     }
 }
 
+// Runs body on a new thread and fails the test with any failure it raised.
+// The test host's thread already holds a COM apartment, so
+// CoInitializeEx(COINIT_MULTITHREADED) fails there with RPC_E_CHANGED_MODE.
+// The test framework raises an assertion failure as a structured exception
+// (ERROR_ASSERT_FAILED); the worker copies its message while the raising
+// frame is still alive.
 inline void RunOnComFreeThread(std::function<void()> body) {
     namespace cuf = Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -555,4 +506,4 @@ inline void RunOnComFreeThread(std::function<void()> body) {
     }
 }
 
-} // namespace LayerMountTests
+}

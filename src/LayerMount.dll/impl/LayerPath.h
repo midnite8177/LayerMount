@@ -6,18 +6,18 @@ namespace LayerMount {
 
 class WhiteoutManager;
 
-// Returns layerPath with one trailing separator. A layerPath that already
-// ends in one, such as a drive root or a shadow-copy device root, gets no
-// second one. Windows does not normalize an extended-form (\\?\) path, so
+// Returns dirPath with one trailing separator. A dirPath that already ends
+// in one, such as a drive root or a shadow-copy device root, gets no second
+// one. Windows does not normalize an extended-form (\\?\) path, so
 // FindFirstFileW, GetFileAttributesW and CreateFileW refuse a doubled
 // separator in one, though a plain path accepts it.
-std::wstring LayerDirWithSeparator(const std::wstring& layerPath);
+std::wstring DirWithSeparator(const std::wstring& dirPath);
 
-// Returns relativePath under layerPath, with one separator between them.
+// Returns relativePath under dirPath, with one separator between them.
 // relativePath must not start with a separator. An empty relativePath
-// gives LayerDirWithSeparator(layerPath).
-std::wstring JoinLayerPath(const std::wstring& layerPath,
-                           const std::wstring& relativePath);
+// gives DirWithSeparator(dirPath).
+std::wstring JoinDirPath(const std::wstring& dirPath,
+                         const std::wstring& relativePath);
 
 // Returns the FindFirstFileW search pattern for dirRelativePath in the
 // layer at layerPath. The pattern never holds a doubled separator.

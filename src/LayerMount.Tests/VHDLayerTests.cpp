@@ -15,9 +15,8 @@ namespace LayerMountTests {
 
 namespace {
 
-// Build a dedicated workspace under %TEMP% for a VHD-layer test run.
-// Returns the root path; VHDX files go here so the normal TempLayerEnvironment
-// UUID directory is a sibling and cleanup is straightforward.
+// Creates a unique %TEMP% workspace with a vhd subdirectory and returns
+// its root.
 std::wstring MakeVhdWorkspace() {
     const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
     std::error_code ec;
@@ -88,12 +87,7 @@ void MakeFat32Volume(LayerMount::VHD::VHDLayerManager& mgr,
         L"The test volume must be FAT32");
 }
 
-} // namespace
-
-// ---------------------------------------------------------------------------
-// VHDLayerTests — VHD lifecycle + differencing. All tests require admin
-// because Create/AttachVirtualDisk hit the kernel driver.
-// ---------------------------------------------------------------------------
+}
 
 TEST_CLASS(VHDLayerTests) {
 public:
@@ -171,21 +165,11 @@ public:
 
         Assert::IsTrue(std::filesystem::exists(child),
                        L"Child differencing VHDX must exist");
-        // Child is typically much smaller than parent because it only stores
-        // the diff metadata until writes happen.
         const auto childSize = std::filesystem::file_size(child);
         Assert::IsTrue(childSize > 0, L"Child VHDX file must have nonzero size");
 
         CleanupWorkspace(root);
     }
-
-    // NOTE: InitializeVHD (partition + format) and MergeVHD are significantly
-    // slower tests (multi-second format.com call) and exercise external
-    // binaries. They're skipped here to keep the unit-level integration run
-    // fast; dedicated longer-running integration sweeps can target them via
-    // a separate test category.
-
-    // ---- Task #7: ExportToDirectory skips NTFS system dirs ----
 
     TEST_METHOD(ExportToDirectory_SkipsNtfsSystemDirsAndCopiesUserContent) {
         UNIT_SKIP_IF_NOT_ADMIN();
@@ -210,13 +194,11 @@ public:
             mgr.ExportToDirectory(vhd, out),
             L"Export must succeed on a freshly-imported NTFS volume");
 
-        // User content landed.
         Assert::IsTrue(std::filesystem::exists(out + L"\\a.txt"),
                        L"Top-level user file must land in destination");
         Assert::IsTrue(std::filesystem::exists(out + L"\\nested\\b.txt"),
                        L"Nested user file must land in destination");
 
-        // System Volume Information must NOT leak through.
         Assert::IsFalse(std::filesystem::exists(out + L"\\System Volume Information"),
                         L"System Volume Information must be filtered out");
 
@@ -224,10 +206,6 @@ public:
     }
 
     TEST_METHOD(AttachVHD_SuppressDriveLetter_NoNewDriveAssigned) {
-        // Regression for task #8: transient attaches (import/export/mount-backing)
-        // must not trigger a Windows AutoPlay flash. We verify the user-visible
-        // symptom: no new drive letter appears in GetLogicalDrives() after a
-        // suppress-drive-letter attach.
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
@@ -237,7 +215,6 @@ public:
         { std::ofstream(src + L"\\marker.txt") << "x"; }
 
         LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        // Import produces a fully formatted, populated VHD.
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0));
 
         const DWORD before = ::GetLogicalDrives();
@@ -249,12 +226,11 @@ public:
                            LayerMount::VHD::AttachLifetime::ProcessScoped,
                            /*suppressDriveLetter=*/ true));
 
-        // Give the Mount Manager a moment; if it were going to assign a
-        // letter, it would do so within a few hundred ms of the attach.
+        // The Mount Manager assigns a drive letter asynchronously, within a
+        // few hundred ms of an attach.
         ::Sleep(750);
         const DWORD after = ::GetLogicalDrives();
 
-        // Any bit that's set in `after` but not `before` is a new drive letter.
         const DWORD newLetters = after & ~before;
 
         mgr.DetachVHD(vhd);
@@ -294,11 +270,32 @@ public:
         CleanupWorkspace(root);
     }
 
-    // ---- AttachLifetime contract ----
+    TEST_METHOD(ImportThenExport_ExtendedWorkDirWithTrailingSeparator_RoundTripsUserContent) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+
+        const std::wstring root = MakeVhdWorkspace();
+        const std::wstring src  = root + L"\\src";
+        const std::wstring vhd  = root + L"\\roundtrip.vhdx";
+        const std::wstring out  = root + L"\\out";
+
+        std::filesystem::create_directories(src);
+        { std::ofstream(src + L"\\top.txt") << "top-content"; }
+
+        LayerMount::VHD::VHDLayerManager mgr(ExtendedDirWithSeparator(root + L"\\vhd"));
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0),
+                                L"Import must mount the VHD under a work dir that ends in a separator");
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ExportToDirectory(vhd, out),
+                                L"Export must mount the VHD under a work dir that ends in a separator");
+
+        std::ifstream f(out + L"\\top.txt", std::ios::binary);
+        Assert::AreEqual(std::string("top-content"),
+                         std::string(std::istreambuf_iterator<char>(f),
+                                     std::istreambuf_iterator<char>()));
+
+        CleanupWorkspace(root);
+    }
 
     TEST_METHOD(AttachLifetime_Permanent_SurvivesHandleClose) {
-        // Control case: the default (Permanent) must keep the attach alive
-        // after the VhdHandle closes. Explicit DetachVHD is required.
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
@@ -319,7 +316,6 @@ public:
                            /*suppressDriveLetter=*/ false));
         attachHandle.Close();
 
-        // Explicit detach must succeed — the attach is still live.
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.DetachVHD(vhdPath),
             L"Permanent attach must survive handle close until DetachVHD");
 
@@ -327,8 +323,6 @@ public:
     }
 
     TEST_METHOD(AttachLifetime_ProcessScoped_ReleasesOnHandleClose) {
-        // Core 12.7 contract: ProcessScoped attach must release when the
-        // handle closes, so hard-kill cleanup is automatic.
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
@@ -349,12 +343,8 @@ public:
                                LayerMount::VHD::AttachLifetime::ProcessScoped,
                                /*suppressDriveLetter=*/ false));
             Assert::IsFalse(physicalPath.empty());
-            // attachHandle closes at scope exit — that should detach the VHD.
         }
 
-        // Re-attach in ProcessScoped mode must succeed with no prior explicit
-        // detach: if the first attach were still live, AttachVirtualDisk would
-        // fail with a sharing or busy error.
         LayerMount::VHD::VhdHandle reattachHandle;
         std::wstring newPhysicalPath;
         const DWORD rc = mgr.AttachVHD(vhdPath, /*readOnly*/ false,
@@ -473,12 +463,6 @@ public:
     }
 };
 
-// ---------------------------------------------------------------------------
-// ManifestPathTests — regression for the historical filename drift where
-// VHDLayerManager wrote layers.manifest.json but `vhd list` read layers.json.
-// Does not touch the VHD kernel driver, so no admin required.
-// ---------------------------------------------------------------------------
-
 TEST_CLASS(ManifestPathTests) {
 public:
     TEST_METHOD(DefaultPath_IsCanonicalFileName) {
@@ -489,13 +473,9 @@ public:
     }
 
     TEST_METHOD(ManagerWriteAndCliReadAgreeOnPath) {
-        // Regression: writer (VHDLayerManager) and reader (vhd list) must
-        // resolve to the same file when both use Manifest::DefaultPath.
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
 
-        // Write a layer via a bare Manifest (avoids admin requirement of the
-        // full VHDLayerManager create/attach flow).
         {
             LayerMount::VHD::Manifest m;
             LayerMount::VHD::LayerEntry entry;
@@ -508,7 +488,6 @@ public:
                 m.Save(LayerMount::VHD::Manifest::DefaultPath(root)));
         }
 
-        // Read it back via the same canonical path the CLI uses.
         {
             LayerMount::VHD::Manifest m;
             Assert::AreEqual<DWORD>(ERROR_SUCCESS,
@@ -521,8 +500,6 @@ public:
         std::error_code ec;
         std::filesystem::remove_all(root, ec);
     }
-
-    // ---- vhd unregister semantics ----
 
     TEST_METHOD(Manifest_RemoveLayerAndSave_RoundTrip) {
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
@@ -564,9 +541,6 @@ public:
     }
 
     TEST_METHOD(Manifest_SaveIsAtomic_NoPartialFileOnCrash) {
-        // Prove Save writes to a sibling tmp file and replaces atomically:
-        // after a successful save, the destination must be a complete JSON
-        // document with our layer — never a truncated stream.
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
         const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
@@ -579,8 +553,6 @@ public:
         m.AddLayer(e);
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, m.Save(path));
 
-        // No leftover tmp files with our PID suffix (MoveFileExW either
-        // renamed the tmp to the final path or Save cleaned it up).
         std::error_code ec;
         for (const auto& de : std::filesystem::directory_iterator(root, ec)) {
             auto name = de.path().filename().wstring();
@@ -588,7 +560,6 @@ public:
                             L"No .tmp.* stragglers must remain after a successful Save");
         }
 
-        // The final file loads cleanly and contains our entry.
         LayerMount::VHD::Manifest reloaded;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, reloaded.Load(path));
         Assert::IsNotNull(reloaded.GetLayer(L"atomicity-probe"));
@@ -597,9 +568,8 @@ public:
     }
 
     TEST_METHOD(ManifestLock_SerializesAcrossThreads) {
-        // Two ManifestLocks for the same path from DIFFERENT threads must not
-        // both be held. The Win32 mutex is recursive for the owning thread,
-        // so a same-thread check would trivially pass — we need a peer thread.
+        // A Win32 mutex is recursive for its owning thread, so only a second
+        // thread can observe that the lock is held.
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
         const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
@@ -622,4 +592,4 @@ public:
     }
 };
 
-} // namespace LayerMountTests
+}

@@ -50,7 +50,7 @@ std::wstring WhiteoutManager::GetWhiteoutFileName(const std::wstring& relativePa
 
 std::wstring WhiteoutManager::GetWhiteoutFullPath(const std::wstring& layerPath,
                                                    const std::wstring& relativePath) {
-    return JoinLayerPath(layerPath, GetWhiteoutFileName(relativePath));
+    return JoinDirPath(layerPath, GetWhiteoutFileName(relativePath));
 }
 
 bool WhiteoutManager::HasWhiteout(const std::wstring& relativePath,
@@ -146,18 +146,18 @@ bool WhiteoutManager::IsOpaque(const std::wstring& dirRelativePath) const {
 
 bool WhiteoutManager::IsOpaqueInLayer(const std::wstring& dirRelativePath,
                                        const std::wstring& layerPath) const {
-    std::wstring dirFullPath = JoinLayerPath(layerPath, dirRelativePath);
+    std::wstring dirFullPath = JoinDirPath(layerPath, dirRelativePath);
 
     if (MetadataADS::HasOpaqueADS(dirFullPath, &config_)) {
         return true;
     }
 
-    std::wstring opqPath = JoinLayerPath(dirFullPath, kOpaqueMarkerFile);
+    std::wstring opqPath = JoinDirPath(dirFullPath, kOpaqueMarkerFile);
     return GetFileAttributesW(opqPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
-    std::wstring dirFullPath = JoinLayerPath(config_.upperPath, dirRelativePath);
+    std::wstring dirFullPath = JoinDirPath(config_.upperPath, dirRelativePath);
 
     EnsureDirectoryExists(dirFullPath);
 
@@ -167,7 +167,7 @@ bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
     // file keeps the directory opaque in a lower unpacked from this upper.
     // FILE_FLAG_BACKUP_SEMANTICS lets SE_RESTORE_NAME pass an inherited
     // DENY-WRITE ACE on the directory; without it, the create fails there.
-    std::wstring opqPath = JoinLayerPath(dirFullPath, kOpaqueMarkerFile);
+    std::wstring opqPath = JoinDirPath(dirFullPath, kOpaqueMarkerFile);
     HANDLE h = CreateFileW(
         opqPath.c_str(),
         GENERIC_WRITE,
@@ -191,11 +191,11 @@ bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
 }
 
 bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
-    std::wstring dirFullPath = JoinLayerPath(config_.upperPath, dirRelativePath);
+    std::wstring dirFullPath = JoinDirPath(config_.upperPath, dirRelativePath);
 
     const bool adsOk = MetadataADS::RemoveOpaqueADS(dirFullPath, &config_);
 
-    std::wstring opqPath = JoinLayerPath(dirFullPath, kOpaqueMarkerFile);
+    std::wstring opqPath = JoinDirPath(dirFullPath, kOpaqueMarkerFile);
     bool legacyOk = true;
     if (!DeleteFileW(opqPath.c_str())) {
         if (GetLastError() != ERROR_FILE_NOT_FOUND) {

@@ -1,15 +1,7 @@
-// Unit tests for CopyUp. Test the class in isolation — do NOT mount
-// an overlay, do NOT invoke host-adapter callbacks. Read-triggered
-// metacopy completion (LayerMount::SRead → CompleteLazyCopyUp) is
-// integration-tested in 10.0.
-
 #include "pch.h"
 #include "TestFixture.h"
 
 #include "CopyUp.h"
-#include "PathResolver.h"
-#include "WhiteoutManager.h"
-#include "Cache.h"
 #include "MetadataADS.h"
 
 #include <winioctl.h>
@@ -26,51 +18,27 @@ public:
         AssertTempIsNTFS();
     }
 
-    // --- Work directory management ---
-
     TEST_METHOD(GenerateWorkPath_ReturnsUniquePathInWorkDir) {
         TempLayerEnvironment env(1);
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        std::wstring a = cu.GenerateWorkPath();
-        std::wstring b = cu.GenerateWorkPath();
+        std::wstring a = rig.copyUp.GenerateWorkPath();
+        std::wstring b = rig.copyUp.GenerateWorkPath();
 
         Assert::AreNotEqual(a, b, L"Two calls should return different paths");
         Assert::IsTrue(a.find(env.Work()) == 0, L"Path should be under work dir");
         Assert::IsTrue(a.find(L".tmp") != std::wstring::npos, L"Path should end with .tmp");
     }
 
-    // ------------------------------------------------------------------------
-     // Audit gap #11 — GenerateWorkPath used a fixed MAX_PATH wchar_t buffer
-     // for swprintf_s. When workDirPath approached or exceeded ~190 chars
-     // (deep deployment roots, NT \\?\ prefixes, paths under non-default
-     // profile dirs), swprintf_s truncated the result. Two concurrent calls
-     // could then produce identical "unique" paths — silent collision that
-     // would surface later as CREATE_NEW failures or, worse, one writer
-     // overwriting another's staged file mid-flight.
-     //
-     // The fix uses std::wstring concatenation, which grows as needed and
-     // can't truncate. This test verifies that paths near the legacy
-     // MAX_PATH boundary stay distinct AND that the concatenated path
-     // contains the full workDirPath prefix (no truncation).
-     // ------------------------------------------------------------------------
      TEST_METHOD(GenerateWorkPath_LongWorkDirPath_StillUniqueNoTruncation) {
          TempLayerEnvironment env(1);
          LayerConfig config = env.MakeConfig();
 
-         // Build a workDirPath that's ~250 wide chars — well past the 190
-         // headroom that the legacy MAX_PATH buffer left for the suffix.
-         // Use the NT-style \\?\ prefix so Windows CreateDirectory accepts
-         // the long path; without it CreateDirectoryW caps at MAX_PATH.
          std::wstring deepBase = env.Root();
          while (deepBase.size() < 240) {
              deepBase += L"\\padding-segment";
          }
+         // create_directories fails on a path past MAX_PATH without the \\?\ prefix.
          const std::wstring deepWork = L"\\\\?\\" + deepBase + L"\\overlay-work";
          std::error_code ec;
          std::filesystem::create_directories(deepWork, ec);
@@ -79,52 +47,35 @@ public:
 
          config.workDirPath = deepWork;
 
-         Cache cache;
-         WhiteoutManager wm(config, &cache);
-         PathResolver resolver(config, wm, cache);
-         LayerMountStats stats;
-         CopyUp cu(config, resolver, wm, cache, stats);
+         CopyUpRig rig(config);
 
-         // Generate many paths in tight sequence (counter increments only
-         // by 1, so collisions would be invisible if both calls happen in
-         // the same FILETIME tick — the fix's correctness comes from
-         // counter+pid+tid, not timestamp).
          std::vector<std::wstring> paths;
          constexpr int kCount = 32;
          paths.reserve(kCount);
          for (int i = 0; i < kCount; ++i) {
-             paths.push_back(cu.GenerateWorkPath());
+             paths.push_back(rig.copyUp.GenerateWorkPath());
          }
 
-         // Every path must start with the full workDirPath (no truncation).
          for (const auto& p : paths) {
              Assert::IsTrue(p.size() > deepWork.size(),
                  L"Generated path must be longer than the work dir prefix");
              Assert::IsTrue(p.compare(0, deepWork.size(), deepWork) == 0,
-                 L"Generated path must start with the FULL workDirPath. "
-                 L"A shorter prefix means swprintf_s truncated.");
+                 L"Generated path must start with the full workDirPath");
              Assert::IsTrue(p.find(L".tmp") == p.size() - 4,
                  L"Generated path must end with .tmp");
          }
 
-         // All paths must be distinct. A duplicate means truncation made two
-         // counter values map to the same string.
          std::set<std::wstring> uniq(paths.begin(), paths.end());
          wchar_t msg[200];
-         swprintf_s(msg, L"Generated %d work paths, only %zu unique. Long-path "
-                         L"work dir caused collision (gap #11).",
+         swprintf_s(msg, L"Generated %d work paths, only %zu unique under a "
+                         L"long work dir.",
                     kCount, uniq.size());
          Assert::IsTrue(uniq.size() == static_cast<size_t>(kCount), msg);
      }
 
     TEST_METHOD(CleanWorkDirectory_RemovesHashTempFiles_LeavesOthers) {
         TempLayerEnvironment env(1);
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
         // Drop a fake work-dir temp file (CleanWorkDirectory looks for #*.tmp)
         std::wstring tempFile = env.Work() + L"\\#abc.tmp";
@@ -132,13 +83,12 @@ public:
                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         ::CloseHandle(h1);
 
-        // And a non-matching file
         std::wstring otherFile = env.Work() + L"\\other.txt";
         HANDLE h2 = ::CreateFileW(otherFile.c_str(), GENERIC_WRITE, 0, nullptr,
                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         ::CloseHandle(h2);
 
-        cu.CleanWorkDirectory();
+        rig.copyUp.CleanWorkDirectory();
 
         Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW(tempFile.c_str()),
@@ -148,21 +98,31 @@ public:
             L"Non-matching file should remain");
     }
 
+    TEST_METHOD(CleanWorkDirectory_ExtendedWorkDirWithTrailingSeparator_RemovesHashTempFiles) {
+        TempLayerEnvironment env(1);
+        LayerConfig config = env.MakeConfig();
+        config.workDirPath = ExtendedDirWithSeparator(env.Work());
+        CopyUpRig rig(config);
+
+        std::wstring tempFile = env.Work() + L"\\#abc.tmp";
+        env.WriteFile(env.Work(), L"#abc.tmp", "staged");
+
+        rig.copyUp.CleanWorkDirectory();
+
+        Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW(tempFile.c_str()),
+            L"CleanWorkDirectory must delete the #abc.tmp file");
+    }
+
     TEST_METHOD(CommitFromWorkDir_MovesFileFromWorkToFinalPath) {
         TempLayerEnvironment env(1);
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        // Create a test file in the work directory
         std::wstring workPath = env.Work() + L"\\test.tmp";
         std::wstring finalPath = env.Upper() + L"\\final.txt";
         env.WriteFile(env.Work(), L"test.tmp", "content");
 
-        NTSTATUS status = cu.CommitFromWorkDir(workPath, finalPath);
+        NTSTATUS status = rig.copyUp.CommitFromWorkDir(workPath, finalPath);
 
         Assert::IsTrue(NT_SUCCESS(status), L"CommitFromWorkDir should succeed");
         Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
@@ -175,18 +135,13 @@ public:
 
     TEST_METHOD(CommitFromWorkDir_CreatesParentDirectoriesIfMissing) {
         TempLayerEnvironment env(1);
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
         std::wstring workPath = env.Work() + L"\\temp.tmp";
         env.WriteFile(env.Work(), L"temp.tmp", "x");
         std::wstring finalPath = env.Upper() + L"\\a\\b\\c.txt";
 
-        NTSTATUS status = cu.CommitFromWorkDir(workPath, finalPath);
+        NTSTATUS status = rig.copyUp.CommitFromWorkDir(workPath, finalPath);
 
         Assert::IsTrue(NT_SUCCESS(status));
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
@@ -194,23 +149,32 @@ public:
             L"Final path under nested dirs should exist");
     }
 
-    // --- Full copy-up ---
-
     TEST_METHOD(CopyUpFile_LowerFileOnly_CopiesContentToUpper) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"foo.txt", "lower content");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        NTSTATUS status = cu.CopyUpFile(L"foo.txt");
+        NTSTATUS status = rig.copyUp.CopyUpFile(L"foo.txt");
         Assert::IsTrue(NT_SUCCESS(status));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"foo.txt"));
+        Assert::AreEqual(std::string("lower content"),
+            env.ReadFile(env.Upper(), L"foo.txt"));
+    }
+
+    TEST_METHOD(CopyUpFile_ExtendedWorkDirWithTrailingSeparator_CopiesContentToUpper) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"foo.txt", "lower content");
+
+        LayerConfig config = env.MakeConfig();
+        config.workDirPath = ExtendedDirWithSeparator(env.Work());
+        CopyUpRig rig(config);
+
+        NTSTATUS status = rig.copyUp.CopyUpFile(L"foo.txt");
+        Assert::IsTrue(NT_SUCCESS(status),
+            L"Copy-up must stage through a work dir that ends in a separator");
+
         Assert::AreEqual(std::string("lower content"),
             env.ReadFile(env.Upper(), L"foo.txt"));
     }
@@ -220,14 +184,9 @@ public:
         std::string content(8192, 'A'); // 8KB of 'A's
         env.WriteFile(env.Lower(0), L"big.bin", content);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpFile(L"big.bin");
+        rig.copyUp.CopyUpFile(L"big.bin");
 
         std::string copied = env.ReadFile(env.Upper(), L"big.bin");
         Assert::AreEqual(content.size(), copied.size());
@@ -237,7 +196,6 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"ts.txt", "x");
 
-        // Capture source timestamps before copy-up
         std::wstring srcPath = env.Lower(0) + L"\\ts.txt";
         FILETIME srcCreation, srcAccess, srcWrite;
         {
@@ -247,14 +205,9 @@ public:
             ::CloseHandle(h);
         }
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpFile(L"ts.txt");
+        rig.copyUp.CopyUpFile(L"ts.txt");
 
         std::wstring upPath = env.Upper() + L"\\ts.txt";
         FILETIME dstCreation, dstAccess, dstWrite;
@@ -275,18 +228,12 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"readonly.txt", "x");
 
-        // Make the source read-only
         std::wstring srcPath = env.Lower(0) + L"\\readonly.txt";
         ::SetFileAttributesW(srcPath.c_str(), FILE_ATTRIBUTE_READONLY);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpFile(L"readonly.txt");
+        rig.copyUp.CopyUpFile(L"readonly.txt");
 
         std::wstring upPath = env.Upper() + L"\\readonly.txt";
         DWORD upAttrs = ::GetFileAttributesW(upPath.c_str());
@@ -302,15 +249,10 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"sub\\nested.txt", "x");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
         // Upper has no 'sub' dir
-        cu.CopyUpFile(L"sub\\nested.txt");
+        rig.copyUp.CopyUpFile(L"sub\\nested.txt");
 
         std::wstring upSub = env.Upper() + L"\\sub";
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
@@ -322,21 +264,15 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"c.txt", "x");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        // Prime cache by resolving (caches the Lower result)
-        resolver.ResolvePath(L"c.txt");
-        Assert::IsTrue(cache.Get(L"c.txt").has_value(), L"Should be cached");
+        rig.resolver.ResolvePath(L"c.txt");
+        Assert::IsTrue(rig.cache.Get(L"c.txt").has_value(), L"Should be cached");
 
-        cu.CopyUpFile(L"c.txt");
+        rig.copyUp.CopyUpFile(L"c.txt");
 
-        Assert::IsFalse(cache.Get(L"c.txt").has_value(),
-            L"CopyUpFile should invalidate cache");
+        Assert::IsFalse(rig.cache.Get(L"c.txt").has_value(),
+            L"CopyUpFile should invalidate the cache");
     }
 
     TEST_METHOD(CopyUpFile_AlreadyInUpper_IsNoOp) {
@@ -344,14 +280,9 @@ public:
         env.WriteFile(env.Upper(), L"both.txt", "upper");
         env.WriteFile(env.Lower(0), L"both.txt", "lower");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        NTSTATUS status = cu.CopyUpFile(L"both.txt");
+        NTSTATUS status = rig.copyUp.CopyUpFile(L"both.txt");
         Assert::IsTrue(NT_SUCCESS(status));
         Assert::AreEqual(std::string("upper"),
             env.ReadFile(env.Upper(), L"both.txt"),
@@ -362,33 +293,21 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"count.txt", "x");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        uint64_t before = stats.copyUpCount.load();
-        cu.CopyUpFile(L"count.txt");
-        Assert::AreEqual(before + 1, stats.copyUpCount.load());
+        uint64_t before = rig.stats.copyUpCount.load();
+        rig.copyUp.CopyUpFile(L"count.txt");
+        Assert::AreEqual(before + 1, rig.stats.copyUpCount.load());
     }
-
-    // --- Directory copy-up ---
 
     TEST_METHOD(CopyUpDirectory_LowerDir_CreatesEntryOnlyNotContents) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"mydir");
         env.WriteFile(env.Lower(0), L"mydir\\child.txt", "child");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpDirectory(L"mydir");
+        rig.copyUp.CopyUpDirectory(L"mydir");
 
         std::wstring upDir = env.Upper() + L"\\mydir";
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
@@ -406,19 +325,13 @@ public:
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"hidden_dir");
 
-        // Mark lower dir as hidden
         std::wstring srcDir = env.Lower(0) + L"\\hidden_dir";
         ::SetFileAttributesW(srcDir.c_str(),
             FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_HIDDEN);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpDirectory(L"hidden_dir");
+        rig.copyUp.CopyUpDirectory(L"hidden_dir");
 
         std::wstring upDir = env.Upper() + L"\\hidden_dir";
         DWORD upAttrs = ::GetFileAttributesW(upDir.c_str());
@@ -440,14 +353,9 @@ public:
             ::CloseHandle(h);
         }
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpDirectory(L"td");
+        rig.copyUp.CopyUpDirectory(L"td");
 
         std::wstring upDir = env.Upper() + L"\\td";
         FILETIME dstCreation, dstAccess, dstWrite;
@@ -465,21 +373,14 @@ public:
             L"Dir LastWriteTime not preserved");
     }
 
-    // --- Directory rename ---
-
     TEST_METHOD(HandleDirectoryRename_WithinUpper_MovesDirectoryOnly) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"srcdir");
         env.WriteFile(env.Upper(), L"srcdir\\file.txt", "data");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        NTSTATUS status = cu.HandleDirectoryRename(L"srcdir", L"dstdir",
+        NTSTATUS status = rig.copyUp.HandleDirectoryRename(L"srcdir", L"dstdir",
                                                     /*sourceIsInLower=*/false);
         Assert::IsTrue(NT_SUCCESS(status));
 
@@ -500,25 +401,19 @@ public:
         env.CreateDir(env.Lower(0), L"ldir");
         env.WriteFile(env.Lower(0), L"ldir\\file.txt", "lower data");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        NTSTATUS status = cu.HandleDirectoryRename(L"ldir", L"newdir",
+        NTSTATUS status = rig.copyUp.HandleDirectoryRename(L"ldir", L"newdir",
                                                     /*sourceIsInLower=*/true);
         Assert::IsTrue(NT_SUCCESS(status));
 
-        // Content recursively copied under new name
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\file.txt"));
 
         // New location is opaque (hides lower/newdir if any)
-        Assert::IsTrue(wm.IsOpaque(L"newdir"));
+        Assert::IsTrue(rig.whiteouts.IsOpaque(L"newdir"));
 
         // Whiteout for old path (hides lower/ldir from the merged view)
-        Assert::IsTrue(wm.HasWhiteout(L"ldir", env.Upper()));
+        Assert::IsTrue(rig.whiteouts.HasWhiteout(L"ldir", env.Upper()));
     }
 };
 
@@ -533,18 +428,12 @@ public:
         std::string content(4096, 'Z'); // 4KB
         env.WriteFile(env.Lower(0), L"lazy.bin", content);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpMetadataOnly(L"lazy.bin");
+        rig.copyUp.CopyUpMetadataOnly(L"lazy.bin");
 
         std::wstring upPath = env.Upper() + L"\\lazy.bin";
 
-        // File exists with correct logical size
         HANDLE h = ::CreateFileW(upPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                  nullptr, OPEN_EXISTING, 0, nullptr);
         Assert::AreNotEqual(INVALID_HANDLE_VALUE, h);
@@ -559,14 +448,9 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"m.txt", "x");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpMetadataOnly(L"m.txt");
+        rig.copyUp.CopyUpMetadataOnly(L"m.txt");
 
         std::wstring upPath = env.Upper() + L"\\m.txt";
         LayerMountMetadata md = MetadataADS::ReadLayerMountMetadata(upPath, nullptr);
@@ -587,14 +471,9 @@ public:
             ::CloseHandle(h);
         }
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpMetadataOnly(L"lts.txt");
+        rig.copyUp.CopyUpMetadataOnly(L"lts.txt");
 
         std::wstring upPath = env.Upper() + L"\\lts.txt";
         FILETIME dstCreation, dstAccess, dstWrite;
@@ -615,14 +494,9 @@ public:
         std::wstring srcPath = env.Lower(0) + L"\\ro.bin";
         ::SetFileAttributesW(srcPath.c_str(), FILE_ATTRIBUTE_READONLY);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpMetadataOnly(L"ro.bin");
+        rig.copyUp.CopyUpMetadataOnly(L"ro.bin");
 
         std::wstring upPath = env.Upper() + L"\\ro.bin";
         DWORD attrs = ::GetFileAttributesW(upPath.c_str());
@@ -638,15 +512,10 @@ public:
         std::string content = "complete me please";
         env.WriteFile(env.Lower(0), L"cl.txt", content);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpMetadataOnly(L"cl.txt");
-        NTSTATUS status = cu.CompleteLazyCopyUp(L"cl.txt");
+        rig.copyUp.CopyUpMetadataOnly(L"cl.txt");
+        NTSTATUS status = rig.copyUp.CompleteLazyCopyUp(L"cl.txt");
         Assert::IsTrue(NT_SUCCESS(status));
 
         Assert::AreEqual(content, env.ReadFile(env.Upper(), L"cl.txt"));
@@ -656,18 +525,13 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"mc.txt", "data");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
-        cu.CopyUpMetadataOnly(L"mc.txt");
+        rig.copyUp.CopyUpMetadataOnly(L"mc.txt");
         std::wstring upPath = env.Upper() + L"\\mc.txt";
         Assert::IsTrue(MetadataADS::ReadLayerMountMetadata(upPath, nullptr).metacopy);
 
-        cu.CompleteLazyCopyUp(L"mc.txt");
+        rig.copyUp.CompleteLazyCopyUp(L"mc.txt");
         Assert::IsFalse(MetadataADS::ReadLayerMountMetadata(upPath, nullptr).metacopy,
             L"metacopy flag should be cleared after completion");
     }
@@ -676,15 +540,10 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Upper(), L"full.txt", "data");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpRig rig(env.MakeConfig());
 
         // No metacopy flag written (file doesn't have one)
-        NTSTATUS status = cu.CompleteLazyCopyUp(L"full.txt");
+        NTSTATUS status = rig.copyUp.CompleteLazyCopyUp(L"full.txt");
         Assert::IsTrue(NT_SUCCESS(status),
             L"Should succeed as no-op when file is not a metacopy");
     }

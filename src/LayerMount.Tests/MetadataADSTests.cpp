@@ -244,7 +244,7 @@ public:
     TEST_METHOD(WriteThenRead_ExtendedFormUpperWithTrailingSeparator_RoundTrips) {
         TempLayerEnvironment env(0);
         env.WriteFile(env.Upper(), L"a.txt", "x");
-        const std::wstring upperRoot = L"\\\\?\\" + env.Upper() + L"\\";
+        const std::wstring upperRoot = ExtendedDirWithSeparator(env.Upper());
         const std::wstring filePath = upperRoot + L"a.txt";
         LayerMountMetadata written;
         written.metacopy = true;

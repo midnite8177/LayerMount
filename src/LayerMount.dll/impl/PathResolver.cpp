@@ -77,7 +77,7 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         return cached.value();
     }
 
-    std::wstring upperFullPath = JoinLayerPath(config_.upperPath, normalized);
+    std::wstring upperFullPath = JoinDirPath(config_.upperPath, normalized);
     DWORD upperAttrs = GetFileAttributesW(upperFullPath.c_str());
     const DWORD upperProbeError = ::GetLastError();
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
@@ -212,7 +212,7 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
             break;
         }
 
-        std::wstring fullPath = JoinLayerPath(lowerPath, normalized);
+        std::wstring fullPath = JoinDirPath(lowerPath, normalized);
         DWORD attrs = GetFileAttributesW(fullPath.c_str());
         const DWORD probeError = ::GetLastError();
         if (attrs != INVALID_FILE_ATTRIBUTES) {
@@ -236,14 +236,14 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
 
 bool PathResolver::ExistsInUpper(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
-    std::wstring fullPath = JoinLayerPath(config_.upperPath, normalized);
+    std::wstring fullPath = JoinDirPath(config_.upperPath, normalized);
     return GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
     if (normalized.empty()) return config_.upperPath;
-    return JoinLayerPath(config_.upperPath, normalized);
+    return JoinDirPath(config_.upperPath, normalized);
 }
 
 bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
@@ -251,14 +251,14 @@ bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
 
     std::vector<DWORD> foundAttrs;
 
-    std::wstring upperPath = JoinLayerPath(config_.upperPath, normalized);
+    std::wstring upperPath = JoinDirPath(config_.upperPath, normalized);
     DWORD upperAttrs = GetFileAttributesW(upperPath.c_str());
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
         foundAttrs.push_back(upperAttrs);
     }
 
     for (const std::wstring& lowerRoot : config_.lowerPaths) {
-        std::wstring lowerPath = JoinLayerPath(lowerRoot, normalized);
+        std::wstring lowerPath = JoinDirPath(lowerRoot, normalized);
         DWORD lowerAttrs = GetFileAttributesW(lowerPath.c_str());
         if (lowerAttrs != INVALID_FILE_ATTRIBUTES) {
             foundAttrs.push_back(lowerAttrs);
