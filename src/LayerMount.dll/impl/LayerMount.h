@@ -566,15 +566,12 @@ public:
     ::LayerMount::abi::EventEmitter& Events() noexcept { return events_; }
     const ::LayerMount::abi::EventEmitter& Events() const noexcept { return events_; }
 
-    // VHD subsystem. Lazy-constructed on first call because most overlays
-    // never exercise VHD paths and VHDLayerManager's ctor acquires a
-    // cross-process ManifestLock. Thread-safe to call concurrently; the
-    // returned reference is stable for the overlay's lifetime.
+    // Thread-safe to call concurrently; the returned reference is stable
+    // for the overlay's lifetime.
     VHD::VHDLayerManager& Vhd();
 
-    // VSS subsystem. Lazy-constructed like Vhd(). VSSManager's methods
-    // require an active ComScope on the caller's thread; the VSS ABI
-    // shims open one on entry. Thread-safe.
+    // VSSManager's methods require an active ComScope on the caller's
+    // thread. Thread-safe.
     VSS::VSSManager& Vss();
 
     LayerImage::LayerImageManager& Images();

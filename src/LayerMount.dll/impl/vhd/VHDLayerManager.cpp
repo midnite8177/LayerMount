@@ -1,5 +1,4 @@
 #include "VHDLayerManager.h"
-#include "Manifest.h"
 #include "VolumeGuid.h"
 #include "../ElevationUtil.h"
 #include "../LayerPath.h"
@@ -42,25 +41,8 @@ std::wstring EnsureTrailingBackslash(const std::wstring& path) {
 
 VHDLayerManager::VHDLayerManager(const std::wstring& workingDir)
     : workingDir_(workingDir)
-    , manifest_(std::make_unique<Manifest>())
 {
     std::filesystem::create_directories(workingDir_);
-
-    auto manifestPath = Manifest::DefaultPath(workingDir_);
-    manifestLock_ = ManifestLock(manifestPath);
-    if (std::filesystem::exists(manifestPath)) {
-        manifest_->Load(manifestPath);
-    }
-}
-
-VHDLayerManager::~VHDLayerManager() {
-    if (manifestLock_.Held()) {
-        try {
-            manifest_->Save(Manifest::DefaultPath(workingDir_));
-        }
-        catch (...) {
-        }
-    }
 }
 
 DWORD VHDLayerManager::CheckElevation() {
@@ -112,9 +94,6 @@ DWORD VHDLayerManager::OpenVHD(const std::wstring& path, VhdHandle& outHandle) {
 
     return result;
 }
-
-Manifest& VHDLayerManager::GetManifest() { return *manifest_; }
-const Manifest& VHDLayerManager::GetManifest() const { return *manifest_; }
 
 DWORD VHDLayerManager::CreateVHD(const std::wstring& path, ULONGLONG sizeBytes,
                                   bool dynamic, VhdHandle& outHandle) {

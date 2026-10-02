@@ -1215,6 +1215,9 @@ LM_API HRESULT LM_CALL LayerMountVhdGetVolumeGuid(
  * `manifestDir == NULL` -> use the process's current working directory.
  * When the manifest file doesn't exist, returns S_OK with
  * *entriesRequired = 0 (idempotent no-op).
+ * Reads under the cross-process layer registry lock. Returns
+ * HRESULT_FROM_WIN32(ERROR_LOCK_VIOLATION) when it cannot get that lock
+ * within 30 seconds.
  */
 LM_API HRESULT LM_CALL LayerMountVhdListLayers(
     LM_HANDLE          mount,
@@ -1225,8 +1228,10 @@ LM_API HRESULT LM_CALL LayerMountVhdListLayers(
     UINT32*             entriesRequired);
 
 /*
- * Remove a layer entry from the VHD manifest (idempotent). Uses a
- * cross-process ManifestLock around the load-mutate-save sequence.
+ * Remove a layer entry from the VHD manifest (idempotent). Loads, changes
+ * and saves the registry under the cross-process layer registry lock.
+ * Returns HRESULT_FROM_WIN32(ERROR_LOCK_VIOLATION) when it cannot get that
+ * lock within 30 seconds.
  * `outRemoved` is set TRUE when an entry was found and removed, FALSE
  * when the id didn't exist or the manifest file was missing.
  */
@@ -1241,6 +1246,9 @@ LM_API HRESULT LM_CALL LayerMountVhdUnregisterLayer(
  * Two-call buffer pattern. Returns S_OK with *requiredChars = 1 (just
  * the NUL) and an empty "{}" when the layer exists but has no metadata;
  * returns STG_E_PATHNOTFOUND if the layer id isn't in the manifest.
+ * Reads under the cross-process layer registry lock. Returns
+ * HRESULT_FROM_WIN32(ERROR_LOCK_VIOLATION) when it cannot get that lock
+ * within 30 seconds.
  */
 LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(
     LM_HANDLE mount,

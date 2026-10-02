@@ -75,6 +75,50 @@ public:
         Assert::AreEqual<UINT32>(0u, required);
         Assert::AreEqual<UINT32>(0u, written);
     }
+
+    TEST_METHOD(VhdUnregisterLayer_ThenDestroy_LayerStaysRemoved) {
+        TempLayerEnv env(0);
+        {
+            std::ofstream registry(env.Work() + L"\\layers.manifest.json",
+                                   std::ios::binary | std::ios::trunc);
+            registry << R"({"schemaVersion":1,"layers":[{"id":"layer-a","type":"vhd","path":"C:\\absent\\a.vhdx"}]})";
+        }
+        const std::wstring notAVhd = env.Root() + L"\\not-a-vhd.bin";
+        {
+            std::ofstream file(notAVhd, std::ios::binary | std::ios::trunc);
+            file << "plain bytes";
+        }
+
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        // Without a VHD handle the overlay never builds its VHD manager, and
+        // the test would pass against a manager that writes the registry back.
+        LM_VHD_CONFIG cfg{};
+        cfg.structSize          = sizeof(cfg);
+        cfg.kind                = LM_VHD_KIND_DYNAMIC;
+        cfg.path                = notAVhd.c_str();
+        cfg.suppressDriveLetter = TRUE;
+        cfg.lifetime            = LM_VHD_ATTACH_PROCESS_SCOPED;
+        LM_VHD_HANDLE vhd = nullptr;
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdOpen(mount.Get(), &cfg, &vhd),
+            L"Open records the path of an existing file without reading it as a VHD");
+
+        BOOL removed = FALSE;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdUnregisterLayer(mount.Get(), L"layer-a", env.Work().c_str(), &removed));
+        Assert::IsTrue(removed != FALSE, L"The seeded layer is registered before the unregister");
+
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdClose(vhd));
+        mount.Reset();
+
+        LayerMountHolder after = CreateLayerMount(env);
+        UINT32 written = 0;
+        UINT32 required = 0;
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdListLayers(
+            after.Get(), env.Work().c_str(), nullptr, 0, &written, &required));
+        Assert::AreEqual<UINT32>(0u, required,
+            L"Destroying the overlay must not bring back an unregistered layer");
+    }
 };
 
-} // namespace LayerMountAbiTests
+}

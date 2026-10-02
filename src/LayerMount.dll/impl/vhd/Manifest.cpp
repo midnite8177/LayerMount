@@ -43,7 +43,7 @@ std::wstring MutexNameForPath(const std::wstring& manifestPath) {
 } // namespace
 
 // ===========================================================================
-// ManifestLock — cross-process serialization of Load-mutate-Save sequences.
+// ManifestLock — cross-process serialization of layer registry access.
 // ===========================================================================
 
 ManifestLock::ManifestLock(const std::wstring& manifestPath, DWORD timeoutMs) {
@@ -64,24 +64,6 @@ ManifestLock::~ManifestLock() {
     if (handle_) {
         ::CloseHandle(handle_);
     }
-}
-
-ManifestLock::ManifestLock(ManifestLock&& other) noexcept
-    : handle_(other.handle_), held_(other.held_) {
-    other.handle_ = nullptr;
-    other.held_ = false;
-}
-
-ManifestLock& ManifestLock::operator=(ManifestLock&& other) noexcept {
-    if (this != &other) {
-        if (held_ && handle_) ::ReleaseMutex(handle_);
-        if (handle_) ::CloseHandle(handle_);
-        handle_ = other.handle_;
-        held_   = other.held_;
-        other.handle_ = nullptr;
-        other.held_   = false;
-    }
-    return *this;
 }
 
 // ===========================================================================

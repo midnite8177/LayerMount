@@ -19,7 +19,6 @@
 #include <mutex>
 #include <filesystem>
 
-#include "Manifest.h"
 #include "../PathUtil.h"
 
 namespace LayerMount::VHD {
@@ -105,7 +104,6 @@ private:
 class VHDLayerManager {
 public:
     explicit VHDLayerManager(const std::wstring& workingDir);
-    ~VHDLayerManager();
 
     VHDLayerManager(const VHDLayerManager&) = delete;
     VHDLayerManager& operator=(const VHDLayerManager&) = delete;
@@ -155,10 +153,6 @@ public:
     DWORD ExportToDirectory(const std::wstring& vhdPath,
                             const std::wstring& directoryPath);
 
-    // Manifest access
-    Manifest& GetManifest();
-    const Manifest& GetManifest() const;
-
     const std::wstring& WorkingDirectory() const { return workingDir_; }
 
 private:
@@ -177,9 +171,6 @@ private:
     static std::wstring GenerateId();
 
     std::wstring workingDir_;
-    std::unique_ptr<Manifest> manifest_;
-    ManifestLock manifestLock_;  // Held for the manager's lifetime to serialize
-                                 // cross-process manifest Load-mutate-Save.
     std::mutex mutex_;
 };
 

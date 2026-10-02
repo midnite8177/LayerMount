@@ -393,9 +393,7 @@ VHD::VHDLayerManager& LayerMount::Vhd() {
 VSS::VSSManager& LayerMount::Vss() {
     std::lock_guard<std::mutex> lock(vssMutex_);
     if (!vss_) {
-        // No manifest, so a VSS-only consumer never builds Vhd() or takes its ManifestLock.
-        VHD::Manifest* const noManifest = nullptr;
-        vss_ = std::make_unique<VSS::VSSManager>(noManifest);
+        vss_ = std::make_unique<VSS::VSSManager>();
     }
     return *vss_;
 }

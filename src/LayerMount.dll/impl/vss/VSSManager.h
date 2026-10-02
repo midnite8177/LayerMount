@@ -10,9 +10,6 @@
 #include <mutex>
 #include <optional>
 
-// Forward declaration — full definition in Manifest.h (LayerMount.VHD project)
-namespace LayerMount::VHD { class Manifest; }
-
 namespace LayerMount::VSS {
 
 // ---------------------------------------------------------------------------
@@ -41,9 +38,7 @@ struct SnapshotInfo {
 
 class VSSManager {
 public:
-    // |manifest| is optional. If non-null, snapshot create/delete operations
-    // will be recorded in the manifest as LayerType::VSS entries.
-    explicit VSSManager(::LayerMount::VHD::Manifest* manifest = nullptr);
+    VSSManager() = default;
     ~VSSManager();
 
     VSSManager(const VSSManager&) = delete;
@@ -144,11 +139,7 @@ private:
     // Format a VSS_TIMESTAMP (FILETIME-based 100ns-since-1601) as ISO 8601 UTC.
     static std::wstring FormatVssTimestamp(VSS_TIMESTAMP ts);
 
-    // In-memory snapshot registry.
     std::map<std::wstring, HeldSnapshot> snapshots_;
-
-    // Optional manifest integration.
-    ::LayerMount::VHD::Manifest* manifest_;
 
     mutable std::mutex mutex_;
 };

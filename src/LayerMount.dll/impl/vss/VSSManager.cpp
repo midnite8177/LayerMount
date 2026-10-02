@@ -1,5 +1,4 @@
 #include "VSSManager.h"
-#include "Manifest.h"
 #include "../ElevationUtil.h"
 #include "../PathUtil.h"
 
@@ -26,17 +25,10 @@ static DWORD Win32FromHresult(HRESULT hr) {
     return ERROR_GEN_FAILURE;
 }
 
-// ===========================================================================
-// VSSManager — construction / destruction
-// ===========================================================================
-
-VSSManager::VSSManager(LayerMount::VHD::Manifest* manifest)
-    : manifest_(manifest) {
-}
-
 VSSManager::~VSSManager() {
     // Releasing HeldSnapshot::VssBackupPtr instances auto-deletes non-persistent
-    // snapshots. Persistent snapshots are not deleted (by design).
+    // snapshots. Persistent snapshots are client-accessible and outlive the
+    // process, so nothing deletes them here.
     // std::map::clear triggers VssBackupPtr destructors via HeldSnapshot.
     snapshots_.clear();
 }
@@ -366,21 +358,6 @@ DWORD VSSManager::CreateSnapshot(const std::wstring& volumePath, bool persistent
 
     snapshots_[idStr] = std::move(held);
 
-    // --- 13. Update manifest if available ---
-    if (manifest_) {
-        LayerMount::VHD::LayerEntry entry;
-        entry.id = idStr;
-        entry.type = LayerMount::VHD::LayerType::VSS;
-        entry.path = devicePath;
-        entry.mountStatus = L"mounted";
-        entry.createdAt = snapshots_[idStr].info.createdAt;
-        entry.metadata[L"volumePath"] = volumePath;
-        entry.metadata[L"persistent"] = persistent ? L"true" : L"false";
-        entry.metadata[L"vssId"] = GuidToString(snapshotId);
-        manifest_->AddLayer(entry);
-    }
-
-    // --- 14. Set output parameters ---
     outSnapshotId = idStr;
     outDevicePath = devicePath;
 
@@ -410,7 +387,6 @@ DWORD VSSManager::DeleteSnapshot(const std::wstring& snapshotId) {
         // Release our original IVssBackupComponents reference (for
         // non-persistent; persistent entries never held one).
         it->second.backup = VssBackupPtr();
-        if (manifest_) manifest_->RemoveLayer(snapshotId);
         snapshots_.erase(it);
     }
     return ERROR_SUCCESS;

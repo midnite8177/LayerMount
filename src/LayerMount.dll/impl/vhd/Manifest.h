@@ -8,18 +8,17 @@
 
 namespace LayerMount::VHD {
 
-// RAII wrapper for a named mutex that serializes manifest mutation for a
-// given manifest path across processes. Acquire before Load-mutate-Save.
+// RAII wrapper for a named mutex that serializes reads and writes of the
+// layer registry at a given path across processes. Take it before Load.
+// Warning: a Win32 mutex lets the thread that owns it take it again, so it
+// does not serialize two holders on the same thread.
 class ManifestLock {
 public:
-    ManifestLock() = default;
-    explicit ManifestLock(const std::wstring& manifestPath, DWORD timeoutMs = 30000);
+    ManifestLock(const std::wstring& manifestPath, DWORD timeoutMs);
     ~ManifestLock();
 
     ManifestLock(const ManifestLock&) = delete;
     ManifestLock& operator=(const ManifestLock&) = delete;
-    ManifestLock(ManifestLock&& other) noexcept;
-    ManifestLock& operator=(ManifestLock&& other) noexcept;
 
     // True if the mutex was acquired (handle held + wait succeeded).
     bool Held() const noexcept { return held_; }

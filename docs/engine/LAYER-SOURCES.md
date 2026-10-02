@@ -56,7 +56,8 @@ empty result or `ERROR_GEN_FAILURE` rather than treat either as final.
 layers recorded in the on-disk layer registry at `<manifestDir>` (the
 process working directory when `manifestDir` is null). A named
 cross-process mutex guards every read and write of the registry file,
-so two processes registering a layer at once cannot corrupt it. If the
+so a list or an unregister never sees an unregister that another process
+has only partly written. If the
 registry file does not exist yet, the call returns success with zero
 entries rather than an error, so listing before anything has been
 registered is safe.
@@ -90,8 +91,11 @@ elevation itself before a VHD call.
 directory. `Attach` is idempotent on an already-attached handle.
 `GetVolumeGuid` needs a retry loop right after `Attach`, because of PnP
 lag. `ListLayers` and `UnregisterLayer` both treat a missing registry
-as empty rather than as an error. `LayerMountVhdMerge` fails at the
-Win32 layer if the child VHD is still attached when merge is called.
+as empty rather than as an error. `ListLayers`, `UnregisterLayer` and
+`GetLayerMetadataJson` return `ERROR_LOCK_VIOLATION` when another holder
+keeps the registry lock for more than 30 seconds.
+`LayerMountVhdMerge` fails at the Win32 layer if the child VHD is still
+attached when merge is called.
 
 ---
 

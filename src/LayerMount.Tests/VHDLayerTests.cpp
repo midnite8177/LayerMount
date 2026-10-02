@@ -7,6 +7,7 @@
 #include "VolumeGuid.h"
 
 #include <fstream>
+#include <iterator>
 #include <thread>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -567,6 +568,32 @@ public:
         std::filesystem::remove_all(root, ec);
     }
 
+    TEST_METHOD(Manager_OnCorruptRegistry_LeavesRegistryBytesUnchanged) {
+        const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
+        std::filesystem::create_directories(root);
+        const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
+        const std::string corrupt = "{ \"schemaVersion\": 1, \"layers\": [ truncated";
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(corrupt.data(), static_cast<std::streamsize>(corrupt.size()));
+        }
+
+        {
+            LayerMount::VHD::VHDLayerManager manager(root);
+        }
+
+        std::string after;
+        {
+            std::ifstream in(path, std::ios::binary);
+            after.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+
+        Assert::IsTrue(after == corrupt,
+            L"Constructing and destroying the manager must not rewrite a registry it cannot parse");
+    }
+
     TEST_METHOD(ManifestLock_SerializesAcrossThreads) {
         // A Win32 mutex is recursive for its owning thread, so only a second
         // thread can observe that the lock is held.
@@ -574,7 +601,7 @@ public:
         std::filesystem::create_directories(root);
         const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
 
-        LayerMount::VHD::ManifestLock first(path);
+        LayerMount::VHD::ManifestLock first(path, /*timeoutMs=*/ 200);
         Assert::IsTrue(first.Held(), L"First lock must acquire the mutex");
 
         bool peerHeld = true;

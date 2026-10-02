@@ -486,6 +486,19 @@ std::wstring ResolveManifestPath(PCWSTR manifestDir) {
     return ::LayerMount::VHD::Manifest::DefaultPath(dir);
 }
 
+constexpr DWORD kRegistryLockTimeoutMs = 30000;
+
+HRESULT RegistryLockFailure(PCWSTR function) {
+    const HRESULT hr = HRESULT_FROM_WIN32(ERROR_LOCK_VIOLATION);
+    std::wstring message = function;
+    message += L": could not get the cross-process layer registry lock within ";
+    message += std::to_wstring(kRegistryLockTimeoutMs / 1000);
+    message += L" seconds. Another VHD tool may be using the same registry. "
+               L"Retry after it releases.";
+    ::LayerMount::abi::ErrorTls::Set(hr, message.c_str());
+    return hr;
+}
+
 // Emit a wstring via the two-call buffer pattern used by LM_VHD_LAYER_INFO
 // per-string fields. Returns TRUE iff the caller's buffer was populated
 // (false if sizing-only or short). *requiredOut always receives the
@@ -540,6 +553,8 @@ LM_API HRESULT LM_CALL LayerMountVhdListLayers(LM_HANDLE          mount,
 
     const std::wstring manifestPath = ResolveManifestPath(manifestDir);
 
+    ::LayerMount::VHD::ManifestLock lock(manifestPath, kRegistryLockTimeoutMs);
+    if (!lock.Held()) return RegistryLockFailure(L"LayerMountVhdListLayers");
     ::LayerMount::VHD::Manifest m;
     DWORD loadErr = m.Load(manifestPath);
     if (loadErr == ERROR_FILE_NOT_FOUND) {
@@ -620,16 +635,8 @@ LM_API HRESULT LM_CALL LayerMountVhdUnregisterLayer(LM_HANDLE mount,
 
     const std::wstring manifestPath = ResolveManifestPath(manifestDir);
 
-    ::LayerMount::VHD::ManifestLock lock(manifestPath);
-    if (!lock.Held()) {
-        // Another process owns the manifest lock or creation failed;
-        // loading + saving without the lock would race their update.
-        ErrorTls::Set(HRESULT_FROM_WIN32(ERROR_LOCK_VIOLATION),
-            L"LayerMountVhdUnregisterLayer: could not acquire the cross-process "
-            L"manifest lock. Another VHD tool may be operating on the same "
-            L"working directory. Retry after it releases.");
-        return HRESULT_FROM_WIN32(ERROR_LOCK_VIOLATION);
-    }
+    ::LayerMount::VHD::ManifestLock lock(manifestPath, kRegistryLockTimeoutMs);
+    if (!lock.Held()) return RegistryLockFailure(L"LayerMountVhdUnregisterLayer");
     ::LayerMount::VHD::Manifest m;
     DWORD loadErr = m.Load(manifestPath);
     if (loadErr == ERROR_FILE_NOT_FOUND) {
@@ -675,6 +682,8 @@ LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(LM_HANDLE mount,
 
     const std::wstring manifestPath = ResolveManifestPath(manifestDir);
 
+    ::LayerMount::VHD::ManifestLock lock(manifestPath, kRegistryLockTimeoutMs);
+    if (!lock.Held()) return RegistryLockFailure(L"LayerMountVhdGetLayerMetadataJson");
     ::LayerMount::VHD::Manifest m;
     DWORD loadErr = m.Load(manifestPath);
     if (loadErr == ERROR_FILE_NOT_FOUND) {
@@ -689,34 +698,11 @@ LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(LM_HANDLE mount,
         return STG_E_PATHNOTFOUND;
     }
 
-    // Serialize the metadata map to JSON. Use nlohmann::json with UTF-8
-    // internally; convert back to wide for the output buffer.
     nlohmann::json j = nlohmann::json::object();
     for (const auto& [k, v] : entry->metadata) {
-        // wstring -> utf8.
-        auto wtou8 = [](const std::wstring& w) {
-            if (w.empty()) return std::string();
-            int n = WideCharToMultiByte(CP_UTF8, 0, w.data(),
-                                        static_cast<int>(w.size()),
-                                        nullptr, 0, nullptr, nullptr);
-            std::string s(static_cast<size_t>(n), '\0');
-            WideCharToMultiByte(CP_UTF8, 0, w.data(),
-                                static_cast<int>(w.size()),
-                                s.data(), n, nullptr, nullptr);
-            return s;
-        };
-        j[wtou8(k)] = wtou8(v);
+        j[::LayerMount::VHD::WideToUtf8(k)] = ::LayerMount::VHD::WideToUtf8(v);
     }
-
-    const std::string u8 = j.dump();
-    // utf8 -> wide.
-    int wideCount = MultiByteToWideChar(CP_UTF8, 0, u8.data(),
-                                        static_cast<int>(u8.size()),
-                                        nullptr, 0);
-    std::wstring out(static_cast<size_t>(wideCount), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, u8.data(),
-                        static_cast<int>(u8.size()),
-                        out.data(), wideCount);
+    const std::wstring out = ::LayerMount::VHD::Utf8ToWide(j.dump());
 
     const SIZE_T need = out.size() + 1;
     if (requiredChars != nullptr) *requiredChars = need;

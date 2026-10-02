@@ -709,8 +709,9 @@ first use because most overlays never exercise them.
 
 `VHDLayerManager` wraps the Win32 `OpenVirtualDisk`/`CreateVirtualDisk`/
 `AttachVirtualDisk` API to attach a VHD or VHDX file as a Windows
-volume, expose its volume GUID path, and record it in a JSON manifest
-guarded by a named cross-process mutex. See
+volume and expose its volume GUID path. The VHD ABI keeps a layer
+registry in a JSON file, and a named cross-process mutex guards each
+read and write of that file. See
 [LAYER-SOURCES.md](LAYER-SOURCES.md) for the create, attach, list,
 clean-up, and privilege details.
 
