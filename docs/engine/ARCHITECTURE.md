@@ -233,8 +233,8 @@ The two main producers of opaque markers:
   fails with `STATUS_OBJECT_NAME_COLLISION` instead. Without the marker, the new
   (empty) upper directory would expose the hidden lower contents through
   the overlay again.
-- `CopyUp::HandleDirectoryRename` when the source directory came from a
-  lower layer. After the recursive copy, the destination is opaque so
+- `CopyUp::RenameLowerDirectory`, which renames a directory that a lower
+  layer holds. After the recursive copy, the destination is opaque so
   subsequent merges don't re-pull files from the lower-layer source
   through the post-rename path.
 
@@ -522,7 +522,7 @@ the `:overlay` metadata, and (importantly) does **not** recurse. The
 directory's children remain in the lower layer until they themselves
 are copied up on demand.
 
-### Cross-layer directory rename (`HandleDirectoryRename`)
+### Cross-layer directory rename (`RenameLowerDirectory`, `RenameUpperDirectory`)
 
 Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.

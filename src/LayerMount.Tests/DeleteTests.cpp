@@ -158,9 +158,9 @@ public:
         env.CreateDir(env.Lower(0), L"sd");
         env.WriteFile(env.Lower(0), L"sd\\inner.txt", "inner-lower");
         env.CreateDir(env.Upper(),  L"sd");
-        Assert::IsTrue(WhiteoutManager(env.MakeConfig(), nullptr).SetOpaque(L"sd"));
-
         auto config = env.MakeConfig();
+        Assert::IsTrue(WhiteoutManager(config, nullptr).SetOpaque(L"sd"));
+
         Cache cache;
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);
@@ -335,7 +335,8 @@ public:
             L"Deleting a directory the upper cannot list must fail with the scan's status");
         Assert::IsTrue(env.FileExists(env.Upper(), L"sub"),
             L"A failed delete must leave the upper directory");
-        Assert::IsFalse(WhiteoutManager(env.MakeConfig(), nullptr).HasWhiteout(L"sub", env.Upper()),
+        auto config = env.MakeConfig();
+        Assert::IsFalse(WhiteoutManager(config, nullptr).HasWhiteout(L"sub", env.Upper()),
             L"A failed delete must write no whiteout");
         Assert::IsTrue(mount.MergeDirectoryEntries(L"sub").entries.count(L"x.txt") == 1,
             L"The lower's entry must stay in the listing");

@@ -51,6 +51,19 @@ struct LayerConfig {
     bool Prepare(std::wstring& error);
 };
 
+// Keeps a reference to a LayerConfig. A temporary config would dangle, so
+// the type refuses one.
+class ConfigRef {
+public:
+    ConfigRef(const LayerConfig& config) noexcept : config_(&config) {}
+    ConfigRef(const LayerConfig&& config) = delete;
+
+    const LayerConfig& Get() const noexcept { return *config_; }
+
+private:
+    const LayerConfig* config_;
+};
+
 struct LayerMountMetadata {
     bool opaque = false;
     bool metacopy = false;
@@ -446,11 +459,10 @@ public:
     NTSTATUS DeleteStreamOnContext(FileContext* ctx);
 
     // Path-based rename: moves the entry within the overlay namespace.
-    // Source is copied up if it lives only in lower; if lower retains a
-    // copy at the old path the helper drops a whiteout there to suppress
-    // it from the overlay. Directory renames go through
-    // CopyUp::HandleDirectoryRename. replaceIfExists FALSE fails with
-    // STATUS_OBJECT_NAME_COLLISION when the destination already exists.
+    // Source is copied up if it lives only in lower. Rename drops a
+    // whiteout at the old path when a lower still holds it.
+    // replaceIfExists FALSE fails with STATUS_OBJECT_NAME_COLLISION when
+    // the destination already exists.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
                     const std::wstring& newRelativePath,
                     BOOLEAN replaceIfExists,

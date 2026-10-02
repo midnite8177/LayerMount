@@ -12,6 +12,9 @@ using namespace LayerMount;
 
 namespace LayerMountTests {
 
+static_assert(RefusesTemporaryConfig<CopyUp, PathResolver&, WhiteoutManager&, Cache&, LayerMountStats&>,
+    "CopyUp keeps a reference to its LayerConfig");
+
 TEST_CLASS(CopyUpTests) {
 public:
     TEST_CLASS_INITIALIZE(ClassInit) {
@@ -77,7 +80,6 @@ public:
         TempLayerEnvironment env(1);
         CopyUpRig rig(env.MakeConfig());
 
-        // Drop a fake work-dir temp file (CleanWorkDirectory looks for #*.tmp)
         std::wstring tempFile = env.Work() + L"\\#abc.tmp";
         HANDLE h1 = ::CreateFileW(tempFile.c_str(), GENERIC_WRITE, 0, nullptr,
                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -181,7 +183,7 @@ public:
 
     TEST_METHOD(CopyUpFile_PreservesFileSize) {
         TempLayerEnvironment env(1);
-        std::string content(8192, 'A'); // 8KB of 'A's
+        std::string content(8192, 'A');
         env.WriteFile(env.Lower(0), L"big.bin", content);
 
         CopyUpRig rig(env.MakeConfig());
@@ -239,10 +241,6 @@ public:
         DWORD upAttrs = ::GetFileAttributesW(upPath.c_str());
         Assert::IsTrue((upAttrs & FILE_ATTRIBUTE_READONLY) != 0,
             L"READONLY attribute not preserved");
-
-        // Clear readonly so cleanup can delete it
-        ::SetFileAttributesW(srcPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-        ::SetFileAttributesW(upPath.c_str(), FILE_ATTRIBUTE_NORMAL);
     }
 
     TEST_METHOD(CopyUpFile_CreatesParentDirectoryInUpper) {
@@ -251,7 +249,6 @@ public:
 
         CopyUpRig rig(env.MakeConfig());
 
-        // Upper has no 'sub' dir
         rig.copyUp.CopyUpFile(L"sub\\nested.txt");
 
         std::wstring upSub = env.Upper() + L"\\sub";
@@ -314,7 +311,6 @@ public:
             ::GetFileAttributesW(upDir.c_str()),
             L"Directory entry should be created in upper");
 
-        // Child should NOT be copied (children resolve lazily through overlay)
         std::wstring upChild = env.Upper() + L"\\mydir\\child.txt";
         Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW(upChild.c_str()),
@@ -373,15 +369,15 @@ public:
             L"Dir LastWriteTime not preserved");
     }
 
-    TEST_METHOD(HandleDirectoryRename_WithinUpper_MovesDirectoryOnly) {
+    TEST_METHOD(RenameUpperDirectory_MovesDirectoryOnly) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"srcdir");
         env.WriteFile(env.Upper(), L"srcdir\\file.txt", "data");
 
         CopyUpRig rig(env.MakeConfig());
 
-        NTSTATUS status = rig.copyUp.HandleDirectoryRename(L"srcdir", L"dstdir",
-                                                    /*sourceIsInLower=*/false);
+        NTSTATUS status = rig.copyUp.RenameUpperDirectory(L"srcdir", L"dstdir",
+                                                          ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
 
         std::wstring src = env.Upper() + L"\\srcdir";
@@ -396,23 +392,21 @@ public:
             L"File should move with the directory");
     }
 
-    TEST_METHOD(HandleDirectoryRename_FromLower_CopiesUpAndCreatesWhiteout) {
+    TEST_METHOD(RenameLowerDirectory_CopiesUpAndCreatesWhiteout) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"ldir");
         env.WriteFile(env.Lower(0), L"ldir\\file.txt", "lower data");
 
         CopyUpRig rig(env.MakeConfig());
 
-        NTSTATUS status = rig.copyUp.HandleDirectoryRename(L"ldir", L"newdir",
-                                                    /*sourceIsInLower=*/true);
+        NTSTATUS status = rig.copyUp.RenameLowerDirectory(L"ldir", L"newdir",
+                                                          ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\file.txt"));
 
-        // New location is opaque (hides lower/newdir if any)
         Assert::IsTrue(rig.whiteouts.IsOpaque(L"newdir"));
 
-        // Whiteout for old path (hides lower/ldir from the merged view)
         Assert::IsTrue(rig.whiteouts.HasWhiteout(L"ldir", env.Upper()));
     }
 };
@@ -425,7 +419,7 @@ public:
 
     TEST_METHOD(CopyUpMetadataOnly_CreatesFileWithSourceSizeButNoData) {
         TempLayerEnvironment env(1);
-        std::string content(4096, 'Z'); // 4KB
+        std::string content(4096, 'Z');
         env.WriteFile(env.Lower(0), L"lazy.bin", content);
 
         CopyUpRig rig(env.MakeConfig());
@@ -501,10 +495,6 @@ public:
         std::wstring upPath = env.Upper() + L"\\ro.bin";
         DWORD attrs = ::GetFileAttributesW(upPath.c_str());
         Assert::IsTrue((attrs & FILE_ATTRIBUTE_READONLY) != 0);
-
-        // Clear for cleanup
-        ::SetFileAttributesW(srcPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-        ::SetFileAttributesW(upPath.c_str(), FILE_ATTRIBUTE_NORMAL);
     }
 
     TEST_METHOD(CompleteLazyCopyUp_CopiesDataFromOriginLayer) {
@@ -542,11 +532,10 @@ public:
 
         CopyUpRig rig(env.MakeConfig());
 
-        // No metacopy flag written (file doesn't have one)
         NTSTATUS status = rig.copyUp.CompleteLazyCopyUp(L"full.txt");
         Assert::IsTrue(NT_SUCCESS(status),
             L"Should succeed as no-op when file is not a metacopy");
     }
 };
 
-} // namespace LayerMountTests
+}

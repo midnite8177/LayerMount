@@ -36,10 +36,10 @@ LowerVisibility LowersBelowMiss(const WhiteoutManager& whiteoutMgr,
 
 }
 
-PathResolver::PathResolver(const LayerConfig& config,
+PathResolver::PathResolver(ConfigRef config,
                            WhiteoutManager& whiteoutMgr,
                            Cache& cache)
-    : config_(config)
+    : config_(config.Get())
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache) {
 }

@@ -9,7 +9,7 @@ class Cache;
 
 class PathResolver {
 public:
-    PathResolver(const LayerConfig& config,
+    PathResolver(ConfigRef config,
                  WhiteoutManager& whiteoutMgr,
                  Cache& cache);
 
@@ -20,25 +20,20 @@ public:
     // ancestor in the upper does.
     ResolvedPath ResolveLowerPath(const std::wstring& relativePath) const;
 
-    // The lower walk that ResolvePath runs serves as the lower hit, so a
-    // path that the overlay resolves into the lowers is walked once.
     CreateResolution ResolveForCreate(const std::wstring& relativePath) const;
 
     bool ExistsInUpper(const std::wstring& relativePath) const;
 
     std::wstring GetUpperPath(const std::wstring& relativePath) const;
 
-    // Detect type conflicts across layers (file vs. directory).
-    // Returns true if a conflict was detected.
     bool HasTypeConflict(const std::wstring& relativePath) const;
 
     const LayerConfig& Config() const { return config_; }
 
 private:
-    // Internal resolution with redirect depth tracking. When lowerWalk is
-    // not null, it receives ResolveLowerPath's result for relativePath itself
-    // if the call learns it: after the walk of the lowers runs, or when a
-    // non-directory ancestor in the upper hides the lowers.
+    // When lowerWalk is not null, it receives ResolveLowerPath's result for
+    // relativePath itself if the call learns it: after the walk of the lowers
+    // runs, or when a non-directory ancestor in the upper hides the lowers.
     ResolvedPath ResolvePathInternal(const std::wstring& relativePath,
                                      int redirectDepth,
                                      std::optional<ResolvedPath>* lowerWalk) const;

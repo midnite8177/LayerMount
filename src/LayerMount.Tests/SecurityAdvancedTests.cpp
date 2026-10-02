@@ -117,19 +117,13 @@ bool HasInheritedAceForSid(const std::wstring& path, PSID target) {
     return false;
 }
 
-} // namespace
-
-// ============================================================================
-// AdvancedSecurityTests — owner + inheritance + SACL invariants.
-// ============================================================================
+}
 
 TEST_CLASS(AdvancedSecurityTests) {
 public:
-    // ------------------------------------------------------------------------
     // Owner propagation: copy-up preserves the owner SID from lower.
     //
     // CopySecurityDescriptor includes OWNER_SECURITY_INFORMATION.
-    // ------------------------------------------------------------------------
     TEST_METHOD(CopyUp_PreservesOwnerSid) {
         LayerMountTests::TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"owned.txt", "o");
@@ -152,7 +146,6 @@ public:
             L"Upper owner SID must match lower owner SID");
     }
 
-    // ------------------------------------------------------------------------
     // Inherited DACL ACEs on a child file: a file created under a directory
     // with an inheritable ACE should carry that ACE (flagged INHERITED_ACE)
     // into the upper copy.
@@ -161,7 +154,6 @@ public:
     // ACE on it; lower/secured/child.txt inherits the deny. On copy-up of
     // the child, the upper file must still carry the inherited deny —
     // otherwise a previously-blocked subject gains unintended access.
-    // ------------------------------------------------------------------------
     TEST_METHOD(CopyUp_ChildWithInheritedAce_PreservesInheritedAce) {
         // CopyUp's preservation of inherited ACEs relies on
         // FILE_FLAG_BACKUP_SEMANTICS opens (in CopyAlternateStream and
@@ -222,7 +214,6 @@ public:
             L"lower parent's ACL). Missing = access-control bypass on copy-up.");
     }
 
-    // ------------------------------------------------------------------------
     // Directory rename from lower: inherited ACEs must carry through.
     //
     // When a lower directory is renamed through the mount, its children are
@@ -230,7 +221,6 @@ public:
     // children (from the old parent) must be preserved OR regenerated from
     // the new upper parent's inheritable ACEs — losing them silently weakens
     // access control on the renamed subtree.
-    // ------------------------------------------------------------------------
     TEST_METHOD(DirectoryRenameFromLower_ChildRetainsInheritedAce) {
         LayerMountTests::TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"src-secured");
@@ -275,9 +265,8 @@ public:
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
 
-        // Simulate a rename-from-lower that the mount path would trigger.
-        Assert::IsTrue(NT_SUCCESS(cu.HandleDirectoryRename(
-            L"src-secured", L"dst-secured", /*sourceIsInLower=*/true)));
+        Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
+            L"src-secured", L"dst-secured", ReplaceExisting::No)));
 
         const std::wstring newKid = env.Upper() + L"\\dst-secured\\kid.txt";
         const size_t countOnChild = CountDaclAcesForSid(newKid, everyone.sid);
@@ -287,12 +276,8 @@ public:
             L"ACE. Missing = access-control state silently weakened by rename.");
     }
 
-    // ------------------------------------------------------------------------
-    // SACL / audit ACE propagation.
-    //
     // CopySecurityDescriptor requests SACL_SECURITY_INFORMATION when the
     // process holds SE_SECURITY_NAME, so audit ACEs survive copy-up.
-    // ------------------------------------------------------------------------
     TEST_METHOD(CopyUp_SaclAuditAce_PreservedOnCopyUp) {
         if (!LayerMountTestShared::TryEnablePrivilege(SE_SECURITY_NAME)) {
             Logger::WriteMessage(L"[SKIP] SE_SECURITY_NAME not held by this user");
@@ -364,4 +349,4 @@ public:
     }
 };
 
-} // namespace LayerMountTests
+}

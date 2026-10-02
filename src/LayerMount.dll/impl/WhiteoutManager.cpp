@@ -62,8 +62,8 @@ bool MarkerFileExists(const std::wstring& path) {
 
 }
 
-WhiteoutManager::WhiteoutManager(const LayerConfig& config, Cache* cache)
-    : config_(config)
+WhiteoutManager::WhiteoutManager(ConfigRef config, Cache* cache)
+    : config_(config.Get())
     , cache_(cache) {
 }
 

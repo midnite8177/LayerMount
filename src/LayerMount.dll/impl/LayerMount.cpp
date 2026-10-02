@@ -2176,8 +2176,11 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
         whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath);
 
     if (isDirectory) {
-        NTSTATUS status = copyUp_->HandleDirectoryRename(
-            oldNorm, newNorm, lowerHasSource, replaceIfExists != FALSE);
+        const ReplaceExisting replace =
+            replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No;
+        NTSTATUS status = lowerHasSource
+            ? copyUp_->RenameLowerDirectory(oldNorm, newNorm, replace)
+            : copyUp_->RenameUpperDirectory(oldNorm, newNorm, replace);
         if (!NT_SUCCESS(status)) return status;
     } else {
         if (!upperHasSource) {

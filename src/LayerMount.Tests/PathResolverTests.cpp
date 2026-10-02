@@ -1,7 +1,3 @@
-// Unit tests for PathResolver. Test the class in isolation — do NOT mount
-// an overlay, do NOT invoke host-adapter callbacks. Mount/callback/end-to-
-// end coverage lives in the host-adapter integration test suites.
-
 #include "pch.h"
 #include "TestFixture.h"
 
@@ -14,10 +10,11 @@ using namespace LayerMount;
 
 namespace LayerMountTests {
 
+static_assert(RefusesTemporaryConfig<PathResolver, WhiteoutManager&, Cache&>,
+    "PathResolver keeps a reference to its LayerConfig");
+
 TEST_CLASS(PathResolverTests) {
 public:
-    // --- Single-layer resolution ---
-
     TEST_METHOD(ResolvePath_SingleLayerUpperOnly_FileInUpper_ReturnsUpper) {
         TempLayerEnvironment env(0);
         env.WriteFile(env.Upper(), L"foo.txt", "hello");
@@ -44,8 +41,6 @@ public:
         ResolvedPath result = resolver.ResolvePath(L"missing.txt");
         Assert::IsFalse(result.Found(), L"Expected file to not be found");
     }
-
-    // --- Two-layer resolution ---
 
     TEST_METHOD(ResolvePath_TwoLayer_FileOnlyInLower_ReturnsLower) {
         TempLayerEnvironment env(1);
@@ -76,8 +71,6 @@ public:
         Assert::IsTrue(result.Found());
         Assert::IsTrue(result.source == LayerSource::Upper, L"Upper should win precedence");
     }
-
-    // --- Multi-layer resolution ---
 
     TEST_METHOD(ResolvePath_ThreeLayer_HitsDeepestLayerOnly_ReturnsCorrectIndex) {
         TempLayerEnvironment env(3);
@@ -121,8 +114,6 @@ public:
         ResolvedPath result = resolver.ResolvePath(L"nowhere.txt");
         Assert::IsFalse(result.Found());
     }
-
-    // --- Path normalization ---
 
     TEST_METHOD(ResolvePath_LeadingBackslash_NormalizedIdenticalToWithout) {
         TempLayerEnvironment env(0);
@@ -180,8 +171,6 @@ public:
         ResolvedPath first = resolver.ResolvePath(L"cached.txt");
         Assert::IsTrue(first.Found(), L"First resolution should find the file");
 
-        // Delete the file on disk behind the resolver's back.
-        // A fresh filesystem check would return not-found.
         std::wstring onDisk = env.Upper() + L"\\cached.txt";
         Assert::IsTrue(::DeleteFileW(onDisk.c_str()) != FALSE, L"Failed to delete file");
 
@@ -205,8 +194,6 @@ public:
         Assert::IsTrue(result.source == LayerSource::Upper);
         Assert::AreEqual(env.Upper(), result.absolutePath);
     }
-
-    // --- ExistsInUpper ---
 
     TEST_METHOD(ExistsInUpper_FileInLowerOnly_ReturnsFalse) {
         TempLayerEnvironment env(1);
@@ -232,8 +219,6 @@ public:
         Assert::IsTrue(resolver.ExistsInUpper(L"upperfile.txt"));
     }
 
-    // --- GetUpperPath ---
-
     TEST_METHOD(GetUpperPath_ReturnsUpperPathSlashRelative) {
         TempLayerEnvironment env(0);
 
@@ -246,8 +231,6 @@ public:
         std::wstring expected = env.Upper() + L"\\foo.txt";
         Assert::AreEqual(expected, got);
     }
-
-    // --- ResolveLowerPath ---
 
     TEST_METHOD(ResolveLowerPath_FileInBoth_SkipsUpperReturnsLower) {
         TempLayerEnvironment env(1);
@@ -264,8 +247,6 @@ public:
         Assert::IsTrue(result.source == LayerSource::Lower, L"Should skip upper and find lower");
         Assert::AreEqual(0, result.lowerIndex);
     }
-
-    // --- HasTypeConflict ---
 
     TEST_METHOD(HasTypeConflict_FileInUpperDirInLower_ReturnsTrue) {
         TempLayerEnvironment env(1);

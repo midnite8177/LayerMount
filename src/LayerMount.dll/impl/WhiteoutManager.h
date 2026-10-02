@@ -21,7 +21,7 @@ enum class WhiteoutType {
 class WhiteoutManager {
 public:
     // A null cache turns off cache invalidation.
-    explicit WhiteoutManager(const LayerConfig& config, Cache* cache);
+    explicit WhiteoutManager(ConfigRef config, Cache* cache);
 
     // A null emitter turns off event emission.
     void SetEventEmitter(::LayerMount::abi::EventEmitter* events) noexcept {
@@ -45,7 +45,6 @@ public:
     bool HasWhiteout(const std::wstring& relativePath,
                      const std::wstring& layerPath) const;
 
-    // Check all layers (upper first, then lowers in order)
     bool HasWhiteoutInAnyLayer(const std::wstring& relativePath) const;
 
     // Both functions change the upper layer only.

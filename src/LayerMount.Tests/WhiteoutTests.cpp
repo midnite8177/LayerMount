@@ -63,6 +63,9 @@ void AssertHiddenFromListingAndLookup(const std::map<std::wstring, MergedEntry>&
 
 }
 
+static_assert(RefusesTemporaryConfig<WhiteoutManager, Cache*>,
+    "WhiteoutManager keeps a reference to its LayerConfig");
+
 TEST_CLASS(WhiteoutTests) {
 public:
     TEST_CLASS_INITIALIZE(ClassInit) {

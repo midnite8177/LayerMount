@@ -11,11 +11,24 @@
 #include <exception>
 #include <functional>
 #include <rpc.h>
+#include <type_traits>
 #include <winioctl.h>
 
 namespace LayerMountTests {
 
 namespace fs = std::filesystem;
+
+// True when T, built from a LayerConfig followed by Rest, accepts a named
+// config and refuses a temporary one.
+template <class T, class... Rest>
+constexpr bool RefusesTemporaryConfig =
+    !std::is_constructible_v<T, LayerMount::LayerConfig, Rest...> &&
+    !std::is_constructible_v<T, const LayerMount::LayerConfig, Rest...> &&
+    std::is_constructible_v<T, LayerMount::LayerConfig&, Rest...> &&
+    std::is_constructible_v<T, const LayerMount::LayerConfig&, Rest...>;
+
+static_assert(RefusesTemporaryConfig<LayerMount::ConfigRef>,
+    "ConfigRef keeps a reference to its LayerConfig");
 
 inline std::wstring MakeUniqueTempRoot() {
     wchar_t tempBuf[MAX_PATH] = {};

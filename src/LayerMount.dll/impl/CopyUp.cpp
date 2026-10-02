@@ -584,7 +584,22 @@ NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
     return ExtendToSize(dstHandle, srcSize);
 }
 
-} // namespace
+// Deletes path, with its whole tree when it is a directory. Does nothing
+// when path does not exist.
+void RemoveEntry(const std::wstring& path) {
+    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    } else {
+        ::DeleteFileW(path.c_str());
+    }
+}
+
+}
 
 namespace LayerMount {
 
@@ -674,16 +689,12 @@ private:
     bool restored_ = false;
 };
 
-// ---------------------------------------------------------------------------
-// Construction
-// ---------------------------------------------------------------------------
-
-CopyUp::CopyUp(const LayerConfig& config,
+CopyUp::CopyUp(ConfigRef config,
                PathResolver& pathResolver,
                WhiteoutManager& whiteoutMgr,
                Cache& cache,
                LayerMountStats& stats)
-    : config_(config)
+    : config_(config.Get())
     , pathResolver_(pathResolver)
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache)
@@ -732,19 +743,15 @@ void CopyUp::CleanWorkDirectory() {
 
 NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
                                     const std::wstring& finalUpperPath) {
-    // Ensure parent directory exists
     std::filesystem::path parentDir = std::filesystem::path(finalUpperPath).parent_path();
     if (!parentDir.empty()) {
         EnsureDirectoryExists(parentDir.wstring());
     }
 
-    // MOVEFILE_COPY_ALLOWED lets cross-volume work_dir layouts succeed via
-    // copy+delete fallback. Same-volume layouts are unaffected (rename is
-    // still atomic). Without this flag MoveFileExW returns ERROR_NOT_SAME_DEVICE
-    // when work_dir lives on a different volume from upper, breaking copy-up
-    // entirely in those configs. Atomicity is best-effort cross-volume — the
-    // copy is not crash-safe — but functional correctness wins over a hard
-    // failure.
+    // Without MOVEFILE_COPY_ALLOWED, MoveFileExW fails with
+    // ERROR_NOT_SAME_DEVICE when the work directory and the upper are on
+    // different volumes. With it, the move falls back to a copy and a delete,
+    // which is not crash-safe. On one volume the move stays an atomic rename.
     DWORD flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH |
                   MOVEFILE_COPY_ALLOWED;
     if (MoveFileExW(workPath.c_str(), finalUpperPath.c_str(), flags)) {
@@ -1462,233 +1469,98 @@ NTSTATUS CopyUp::SecureAndTagUpperDirectory(const std::wstring& sourcePath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
-                                        const std::wstring& newRelativePath,
-                                        bool sourceIsInLower,
-                                        bool replaceIfExists) {
+bool CopyUp::DestinationExistsInMerged(const std::wstring& normalizedPath) const {
+    const bool destInUpper = pathResolver_.ExistsInUpper(normalizedPath);
+    const bool destWhitedOut =
+        whiteoutMgr_.HasWhiteout(normalizedPath, config_.upperPath);
+    const bool destInLower =
+        pathResolver_.ResolveLowerPath(normalizedPath).Found();
+    return destInUpper || (destInLower && !destWhitedOut);
+}
+
+NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
+                                    const std::wstring& newUpperPath) {
+    static constexpr std::wstring_view kWhPrefix(L".wh.");
+    static constexpr std::wstring_view kOpqMarker(L".wh..wh..opq");
+
+    WIN32_FIND_DATAW fd{};
+    const std::wstring pattern = oldUpperPath + L"\\*";
+    HANDLE hFind = ::FindFirstFileW(pattern.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return STATUS_SUCCESS;
+    }
+
+    do {
+        if (fd.cFileName[0] == L'.' &&
+            (fd.cFileName[1] == 0 ||
+             (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))) continue;
+
+        const std::wstring name = fd.cFileName;
+        const std::wstring childSrc = oldUpperPath + L"\\" + name;
+        const std::wstring childDst = newUpperPath + L"\\" + name;
+
+        if (name == kOpqMarker) continue;
+
+        if (name.size() > kWhPrefix.size() &&
+            std::equal(kWhPrefix.begin(), kWhPrefix.end(), name.begin())) {
+            RemoveEntry(newUpperPath + L"\\" + name.substr(kWhPrefix.size()));
+            continue;
+        }
+
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            RemoveEntry(childDst);
+        }
+        const NTSTATUS childStatus = CopyTreePreservingMetadata(childSrc, childDst);
+        if (!NT_SUCCESS(childStatus)) {
+            ::FindClose(hFind);
+            return childStatus;
+        }
+    } while (::FindNextFileW(hFind, &fd));
+    ::FindClose(hFind);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::RenameLowerDirectory(const std::wstring& oldRelativePath,
+                                      const std::wstring& newRelativePath,
+                                      ReplaceExisting replace) {
     std::wstring oldNorm = NormalizePath(oldRelativePath);
     std::wstring newNorm = NormalizePath(newRelativePath);
     std::wstring newUpperPath = pathResolver_.GetUpperPath(newNorm);
 
-    // Collision guard. Before any mutation we must decide whether the
-    // destination already exists in the merged view. If it does, a rename
-    // without replaceIfExists is a failure — NOT a silent merge (lower→dst)
-    // or overwrite (upper→dst). Historical behaviour ignored this flag
-    // entirely; integration tests and Win32 callers that rely on it (e.g.
-    // git, MSBuild, installers) saw corrupt overlay state on collision.
-    if (!replaceIfExists) {
-        const bool destInUpper = pathResolver_.ExistsInUpper(newNorm);
-        const bool destWhitedOut =
-            whiteoutMgr_.HasWhiteout(newNorm, config_.upperPath);
-        const bool destInLower =
-            pathResolver_.ResolveLowerPath(newNorm).Found();
-        // A whiteout in upper hides the lower entry, so the destination
-        // does NOT exist in the merged view even if lower has content.
-        const bool destExistsInMerged =
-            destInUpper || (destInLower && !destWhitedOut);
-        if (destExistsInMerged) {
-            return STATUS_OBJECT_NAME_COLLISION;
-        }
+    if (replace == ReplaceExisting::No && DestinationExistsInMerged(newNorm)) {
+        return STATUS_OBJECT_NAME_COLLISION;
     }
 
-    if (sourceIsInLower) {
-        // Resolve source in lower layers
-        ResolvedPath source = pathResolver_.ResolveLowerPath(oldNorm);
-        if (!source.Found()) {
-            return STATUS_OBJECT_NAME_NOT_FOUND;
+    ResolvedPath source = pathResolver_.ResolveLowerPath(oldNorm);
+    if (!source.Found()) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    EnsureDirectoryExists(std::filesystem::path(newUpperPath).parent_path().wstring());
+
+    // Copy a junction or directory symlink as a link and never make it
+    // opaque. SetOpaque would write its marker through the link into the
+    // external target.
+    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+        capabilities_.HasReparsePoints()) {
+        NTSTATUS rpStatus = CopyUpReparsePointEntry(
+            source.absolutePath, newUpperPath, source.attributes);
+        if (!NT_SUCCESS(rpStatus)) {
+            return rpStatus;
         }
 
-        // Ensure parent of new path exists
-        EnsureDirectoryExists(std::filesystem::path(newUpperPath).parent_path().wstring());
-
-        // Reparse-point short-circuit (junction / directory-symlink source).
-        // The opacity + recursive-merge dance below is meaningless for a
-        // reparse object — it has no overlay-shadow children, and SetOpaque
-        // on a junction would write a marker file INSIDE the link, which
-        // follows through to the external target and mutates state outside
-        // the overlay. Just copy the reparse entry, drop any prior upper
-        // shadow at the old path, and create the whiteout.
-        //
-        // Capability gate: an upper layer that
-        // doesn't support reparse points cannot HOLD a junction/symlink at
-        // all. Skip the short-circuit and fall through to the recursive
-        // CopyTreePreservingMetadata branch -- that copies the link's
-        // *target* contents into a regular directory, losing the link
-        // semantics but preserving the data. Emit one LM_EVT_WARNING per
-        // affected rename so observability tooling can surface the
-        // degradation.
-        if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
-            capabilities_.HasReparsePoints()) {
-            NTSTATUS rpStatus = CopyUpReparsePointEntry(
-                source.absolutePath, newUpperPath, source.attributes);
-            if (!NT_SUCCESS(rpStatus)) {
-                return rpStatus;
-            }
-
-            // Remove the upper shadow at the old path if one was previously
-            // copied up (e.g. from the rename's own SOpen). For a reparse
-            // entry, RemoveDirectoryW on the link removes just the link
-            // object (kernel-level), not the external target.
-            const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
-            const DWORD oldAttrs = ::GetFileAttributesW(oldUpperPath.c_str());
-            if (oldAttrs != INVALID_FILE_ATTRIBUTES) {
-                if ((oldAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                    ::RemoveDirectoryW(oldUpperPath.c_str());
-                } else {
-                    ::DeleteFileW(oldUpperPath.c_str());
-                }
-            }
-
-            // Without the old-path whiteout, the lower-layer directory will
-            // resurface after the rename — callers saw success but the tree
-            // reappears. Surface the failure instead of silently completing.
-            if (!whiteoutMgr_.CreateWhiteout(oldNorm, WhiteoutType::Directory)) {
-                const DWORD whErr = ::GetLastError();
-                cache_.InvalidateWithAncestors(oldNorm);
-                cache_.InvalidateWithAncestors(newNorm);
-                return whErr ? ::LayerMount::NtStatusFromWin32(whErr)
-                             : STATUS_ACCESS_DENIED;
-            }
-            cache_.InvalidateWithAncestors(oldNorm);
-            cache_.InvalidateWithAncestors(newNorm);
-            return STATUS_SUCCESS;
-        }
-
-        // If the source is a reparse point but the host's upper layer
-        // doesn't support reparse points, we just fell through here from
-        // the gated short-circuit above. Surface the degradation so
-        // hosts can log/audit it.
-        if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
-            !capabilities_.HasReparsePoints() && events_ != nullptr) {
-            events_->Emit(LM_EVT_WARNING, S_OK, oldNorm.c_str(),
-                L"Directory rename of a reparse-point source forced full "
-                L"recursive copy-up: upper layer lacks LM_CAP_REPARSE_POINTS, "
-                L"link semantics will not be preserved.");
-        }
-
-        // Recursive copy from lower to new upper location. Use a custom walker
-        // so reparse points (symlinks/junctions) and sparse files preserve
-        // their tags/sparsity — std::filesystem::copy follows symlinks and
-        // copies sparse files as dense, which silently drops tree fidelity.
-        NTSTATUS copyStatus = CopyTreePreservingMetadata(
-            source.absolutePath, newUpperPath);
-        if (!NT_SUCCESS(copyStatus)) {
-            // Tear down the half-built destination. CopyTree now surfaces
-            // real child failures (file-over-dir collision, ACL denial,
-            // I/O error); leaving partial state at newUpperPath would
-            // poison merged-view reads even though the rename returned
-            // failure to the caller.
-            std::error_code ec;
-            std::filesystem::remove_all(newUpperPath, ec);
-            return copyStatus;
-        }
-
-        // LayerMount the upper shadow (if any) on top of the lower copy so any
-        // pre-existing overlay state carries through to the renamed path.
-        // Without this, `upper/src/.wh.child` stays behind at the old path
-        // while `upper/dst` shows `child` resurrected from lower.
-        //
-        // Two special child kinds need careful handling:
-        //   - ".wh.<name>" whiteouts: instead of copying the whiteout file
-        //     verbatim (which would leave an inconsistent upper state where
-        //     both `<name>` and `.wh.<name>` coexist), delete the matching
-        //     `<name>` from the destination. The destination is opaque after
-        //     the rename (SetOpaque below), so the whiteout marker itself is
-        //     redundant and we don't need to carry it over.
-        //   - ".wh..wh..opq" opaque marker + the overlay's :overlay.opaque ADS:
-        //     we re-apply opacity via SetOpaque(newNorm) ourselves, so skip
-        //     the marker to avoid double bookkeeping.
-        //
-        // Non-whiteout upper content (a real shadow file that was written in
-        // upper and thus shadows the lower) is just overwritten on top of the
-        // lower copy — that's the existing "upper wins" semantic.
-        std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
-        DWORD oldUpperAttrs = GetFileAttributesW(oldUpperPath.c_str());
-        if (oldUpperAttrs != INVALID_FILE_ATTRIBUTES &&
-            (oldUpperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            static constexpr std::wstring_view kWhPrefix(L".wh.");
-            static constexpr std::wstring_view kOpqMarker(L".wh..wh..opq");
-
-            WIN32_FIND_DATAW fd{};
-            const std::wstring pattern = oldUpperPath + L"\\*";
-            HANDLE hFind = ::FindFirstFileW(pattern.c_str(), &fd);
-            if (hFind != INVALID_HANDLE_VALUE) {
-                do {
-                    if (fd.cFileName[0] == L'.' &&
-                        (fd.cFileName[1] == 0 ||
-                         (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))) continue;
-
-                    const std::wstring name = fd.cFileName;
-                    const std::wstring childSrc = oldUpperPath + L"\\" + name;
-                    const std::wstring childDst = newUpperPath + L"\\" + name;
-
-                    // Skip the opaque marker; SetOpaque below handles opacity.
-                    if (name == kOpqMarker) continue;
-
-                    // Whiteout: delete the shadowed file from the destination
-                    // instead of carrying the marker over.
-                    if (name.size() > kWhPrefix.size() &&
-                        std::equal(kWhPrefix.begin(), kWhPrefix.end(),
-                                    name.begin())) {
-                        const std::wstring target =
-                            newUpperPath + L"\\" + name.substr(kWhPrefix.size());
-                        DWORD a = ::GetFileAttributesW(target.c_str());
-                        if (a != INVALID_FILE_ATTRIBUTES) {
-                            if (a & FILE_ATTRIBUTE_DIRECTORY) {
-                                std::error_code ec;
-                                std::filesystem::remove_all(target, ec);
-                            } else {
-                                ::DeleteFileW(target.c_str());
-                            }
-                        }
-                        continue;
-                    }
-
-                    // A real upper shadow file or directory overlays the lower copy.
-                    NTSTATUS childStatus = STATUS_SUCCESS;
-                    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                        DWORD targetAttrs = ::GetFileAttributesW(childDst.c_str());
-                        if (targetAttrs != INVALID_FILE_ATTRIBUTES) {
-                            if (targetAttrs & FILE_ATTRIBUTE_DIRECTORY) {
-                                std::error_code ec;
-                                std::filesystem::remove_all(childDst, ec);
-                            } else {
-                                ::DeleteFileW(childDst.c_str());
-                            }
-                        }
-                        childStatus = CopyTreePreservingMetadata(childSrc, childDst);
-                    } else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                        childStatus = CopyTreePreservingMetadata(childSrc, childDst);
-                    } else {
-                        childStatus = CopyTreePreservingMetadata(childSrc, childDst);
-                    }
-
-                    if (!NT_SUCCESS(childStatus)) {
-                        ::FindClose(hFind);
-                        std::error_code ec;
-                        std::filesystem::remove_all(newUpperPath, ec);
-                        return childStatus;
-                    }
-                } while (::FindNextFileW(hFind, &fd));
-                ::FindClose(hFind);
+        // RemoveDirectoryW on a junction or directory symlink removes
+        // the link, not its target.
+        const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
+        const DWORD oldAttrs = ::GetFileAttributesW(oldUpperPath.c_str());
+        if (oldAttrs != INVALID_FILE_ATTRIBUTES) {
+            if ((oldAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                ::RemoveDirectoryW(oldUpperPath.c_str());
+            } else {
+                ::DeleteFileW(oldUpperPath.c_str());
             }
         }
 
-        // Mark new location as opaque (hide lower layer contents at new path)
-        whiteoutMgr_.SetOpaque(newNorm);
-
-        // Tear down the upper shadow at the old path. std::filesystem::remove_all
-        // succeeds for an empty or a non-existent directory, which is exactly
-        // the "RemoveDirectoryW silently no-ops on a missing path" contract we
-        // had before — just now it also handles shadows that contained whiteout
-        // files. ADS on the directory itself don't count as contents so this
-        // is fine for a plain shallow stub too.
-        std::error_code ecRemove;
-        std::filesystem::remove_all(oldUpperPath, ecRemove);
-
-        // Create whiteout at old location so the lower subtree stops surfacing.
-        // Surface the failure if the marker can't be persisted — otherwise the
-        // lower directory tree resurfaces after a "successful" rename.
         if (!whiteoutMgr_.CreateWhiteout(oldNorm, WhiteoutType::Directory)) {
             const DWORD whErr = ::GetLastError();
             cache_.InvalidateWithAncestors(oldNorm);
@@ -1696,44 +1568,94 @@ NTSTATUS CopyUp::HandleDirectoryRename(const std::wstring& oldRelativePath,
             return whErr ? ::LayerMount::NtStatusFromWin32(whErr)
                          : STATUS_ACCESS_DENIED;
         }
-    } else {
-        // Renaming within upper layer
-        std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
+        cache_.InvalidateWithAncestors(oldNorm);
+        cache_.InvalidateWithAncestors(newNorm);
+        return STATUS_SUCCESS;
+    }
 
-        // Check if old location was opaque
-        bool wasOpaque = whiteoutMgr_.IsOpaque(oldNorm);
+    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+        !capabilities_.HasReparsePoints() && events_ != nullptr) {
+        events_->Emit(LM_EVT_WARNING, S_OK, oldNorm.c_str(),
+            L"Directory rename of a reparse-point source forced full "
+            L"recursive copy-up: upper layer lacks LM_CAP_REPARSE_POINTS, "
+            L"link semantics will not be preserved.");
+    }
 
-        DWORD flags = replaceIfExists ? MOVEFILE_REPLACE_EXISTING : 0;
-        if (!MoveFileExW(oldUpperPath.c_str(), newUpperPath.c_str(), flags)) {
-            return ::LayerMount::NtStatusFromWin32(GetLastError());
-        }
+    NTSTATUS copyStatus = CopyTreePreservingMetadata(
+        source.absolutePath, newUpperPath);
+    if (!NT_SUCCESS(copyStatus)) {
+        std::error_code ec;
+        std::filesystem::remove_all(newUpperPath, ec);
+        return copyStatus;
+    }
 
-        // Transfer opaque marker
-        if (wasOpaque) {
-            whiteoutMgr_.RemoveOpaque(oldNorm);
-            whiteoutMgr_.SetOpaque(newNorm);
+    std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
+    DWORD oldUpperAttrs = GetFileAttributesW(oldUpperPath.c_str());
+    if (oldUpperAttrs != INVALID_FILE_ATTRIBUTES &&
+        (oldUpperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        const NTSTATUS overlayStatus = OverlayUpperShadow(oldUpperPath, newUpperPath);
+        if (!NT_SUCCESS(overlayStatus)) {
+            std::error_code ec;
+            std::filesystem::remove_all(newUpperPath, ec);
+            return overlayStatus;
         }
     }
 
-    // Invalidate cache for both paths
+    whiteoutMgr_.SetOpaque(newNorm);
+
+    std::error_code ecRemove;
+    std::filesystem::remove_all(oldUpperPath, ecRemove);
+
+    if (!whiteoutMgr_.CreateWhiteout(oldNorm, WhiteoutType::Directory)) {
+        const DWORD whErr = ::GetLastError();
+        cache_.InvalidateWithAncestors(oldNorm);
+        cache_.InvalidateWithAncestors(newNorm);
+        return whErr ? ::LayerMount::NtStatusFromWin32(whErr)
+                     : STATUS_ACCESS_DENIED;
+    }
+
     cache_.InvalidateWithAncestors(oldNorm);
     cache_.InvalidateWithAncestors(newNorm);
 
     return STATUS_SUCCESS;
 }
 
-// ---------------------------------------------------------------------------
-// Tree copy preserving reparse points, sparse files, and ADS
-// ---------------------------------------------------------------------------
+NTSTATUS CopyUp::RenameUpperDirectory(const std::wstring& oldRelativePath,
+                                      const std::wstring& newRelativePath,
+                                      ReplaceExisting replace) {
+    std::wstring oldNorm = NormalizePath(oldRelativePath);
+    std::wstring newNorm = NormalizePath(newRelativePath);
+    std::wstring newUpperPath = pathResolver_.GetUpperPath(newNorm);
+
+    if (replace == ReplaceExisting::No && DestinationExistsInMerged(newNorm)) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+
+    std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
+
+    bool wasOpaque = whiteoutMgr_.IsOpaque(oldNorm);
+
+    DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
+    if (!MoveFileExW(oldUpperPath.c_str(), newUpperPath.c_str(), flags)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+
+    if (wasOpaque) {
+        whiteoutMgr_.RemoveOpaque(oldNorm);
+        whiteoutMgr_.SetOpaque(newNorm);
+    }
+
+    cache_.InvalidateWithAncestors(oldNorm);
+    cache_.InvalidateWithAncestors(newNorm);
+
+    return STATUS_SUCCESS;
+}
 
 namespace {
 
 // Copy a single regular file with its ADS, and its sparse state when the
-// host adapter has the sparse capability. Mirrors the tail
-// half of CopyUpFile but without the work-dir atomic-commit dance, because
-// the caller is already operating inside a new upper-layer subtree and
-// doesn't need crash-safety against the destination appearing half-formed
-// (the whole subtree gets removed on failure at a higher level).
+// host adapter has the sparse capability. No work-dir commit: on failure
+// the caller removes the whole new subtree.
 NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
                                      const std::wstring& dstAbs,
                                      const LayerConfig* config,
@@ -1931,16 +1853,12 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
         if (err != ERROR_ALREADY_EXISTS) {
             return ::LayerMount::NtStatusFromWin32(err);
         }
-        // ERROR_ALREADY_EXISTS is returned both for an existing DIRECTORY
-        // (benign — we overlay into it) and an existing FILE (a type
-        // collision — we cannot recurse into a file). Without this check,
-        // a tree rename into a destination where `dst\child` is already a
-        // file would treat the file as a "directory" and then fail every
-        // subsequent child copy with PATH_NOT_FOUND. Because the caller
-        // previously discarded those errors, the rename appeared to
-        // succeed with a corrupt partial tree. Detect the type conflict
-        // up front and surface STATUS_OBJECT_NAME_COLLISION so the caller
-        // can tear down.
+        // ERROR_ALREADY_EXISTS covers both an existing directory, which the
+        // copy overlays into, and an existing file, which is a type
+        // collision. Without this check, a tree rename into a destination
+        // where `dst\child` is a file treats the file as a directory and
+        // fails every child copy with PATH_NOT_FOUND. Return
+        // STATUS_OBJECT_NAME_COLLISION so the caller can tear down.
         DWORD existingAttrs = ::GetFileAttributesW(dstAbs.c_str());
         if (existingAttrs == INVALID_FILE_ATTRIBUTES) {
             return ::LayerMount::NtStatusFromWin32(::GetLastError());
@@ -2068,7 +1986,7 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
     return STATUS_SUCCESS;
 }
 
-} // namespace
+}
 
 NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
                                               const std::wstring& dstAbs) {
@@ -2125,10 +2043,6 @@ NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
 
     return walkStatus;
 }
-
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
 
 NTSTATUS CopyUp::EnsureParentDirectories(const std::wstring& relativePath) {
     std::filesystem::path relPath(relativePath);
@@ -2201,4 +2115,4 @@ bool CopyUp::CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle) {
     return SetFileTime(dstHandle, &creation, &access, &write) != FALSE;
 }
 
-} // namespace LayerMount
+}

@@ -16,7 +16,6 @@ class WhiteoutManager;
 class Cache;
 class FileBasicInfoGuard;
 
-// RAII wrapper for Win32 HANDLEs
 class ScopedHandle {
 public:
     explicit ScopedHandle(HANDLE h = INVALID_HANDLE_VALUE) noexcept : h_(h) {}
@@ -42,46 +41,36 @@ private:
     HANDLE h_;
 };
 
+enum class ReplaceExisting { No, Yes };
+
 class CopyUp {
 public:
-    CopyUp(const LayerConfig& config,
+    CopyUp(ConfigRef config,
            PathResolver& pathResolver,
            WhiteoutManager& whiteoutMgr,
            Cache& cache,
            LayerMountStats& stats);
 
-    // Host capability gate + event emitter, both wired post-construction
-    // by LayerMount so the existing 5-arg test ctors still compile. When
-    // unset, capabilities_ defaults to "all bits on" -- engine takes the
-    // optimized path; events_ stays nullptr and Emit is a no-op.
     void SetCapabilityGate(::LayerMount::abi::CapabilityGate gate) noexcept { capabilities_ = gate; }
     void SetEventEmitter(::LayerMount::abi::EventEmitter* events) noexcept { events_ = events; }
 
     // Bump the copy-up stat counter and emit LM_EVT_COPY_UP to the host
-    // callback (if installed). Called at every successful commit point
-    // of CopyUpFile / CopyUpDirectory / CopyUpMetadataOnly /
-    // CompleteLazyCopyUp so the counter and the event stay in lockstep.
+    // callback when one is installed.
     void RecordCopyUp(const std::wstring& relativePath);
 
-    // --- Work directory management ---
-
-    // Generate a unique temp path in the work directory.
     std::wstring GenerateWorkPath();
 
-    // Purge stale temp files from the work directory. Called on startup.
+    // Deletes every #*.tmp in the work directory. Call it only when no
+    // copy-up is in flight.
     void CleanWorkDirectory();
 
-    // Atomically move a file from the work directory to the upper layer.
+    // Replaces finalUpperPath. Atomic only when the work directory and the
+    // upper share a volume.
     NTSTATUS CommitFromWorkDir(const std::wstring& workPath,
                                const std::wstring& finalUpperPath);
 
-    // --- Full copy-up ---
-
-    // Copy a file from a lower layer to the upper layer atomically.
     // Creates parent directories as needed. Preserves security, timestamps, data.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
-
-    // --- Metacopy ---
 
     // Copy only metadata (security, timestamps) as a sparse file. Data copied on demand.
     NTSTATUS CopyUpMetadataOnly(const std::wstring& relativePath);
@@ -91,46 +80,48 @@ public:
     // survives the fill. Clears the metacopy ADS flag when done.
     NTSTATUS CompleteLazyCopyUp(const std::wstring& relativePath);
 
-    // --- Directory copy-up ---
-
     // Copy a directory entry (not contents) from a lower layer to the upper layer.
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);
 
-    // --- Directory rename redirect ---
+    // Copies the lower tree and the old upper shadow to the new upper path,
+    // marks it opaque, and whites out the old path. A junction or directory
+    // symlink source, when the upper supports reparse points, is copied as
+    // a link, without its upper shadow and without opacity.
+    // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
+    // destination exists in the merged view.
+    NTSTATUS RenameLowerDirectory(const std::wstring& oldRelativePath,
+                                  const std::wstring& newRelativePath,
+                                  ReplaceExisting replace);
 
-    // Handle directory rename across layers.
-    // From lower: recursive copy + opaque + whiteout at old path.
-    // Within upper: MoveFileExW + transfer opaque marker.
-    //
-    // replaceIfExists mirrors the Win32 ReplaceIfExists/MOVEFILE_REPLACE_EXISTING
-    // semantics: when false, a rename whose destination already exists in
-    // the merged view must fail with STATUS_OBJECT_NAME_COLLISION instead of
-    // silently merging into (lower-source) or overwriting (upper-source) it.
-    // Default is false to match the historical behaviour of NTAPI Win32
-    // MoveFileW (no replace).
-    NTSTATUS HandleDirectoryRename(const std::wstring& oldRelativePath,
-                                   const std::wstring& newRelativePath,
-                                   bool sourceIsInLower,
-                                   bool replaceIfExists = false);
+    // Moves the upper directory and carries its opaque marker.
+    // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
+    // destination exists in the merged view.
+    NTSTATUS RenameUpperDirectory(const std::wstring& oldRelativePath,
+                                  const std::wstring& newRelativePath,
+                                  ReplaceExisting replace);
 
 private:
+    // A lower entry under a whiteout does not count.
+    bool DestinationExistsInMerged(const std::wstring& normalizedPath) const;
+
+    // Copies each old upper entry over newUpperPath. Skips the opaque marker
+    // and deletes each whited-out name instead of copying its whiteout,
+    // because the destination becomes opaque and those markers are redundant.
+    NTSTATUS OverlayUpperShadow(const std::wstring& oldUpperPath,
+                                const std::wstring& newUpperPath);
+
     // Ensure all ancestor directories exist in the upper layer, copying up as needed.
     NTSTATUS EnsureParentDirectories(const std::wstring& relativePath);
 
     // Recursively copy a directory tree from srcAbs to dstAbs preserving child
     // metadata that std::filesystem::copy drops: reparse points (symlinks /
     // junctions) stay as links, sparse files stay sparse, ADS ride along with
-    // their base file. Used by HandleDirectoryRename for lower→upper copies
-    // of non-trivial trees. Entries already present at dstAbs are overwritten
-    // (matches copy_options::overwrite_existing semantics) so this can also be
-    // used to overlay an upper-shadow tree on top of a lower copy.
+    // their base file.
     NTSTATUS CopyTreePreservingMetadata(const std::wstring& srcAbs,
                                          const std::wstring& dstAbs);
 
-    // Copy security descriptor from one path to another.
     bool CopySecurityDescriptor(const std::wstring& srcPath, const std::wstring& dstPath);
 
-    // Copy timestamps from one file/dir handle to another.
     bool CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle);
 
     // Write the copy-up bookkeeping metadata to upperPath. On failure,
@@ -226,4 +217,4 @@ private:
     std::unordered_set<std::wstring> inFlightCopyUps_;
 };
 
-} // namespace LayerMount
+}
