@@ -66,10 +66,42 @@ std::wstring WithStoredLeafName(const std::wstring& targetPath,
     return targetPath.substr(0, targetPath.find_last_of(L'\\') + 1) + fd.cFileName;
 }
 
+NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLink) {
+    *isLink = false;
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    constexpr DWORD kDirectoryReparsePoint =
+        FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+    if ((attributes & kDirectoryReparsePoint) != kDirectoryReparsePoint) {
+        return STATUS_SUCCESS;
+    }
+    HANDLE entry = ::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (entry == INVALID_HANDLE_VALUE) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+    FILE_ATTRIBUTE_TAG_INFO tagInfo{};
+    const BOOL read = ::GetFileInformationByHandleEx(
+        entry, FileAttributeTagInfo, &tagInfo, sizeof(tagInfo));
+    const DWORD readErr = read ? 0 : ::GetLastError();
+    ::CloseHandle(entry);
+    if (!read) {
+        return NtStatusFromWin32(readErr);
+    }
+    *isLink = IsReparseTagNameSurrogate(tagInfo.ReparseTag);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
-                        ReplaceExisting replace) {
-    const DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
+                        ReplaceExisting replace,
+                        CopyAcrossVolumes copy) {
+    const DWORD flags =
+        (replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0) |
+        (copy == CopyAcrossVolumes::Yes ? MOVEFILE_COPY_ALLOWED : 0);
     if (::MoveFileExW(from.c_str(), to.c_str(), flags)) {
         return STATUS_SUCCESS;
     }
@@ -82,11 +114,14 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
     // parent to the upper parent, MoveFileExW fails the destination DACL
     // check although the engine owns the upper entry. With SE_RESTORE_NAME,
     // a handle opened with backup semantics skips that check through
-    // FileRenameInfo.
+    // FileRenameInfo. FILE_FLAG_OPEN_REPARSE_POINT opens a junction or a
+    // symbolic link itself. Without it, the handle is the link's target, and
+    // the rename moves the target.
     HANDLE src = ::CreateFileW(from.c_str(),
         GENERIC_READ | DELETE | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (src == INVALID_HANDLE_VALUE) {
         return NtStatusFromWin32(::GetLastError());
     }

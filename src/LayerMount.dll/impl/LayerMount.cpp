@@ -1810,14 +1810,33 @@ NTSTATUS LayerMount::DirectoryEmptinessStatus(const std::wstring& dirNorm) const
     return STATUS_SUCCESS;
 }
 
+namespace {
+
+NTSTATUS RenameEntryKindOf(const ResolvedPath& entry, RenameEntryKind* kind) {
+    if ((entry.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        *kind = RenameEntryKind::File;
+        return STATUS_SUCCESS;
+    }
+    bool isLink = false;
+    const NTSTATUS status = IsDirectoryLink(entry.absolutePath, entry.attributes, &isLink);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    *kind = isLink ? RenameEntryKind::Link : RenameEntryKind::Directory;
+    return STATUS_SUCCESS;
+}
+
+}
+
 NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
-                                            bool isDirectory,
-                                            BOOLEAN replaceIfExists) const {
+                                            BOOLEAN replaceIfExists,
+                                            RenameKinds* kinds) const {
     const ResolvedPath destResolved = pathResolver_->ResolvePath(paths.newNorm);
     if (destResolved.Found() && !replaceIfExists) {
         return STATUS_OBJECT_NAME_COLLISION;
     }
-    if (isDirectory && IsInsideDirectory(paths.newNorm, paths.oldNorm)) {
+    if (kinds->source != RenameEntryKind::File &&
+        IsInsideDirectory(paths.newNorm, paths.oldNorm)) {
         return STATUS_INVALID_PARAMETER;
     }
     if (!destResolved.Found()) {
@@ -1826,12 +1845,18 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
     if (IsInsideDirectory(paths.oldNorm, paths.newNorm)) {
         return STATUS_DIRECTORY_NOT_EMPTY;
     }
-    const bool destinationIsDirectory =
-        (destResolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    if (isDirectory != destinationIsDirectory) {
-        return isDirectory ? STATUS_NOT_A_DIRECTORY : STATUS_FILE_IS_A_DIRECTORY;
+    RenameEntryKind destinationKind = RenameEntryKind::File;
+    const NTSTATUS kindStatus = RenameEntryKindOf(destResolved, &destinationKind);
+    if (!NT_SUCCESS(kindStatus)) {
+        return kindStatus;
     }
-    if (isDirectory) {
+    kinds->destination = destinationKind;
+    const bool sourceIsDirectory = kinds->source == RenameEntryKind::Directory;
+    const bool destinationIsDirectory = destinationKind == RenameEntryKind::Directory;
+    if (sourceIsDirectory != destinationIsDirectory) {
+        return sourceIsDirectory ? STATUS_NOT_A_DIRECTORY : STATUS_FILE_IS_A_DIRECTORY;
+    }
+    if (sourceIsDirectory) {
         return DirectoryEmptinessStatus(paths.newNorm);
     }
     return STATUS_SUCCESS;
@@ -2083,7 +2108,8 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
 
     status = MoveUpperEntry(
         pathResolver_->GetStoredUpperPath(oldRelativePath), newUpperPath,
-        replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No);
+        replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No,
+        CopyAcrossVolumes::No);
     if (!NT_SUCCESS(status)) return status;
 
     if (lowerHasSource) {
@@ -2127,15 +2153,14 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
                            const std::wstring& newRelativePath,
                            BOOLEAN replaceIfExists,
                            DWORD callerPid) {
-    std::wstring oldNorm = NormalizePath(oldRelativePath);
-    std::wstring newNorm = NormalizePath(newRelativePath);
-    const bool isSameLogicalPath = oldNorm == newNorm;
+    const std::wstring oldNorm = NormalizePath(oldRelativePath);
+    const std::wstring newNorm = NormalizePath(newRelativePath);
     const RenamePaths paths{oldNorm, newNorm};
 
     const NTSTATUS requestStatus = CheckRenameRequest(paths, callerPid);
     if (!NT_SUCCESS(requestStatus)) return requestStatus;
 
-    ResolvedPath sourceResolved = pathResolver_->ResolvePath(oldNorm);
+    const ResolvedPath sourceResolved = pathResolver_->ResolvePath(oldNorm);
     if (!sourceResolved.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
@@ -2143,18 +2168,32 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
         NormalizePathPreserveCase(newRelativePath)) {
         return STATUS_SUCCESS;
     }
-    const bool isDirectory =
-        (sourceResolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    RenameKinds kinds{RenameEntryKind::File, std::nullopt};
+    NTSTATUS status = RenameEntryKindOf(sourceResolved, &kinds.source);
+    if (!NT_SUCCESS(status)) return status;
+    if (oldNorm != newNorm) {
+        status = CheckRenameDestination(paths, replaceIfExists, &kinds);
+        if (!NT_SUCCESS(status)) return status;
+    }
+    return RenameCheckedEntry(oldRelativePath, newRelativePath, replaceIfExists, kinds);
+}
+
+NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
+                                        const std::wstring& newRelativePath,
+                                        BOOLEAN replaceIfExists,
+                                        const RenameKinds& kinds) {
+    const std::wstring oldNorm = NormalizePath(oldRelativePath);
+    const std::wstring newNorm = NormalizePath(newRelativePath);
+    const bool isSameLogicalPath = oldNorm == newNorm;
+    const bool isDirectory = kinds.source != RenameEntryKind::File;
 
     NTSTATUS status = STATUS_SUCCESS;
     RenameDestinationAside destinationAside;
-    if (!isSameLogicalPath) {
-        status = CheckRenameDestination(paths, isDirectory, replaceIfExists);
+    if (replaceIfExists && kinds.destination.has_value()) {
+        status = copyUp_->SetRenameDestinationAside(newNorm, kinds.source,
+                                                    *kinds.destination,
+                                                    &destinationAside);
         if (!NT_SUCCESS(status)) return status;
-        if (isDirectory && replaceIfExists) {
-            status = copyUp_->SetRenameDestinationAside(newNorm, &destinationAside);
-            if (!NT_SUCCESS(status)) return status;
-        }
     }
 
     const bool destHadWhiteout =
@@ -2169,8 +2208,8 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
         const CallerPath oldCallerPath(oldRelativePath);
         const CallerPath newCallerPath(newRelativePath);
         status = pathResolver_->ResolveLowerPath(oldNorm).Found()
-            ? copyUp_->RenameLowerDirectory(oldCallerPath, newCallerPath, replace)
-            : copyUp_->RenameUpperDirectory(oldCallerPath, newCallerPath, replace);
+            ? copyUp_->RenameLowerDirectory(oldCallerPath, newCallerPath, kinds.source, replace)
+            : copyUp_->RenameUpperDirectory(oldCallerPath, newCallerPath, kinds.source, replace);
     } else {
         status = RenameFileInUpper(oldRelativePath, newRelativePath, replaceIfExists,
                                    destHadWhiteout);
@@ -2202,50 +2241,31 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
     }
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
-    const bool isDirectory = ctx->isDirectory;
+    const RenamePaths paths{oldNorm, newNorm};
+
+    const NTSTATUS requestStatus = CheckRenameRequest(paths, callerPid);
+    if (!NT_SUCCESS(requestStatus)) return requestStatus;
+
+    const ResolvedPath sourceResolved = pathResolver_->ResolvePath(oldNorm);
+    if (!sourceResolved.Found()) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    RenameKinds kinds{RenameEntryKind::File, std::nullopt};
+    NTSTATUS status = RenameEntryKindOf(sourceResolved, &kinds.source);
+    if (!NT_SUCCESS(status)) return status;
     if (oldNorm != newNorm) {
-        const RenamePaths paths{oldNorm, newNorm};
-        const NTSTATUS requestStatus = CheckRenameRequest(paths, callerPid);
-        if (!NT_SUCCESS(requestStatus)) return requestStatus;
-        const NTSTATUS destinationStatus =
-            CheckRenameDestination(paths, isDirectory, replaceIfExists);
-        if (!NT_SUCCESS(destinationStatus)) return destinationStatus;
+        status = CheckRenameDestination(paths, replaceIfExists, &kinds);
+        if (!NT_SUCCESS(status)) return status;
     }
     const bool sourceWasInUpper = pathResolver_->ExistsInUpper(oldNorm);
     const std::wstring oldActualPath = ctx->actualPath;
-
-    NTSTATUS status = STATUS_SUCCESS;
-    if (isDirectory) {
-        if (ctx->handle != INVALID_HANDLE_VALUE) {
-            ::CloseHandle(ctx->handle);
-            ctx->handle = INVALID_HANDLE_VALUE;
-        }
-
-        status = Rename(oldRelativePath, newRelativePath,
-                        replaceIfExists, callerPid);
-        if (!NT_SUCCESS(status)) {
-            ctx->actualPath = oldActualPath;
-            ctx->handleNeedsReopen = true;
-            return status;
-        }
-
-        ctx->relativePath = newNorm;
-        ctx->actualPath = pathResolver_->GetUpperPathForNewEntry(CallerPath(newRelativePath));
-        ctx->writable = true;
-        if (!sourceWasInUpper) {
-            ctx->isMetacopyOnly = false;
-        }
-        ctx->handleNeedsReopen = true;
-        return STATUS_SUCCESS;
-    }
 
     if (ctx->handle != INVALID_HANDLE_VALUE) {
         ::CloseHandle(ctx->handle);
         ctx->handle = INVALID_HANDLE_VALUE;
     }
 
-    status = Rename(oldRelativePath, newRelativePath,
-                    replaceIfExists, callerPid);
+    status = RenameCheckedEntry(oldRelativePath, newRelativePath, replaceIfExists, kinds);
     if (!NT_SUCCESS(status)) {
         ctx->actualPath = oldActualPath;
         ctx->handleNeedsReopen = true;

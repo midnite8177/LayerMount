@@ -69,7 +69,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         const NTSTATUS st = cu.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
+            CallerPath(L"src"), CallerPath(L"dst"),
+            RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st));
 
         Assert::IsFalse(env.FileExists(env.Upper(), L"src"));
@@ -92,7 +93,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No)));
+            CallerPath(L"src"), CallerPath(L"dst"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\inner.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\deep\\more.txt"));
@@ -116,7 +118,8 @@ public:
         Assert::IsTrue(wm.IsOpaque(L"src"));
 
         Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No)));
+            CallerPath(L"src"), CallerPath(L"dst"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsFalse(wm.IsOpaque(L"src"),
             L"Opacity should no longer be reported for the vanished source path");
@@ -177,7 +180,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
-            CallerPath(L"ld"), CallerPath(L"newdir"), ReplaceExisting::No)));
+            CallerPath(L"ld"), CallerPath(L"newdir"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\top.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\nested\\inner.txt"));
@@ -360,7 +364,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         const NTSTATUS st = cu.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
+            CallerPath(L"src"), CallerPath(L"dst"),
+            RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -386,7 +391,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         const NTSTATUS st = cu.RenameLowerDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
+            CallerPath(L"src"), CallerPath(L"dst"),
+            RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st));
@@ -411,7 +417,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         const NTSTATUS st = cu.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::No);
+            CallerPath(L"src"), CallerPath(L"dst"),
+            RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st),
             L"Whited-out destination is invisible in merged view — rename "
             L"without replace must succeed, not collision.");
@@ -433,7 +440,8 @@ public:
         // ReplaceExisting::Yes gets past the top-level collision check, so
         // the copy reaches the child conflict.
         const NTSTATUS st = cu.RenameLowerDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"), ReplaceExisting::Yes);
+            CallerPath(L"src"), CallerPath(L"dst"),
+            RenameEntryKind::Directory, ReplaceExisting::Yes);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -592,6 +600,19 @@ bool CreateDirectoryJunction(const std::wstring& junction, const std::wstring& t
     const std::wstring command =
         L"cmd.exe /c mklink /J \"" + junction + L"\" \"" + target + L"\" >nul 2>&1";
     return _wsystem(command.c_str()) == 0;
+}
+
+bool CreateDirectorySymlink(const std::wstring& link, const std::wstring& target) {
+    return ::CreateSymbolicLinkW(link.c_str(), target.c_str(),
+        SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+}
+
+void AssertNoOpaqueMarkerIn(const std::wstring& directory) {
+    Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
+        ::GetFileAttributesW(OpaqueMarkerPath(directory).c_str()),
+        L"The rename must write no opaque marker file into the link target");
+    Assert::IsFalse(MetadataStore::HasOpaqueMetadata(directory, nullptr),
+        L"The rename must write no opaque stream onto the link target");
 }
 
 // Closes ctx after the rename, so a caller can compare the layers afterward.
@@ -1246,7 +1267,7 @@ public:
         }
     }
 
-    TEST_METHOD(ReplaceRename_FileOntoDirectoryJunction_FailsAsForADirectory) {
+    TEST_METHOD(ReplaceRename_FileOntoUpperJunction_ReplacesTheJunctionAndKeepsItsTarget) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
         env.WriteFile(env.Lower(0), L"f.txt", "f");
@@ -1255,16 +1276,17 @@ public:
             return;
         }
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const LayerSnapshot upperBefore(env.Upper());
         const LayerSnapshot targetBefore(env.Root() + L"\\target");
 
-        AssertStatus(STATUS_FILE_IS_A_DIRECTORY,
+        AssertStatus(STATUS_SUCCESS,
             mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid),
-            L"A replace rename of a file onto a directory junction must fail");
-        upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
-        targetBefore.AssertUnchanged(L"The refused rename must write nothing in the junction target");
-        Assert::IsTrue(HasAttribute(env.Upper() + L"\\link", FILE_ATTRIBUTE_REPARSE_POINT),
-            L"The upper link must stay a junction");
+            L"A replace rename of a file onto a directory junction must succeed");
+        AssertRootShowsOnlyFileNamed(mount, L"link");
+        Assert::AreEqual(std::string("f"), env.ReadFile(env.Upper(), L"link"),
+            L"The upper link must be the moved file");
+        targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
+        Assert::AreEqual(std::string("inside"), env.ReadFile(env.Root(), L"target\\inside.txt"),
+            L"The rename must leave the junction target's file");
     }
 
     TEST_METHOD(ReplaceRename_UpperDirectoryThatCannotMove_KeepsTheDestination) {
@@ -1312,10 +1334,196 @@ public:
         }
     }
 
-    TEST_METHOD(ReplaceRename_UpperJunctionOntoLowerDirectory_WritesNoOpaqueMarkerIntoTheTarget) {
+    TEST_METHOD(ReplaceRename_FileOntoLowerJunction_ShowsOnlyTheFile) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
-        env.CreateDir(env.Lower(0), L"dst");
+        env.WriteFile(env.Lower(0), L"f.txt", "f");
+        if (!CreateDirectoryJunction(env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the lower junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of a file onto a lower junction must succeed");
+        AssertRootShowsOnlyFileNamed(mount, L"link");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"link").entries.empty(),
+            L"The file must hide the lower junction's entries");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoDirectorySymlink_ReplacesTheSymlinkAndKeepsItsTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.WriteFile(env.Upper(), L"f.txt", "f");
+        if (!CreateDirectorySymlink(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] the upper directory symlink could not be created");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of a file onto a directory symlink must succeed");
+        AssertRootShowsOnlyFileNamed(mount, L"link");
+        Assert::AreEqual(std::string("f"), env.ReadFile(env.Upper(), L"link"),
+            L"The upper link must be the moved file");
+        targetBefore.AssertUnchanged(L"The rename must leave the symlink target's entries");
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoJunctionWhenTheMoveFails_RestoresTheJunction) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.WriteFile(env.Upper(), L"f.txt", "f");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            // An open handle without FILE_SHARE_DELETE blocks the move of f.txt.
+            const ScopedHandle heldSource(::CreateFileW(
+                (env.Upper() + L"\\f.txt").c_str(), GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL, nullptr));
+            Assert::IsTrue(heldSource.IsValid(), L"The test must hold f.txt open");
+            status = mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid);
+        }
+
+        Assert::IsFalse(NT_SUCCESS(status), L"The rename must fail while f.txt is open");
+        upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+        targetBefore.AssertUnchanged(L"The failed rename must leave the junction target's entries");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\link", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper link must be a junction again");
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoJunction_FailsWithNotADirectory) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            for (const DirectoryLayer junctionLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+                TempLayerEnvironment env(1);
+                env.CreateDir(env.Root(), L"target");
+                env.WriteFile(LayerRoot(env, sourceLayer), L"dir\\a.txt", "a");
+                if (!CreateDirectoryJunction(LayerRoot(env, junctionLayer) + L"\\link",
+                                             env.Root() + L"\\target")) {
+                    Logger::WriteMessage(L"[SKIP] mklink /J could not create the junction");
+                    return;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot upperBefore(env.Upper());
+                const LayerSnapshot lowerBefore(env.Lower(0));
+                const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+                AssertStatus(STATUS_NOT_A_DIRECTORY,
+                    mount.Rename(L"dir", L"link", kReplaceIfExists, kNoCallerPid),
+                    L"A replace rename of a directory onto a junction to an empty directory must fail");
+                upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+                lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+                targetBefore.AssertUnchanged(
+                    L"The refused rename must write nothing in the junction target");
+            }
+        }
+    }
+
+    TEST_METHOD(ReplaceRenameOpenDirectory_OntoJunction_FailsAndKeepsTheHandleOpen) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Root(), L"target");
+        env.WriteFile(env.Lower(0), L"dir\\a.txt", "a");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"dir", FILE_LIST_DIRECTORY | DELETE,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The source directory must open");
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertReplaceRenameThroughHandleRefused(mount, ctx.get(), L"link", STATUS_NOT_A_DIRECTORY,
+            L"A replace rename of an open directory onto a junction must fail");
+        upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+        targetBefore.AssertUnchanged(L"The refused rename must write nothing in the junction target");
+    }
+
+    TEST_METHOD(ReplaceRenameOpenJunction_OntoDirectory_FailsAndKeepsTheHandleOpen) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Root(), L"target");
+        env.CreateDir(env.Lower(0), L"dir");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"link", FILE_LIST_DIRECTORY | DELETE,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The junction must open");
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertReplaceRenameThroughHandleRefused(mount, ctx.get(), L"dir", STATUS_FILE_IS_A_DIRECTORY,
+            L"A replace rename of an open junction onto an empty directory must fail");
+        upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+        lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(ReplaceRename_JunctionOntoDirectory_FailsWithFileIsADirectory) {
+        for (const DirectoryLayer destinationLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+            env.CreateDir(LayerRoot(env, destinationLayer), L"dir");
+            if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+                Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+                return;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            const LayerSnapshot upperBefore(env.Upper());
+            const LayerSnapshot lowerBefore(env.Lower(0));
+
+            AssertStatus(STATUS_FILE_IS_A_DIRECTORY,
+                mount.Rename(L"link", L"dir", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename of a junction onto an empty directory must fail");
+            upperBefore.AssertUnchanged(L"The refused rename must write nothing in the upper");
+            lowerBefore.AssertUnchanged(L"The refused rename must write nothing in the lower");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_UpperJunctionOntoUpperFile_ReplacesTheFileWithTheJunction) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.WriteFile(env.Upper(), L"f.txt", "f");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"f.txt", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of an upper junction onto an upper file must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\f.txt", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper f.txt must be the moved junction");
+        AssertListedDirectoryWithChild(mount, L"f.txt", L"inside.txt");
+        targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
+    }
+
+    TEST_METHOD(ReplaceRename_UpperJunctionOntoLowerFile_WritesNoOpaqueMarkerIntoTheTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.WriteFile(env.Lower(0), L"f.txt", "f");
         if (!CreateDirectoryJunction(env.Upper() + L"\\link", env.Root() + L"\\target")) {
             Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
             return;
@@ -1323,14 +1531,60 @@ public:
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS,
-            mount.Rename(L"link", L"dst", kReplaceIfExists, kNoCallerPid),
-            L"A replace rename of an upper junction onto an empty lower directory must succeed");
-        Assert::IsTrue(HasAttribute(env.Upper() + L"\\dst", FILE_ATTRIBUTE_REPARSE_POINT),
-            L"The upper dst must be the moved junction");
-        Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
-            L"The rename must write no opaque marker file into the junction target");
-        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Root() + L"\\target", nullptr),
-            L"The rename must write no opaque stream onto the junction target");
+            mount.Rename(L"link", L"f.txt", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of an upper junction onto a lower file must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\f.txt", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper f.txt must be the moved junction");
+        AssertListedDirectoryWithChild(mount, L"f.txt", L"inside.txt");
+        AssertNoOpaqueMarkerIn(env.Root() + L"\\target");
+    }
+
+    TEST_METHOD(ReplaceRename_LowerJunctionOntoLowerFile_CopiesTheJunctionUp) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        env.WriteFile(env.Lower(0), L"f.txt", "f");
+        if (!CreateDirectoryJunction(env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the lower junction");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        const LayerSnapshot targetBefore(env.Root() + L"\\target");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link", L"f.txt", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of a lower junction onto a lower file must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\f.txt", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper f.txt must be a junction");
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"link")),
+            L"The rename must leave a whiteout at the old path");
+        AssertListedDirectoryWithChild(mount, L"f.txt", L"inside.txt");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
+        AssertNoOpaqueMarkerIn(env.Root() + L"\\target");
+    }
+
+    TEST_METHOD(ReplaceRename_JunctionOntoJunction_ReplacesTheDestinationLink) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"first\\a.txt", "a");
+        env.WriteFile(env.Root(), L"second\\b.txt", "b");
+        if (!CreateDirectoryJunction(env.Upper() + L"\\one", env.Root() + L"\\first") ||
+            !CreateDirectoryJunction(env.Upper() + L"\\two", env.Root() + L"\\second")) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junctions");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot firstBefore(env.Root() + L"\\first");
+        const LayerSnapshot secondBefore(env.Root() + L"\\second");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"one", L"two", kReplaceIfExists, kNoCallerPid),
+            L"A replace rename of a junction onto a junction must succeed");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\two", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper two must be the moved junction");
+        AssertListedDirectoryWithChild(mount, L"two", L"a.txt");
+        firstBefore.AssertUnchanged(L"The rename must leave the source junction target's entries");
+        secondBefore.AssertUnchanged(L"The rename must leave the replaced junction target's entries");
     }
 };
 

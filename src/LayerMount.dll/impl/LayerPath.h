@@ -58,14 +58,30 @@ std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
 std::wstring WithStoredLeafName(const std::wstring& targetPath,
                                 const std::wstring& entryPath);
 
+// Sets *isLink to whether the entry at path is a junction or a directory
+// symbolic link. Such a link is a directory reparse point whose reparse
+// tag is a name surrogate. Any other directory reparse point is not a
+// link. attributes are the entry's own, as GetFileAttributesW reports them
+// without following a link. Reads the tag only for a directory reparse
+// point. When the tag cannot be read, returns that error and leaves
+// *isLink false. INVALID_FILE_ATTRIBUTES returns STATUS_INVALID_PARAMETER.
+NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLink);
+
 enum class ReplaceExisting { No, Yes };
 
-// Renames an upper file or directory. An inherited deny-write ACE on the
-// upper parent fails the rename with STATUS_ACCESS_DENIED unless the
-// process holds SE_RESTORE_NAME.
+enum class CopyAcrossVolumes { No, Yes };
+
+// Renames an upper file or directory. A junction or a symbolic link moves
+// as a link, and its target stays. With CopyAcrossVolumes::Yes, a file
+// whose destination is on another volume moves as a copy and a delete. A
+// directory, a junction or a directory symbolic link cannot move to
+// another volume. An inherited deny-write ACE on the upper parent fails
+// the rename with STATUS_ACCESS_DENIED unless the process holds
+// SE_RESTORE_NAME.
 NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
-                        ReplaceExisting replace);
+                        ReplaceExisting replace,
+                        CopyAcrossVolumes copy);
 
 // Removes the upper entry at path. A directory goes with its whole tree.
 // A junction or a symbolic link goes, and its target stays. A path that

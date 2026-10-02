@@ -526,7 +526,7 @@ are copied up on demand.
 
 Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.
-The engine handles eight cases. The last two also apply to a file source:
+The engine handles nine cases. The last three also apply to a file source:
 
 - **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
   if present. When a lower layer has an entry at the destination path,
@@ -535,7 +535,8 @@ The engine handles eight cases. The last two also apply to a file source:
 - **lower → upper, dest-not-present**: recursive copy
   via `CopyTreePreservingMetadata` (preserves reparse points, sparse
   bits, and ADS), then mark the destination opaque, then drop a
-  whiteout at the source.
+  whiteout at the source. A junction or directory symlink copies up as
+  a link and gets no opaque marker.
 - **replace=true, dest is a directory with visible children**: a child
   from the upper or from a lower shows in the merged view. The engine
   rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY` before any side
@@ -547,8 +548,10 @@ The engine handles eight cases. The last two also apply to a file source:
   rename as for a destination that is not present. When the rename
   fails, the engine moves the destination back and restores its opaque
   marker. When the rename succeeds, the engine removes the copy in the
-  work directory. The new directory is opaque when a lower layer has
-  the destination path, so no lower child of the old destination shows.
+  work directory. With the work directory on another volume, the engine
+  removes the destination at once, and a failed rename cannot restore
+  it. The new directory is opaque when a lower layer has the destination
+  path, so no lower child of the old destination shows.
 - **rename to a destination that already exists in the merged view
   (with replace=false)**: the engine rejects the rename with
   `STATUS_OBJECT_NAME_COLLISION` before any side effects.
@@ -558,7 +561,8 @@ The engine handles eight cases. The last two also apply to a file source:
   collision check above runs first, so replace=false onto an existing
   `a\b` still returns `STATUS_OBJECT_NAME_COLLISION`. Replace=true onto
   a non-empty `a\b` returns `STATUS_INVALID_PARAMETER`, not
-  `STATUS_DIRECTORY_NOT_EMPTY`. A file source gets no such check. A file
+  `STATUS_DIRECTORY_NOT_EMPTY`. A junction or directory symlink source
+  gets the same check. A file source gets no such check. A file
   `a` renamed to `a\b` fails with `STATUS_OBJECT_PATH_NOT_FOUND`.
 - **replace=true onto an ancestor of the source** (`a\f` onto `a`):
   the engine rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY`
@@ -568,13 +572,27 @@ The engine handles eight cases. The last two also apply to a file source:
   directory fails with `STATUS_FILE_IS_A_DIRECTORY` (overlayfs
   `EISDIR`), and a directory onto a file fails with
   `STATUS_NOT_A_DIRECTORY` (overlayfs `ENOTDIR`). Both fail before any
-  side effects, so the engine copies no lower file source up. The engine
-  takes the type of the destination from its merged-view attributes,
-  so a junction or a directory symlink counts as a directory. This
-  differs from overlayfs, where rename does not follow the last path
-  component: there, a file replaces a symlink, and a directory onto a
-  symlink fails with `ENOTDIR`. With replace=false,
-  `STATUS_OBJECT_NAME_COLLISION` comes first.
+  side effects, so the engine copies no lower file source up. With
+  replace=false, `STATUS_OBJECT_NAME_COLLISION` comes first.
+- **a junction or directory symlink as source or destination**:
+  overlayfs does not follow the last path component in a rename, so a
+  symlink is a non-directory there. The engine treats a junction or a
+  directory symlink the same way. Such a link is a directory reparse
+  point whose reparse tag is a name surrogate. Any other directory
+  reparse point stays a directory. When the engine cannot read the
+  reparse tag, the rename fails with that error before any side
+  effects. With replace=true, a file or a link replaces a link, and a
+  link replaces a file. A directory onto a link fails with
+  `STATUS_NOT_A_DIRECTORY`, and a link onto a directory fails with
+  `STATUS_FILE_IS_A_DIRECTORY`, both before any side effects. The link
+  moves as a link. A lower link copies up as a link and leaves a
+  whiteout at its old path. The link target and its entries stay
+  unchanged, and no opaque marker goes into the target. An upper
+  destination moves into the work directory before the rename, as an
+  empty directory does, and comes back when the rename fails. With the
+  work directory on another volume, a file destination moves there as a
+  copy, and a link destination goes at once, so a failed rename cannot
+  restore it.
 
 Recursive copy-up is expensive and is the main reason single-file
 metacopy exists; the engine cannot apply the same trick to directories

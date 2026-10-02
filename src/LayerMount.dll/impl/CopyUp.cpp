@@ -1519,6 +1519,7 @@ NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
 
 NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
                                       const CallerPath& newCallerPath,
+                                      RenameEntryKind sourceKind,
                                       ReplaceExisting replace) {
     std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
     std::wstring newNorm = NormalizePath(newCallerPath.Text());
@@ -1534,11 +1535,9 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
         return destinationStatus;
     }
 
-    // Copy a junction or directory symlink as a link and never make it
-    // opaque. SetOpaque would write its marker through the link into the
-    // external target.
-    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
-        capabilities_.HasReparsePoints()) {
+    // Copy a link as a link and never make it opaque. SetOpaque would write
+    // its marker through the link into the external target.
+    if (sourceKind == RenameEntryKind::Link && capabilities_.HasReparsePoints()) {
         NTSTATUS rpStatus = CopyUpReparsePointEntry(
             source.absolutePath, newUpperPath, source.attributes);
         if (!NT_SUCCESS(rpStatus)) {
@@ -1559,8 +1558,8 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
         return STATUS_SUCCESS;
     }
 
-    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
-        !capabilities_.HasReparsePoints() && events_ != nullptr) {
+    if (sourceKind == RenameEntryKind::Link && !capabilities_.HasReparsePoints() &&
+        events_ != nullptr) {
         events_->Emit(LM_EVT_WARNING, S_OK, oldNorm.c_str(), kReparseTreeCopyWarning);
     }
 
@@ -1605,6 +1604,7 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
 
 NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
                                       const CallerPath& newCallerPath,
+                                      RenameEntryKind sourceKind,
                                       ReplaceExisting replace) {
     std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
     std::wstring newNorm = NormalizePath(newCallerPath.Text());
@@ -1617,11 +1617,8 @@ NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
 
     std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
 
-    // The opaque marker calls on a junction or directory symlink would
-    // reach its target.
-    const DWORD oldUpperAttrs = ::GetFileAttributesW(oldUpperPath.c_str());
-    const bool isLink = oldUpperAttrs != INVALID_FILE_ATTRIBUTES &&
-                        (oldUpperAttrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    // The opaque marker calls on a link would reach its target.
+    const bool isLink = sourceKind == RenameEntryKind::Link;
     const bool wasOpaque = !isLink && whiteoutMgr_.IsOpaque(oldNorm);
 
     DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
@@ -1649,11 +1646,28 @@ RenameDestinationAside::~RenameDestinationAside() {
     }
     if (::GetFileAttributesW(upperPath_.c_str()) != INVALID_FILE_ATTRIBUTES) {
         RemoveUpperEntry(asidePath_);
-    } else if (NT_SUCCESS(MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No)) &&
+    } else if (NT_SUCCESS(MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No,
+                                         restoreCopy_)) &&
                wasOpaque_) {
         whiteoutMgr_->SetOpaque(normalizedPath_);
     }
     cache_->InvalidateWithAncestors(normalizedPath_);
+}
+
+void RenameDestinationAside::Hold(WhiteoutManager* whiteoutMgr,
+                                  Cache* cache,
+                                  std::wstring normalizedPath,
+                                  std::wstring upperPath,
+                                  std::wstring asidePath,
+                                  bool wasOpaque,
+                                  CopyAcrossVolumes restoreCopy) {
+    whiteoutMgr_ = whiteoutMgr;
+    cache_ = cache;
+    normalizedPath_ = std::move(normalizedPath);
+    upperPath_ = std::move(upperPath);
+    asidePath_ = std::move(asidePath);
+    wasOpaque_ = wasOpaque;
+    restoreCopy_ = restoreCopy;
 }
 
 void RenameDestinationAside::Commit() {
@@ -1665,33 +1679,35 @@ void RenameDestinationAside::Commit() {
 }
 
 NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
+                                           RenameEntryKind sourceKind,
+                                           RenameEntryKind destinationKind,
                                            RenameDestinationAside* aside) {
     const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
-    const DWORD attrs = ::GetFileAttributesW(upperPath.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
+    if (::GetFileAttributesW(upperPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
         if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
             return STATUS_SUCCESS;
         }
         return ::LayerMount::NtStatusFromWin32(probeErr);
     }
-    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+    if (sourceKind == RenameEntryKind::File && destinationKind == RenameEntryKind::File) {
         return STATUS_SUCCESS;
     }
 
-    // The opaque marker calls on a junction or directory symlink would
-    // reach its target.
-    const bool wasOpaque = (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+    // The opaque marker calls on a link would reach its target.
+    const bool wasOpaque = destinationKind == RenameEntryKind::Directory &&
                            whiteoutMgr_.IsOpaque(newNorm);
     if (wasOpaque) {
         whiteoutMgr_.RemoveOpaque(newNorm);
     }
+    const CopyAcrossVolumes copy = destinationKind == RenameEntryKind::File
+        ? CopyAcrossVolumes::Yes
+        : CopyAcrossVolumes::No;
     const std::wstring asidePath = GenerateWorkPath();
-    NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No);
+    NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No, copy);
     if (moveStatus == ::LayerMount::NtStatusFromWin32(ERROR_NOT_SAME_DEVICE)) {
-        // MoveFileExW cannot move a directory to another volume. With the
-        // work directory on another volume, the destination goes at once,
-        // and a failed rename cannot restore it.
+        // MoveFileExW cannot move a directory or a link to another volume.
+        // The entry goes at once, so a failed rename cannot restore it.
         moveStatus = RemoveUpperEntry(upperPath);
         cache_.InvalidateWithAncestors(newNorm);
         return moveStatus;
@@ -1705,12 +1721,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
         return moveStatus;
     }
 
-    aside->whiteoutMgr_ = &whiteoutMgr_;
-    aside->cache_ = &cache_;
-    aside->normalizedPath_ = newNorm;
-    aside->upperPath_ = upperPath;
-    aside->asidePath_ = asidePath;
-    aside->wasOpaque_ = wasOpaque;
+    aside->Hold(&whiteoutMgr_, &cache_, newNorm, upperPath, asidePath, wasOpaque, copy);
     return STATUS_SUCCESS;
 }
 
@@ -1748,7 +1759,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
     }
 
     status = MoveUpperEntry(pathResolver_.GetStoredUpperPath(oldCallerPath.Text()),
-                            newUpperPath, ReplaceExisting::No);
+                            newUpperPath, ReplaceExisting::No, CopyAcrossVolumes::No);
     cache_.InvalidateWithAncestors(normalized);
     return status;
 }

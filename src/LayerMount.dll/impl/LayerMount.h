@@ -86,6 +86,19 @@ struct ResolvedPath {
     }
 };
 
+// The kind of a rename source or destination. A Link is a directory reparse
+// point whose reparse tag is a name surrogate, such as a junction or a
+// directory symbolic link. Any other directory reparse point is a
+// Directory. A rename does not follow a Link and treats it as a
+// non-directory, as overlayfs treats a symlink. The one exception is that a
+// Link source keeps the directory check that refuses a destination inside
+// its own tree.
+enum class RenameEntryKind {
+    File,
+    Directory,
+    Link,
+};
+
 struct CreateResolution {
     // The overlay's hit, as ResolvePath returns it.
     ResolvedPath overlayHit;
@@ -480,16 +493,25 @@ public:
     // whiteout at the old path when a lower still holds it. A rename to
     // the identical name succeeds and changes nothing.
     // replaceIfExists FALSE fails with STATUS_OBJECT_NAME_COLLISION when
-    // the destination already exists. Otherwise a directory rename to a
-    // path inside the directory's own tree fails with
+    // the destination already exists. Otherwise the rename of a directory
+    // or a link to a path inside its own tree fails with
     // STATUS_INVALID_PARAMETER, even when the destination is a non-empty
     // directory. A directory rename with replaceIfExists TRUE onto a
     // directory fails with STATUS_DIRECTORY_NOT_EMPTY when the merged view
-    // shows a child of the destination. When it shows none, Rename moves
-    // the upper destination into the work directory before the move, puts
-    // it back when the move fails, and removes it when the move succeeds.
-    // The FileContext overload makes the destination checks before it
-    // closes ctx->handle, so a refused rename leaves the handle open.
+    // shows a child of the destination. A link, as RenameEntryKind defines
+    // it, is a non-directory on either side of a rename. With
+    // replaceIfExists TRUE, a file or a link replaces a link, and a link
+    // replaces a file. The link moves as a link, and its target stays
+    // unchanged. Before the move, Rename moves the upper destination into
+    // the work directory, unless both the source and the destination are
+    // files. It puts the destination back when the move fails and removes
+    // it when the move succeeds. With the work directory on another volume,
+    // a file destination moves there as a copy, and a directory or link
+    // destination goes at once, so a failed rename cannot restore it. A
+    // failure to read the reparse tag of a source or destination fails the
+    // rename with that status before any change. The FileContext overload
+    // makes these checks before it closes ctx->handle, so a refused rename
+    // leaves the handle open.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
                     const std::wstring& newRelativePath,
                     BOOLEAN replaceIfExists,
@@ -720,19 +742,24 @@ private:
     // destination: stream names, reserved paths and the access tracker.
     NTSTATUS CheckRenameRequest(const RenamePaths& paths, DWORD callerPid);
 
-    // The merged-view checks of a rename destination, in the order that
-    // overlayfs uses. Returns STATUS_OBJECT_NAME_COLLISION when
-    // replaceIfExists is FALSE and the destination exists, then
-    // STATUS_INVALID_PARAMETER for a directory whose destination lies
-    // inside its own tree, then STATUS_DIRECTORY_NOT_EMPTY for an existing
-    // destination that is an ancestor of the source, then
-    // STATUS_NOT_A_DIRECTORY for a directory onto a file and
-    // STATUS_FILE_IS_A_DIRECTORY for a file onto a directory, then
-    // DirectoryEmptinessStatus for a directory onto a directory. Changes
-    // nothing.
+    // The kinds of a rename's source and, when the merged view shows one,
+    // its destination.
+    struct RenameKinds {
+        RenameEntryKind source;
+        std::optional<RenameEntryKind> destination;
+    };
+
+    // Runs the checks in the order that overlayfs uses, and sets
+    // kinds->destination.
     NTSTATUS CheckRenameDestination(const RenamePaths& paths,
-                                    bool isDirectory,
-                                    BOOLEAN replaceIfExists) const;
+                                    BOOLEAN replaceIfExists,
+                                    RenameKinds* kinds) const;
+
+    // The part of a rename after its checks passed.
+    NTSTATUS RenameCheckedEntry(const std::wstring& oldRelativePath,
+                                const std::wstring& newRelativePath,
+                                BOOLEAN replaceIfExists,
+                                const RenameKinds& kinds);
 
     LayerConfig config_;
     ::LayerMount::abi::CapabilityGate capabilities_;

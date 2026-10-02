@@ -261,7 +261,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
-            CallerPath(L"src-secured"), CallerPath(L"dst-secured"), ReplaceExisting::No)));
+            CallerPath(L"src-secured"), CallerPath(L"dst-secured"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
 
         const std::wstring newKid = env.Upper() + L"\\dst-secured\\kid.txt";
         const size_t countOnChild = CountDaclAcesForSid(newKid, everyone.sid);

@@ -230,7 +230,8 @@ public:
         cu.SetCapabilityGate(GateWithoutSparseFiles());
 
         Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"), ReplaceExisting::No)));
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"moved\\sparse.bin"));
         Assert::IsFalse(HasSparseAttribute(env.Upper() + L"\\moved\\sparse.bin"),
@@ -254,7 +255,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"), ReplaceExisting::No)));
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(HasSparseAttribute(env.Upper() + L"\\moved\\sparse.bin"),
             L"With the sparse capability the tree copy keeps FILE_ATTRIBUTE_SPARSE_FILE");
@@ -281,7 +283,8 @@ public:
         CopyUp cu(config, resolver, wm, cache, stats);
 
         Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"), ReplaceExisting::No)));
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved\\cmp.bin", FILE_ATTRIBUTE_COMPRESSED),
             L"The tree copy keeps FILE_ATTRIBUTE_COMPRESSED on a compressed child");
