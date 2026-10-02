@@ -20,7 +20,10 @@ namespace {
 
 struct ResolverUnderTest {
     explicit ResolverUnderTest(const TempLayerEnvironment& env)
-        : config(env.MakeConfig())
+        : ResolverUnderTest(env.MakeConfig()) {}
+
+    explicit ResolverUnderTest(const ::LayerMount::LayerConfig& layerConfig)
+        : config(layerConfig)
         , wm(config, &cache)
         , resolver(config, wm, cache) {}
 
@@ -45,6 +48,17 @@ void AssertEveryListedEntryResolves(const TempLayerEnvironment& env,
         Assert::IsTrue(r.resolver.ResolvePath(child).Found(),
             (L"Every listed entry must resolve: " + child).c_str());
     }
+}
+
+void AssertHiddenFromListingAndLookup(const std::map<std::wstring, MergedEntry>& merged,
+                                      const PathResolver& resolver,
+                                      const std::wstring& listedName,
+                                      const std::wstring& lookupPath,
+                                      const std::wstring& hiddenBy) {
+    Assert::IsTrue(merged.count(listedName) == 0,
+        (hiddenBy + L" must hide " + listedName + L" from the listing").c_str());
+    Assert::IsFalse(resolver.ResolvePath(lookupPath).Found(),
+        (hiddenBy + L" must hide " + lookupPath + L" from the lookup by name").c_str());
 }
 
 }
@@ -605,29 +619,6 @@ public:
             L"Sentinel file should be removed");
     }
 
-    TEST_METHOD(HasOpaqueAncestor_ParentOpaque_ReturnsTrue) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Upper(), L"sub");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-
-        wm.SetOpaque(L"sub");
-        Assert::IsTrue(wm.HasOpaqueAncestor(L"sub\\child.txt"));
-    }
-
-    TEST_METHOD(HasOpaqueAncestor_NoAncestorOpaque_ReturnsFalse) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Upper(), L"sub");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-
-        Assert::IsFalse(wm.HasOpaqueAncestor(L"sub\\child.txt"));
-    }
-
     TEST_METHOD(HasOpaqueSelfOrAncestorInLayer_DirOpaqueInLayer_ReturnsTrue) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"d"), "");
@@ -673,18 +664,6 @@ public:
         WhiteoutManager wm(config, &cache);
 
         Assert::IsFalse(wm.HasOpaqueSelfOrAncestorInLayer(L"a\\b", env.Lower(0)));
-    }
-
-    TEST_METHOD(HasOpaqueAncestor_GrandparentOpaque_ReturnsTrue) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Upper(), L"a\\b\\c");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-
-        wm.SetOpaque(L"a");
-        Assert::IsTrue(wm.HasOpaqueAncestor(L"a\\b\\c\\deep.txt"));
     }
 
     TEST_METHOD(PathResolve_OpaqueUpperDir_HidesAllLowerChildren) {
@@ -910,6 +889,111 @@ public:
             L"The whiteout for the ancestor must hide the descendant in its own lower and in the lower below");
         Assert::IsFalse(r.resolver.ResolveLowerPath(L"a\\b\\c.txt").Found(),
             L"The whiteout for the ancestor must hide the descendant in its own lower and in the lower below");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerAtRootOfLower_HidesDeeperLowersTopLevelEntryAsTheListingDoes) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L".wh..wh..opq", "");
+        env.WriteFile(env.Lower(1), L"deep.txt", "lower1");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        ResolverUnderTest r(env);
+
+        auto merged = mount.MergeDirectoryEntries(L"").entries;
+
+        AssertHiddenFromListingAndLookup(merged, r.resolver, L"deep.txt", L"deep.txt",
+            L"The opaque marker at the root of the lower");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerAtRootOfExtendedFormLowerWithTrailingSeparator_HidesDeeperLowersTopLevelEntryAsTheListingDoes) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L".wh..wh..opq", "");
+        env.WriteFile(env.Lower(1), L"deep.txt", "lower1");
+        auto config = env.MakeConfig();
+        config.lowerPaths[0] = ExtendedDirWithSeparator(env.Lower(0));
+        ::LayerMount::LayerMount mount(config);
+        ResolverUnderTest r(config);
+
+        auto merged = mount.MergeDirectoryEntries(L"").entries;
+
+        AssertHiddenFromListingAndLookup(merged, r.resolver, L"deep.txt", L"deep.txt",
+            L"The opaque marker at the root of the extended-form lower that ends in a separator");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerAtRootOfLower_ResolvesThatLowersTopLevelEntry) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L".wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"own.txt", "lower1");
+        ResolverUnderTest r(env);
+
+        const ResolvedPath own = r.resolver.ResolvePath(L"own.txt");
+
+        Assert::IsTrue(own.Found(),
+            L"The entry at the root of the opaque lower must resolve");
+        Assert::IsTrue(own.source == LayerSource::Lower,
+            L"The entry at the root of the opaque lower must resolve from a lower");
+        Assert::AreEqual(0, own.lowerIndex,
+            L"The entry at the root of the opaque lower must resolve to that lower");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerAtRootOfUpper_HidesLowersTopLevelEntryAsTheListingDoes) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L".wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"low.txt", "lower0");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        ResolverUnderTest r(env);
+
+        auto merged = mount.MergeDirectoryEntries(L"").entries;
+
+        AssertHiddenFromListingAndLookup(merged, r.resolver, L"low.txt", L"low.txt",
+            L"The opaque marker at the root of the upper");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerAtRootOfLowerWithoutTheDirectory_HidesDeeperLowersNestedEntryAsTheListingDoes) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L".wh..wh..opq", "");
+        env.WriteFile(env.Lower(1), L"a\\x.txt", "lower1");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        ResolverUnderTest r(env);
+
+        auto merged = mount.MergeDirectoryEntries(L"").entries;
+
+        AssertHiddenFromListingAndLookup(merged, r.resolver, L"a", L"a\\x.txt",
+            L"The opaque marker at the root of the lower");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerAtRootOfLowerHoldingTheDirectory_HidesDeeperLowersNestedEntryAsTheListingDoes) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L".wh..wh..opq", "");
+        env.WriteFile(env.Lower(0), L"a\\own.txt", "lower0");
+        env.WriteFile(env.Lower(1), L"a\\x.txt", "lower1");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        ResolverUnderTest r(env);
+
+        auto merged = mount.MergeDirectoryEntries(L"a").entries;
+
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the entry of the opaque lower's own directory");
+        Assert::IsTrue(r.resolver.ResolvePath(L"a\\own.txt").Found(),
+            L"The entry of the opaque lower's own directory must resolve");
+        AssertHiddenFromListingAndLookup(merged, r.resolver, L"x.txt", L"a\\x.txt",
+            L"The opaque marker at the root of the lower");
+    }
+
+    TEST_METHOD(PathResolve_OpaqueMarkerAtRootOfUpper_HidesLowersNestedEntryAsTheListingDoes) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L".wh..wh..opq", "");
+        env.WriteFile(env.Upper(), L"a\\own.txt", "upper");
+        env.WriteFile(env.Lower(0), L"a\\low.txt", "lower0");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        ResolverUnderTest r(env);
+
+        auto merged = mount.MergeDirectoryEntries(L"a").entries;
+
+        Assert::IsTrue(merged.count(L"own.txt") == 1,
+            L"The listing must show the entry of the upper's own directory");
+        AssertHiddenFromListingAndLookup(merged, r.resolver, L"low.txt", L"a\\low.txt",
+            L"The opaque marker at the root of the upper");
     }
 };
 

@@ -29,8 +29,6 @@ LowerVisibility LowersBelowMiss(const WhiteoutManager& whiteoutMgr,
                                 const std::wstring& normalized,
                                 DWORD probeError) {
     const std::wstring parent = ParentDir(normalized);
-    // A top-level path has no ancestor directory in the layer to hide it.
-    if (parent.empty()) return LowerVisibility::Visible;
     const DirectoryProbe parentProbe =
         probeError == ERROR_FILE_NOT_FOUND ? DirectoryProbe::Found : DirectoryProbe::Missed;
     return LowersBelow(LayerDirectory{whiteoutMgr, layerPath, parent}, parentProbe);
@@ -151,10 +149,13 @@ PathResolver::UpperHiding PathResolver::HidingInUpper(const std::wstring& normal
 void PathResolver::LogTypeConflictInDeeperLowers(const std::wstring& normalized,
                                                  const ResolvedPath& hit) const {
     const bool hitIsDir = IsDirectory(hit.attributes);
+    const std::wstring parent = ParentDir(normalized);
     ResolvedPath visible = hit;
     for (;;) {
         const size_t lowerIndex = static_cast<size_t>(visible.lowerIndex);
-        if (whiteoutMgr_.HasOpaqueAncestorInLayer(normalized, config_.lowerPaths[lowerIndex])) {
+        // The lower holds the path, so it holds the parent as a directory.
+        if (LowersBelow(LayerDirectory{whiteoutMgr_, config_.lowerPaths[lowerIndex], parent},
+                        DirectoryProbe::Found) != LowerVisibility::Visible) {
             return;
         }
         visible = FindInLowers(normalized, lowerIndex + 1);

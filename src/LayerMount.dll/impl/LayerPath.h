@@ -53,10 +53,10 @@ enum class LowerVisibility {
 };
 
 // Whether the lowers below the layer can hold entries under the directory.
-// An opaque marker at the directory or at an ancestor in the layer hides
-// them, and so does a non-directory there. A directory the layer was found
-// to hold has no non-directory at its path or above, so only a miss walks
-// the path.
+// An opaque marker at the directory or at an ancestor in the layer, the
+// layer root included, hides them, and so does a non-directory there. A
+// directory the layer was found to hold has no non-directory at its path or
+// above, so only a miss walks the path.
 LowerVisibility LowersBelow(const LayerDirectory& dir, DirectoryProbe probe);
 
 }

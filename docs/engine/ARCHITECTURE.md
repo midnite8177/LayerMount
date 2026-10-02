@@ -208,7 +208,11 @@ entries of the layer that holds the marker stay visible. The rule is the same fo
 upper and for a lower: a directory opaque in lower N shows the entries
 of lower N and hides lowers N+1..end. Opaque is the directory analog of
 a whiteout: it expresses "this directory's contents in this layer are
-the authoritative set; do not merge children from below".
+the authoritative set; do not merge children from below". A
+`.wh..wh..opq` marker at the root of a layer hides the lowers below
+that layer, as a root opaque whiteout in an OCI image layer does.
+Kernel overlayfs does not do this. It builds the merged root at mount
+and ignores opacity at a layer root.
 
 Two coexisting representations:
 
@@ -242,13 +246,18 @@ The resolver applies the rules transitively:
   parent chain and returns true if any ancestor in `layer` carries a
   `.wh.<name>` marker. A whitedout directory hides every descendant
   from its layer downward.
-- `WhiteoutManager::HasOpaqueAncestor(rel)` /
-  `HasOpaqueAncestorInLayer(rel, layer)` walks the parent chain and
-  returns true if any ancestor is opaque. An opaque ancestor hides
-  every descendant in the layers below the layer that holds the marker.
-  The descendants in the layer that holds the marker stay visible.
+- `WhiteoutManager::HasOpaqueSelfOrAncestorInLayer(dir, layer)` walks
+  from `dir` up the parent chain and returns true if `dir`, any
+  ancestor, or the layer root is opaque in `layer`. An opaque ancestor
+  hides every descendant in the layers below the layer that holds the
+  marker. The descendants in the layer that holds the marker stay
+  visible. The resolver's hiding checks, the directory merge and the
+  type-conflict log ask this question through `LowersBelow`, so they
+  agree at every depth.
 
-Both walks stop at the layer root.
+The whiteout walk stops below the layer root, since a whiteout names an
+entry and the root has no name. The opaque walk probes the layer root
+too.
 
 ### Resurrection windows and ordering
 
@@ -305,7 +314,8 @@ or rename it. See "Path safety guards". Directory merging in
 4. An opaque directory limits step 2. If the directory is opaque in the
    upper layer, the merge enumerates no lower. If the directory is
    opaque in lower N, the merge enumerates lower N and skips lowers
-   N+1..end.
+   N+1..end. An opaque ancestor in a layer, the layer root included,
+   makes the directory opaque in that layer.
 
 `CanDelete` returns a failed merge's status instead of reading the
 missing entries as an empty directory, and `LayerMountMergeDirectory`
@@ -340,7 +350,8 @@ algorithm (in `impl/PathResolver.cpp`):
 5a. If any ancestor in upper carries a whiteout marker, treat the
     descendant as whited-out as well.
 6.  If any ancestor in upper is opaque, return not-found
-    (the ancestor's opacity hides the lower content).
+    (the ancestor's opacity hides the lower content). The upper root
+    counts as an ancestor of every path.
 6a. If any ancestor in upper is a file, return not-found. The file
     hides the lower content under its path. An ancestor whose
     attributes the engine cannot read, for a reason other than a
@@ -351,7 +362,8 @@ algorithm (in `impl/PathResolver.cpp`):
       a. Whiteout in this lower => stop iterating.
       b. Whitedout ancestor in this lower => stop iterating.
       c. Probe this lower; on hit, capture and break.
-      d. Opaque ancestor in this lower => stop after this lower.
+      d. Opaque ancestor in this lower, the lower's root included =>
+         stop after this lower.
       e. File ancestor, or unreadable ancestor, in this lower => stop
          after this lower.
 8.  If a lower hit was captured, scan the deeper lowers that stay

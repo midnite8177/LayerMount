@@ -14,6 +14,25 @@ namespace {
 
 constexpr size_t kWhiteoutPrefixLength = std::wstring_view(kWhiteoutPrefix).size();
 
+enum class LayerRoot {
+    Probed,
+    Skipped,
+};
+
+// Calls hasMarker on dir and then on each ancestor of dir, and returns true
+// at the first call that does. dir is relative to the layer root, so the
+// walk ends at the empty path, which is the root itself. hasMarker sees the
+// root only when root is LayerRoot::Probed.
+template <typename HasMarker>
+bool AnyDirectoryUpToRoot(fs::path dir, LayerRoot root, const HasMarker& hasMarker) {
+    for (; !dir.empty(); dir = dir.parent_path()) {
+        if (hasMarker(dir.wstring())) {
+            return true;
+        }
+    }
+    return root == LayerRoot::Probed && hasMarker(std::wstring());
+}
+
 }
 
 WhiteoutManager::WhiteoutManager(const LayerConfig& config, Cache* cache)
@@ -210,60 +229,20 @@ bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
     return adsOk && legacyOk;
 }
 
-bool WhiteoutManager::HasOpaqueAncestor(const std::wstring& relativePath) const {
-    fs::path p(relativePath);
-    fs::path ancestor = p.parent_path();
-
-    while (!ancestor.empty()) {
-        if (IsOpaque(ancestor.wstring())) {
-            return true;
-        }
-        fs::path next = ancestor.parent_path();
-        if (next == ancestor) break;  // reached root
-        ancestor = next;
-    }
-
-    return false;
-}
-
-bool WhiteoutManager::HasOpaqueAncestorInLayer(const std::wstring& relativePath,
-                                                const std::wstring& layerPath) const {
-    fs::path p(relativePath);
-    fs::path ancestor = p.parent_path();
-
-    while (!ancestor.empty()) {
-        if (IsOpaqueInLayer(ancestor.wstring(), layerPath)) {
-            return true;
-        }
-        fs::path next = ancestor.parent_path();
-        if (next == ancestor) break;
-        ancestor = next;
-    }
-
-    return false;
-}
-
 bool WhiteoutManager::HasOpaqueSelfOrAncestorInLayer(const std::wstring& dirRelativePath,
                                                       const std::wstring& layerPath) const {
-    return IsOpaqueInLayer(dirRelativePath, layerPath) ||
-        HasOpaqueAncestorInLayer(dirRelativePath, layerPath);
+    return AnyDirectoryUpToRoot(fs::path(dirRelativePath), LayerRoot::Probed,
+                                [&](const std::wstring& dir) {
+                                    return IsOpaqueInLayer(dir, layerPath);
+                                });
 }
 
 bool WhiteoutManager::HasWhitedOutAncestorInLayer(const std::wstring& relativePath,
                                                    const std::wstring& layerPath) const {
-    fs::path p(relativePath);
-    fs::path ancestor = p.parent_path();
-
-    while (!ancestor.empty()) {
-        if (HasWhiteout(ancestor.wstring(), layerPath)) {
-            return true;
-        }
-        fs::path next = ancestor.parent_path();
-        if (next == ancestor) break;
-        ancestor = next;
-    }
-
-    return false;
+    return AnyDirectoryUpToRoot(fs::path(relativePath).parent_path(), LayerRoot::Skipped,
+                                [&](const std::wstring& dir) {
+                                    return HasWhiteout(dir, layerPath);
+                                });
 }
 
 }

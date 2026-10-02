@@ -55,31 +55,27 @@ public:
     // Check if directory is opaque in the upper layer (ADS marker or .wh..wh..opq)
     bool IsOpaque(const std::wstring& dirRelativePath) const;
 
-    // Check if directory is opaque in a specific layer
     bool IsOpaqueInLayer(const std::wstring& dirRelativePath,
                          const std::wstring& layerPath) const;
 
     bool SetOpaque(const std::wstring& dirRelativePath);
     bool RemoveOpaque(const std::wstring& dirRelativePath);
 
-    bool HasOpaqueAncestor(const std::wstring& relativePath) const;
-
-    bool HasOpaqueAncestorInLayer(const std::wstring& relativePath,
-                                  const std::wstring& layerPath) const;
-
+    // Whether the directory, an ancestor of it, or the layer root is opaque in
+    // the layer. dirRelativePath is relative to the layer root, and an empty
+    // dirRelativePath is the root.
     bool HasOpaqueSelfOrAncestorInLayer(const std::wstring& dirRelativePath,
                                         const std::wstring& layerPath) const;
 
-    // Walk ancestors upward; return true if any ancestor has a whiteout marker in
-    // the given layer. A whiteout at a directory path hides every descendant from
-    // that layer downward.
+    // Whether an ancestor of relativePath, not counting the layer root, has a
+    // whiteout marker in the layer. A whiteout at a directory path hides every
+    // descendant from that layer downward.
     bool HasWhitedOutAncestorInLayer(const std::wstring& relativePath,
                                      const std::wstring& layerPath) const;
 
     // Build the whiteout marker filename for a relative path: parent\.wh.<name>
     static std::wstring GetWhiteoutFileName(const std::wstring& relativePath);
 
-    // Build the full absolute whiteout path within a layer
     static std::wstring GetWhiteoutFullPath(const std::wstring& layerPath,
                                             const std::wstring& relativePath);
 
