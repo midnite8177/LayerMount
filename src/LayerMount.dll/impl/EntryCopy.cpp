@@ -85,79 +85,6 @@ LayerMountMetadata CarriedCopyUpMetadata(const std::wstring& sourcePath,
     return metadata;
 }
 
-// NTFS stream names come back as ":name:$DATA" or ":name:$<type>".
-bool IsReservedLayerMountStream(const std::wstring& streamName) {
-    static constexpr std::wstring_view kLayerMount(L":overlay");
-    if (streamName.size() < kLayerMount.size()) return false;
-    // Compares a lowercase copy, because NTFS stream names are
-    // case-insensitive.
-    std::wstring lower(streamName.begin(), streamName.begin() + kLayerMount.size());
-    ::CharLowerBuffW(lower.data(), static_cast<DWORD>(lower.size()));
-    return lower.compare(0, kLayerMount.size(), kLayerMount) == 0;
-}
-
-// srcPath and dstPath are the full paths to the underlying files; streamName is the `:name:$<T>`
-// suffix as returned by FindFirstStreamW / FILE_STREAM_INFO.StreamName.
-//
-// Both opens use FILE_FLAG_BACKUP_SEMANTICS. With SE_BACKUP_NAME and
-// SE_RESTORE_NAME, which EnableFileSystemPrivileges enables, that bypasses
-// DACL checks, so a lower file inside a directory whose DACL denies our
-// process (e.g. an inherited DENY-WRITE for Everyone) can still have its ADS
-// copied up. Without backup semantics the destination open would fail because the
-// just-committed upper file inherits the same restrictive DACL from its
-// parent shadow, and silent ADS loss would result.
-bool CopyAlternateStream(const std::wstring& srcPath,
-                         const std::wstring& dstPath,
-                         const std::wstring& streamName) {
-    const std::wstring srcFull = srcPath + streamName;
-    const std::wstring dstFull = dstPath + streamName;
-
-    HANDLE srcH = ::CreateFileW(srcFull.c_str(), GENERIC_READ,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                      FILE_SHARE_DELETE,
-                                  nullptr, OPEN_EXISTING,
-                                  FILE_FLAG_SEQUENTIAL_SCAN |
-                                      FILE_FLAG_BACKUP_SEMANTICS,
-                                  nullptr);
-    if (srcH == INVALID_HANDLE_VALUE) return false;
-
-    HANDLE dstH = ::CreateFileW(dstFull.c_str(), GENERIC_WRITE,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                      FILE_SHARE_DELETE,
-                                  nullptr, CREATE_ALWAYS,
-                                  FILE_ATTRIBUTE_NORMAL |
-                                      FILE_FLAG_BACKUP_SEMANTICS,
-                                  nullptr);
-    if (dstH == INVALID_HANDLE_VALUE) {
-        ::CloseHandle(srcH);
-        return false;
-    }
-
-    BYTE buf[64 * 1024];
-    bool ok = true;
-    for (;;) {
-        DWORD r = 0;
-        if (!::ReadFile(srcH, buf, sizeof(buf), &r, nullptr)) {
-            ok = false;
-            break;
-        }
-        if (r == 0) break;
-        DWORD w = 0;
-        if (!::WriteFile(dstH, buf, r, &w, nullptr) || w != r) {
-            ok = false;
-            break;
-        }
-    }
-
-    ::CloseHandle(srcH);
-    ::CloseHandle(dstH);
-
-    if (!ok) {
-        ::DeleteFileW(dstFull.c_str());
-    }
-    return ok;
-}
-
 // A refusal is ignored: a Windows copy
 // of a compressed file to a volume that cannot compress gives a dense file
 // and no error. Call it before the data copy; after it, NTFS rewrites the
@@ -184,15 +111,23 @@ void SetCompressedDirectory(const std::wstring& path) {
 
 constexpr DWORD kCopyBufferSize = 64 * 1024;
 
-// Write length bytes to dstHandle. WriteFile returns success with a count
-// below length on a full quota, on a network volume and on some raw
-// devices; that write fails with ERROR_WRITE_FAULT. A failed call with no
-// last error set maps to the same status, never to success.
+// A failed call that leaves the last error at 0 maps to fallback, never to
+// success.
+NTSTATUS StatusFromWin32Error(DWORD err, DWORD fallback) {
+    return ::LayerMount::NtStatusFromWin32(err != 0 ? err : fallback);
+}
+
+NTSTATUS StatusOfFailedCall(DWORD fallback) {
+    return StatusFromWin32Error(::GetLastError(), fallback);
+}
+
+// WriteFile returns success with a count below length on a full quota, on a
+// network volume and on some raw devices; that write fails with
+// ERROR_WRITE_FAULT.
 NTSTATUS WriteChunk(HANDLE dstHandle, const BYTE* buffer, DWORD length) {
     DWORD bytesWritten = 0;
     if (!WriteFile(dstHandle, buffer, length, &bytesWritten, nullptr)) {
-        const DWORD err = GetLastError();
-        return ::LayerMount::NtStatusFromWin32(err != 0 ? err : ERROR_WRITE_FAULT);
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
     if (bytesWritten != length) {
         return ::LayerMount::NtStatusFromWin32(ERROR_WRITE_FAULT);
@@ -214,7 +149,7 @@ NTSTATUS CopyBytes(HANDLE srcHandle, HANDLE dstHandle, LONGLONG limit,
                                                    : kCopyBufferSize;
         DWORD bytesRead = 0;
         if (!ReadFile(srcHandle, buffer, chunk, &bytesRead, nullptr)) {
-            return ::LayerMount::NtStatusFromWin32(GetLastError());
+            return StatusOfFailedCall(ERROR_READ_FAULT);
         }
         if (bytesRead == 0) {
             break;
@@ -233,12 +168,85 @@ NTSTATUS CopyBytesToEnd(HANDLE srcHandle, HANDLE dstHandle) {
     return CopyBytes(srcHandle, dstHandle, LLONG_MAX, bytesCopied);
 }
 
+// streamName is the `:name:$TYPE` form of FILE_STREAM_INFO.StreamName. A
+// failed copy removes the destination stream and returns the status of the
+// call that failed.
+//
+// Both opens use FILE_FLAG_BACKUP_SEMANTICS. With SE_BACKUP_NAME and
+// SE_RESTORE_NAME, which EnableFileSystemPrivileges enables, that bypasses
+// DACL checks. A lower file inside a directory whose DACL denies this
+// process, for example with an inherited DENY-WRITE for Everyone, still has
+// its streams copied up. Without backup semantics the destination open fails,
+// because the destination inherits the same DACL from its parent.
+NTSTATUS CopyAlternateStream(const std::wstring& srcPath,
+                             const std::wstring& dstPath,
+                             std::wstring_view streamName) {
+    const std::wstring srcFull = srcPath + std::wstring(streamName);
+    const std::wstring dstFull = dstPath + std::wstring(streamName);
+
+    ScopedHandle srcHandle(::CreateFileW(
+        srcFull.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr));
+    if (!srcHandle.IsValid()) {
+        return StatusOfFailedCall(ERROR_READ_FAULT);
+    }
+
+    ScopedHandle dstHandle(::CreateFileW(
+        dstFull.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr));
+    if (!dstHandle.IsValid()) {
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
+    }
+
+    const NTSTATUS status = CopyBytesToEnd(srcHandle.Get(), dstHandle.Get());
+    if (!NT_SUCCESS(status)) {
+        dstHandle.Reset();
+        ::DeleteFileW(dstFull.c_str());
+    }
+    return status;
+}
+
+// Reads the FILE_STREAM_INFO list of handle into list. FileStreamInfo gives
+// no size hint, so the buffer doubles on each ERROR_MORE_DATA until the list
+// fits or the size passes what a DWORD length can hold. ERROR_HANDLE_EOF
+// means the file has no streams and leaves list empty.
+//
+// The list comes from GetFileInformationByHandleEx and not from the
+// path-based FindFirstStreamW. A handle opened with
+// FILE_FLAG_BACKUP_SEMANTICS lists the streams of a file whose DACL denies
+// this process; FindFirstStreamW fails there with ERROR_ACCESS_DENIED.
+NTSTATUS ReadStreamList(HANDLE handle, std::vector<BYTE>& list) {
+    list.resize(kInitialStreamListSize);
+    for (;;) {
+        if (::GetFileInformationByHandleEx(handle, FileStreamInfo, list.data(),
+                                           static_cast<DWORD>(list.size()))) {
+            return STATUS_SUCCESS;
+        }
+        const DWORD err = ::GetLastError();
+        if (err == ERROR_HANDLE_EOF) {
+            list.clear();
+            return STATUS_SUCCESS;
+        }
+        if (err != ERROR_MORE_DATA) {
+            return StatusFromWin32Error(err, ERROR_READ_FAULT);
+        }
+        if (list.size() > MAXDWORD / 2) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        list.resize(list.size() * 2);
+    }
+}
+
 // A range copied before the call is written again at the same offset.
 NTSTATUS CopyBytesFromStart(HANDLE srcHandle, HANDLE dstHandle) {
     LARGE_INTEGER zero{};
     if (!SetFilePointerEx(srcHandle, zero, nullptr, FILE_BEGIN) ||
         !SetFilePointerEx(dstHandle, zero, nullptr, FILE_BEGIN)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return StatusOfFailedCall(ERROR_SEEK);
     }
     return CopyBytesToEnd(srcHandle, dstHandle);
 }
@@ -250,7 +258,7 @@ NTSTATUS CopyAllocatedRange(HANDLE srcHandle, HANDLE dstHandle,
                             LONGLONG& bytesCopied) {
     if (!SetFilePointerEx(srcHandle, range.FileOffset, nullptr, FILE_BEGIN) ||
         !SetFilePointerEx(dstHandle, range.FileOffset, nullptr, FILE_BEGIN)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return StatusOfFailedCall(ERROR_SEEK);
     }
     return CopyBytes(srcHandle, dstHandle, range.Length.QuadPart, bytesCopied);
 }
@@ -316,18 +324,19 @@ NTSTATUS CopyAllocatedRanges(HANDLE srcHandle, HANDLE dstHandle,
     return STATUS_SUCCESS;
 }
 
-// Set the end of file of dstHandle to size when it differs.
-NTSTATUS ExtendToSize(HANDLE dstHandle, LARGE_INTEGER size) {
+// A metacopy shell already has the source size and can be open elsewhere for
+// write, so an equal size stays as it is.
+NTSTATUS SetEndOfFileIfSizeDiffers(HANDLE dstHandle, LARGE_INTEGER size) {
     LARGE_INTEGER dstSize{};
     if (!GetFileSizeEx(dstHandle, &dstSize)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return StatusOfFailedCall(ERROR_READ_FAULT);
     }
     if (dstSize.QuadPart == size.QuadPart) {
         return STATUS_SUCCESS;
     }
     if (!SetFilePointerEx(dstHandle, size, nullptr, FILE_BEGIN) ||
         !SetEndOfFile(dstHandle)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
     return STATUS_SUCCESS;
 }
@@ -351,7 +360,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr);
     if (srcH == INVALID_HANDLE_VALUE) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return StatusOfFailedCall(ERROR_READ_FAULT);
     }
 
     BYTE reparseBuf[MAXIMUM_REPARSE_DATA_BUFFER_SIZE]{};
@@ -360,7 +369,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
                           reparseBuf, sizeof(reparseBuf), &returned, nullptr)) {
         DWORD err = GetLastError();
         CloseHandle(srcH);
-        return ::LayerMount::NtStatusFromWin32(err);
+        return StatusFromWin32Error(err, ERROR_READ_FAULT);
     }
     CloseHandle(srcH);
 
@@ -375,7 +384,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
                                          nullptr, CREATE_ALWAYS,
                                          FILE_ATTRIBUTE_NORMAL, nullptr);
         if (dstCreate == INVALID_HANDLE_VALUE) {
-            return ::LayerMount::NtStatusFromWin32(GetLastError());
+            return StatusOfFailedCall(ERROR_WRITE_FAULT);
         }
         CloseHandle(dstCreate);
     }
@@ -388,7 +397,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr);
     if (dstH == INVALID_HANDLE_VALUE) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
 
     DWORD setReturned = 0;
@@ -396,7 +405,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
                           nullptr, 0, &setReturned, nullptr)) {
         DWORD err = GetLastError();
         CloseHandle(dstH);
-        return ::LayerMount::NtStatusFromWin32(err);
+        return StatusFromWin32Error(err, ERROR_WRITE_FAULT);
     }
     CloseHandle(dstH);
     return STATUS_SUCCESS;
@@ -434,53 +443,45 @@ LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
     return MakeCopyUpMetadata(sourcePath);
 }
 
-// Uses the handle-based GetFileInformationByHandleEx with FileStreamInfo
-// rather than the path-based FindFirstStreamW. Handle-based
-// enumeration honors FILE_FLAG_BACKUP_SEMANTICS on the source open, which
-// (with SE_BACKUP_NAME enabled in EnableFileSystemPrivileges) bypasses DACL
-// checks so a lower file inside a directory whose ACL denies our process
-// can still have its ADS enumerated. The path-based FindFirstStreamW does
-// not carry backup semantics and fails with ERROR_ACCESS_DENIED on such
-// files, so the copy-up would lose all of their ADS.
-bool CopyUserAlternateDataStreams(const std::wstring& srcPath,
-                                  const std::wstring& dstPath) {
-    HANDLE srcH = ::CreateFileW(srcPath.c_str(),
-                                  FILE_GENERIC_READ,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                      FILE_SHARE_DELETE,
-                                  nullptr, OPEN_EXISTING,
-                                  FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (srcH == INVALID_HANDLE_VALUE) {
-        DWORD err = ::GetLastError();
-        return err == ERROR_FILE_NOT_FOUND;
+// The source open uses FILE_FLAG_BACKUP_SEMANTICS, so the copy reads the
+// stream list of a file whose DACL denies this process.
+NTSTATUS CopyUserAlternateDataStreams(const std::wstring& srcPath,
+                                      const std::wstring& dstPath) {
+    std::vector<BYTE> list;
+    {
+        ScopedHandle srcHandle(::CreateFileW(
+            srcPath.c_str(), FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (!srcHandle.IsValid()) {
+            return StatusOfFailedCall(ERROR_READ_FAULT);
+        }
+        const NTSTATUS listStatus = ReadStreamList(srcHandle.Get(), list);
+        if (!NT_SUCCESS(listStatus)) {
+            return listStatus;
+        }
+    }
+    if (list.empty()) {
+        return STATUS_SUCCESS;
     }
 
-    std::vector<BYTE> buf(64 * 1024);
-    if (!::GetFileInformationByHandleEx(srcH, FileStreamInfo, buf.data(),
-                                          static_cast<DWORD>(buf.size()))) {
-        DWORD err = ::GetLastError();
-        ::CloseHandle(srcH);
-        // ERROR_HANDLE_EOF means the file has no streams.
-        return err == ERROR_HANDLE_EOF;
-    }
-    ::CloseHandle(srcH);
-
-    bool ok = true;
-    auto* p = reinterpret_cast<FILE_STREAM_INFO*>(buf.data());
-    while (true) {
-        // StreamName is NOT null-terminated; length is in bytes.
-        const std::wstring name(p->StreamName,
-                                p->StreamNameLength / sizeof(wchar_t));
-        if (name != L"::$DATA" && !IsReservedLayerMountStream(name)) {
-            if (!CopyAlternateStream(srcPath, dstPath, name)) {
-                ok = false;
+    const BYTE* entry = list.data();
+    for (;;) {
+        const auto* info = reinterpret_cast<const FILE_STREAM_INFO*>(entry);
+        // StreamName is not null-terminated, and its length is in bytes.
+        const std::wstring_view name(info->StreamName,
+                                     info->StreamNameLength / sizeof(wchar_t));
+        if (IsUserAlternateStream(name)) {
+            const NTSTATUS status = CopyAlternateStream(srcPath, dstPath, name);
+            if (!NT_SUCCESS(status)) {
+                return status;
             }
         }
-        if (p->NextEntryOffset == 0) break;
-        p = reinterpret_cast<FILE_STREAM_INFO*>(
-            reinterpret_cast<BYTE*>(p) + p->NextEntryOffset);
+        if (info->NextEntryOffset == 0) {
+            return STATUS_SUCCESS;
+        }
+        entry += info->NextEntryOffset;
     }
-    return ok;
 }
 
 bool ApplyEncryptedStateIfNeeded(const std::wstring& path, DWORD attrs) {
@@ -513,8 +514,7 @@ bool SetSparse(HANDLE handle) {
 }
 
 NTSTATUS SparseRefusalStatus() {
-    const DWORD err = ::GetLastError();
-    return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+    return StatusOfFailedCall(ERROR_ACCESS_DENIED);
 }
 
 void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs) {
@@ -528,7 +528,7 @@ NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, DWORD srcAttrs) {
         SetCompressedDirectory(upperPath);
     }
     if (!ApplyEncryptedStateIfNeeded(upperPath, srcAttrs)) {
-        return ::LayerMount::NtStatusFromWin32(::GetLastError());
+        return StatusOfFailedCall(ERROR_ACCESS_DENIED);
     }
     return STATUS_SUCCESS;
 }
@@ -540,7 +540,7 @@ NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
 
     LARGE_INTEGER srcSize{};
     if (!GetFileSizeEx(srcHandle, &srcSize)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+        return StatusOfFailedCall(ERROR_READ_FAULT);
     }
 
     bool rangesRefused = false;
@@ -552,7 +552,7 @@ NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
     if (rangesRefused) {
         return CopyBytesFromStart(srcHandle, dstHandle);
     }
-    return ExtendToSize(dstHandle, srcSize);
+    return SetEndOfFileIfSizeDiffers(dstHandle, srcSize);
 }
 
 namespace {
@@ -630,7 +630,7 @@ NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
     }
     const DWORD err = ::GetLastError();
     RemoveNewUpperEntry(upperPath, kind);
-    return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+    return StatusFromWin32Error(err, ERROR_WRITE_FAULT);
 }
 
 NTSTATUS CopyLinkWithCopyUpRecord(const std::wstring& srcAbsolute,

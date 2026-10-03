@@ -2,6 +2,7 @@
 
 #include "WindowsNtStatus.h"
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <cstdint>
@@ -186,12 +187,14 @@ std::wstring NormalizePath(const std::wstring& path);
 // segment that would traverse out of the layer root when concatenated.
 bool IsSafeRelativePath(const std::wstring& normalized);
 
-// Returns true if `streamName` (the parsed stream name only, *without* the
-// leading colon and without any `$TYPE` suffix) matches one of LayerMount's
-// reserved internal streams. Reserved streams hold sidecar bookkeeping
-// (metacopy / opaque markers) and must never be exposed to callers as
-// creatable / openable / deletable names. Case-insensitive.
-bool IsReservedStreamName(const std::wstring& streamName) noexcept;
+// Returns true if `ntfsStreamName` is a user alternate data stream. The name
+// is the NTFS form that stream enumeration gives, `:name:$TYPE`. The main
+// stream `::$DATA` and the reserved streams return false. The reserved
+// streams are `:overlay`, which is `kLayerMountADSStream`, and every stream
+// whose name starts with `overlay.`, such as `:overlay.opaque`. The compare
+// ignores case, as NTFS stream names do. A stream such as `:overlayNotes` is
+// user data.
+bool IsUserAlternateStream(std::wstring_view ntfsStreamName) noexcept;
 
 // Parse a normalized relative path into <host>[:<stream>[:$DATA]] components.
 // Returns true iff every rule holds:
@@ -200,7 +203,7 @@ bool IsReservedStreamName(const std::wstring& streamName) noexcept;
 //     `IsSafeRelativePath` (no embedded `:`, no `..`, no empty, no
 //     drive-qualifier)
 //   - if a stream is present: the stream name is non-empty, contains no `\`,
-//     and is not a reserved name per `IsReservedStreamName`
+//     and is not a reserved name (`overlay` or a name under `overlay.`)
 //   - if a stream-type suffix is present: it is exactly `:$DATA`
 //     (case-insensitive); other NTFS types (`$INDEX_ALLOCATION`, `$BITMAP`,
 //     ...) are rejected
@@ -459,9 +462,8 @@ public:
                    InternalFileInfo* outInfo);
 
     // CREATE_ALWAYS-style truncate of an already-open file. Copies the
-    // entry up to the upper layer if needed, deletes non-overlay ADS
-    // streams (user content under CREATE_ALWAYS is destroyed but our
-    // :overlay* bookkeeping survives), truncates to zero, applies
+    // entry up to the upper layer if needed, deletes the ADS streams
+    // `IsUserAlternateStream` accepts, truncates to zero, applies
     // allocation, and either replaces or ORs the file attributes. The
     // process tracker checks the overwrite against ctx->ownerPid, as for
     // Read.
@@ -606,9 +608,8 @@ public:
     // Enumerate the named data streams of the file at `relativePath`.
     // Resolves the path through the overlay; reads streams from the
     // resolved physical layer via ::FindFirstStreamW. Filters the main
-    // unnamed stream (`::$DATA`) — that's the file's own content, not
-    // a separate "stream" in the ADS sense — and LayerMount's reserved
-    // metadata streams (`:overlay:$DATA`, `:overlay.opaque:$DATA`).
+    // unnamed stream (`::$DATA`) and every stream that
+    // `IsUserAlternateStream` rejects.
     // Returns STATUS_OBJECT_NAME_NOT_FOUND when the file is absent in
     // every layer. Returns STATUS_SUCCESS with an empty `out` when the
     // file exists but carries no user-visible streams.

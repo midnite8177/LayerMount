@@ -34,14 +34,20 @@ LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
                                        CopiedEntryRecord record,
                                        const LayerConfig& config);
 
-// Enumerate user-visible alternate data streams on srcPath and copy each to
-// dstPath. Skips the main `::$DATA` stream (carried by the normal file-data
-// copy) and the overlay's reserved `:overlay*` bookkeeping streams.
+// Copies each user alternate data stream of srcPath to the same stream of
+// dstPath. A user stream is one `IsUserAlternateStream` accepts. The main
+// `::$DATA` stream and the reserved streams are not copied, and the file-data
+// copy carries the main stream.
 //
-// Returns true when every stream copied. A file with no streams counts as
-// a success.
-bool CopyUserAlternateDataStreams(const std::wstring& srcPath,
-                                  const std::wstring& dstPath);
+// Stops at the first stream that fails and returns its status. A missing
+// source fails with the status of the open. A file with no named streams
+// returns STATUS_SUCCESS.
+NTSTATUS CopyUserAlternateDataStreams(const std::wstring& srcPath,
+                                      const std::wstring& dstPath);
+
+// The size of the first buffer for the stream list of a file. A longer list
+// doubles the buffer until the list fits.
+inline constexpr size_t kInitialStreamListSize = 64 * 1024;
 
 // Propagate NTFS EFS state. Unlike sparse/compression, encryption is applied
 // path-wise rather than via a writable handle. Run it once the destination

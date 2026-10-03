@@ -191,11 +191,10 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
 
-    if (!CopyUserAlternateDataStreams(srcAbs, dstAbs)) {
-        DWORD streamError = ::GetLastError();
-        if (streamError == ERROR_SUCCESS) streamError = ERROR_INVALID_DATA;
+    const NTSTATUS streamStatus = CopyUserAlternateDataStreams(srcAbs, dstAbs);
+    if (!NT_SUCCESS(streamStatus)) {
         ::DeleteFileW(dstAbs.c_str());
-        return ::LayerMount::NtStatusFromWin32(streamError);
+        return streamStatus;
     }
 
     const DWORD securityError = CopySecurityKeepingInheritance(srcAbs, dstAbs);

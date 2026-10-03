@@ -245,6 +245,24 @@ public:
             L"Custom user ADS must survive lazy metacopy + completion");
     }
 
+    TEST_METHOD(LazyCompletion_CopiesUserStreamNamedOverlayNotes) {
+        UNIT_SKIP_IF_NOT_NTFS();
+
+        LayerMountTests::TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"notes.bin", std::string(2 * 1024 * 1024, 'N'));
+        const std::wstring srcPath = env.Lower(0) + L"\\notes.bin";
+        WriteADS(srcPath, L"overlayNotes", "user notes");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"notes.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"notes.bin")));
+
+        Assert::IsTrue(ADSExists(env.Upper() + L"\\notes.bin", L"overlayNotes"),
+            L"A stream whose name only starts with overlay is user data and "
+            L"must survive the fill");
+    }
+
     TEST_METHOD(LazyCompletion_PreservesCompression) {
         UNIT_SKIP_IF_NOT_NTFS();
 

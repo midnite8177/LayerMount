@@ -8,8 +8,11 @@
 #include "WhiteoutManager.h"
 #include "Cache.h"
 #include "MetadataStore.h"
+#include "EntryCopy.h"
 
 #include <winioctl.h>
+#include <cstddef>
+#include <string_view>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
@@ -101,6 +104,21 @@ bool ADSExists(const std::wstring& layerPath, const std::wstring& rel,
     return true;
 }
 
+constexpr size_t kLongStreamNameLength = 120;
+constexpr size_t kListedStreamNameChars =
+    std::wstring_view(L":").size() + kLongStreamNameLength +
+    std::wstring_view(L":$DATA").size();
+constexpr size_t kStreamInfoEntryBytes =
+    offsetof(FILE_STREAM_INFO, StreamName) + kListedStreamNameChars * sizeof(wchar_t);
+constexpr int kLongStreamCount =
+    static_cast<int>(kInitialStreamListSize * 3 / 2 / kStreamInfoEntryBytes);
+
+std::wstring LongStreamName(int index) {
+    std::wstring name = L"s" + std::to_wstring(index) + L"-";
+    name.resize(kLongStreamNameLength, L'x');
+    return name;
+}
+
 }
 
 TEST_CLASS(CopyUpPreservationTests) {
@@ -119,14 +137,9 @@ public:
         Assert::IsTrue(HasSparseAttribute(srcPath),
             L"Precondition: lower file must be sparse");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"sparse.bin")));
 
         const std::wstring upPath = env.Upper() + L"\\sparse.bin";
         Assert::IsTrue(HasSparseAttribute(upPath),
@@ -140,14 +153,9 @@ public:
         const LONGLONG logical = 64 * 1024;
         MakeSparse(srcPath, logical);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"sparse.bin")));
 
         Assert::AreEqual(logical,
                          LayerMountTests::LogicalBytes(env.Upper() + L"\\sparse.bin"),
@@ -165,14 +173,9 @@ public:
         Assert::IsTrue(LayerMountTests::AllocatedBytes(srcPath) < dataOffset,
             L"Precondition: the lower file allocates only its data range");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"sparse.bin")));
 
         const std::wstring upPath = env.Upper() + L"\\sparse.bin";
         Assert::IsTrue(HasSparseAttribute(upPath),
@@ -198,15 +201,10 @@ public:
         Assert::IsTrue(HasSparseAttribute(srcPath),
             L"Precondition: lower file must be sparse");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-        cu.SetCapabilityGate(GateWithoutSparseFiles());
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        rig.copyUp.SetCapabilityGate(GateWithoutSparseFiles());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"sparse.bin")));
 
         Assert::IsFalse(HasSparseAttribute(env.Upper() + L"\\sparse.bin"),
             L"Without the sparse capability the upper copy is dense");
@@ -221,14 +219,10 @@ public:
         Assert::IsTrue(HasSparseAttribute(srcPath),
             L"Precondition: lower file must be sparse");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-        cu.SetCapabilityGate(GateWithoutSparseFiles());
-        DirectoryRename dirRename(config, resolver, wm, cache, cu, GateWithoutSparseFiles());
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        rig.copyUp.SetCapabilityGate(GateWithoutSparseFiles());
+        DirectoryRename dirRename(rig.config, rig.resolver, rig.whiteouts, rig.cache,
+                                  rig.copyUp, GateWithoutSparseFiles());
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"moved"),
@@ -248,16 +242,9 @@ public:
         Assert::IsTrue(HasSparseAttribute(srcPath),
             L"Precondition: lower file must be sparse");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"moved"),
             RenameEntryKind::Directory, ReplaceExisting::No)));
 
@@ -278,16 +265,9 @@ public:
         Assert::IsTrue(HasAttribute(srcPath, FILE_ATTRIBUTE_COMPRESSED),
             L"Precondition: lower file must be compressed");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"moved"),
             RenameEntryKind::Directory, ReplaceExisting::No)));
 
@@ -305,14 +285,9 @@ public:
                  "[ZoneTransfer]\r\nZoneId=3\r\n");
         WriteADS(env.Lower(0), L"doc.txt", L"custom.stream", "secret-metadata");
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"doc.txt")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"doc.txt")));
 
         // Main stream copied (already covered elsewhere — quick sanity check).
         Assert::AreEqual(std::string("main-content"),
@@ -339,14 +314,9 @@ public:
         fake.originLayer = L"bogus";
         MetadataStore::WriteLayerMountMetadata(env.Lower(0) + L"\\book.txt", fake, nullptr);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"book.txt")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"book.txt")));
 
         // Upper's :overlay metadata should reflect copy-up truth, not the
         // fabricated value from lower.
@@ -356,6 +326,58 @@ public:
             L"Upper's bookkeeping ADS must be written by copy-up, not inherited");
     }
 
+    TEST_METHOD(CopyUpFile_CopiesUserStreamNamedOverlayNotes) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"notes.txt", "content");
+        WriteADS(env.Lower(0), L"notes.txt", L"overlayNotes", "user notes");
+        WriteADS(env.Lower(0), L"notes.txt", L"overlay.extra", "reserved");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"notes.txt")));
+
+        Assert::AreEqual(std::string("user notes"),
+                         ReadADS(env.Upper(), L"notes.txt", L"overlayNotes"),
+            L"A stream whose name only starts with overlay is user data");
+        Assert::IsFalse(ADSExists(env.Upper(), L"notes.txt", L"overlay.extra"),
+            L"A stream under overlay. is reserved and stays in its layer");
+    }
+
+    TEST_METHOD(CopyUpFile_CopiesEveryStreamOfFileWithManyLongNamedStreams) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"many.txt", "content");
+        for (int i = 0; i < kLongStreamCount; ++i) {
+            WriteADS(env.Lower(0), L"many.txt", LongStreamName(i), std::to_string(i));
+        }
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"many.txt")));
+
+        for (int i = 0; i < kLongStreamCount; ++i) {
+            Assert::AreEqual(std::to_string(i),
+                             ReadADS(env.Upper(), L"many.txt", LongStreamName(i)),
+                L"Every stream of the lower file must reach the upper copy");
+        }
+    }
+
+    TEST_METHOD(DirectoryRename_CopiesUserStreamNamedOverlayNotesOfChild) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        env.WriteFile(env.Lower(0), L"tree\\notes.txt", "content");
+        WriteADS(env.Lower(0), L"tree\\notes.txt", L"overlayNotes", "user notes");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
+
+        Assert::AreEqual(std::string("user notes"),
+                         ReadADS(env.Upper(), L"moved\\notes.txt", L"overlayNotes"),
+            L"The tree copy keeps a user stream whose name starts with overlay");
+    }
+
 
     TEST_METHOD(CopyUpFile_PreservesSystemAttribute) {
         TempLayerEnvironment env(1);
@@ -363,14 +385,9 @@ public:
         ::SetFileAttributesW((env.Lower(0) + L"\\s.bin").c_str(),
                               FILE_ATTRIBUTE_SYSTEM);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"s.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"s.bin")));
 
         DWORD attrs = ::GetFileAttributesW((env.Upper() + L"\\s.bin").c_str());
         Assert::IsTrue((attrs & FILE_ATTRIBUTE_SYSTEM) != 0,
@@ -387,14 +404,9 @@ public:
         ::SetFileAttributesW((env.Lower(0) + L"\\t.bin").c_str(),
                               FILE_ATTRIBUTE_TEMPORARY);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"t.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"t.bin")));
 
         DWORD attrs = ::GetFileAttributesW((env.Upper() + L"\\t.bin").c_str());
         Assert::IsTrue((attrs & FILE_ATTRIBUTE_TEMPORARY) != 0,
@@ -407,14 +419,9 @@ public:
         ::SetFileAttributesW((env.Lower(0) + L"\\hs.bin").c_str(),
                               FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpFile(L"hs.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"hs.bin")));
 
         DWORD attrs = ::GetFileAttributesW((env.Upper() + L"\\hs.bin").c_str());
         Assert::IsTrue((attrs & FILE_ATTRIBUTE_HIDDEN) != 0);
@@ -431,14 +438,9 @@ public:
         ::SetFileAttributesW((env.Lower(0) + L"\\sysdir").c_str(),
                               FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_SYSTEM);
 
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpDirectory(L"sysdir")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpDirectory(L"sysdir")));
 
         DWORD attrs = ::GetFileAttributesW((env.Upper() + L"\\sysdir").c_str());
         Assert::IsTrue((attrs & FILE_ATTRIBUTE_SYSTEM) != 0,

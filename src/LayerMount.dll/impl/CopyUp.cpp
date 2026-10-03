@@ -332,19 +332,10 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
 NTSTATUS CopyUp::FinishCommittedFile(const std::wstring& sourcePath,
                                      const std::wstring& upperPath,
                                      FileBasicInfoGuard& basicInfo) {
-    // Copy user alternate data streams (zone.identifier, custom metadata, etc.)
-    // Must run BEFORE WriteLayerMountMetadata so the overlay's own :overlay stream
-    // is authoritative and not overwritten by whatever the lower file had.
-    // ADS failures are fatal: if Zone.Identifier or an app-specific stream
-    // can't be carried up, the upper file would silently lose security or
-    // app metadata that the source had — better to fail the copy-up so the
-    // caller can retry or report than to commit a half-faithful copy. Tear
-    // down the just-committed upper file so a retry starts fresh.
-    if (!CopyUserAlternateDataStreams(sourcePath, upperPath)) {
-        DWORD adsErr = ::GetLastError();
-        if (adsErr == 0) adsErr = ERROR_INVALID_DATA;
+    const NTSTATUS streamStatus = CopyUserAlternateDataStreams(sourcePath, upperPath);
+    if (!NT_SUCCESS(streamStatus)) {
         ::DeleteFileW(upperPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(adsErr);
+        return streamStatus;
     }
 
     LayerMountMetadata metadata = MakeCopyUpMetadata(sourcePath);
@@ -690,21 +681,12 @@ NTSTATUS CopyUp::FillMetacopyShell(ScopedHandle& srcHandle,
 
 NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
                                    LayerMountMetadata& metadata) {
-    // Carry user alternate data streams (zone.identifier, custom metadata)
-    // from the lower file up to the upper. The eager copy-up (CopyUpFile)
-    // does this right after commit; the lazy path has to do it here because
-    // CopyUpMetadataOnly only staged a sparse data shell without streams.
-    // Run BEFORE WriteLayerMountMetadata so the overlay's own :overlay stream
-    // stays authoritative.
-    //
-    // ADS failures are fatal: if a stream can't be carried up, leave the
-    // metacopy flag set and surface the error so the caller can retry.
-    // Clearing metacopy with a partial ADS set would commit a corrupted
-    // upper that silently misses a stream the source had.
-    if (!CopyUserAlternateDataStreams(metadata.originLayer, upperPath)) {
-        DWORD adsErr = ::GetLastError();
-        if (adsErr == 0) adsErr = ERROR_INVALID_DATA;
-        return ::LayerMount::NtStatusFromWin32(adsErr);
+    // A stream failure returns before the code clears the metacopy flag, so
+    // the next open tries the fill again.
+    const NTSTATUS streamStatus =
+        CopyUserAlternateDataStreams(metadata.originLayer, upperPath);
+    if (!NT_SUCCESS(streamStatus)) {
+        return streamStatus;
     }
 
     // Clear metacopy flag. Metadata persistence is the atomic commit point

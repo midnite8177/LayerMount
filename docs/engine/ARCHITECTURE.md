@@ -530,7 +530,8 @@ unavailable. Steps:
    matches a Windows copy of a compressed file to such a volume.
 6. Mirror metadata: file attributes, all three timestamps, security
    descriptor (DACL/SACL/owner/group), and every alternate data stream
-   except the reserved `:overlay*` namespace.
+   except the reserved ones, `:overlay` and every `:overlay.*` stream. A
+   stream that fails to copy fails the copy-up with its status.
 7. Write the `:overlay` metadata record (origin layer, copy-up
    timestamp, captured stable index number).
 8. `MoveFileExW(work, upper, MOVEFILE_REPLACE_EXISTING |
@@ -770,9 +771,13 @@ choice, the SHA-1 rationale, and the read and remove details.
 
 The engine reserves three namespaces:
 
-- `:overlay`, `:overlay.opaque` ADS streams in the upper layer.
-  `Overwrite`, which has CREATE_ALWAYS semantics, deletes user ADS
-  streams but skips anything starting with `:overlay`.
+- The `:overlay` ADS stream and every `:overlay.*` stream, such as
+  `:overlay.opaque`, in the upper layer. This follows overlayfs, which
+  reserves `trusted.overlay.*`. The match ignores case, and a name that
+  only starts with `overlay`, such as `:overlayNotes`, is user data.
+  `IsReservedStreamName` holds the rule for the stream-path parse, the
+  copy-up stream copy, `EnumerateStreams` and `Overwrite`. `Overwrite` has
+  CREATE_ALWAYS semantics and deletes the user ADS streams only.
 - The `<upper>\.overlay\` directory. `IsReservedRelativePath` rejects
   every read and write that targets it, and `MergeDirectoryEntries`
   filters it out of root listings.

@@ -76,6 +76,20 @@ public:
             L"reserved stream name 'overlay.opaque' must be rejected");
     }
 
+    TEST_METHOD(Parse_StreamUnderReservedNamespace_RejectedAndOverlayPrefixAccepted) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt"));
+
+        Assert::AreEqual<HRESULT>(kHrObjectNameInvalid,
+            CreateThroughEngine(mount.Get(), L"\\host.txt:overlay.foo"),
+            L"a stream under 'overlay.' is reserved, as 'overlay' is");
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt:overlayNotes"),
+            L"a stream that only starts with 'overlay' is a user stream");
+    }
+
     TEST_METHOD(Parse_BackslashInStreamName_Rejected) {
         TempLayerEnv env(0);
         LayerMountHolder mount = CreateLayerMount(env);
@@ -250,6 +264,27 @@ public:
             L"newly created stream must land on the upper host");
     }
 
+    TEST_METHOD(OpenFile_WriteOnLowerFile_CopiesUserStreamNamedOverlayNotes) {
+        TempLayerEnv env(1);
+        env.WriteLowerFile(0, L"host.txt", "lower content");
+        WriteRawStream(env.Lower(0) + L"\\host.txt:overlayNotes", "user notes", 10);
+
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OpenOverlayFile(mount.Get(), L"\\host.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, opened));
+        UINT32 written = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            WriteFromStart(opened.handle, "upper", 5, &written, nullptr));
+        ::LayerMountCloseFile(opened.handle);
+
+        Assert::AreEqual<std::string>("user notes",
+            ReadRawStream(env.Upper() + L"\\host.txt:overlayNotes"),
+            L"a write copies up a user stream whose name starts with overlay");
+    }
+
     TEST_METHOD(CreateFile_AdsOnMetacopyShell_SurvivesLaterDataOpen) {
         // A stream Create on a metacopy shell fills the shell first, so the
         // lower's streams cannot land over the user's stream later. A
@@ -347,6 +382,40 @@ public:
             ReadRawStream(env.Upper() + L"\\host.txt:a"));
         Assert::AreEqual<std::string>("BBBBBBBBBB",
             ReadRawStream(env.Upper() + L"\\host.txt:b"));
+    }
+
+    TEST_METHOD(Overwrite_DeletesUserStreamNamedOverlayNotesAndKeepsReservedStreams) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt"));
+        const std::wstring upperHost = env.Upper() + L"\\host.txt";
+        const std::string record = R"({"originLayer":"kept"})";
+        ::DeleteFileW((upperHost + L":overlay").c_str());
+        WriteRawStream(upperHost + L":overlay", record.data(),
+                       static_cast<DWORD>(record.size()));
+        WriteRawStream(upperHost + L":Overlay.Extra", "reserved", 8);
+        WriteRawStream(upperHost + L":overlayNotes", "user notes", 10);
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OpenOverlayFile(mount.Get(), L"\\host.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, opened));
+        constexpr UINT64 allocationSize = 0u;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OverwriteAddingAttributes(opened.handle, FILE_ATTRIBUTE_NORMAL,
+                                      allocationSize, nullptr));
+        ::LayerMountCloseFile(opened.handle);
+
+        Assert::IsFalse(HasStream(upperHost + L":overlayNotes"),
+            L"Overwrite deletes a user stream whose name starts with overlay");
+        Assert::AreEqual<std::string>(record,
+            ReadRawStream(upperHost + L":overlay"),
+            L"Overwrite keeps the reserved record");
+        Assert::AreEqual<std::string>("reserved",
+            ReadRawStream(upperHost + L":Overlay.Extra"),
+            L"Overwrite keeps a stream under the reserved namespace in any case");
     }
 
     TEST_METHOD(DeleteFile_StreamOnly_LeavesHost) {

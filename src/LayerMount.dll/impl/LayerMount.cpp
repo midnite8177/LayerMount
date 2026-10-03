@@ -218,9 +218,36 @@ bool IsSafeRelativePath(const std::wstring& normalized) {
     return true;
 }
 
-bool IsReservedStreamName(const std::wstring& streamName) noexcept {
-    return ::_wcsicmp(streamName.c_str(), L"overlay") == 0
-        || ::_wcsicmp(streamName.c_str(), L"overlay.opaque") == 0;
+namespace {
+
+bool StreamNamesEqual(std::wstring_view a, std::wstring_view b) noexcept {
+    return a.size() == b.size() && a.size() <= INT_MAX &&
+           ::CompareStringOrdinal(a.data(), static_cast<int>(a.size()),
+                                  b.data(), static_cast<int>(b.size()),
+                                  TRUE) == CSTR_EQUAL;
+}
+
+// `streamName` is the bare name, without the leading colon and without a
+// `:$TYPE` suffix.
+bool IsReservedStreamName(std::wstring_view streamName) noexcept {
+    const std::wstring_view reserved = std::wstring_view(kLayerMountADSStream).substr(1);
+    if (streamName.size() == reserved.size()) {
+        return StreamNamesEqual(streamName, reserved);
+    }
+    return streamName.size() > reserved.size() &&
+           streamName[reserved.size()] == L'.' &&
+           StreamNamesEqual(streamName.substr(0, reserved.size()), reserved);
+}
+
+}
+
+bool IsUserAlternateStream(std::wstring_view ntfsStreamName) noexcept {
+    if (ntfsStreamName.empty() || ntfsStreamName.front() != L':') {
+        return false;
+    }
+    const std::wstring_view afterColon = ntfsStreamName.substr(1);
+    const std::wstring_view name = afterColon.substr(0, afterColon.find(L':'));
+    return !name.empty() && !IsReservedStreamName(name);
 }
 
 bool TryParseStreamPath(const std::wstring& normalized,
@@ -1615,17 +1642,6 @@ NTSTATUS LayerMount::Write(FileContext* ctx,
 
 namespace {
 
-// CREATE_ALWAYS on a file blows away user alternate data streams. Our
-// :overlay* bookkeeping is NOT user content and must be preserved; other
-// streams are user data and get deleted alongside the primary stream.
-bool IsReservedLayerMountStreamName(std::wstring_view streamName) {
-    static constexpr std::wstring_view kLayerMount(L":overlay");
-    if (streamName.size() < kLayerMount.size()) return false;
-    std::wstring lower(streamName.begin(), streamName.begin() + kLayerMount.size());
-    ::CharLowerBuffW(lower.data(), static_cast<DWORD>(lower.size()));
-    return lower.compare(0, kLayerMount.size(), kLayerMount) == 0;
-}
-
 NTSTATUS DeleteUserAlternateDataStreams(const std::wstring& basePath) {
     WIN32_FIND_STREAM_DATA streamData{};
     HANDLE find = ::FindFirstStreamW(basePath.c_str(), FindStreamInfoStandard,
@@ -1636,12 +1652,11 @@ NTSTATUS DeleteUserAlternateDataStreams(const std::wstring& basePath) {
                                        : ::LayerMount::NtStatusFromWin32(err);
     }
 
-    static constexpr std::wstring_view kPrimaryStream(L"::$DATA");
     static constexpr std::wstring_view kDataSuffix(L":$DATA");
     NTSTATUS status = STATUS_SUCCESS;
     for (;;) {
         const std::wstring_view name(streamData.cStreamName);
-        if (name != kPrimaryStream && !IsReservedLayerMountStreamName(name)) {
+        if (IsUserAlternateStream(name)) {
             std::wstring streamPath = basePath;
             if (name.size() >= kDataSuffix.size() &&
                 name.compare(name.size() - kDataSuffix.size(),
@@ -2705,27 +2720,6 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
     return STATUS_SUCCESS;
 }
 
-namespace {
-// Stream names FindFirstStreamW returns are NTFS-native forms such as
-// "::$DATA" (the main unnamed stream — file content), ":foo:$DATA" (a
-// user-defined ADS named "foo"), and ":overlay:$DATA" /
-// ":overlay.opaque:$DATA" (LayerMount's reserved metadata streams).
-// EnumerateStreams hides these from callers so the result list is the
-// user-facing surface: named data streams only, no implementation
-// detail and no main-content alias.
-bool IsReservedFullNtfsStreamName(const wchar_t* name) noexcept {
-    if (name == nullptr) return false;
-    static const std::wstring kMainData      = L"::$DATA";
-    static const std::wstring kOverlayData   =
-        std::wstring(kLayerMountADSStream) + L":$DATA";
-    static const std::wstring kOpaqueData    =
-        std::wstring(kOpaqueADSStream)     + L":$DATA";
-    return ::_wcsicmp(name, kMainData.c_str())    == 0
-        || ::_wcsicmp(name, kOverlayData.c_str()) == 0
-        || ::_wcsicmp(name, kOpaqueData.c_str())  == 0;
-}
-}
-
 NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
                                       std::vector<InternalStreamInfo>& out) {
     out.clear();
@@ -2756,7 +2750,7 @@ NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
     std::unique_ptr<void, decltype(&::FindClose)> findGuard(h, &::FindClose);
 
     do {
-        if (IsReservedFullNtfsStreamName(findData.cStreamName)) {
+        if (!IsUserAlternateStream(findData.cStreamName)) {
             continue;
         }
         InternalStreamInfo info;

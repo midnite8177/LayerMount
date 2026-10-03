@@ -26,6 +26,7 @@
 #include "WhiteoutManager.h"
 #include "Cache.h"
 #include "MetadataStore.h"
+#include "EntryCopy.h"
 
 #include <thread>
 #include <atomic>
@@ -380,6 +381,43 @@ public:
         }
         Assert::AreEqual<size_t>(0, leftover,
             L"Copy-up under contention must leave no work-dir temp orphans");
+    }
+
+    TEST_METHOD(CopyUserAlternateDataStreams_MissingSource_ReturnsNotFound) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"dst.txt", "dst");
+
+        const NTSTATUS status = CopyUserAlternateDataStreams(
+            env.Lower(0) + L"\\absent.txt", env.Upper() + L"\\dst.txt");
+
+        Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_NOT_FOUND, status,
+            L"A source that does not exist fails the stream copy");
+    }
+
+    TEST_METHOD(CopyUserAlternateDataStreams_StreamCopyFails_ReturnsThatStreamsStatus) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"src.txt", "src");
+        env.WriteFile(env.Upper(), L"dst.txt", "dst");
+        const std::wstring srcPath = env.Lower(0) + L"\\src.txt";
+        const std::wstring dstPath = env.Upper() + L"\\dst.txt";
+
+        HANDLE srcStream = ::CreateFileW((srcPath + L":held").c_str(), GENERIC_WRITE, 0,
+                                         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, srcStream);
+        ::CloseHandle(srcStream);
+
+        HANDLE heldDst = ::CreateFileW((dstPath + L":held").c_str(), GENERIC_WRITE, 0,
+                                       nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, heldDst,
+            L"Opening the destination stream with no sharing must succeed");
+
+        const NTSTATUS status = CopyUserAlternateDataStreams(srcPath, dstPath);
+        ::CloseHandle(heldDst);
+
+        Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
+            L"The copy reports the status of the stream that failed");
     }
 };
 

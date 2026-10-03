@@ -345,6 +345,34 @@ public:
         Assert::IsTrue(sawPayload, L":payload stream missing from results");
     }
 
+    TEST_METHOD(EnumerateStreams_ListsOverlayNotesAndHidesReservedNamespace) {
+        TempLayerEnv     env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateOverlayFile(mount.Get(), L"\\host.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
+
+        const std::wstring upper = env.Upper() + L"\\host.txt";
+        WriteRawStream(upper + L":overlayNotes",  "notes", 5);
+        const std::string record = R"({"originLayer":"kept"})";
+        WriteRawStream(upper + L":overlay", record.data(), static_cast<DWORD>(record.size()));
+        WriteRawStream(upper + L":Overlay.Extra", "reserved", 8);
+
+        LM_STREAM_INFO streams[4]{};
+        UINT32 written = 0;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnumerateStreams(mount.Get(), L"\\host.txt",
+                streams, 4, &written));
+        Assert::AreEqual<UINT32>(1u, written,
+            L"only the user stream is listed; the reserved namespace is hidden");
+        Assert::AreEqual(std::wstring(L":overlayNotes:$DATA"),
+                         std::wstring(streams[0].streamName));
+    }
+
     TEST_METHOD(EnumerateStreams_Allocation_IsStreamSizeRoundedUp) {
         TempLayerEnv     env(0);
         LayerMountHolder mount = CreateLayerMount(env);

@@ -253,9 +253,9 @@ typedef struct LM_FILE_INFO {
  *
  * Single named-data-stream entry returned from LayerMountEnumerateStreams.
  * Stream names carry NTFS's native form (e.g. ":mystream:$DATA"). The
- * main unnamed stream (`::$DATA`) and LayerMount's reserved metadata
- * streams (`:overlay:$DATA`, `:overlay.opaque:$DATA`) are filtered out
- * before this struct is populated, so callers never see them.
+ * main unnamed stream (`::$DATA`) and the reserved streams are not in the
+ * list. The reserved streams are `:overlay` and every stream whose name
+ * starts with `overlay.`, in any letter case.
  *
  * `streamName` is a fixed-size buffer sized to fit any NTFS stream name
  * (NTFS caps stream names at 255 WCHARs, plus the `:$DATA` suffix and a
