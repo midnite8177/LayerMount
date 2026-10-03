@@ -79,16 +79,11 @@ bool IsEnumerableDirectory(DWORD attributes) {
            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 }
 
-NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLink) {
-    *isLink = false;
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    constexpr DWORD kDirectoryReparsePoint =
-        FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
-    if ((attributes & kDirectoryReparsePoint) != kDirectoryReparsePoint) {
-        return STATUS_SUCCESS;
-    }
+namespace {
+
+// Reads the tag of the entry at path, not of its target. Opens a file or a
+// directory.
+NTSTATUS ReadReparseTag(const std::wstring& path, DWORD* tag) {
     HANDLE entry = ::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
@@ -104,7 +99,48 @@ NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLin
     if (!read) {
         return NtStatusFromWin32(readErr);
     }
-    *isLink = IsReparseTagNameSurrogate(tagInfo.ReparseTag);
+    *tag = tagInfo.ReparseTag;
+    return STATUS_SUCCESS;
+}
+
+// The user-mode SDK headers define no names for the WSL FIFO, character
+// device and block device tags.
+constexpr DWORD kReparseTagLxFifo = 0x80000024;
+constexpr DWORD kReparseTagLxChr = 0x80000025;
+constexpr DWORD kReparseTagLxBlk = 0x80000026;
+
+// A reparse point is a link when its tag is a name surrogate, such as the
+// tag of a symbolic link or of a junction.
+bool IsLinkReparseTag(DWORD tag) {
+    return IsReparseTagNameSurrogate(tag);
+}
+
+// The reparse data of these tags is the whole entry, so a data copy loses
+// it. Overlayfs also copies up a WSL special file as a special file.
+bool IsSelfContainedFileReparseTag(DWORD tag) {
+    return tag == IO_REPARSE_TAG_AF_UNIX || tag == kReparseTagLxFifo ||
+           tag == kReparseTagLxChr || tag == kReparseTagLxBlk ||
+           tag == IO_REPARSE_TAG_APPEXECLINK;
+}
+
+}
+
+NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLink) {
+    *isLink = false;
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    constexpr DWORD kDirectoryReparsePoint =
+        FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+    if ((attributes & kDirectoryReparsePoint) != kDirectoryReparsePoint) {
+        return STATUS_SUCCESS;
+    }
+    DWORD tag = 0;
+    const NTSTATUS status = ReadReparseTag(path, &tag);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    *isLink = IsLinkReparseTag(tag);
     return STATUS_SUCCESS;
 }
 
@@ -124,15 +160,19 @@ NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind
 
 NTSTATUS ClonesReparsePoint(const std::wstring& path, DWORD attributes, bool* clones) {
     *clones = false;
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return STATUS_INVALID_PARAMETER;
+    }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
         return STATUS_SUCCESS;
     }
-    RenameEntryKind kind = RenameEntryKind::File;
-    const NTSTATUS status = EntryKindOf(path, attributes, &kind);
+    DWORD tag = 0;
+    const NTSTATUS status = ReadReparseTag(path, &tag);
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    *clones = kind != RenameEntryKind::Directory;
+    const bool isDirectory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    *clones = IsLinkReparseTag(tag) || (!isDirectory && IsSelfContainedFileReparseTag(tag));
     return STATUS_SUCCESS;
 }
 

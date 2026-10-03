@@ -122,26 +122,40 @@ NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
                                         NewUpperEntryKind kind,
                                         const LayerConfig& config);
 
-// Copies the link at srcAbsolute to dstAbsolute as a link and writes the
-// copy-up record `policy.record` selects on the new link, not on its
-// target, as overlayfs keeps the inode number of a copied-up symlink. A
-// failure removes the new link.
-NTSTATUS CopyLinkWithCopyUpRecord(const std::wstring& srcAbsolute,
-                                  DWORD srcAttrs,
-                                  const std::wstring& dstAbsolute,
-                                  const EntryCopyPolicy& policy);
+// Copies each extended attribute of the entry at srcPath to the entry at
+// dstPath. Opens the entries themselves, not the targets of links. When the
+// source has no extended attributes, or either volume has no support for
+// them, copies nothing and returns STATUS_SUCCESS. A failed read or write
+// returns its status.
+NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring& dstPath);
 
-// Copies the link at srcAbsolute, whose attributes are srcAttrs, to
-// upperPath, with the copy-up record that policy.record selects. The link
-// is built in containerPath, a new path in the work directory, through
-// BuildInContainerAndMove, so it inherits the ACEs of its upper parent.
-// When an entry holds upperPath, fails with STATUS_OBJECT_NAME_COLLISION
-// and leaves that entry as it was.
-NTSTATUS CopyLinkThroughWorkDir(const std::wstring& srcAbsolute,
-                                DWORD srcAttrs,
-                                const std::wstring& containerPath,
-                                const std::wstring& upperPath,
-                                const EntryCopyPolicy& policy);
+// An entry to copy. attributes are the entry's own, as GetFileAttributesW
+// reports them without following a link.
+struct SourceEntry {
+    const std::wstring& path;
+    DWORD attributes;
+};
+
+// Clones the reparse point of source, such as a link, to dstAbsolute, and
+// copies its extended attributes. WSL keeps the mode and the device number
+// of a special file in extended attributes, and overlayfs copies xattrs
+// on copy-up. Then writes the copy-up record that policy.record selects
+// on the clone, not on a link's target, as overlayfs keeps the inode number
+// of a copied-up symlink. A failure removes the clone.
+NTSTATUS CloneReparsePointWithCopyUpRecord(const SourceEntry& source,
+                                           const std::wstring& dstAbsolute,
+                                           const EntryCopyPolicy& policy);
+
+// Clones the reparse point of source to upperPath, as
+// CloneReparsePointWithCopyUpRecord clones it. BuildInContainerAndMove
+// builds the clone in containerPath, a new path in the work directory, so
+// the clone inherits the ACEs of its upper parent. When an entry holds
+// upperPath, fails with STATUS_OBJECT_NAME_COLLISION and leaves that entry
+// as it was.
+NTSTATUS CloneReparsePointThroughWorkDir(const SourceEntry& source,
+                                         const std::wstring& containerPath,
+                                         const std::wstring& upperPath,
+                                         const EntryCopyPolicy& policy);
 
 // Writes the ACEs of the DACL of the directory at parentAbs, the inherited
 // ones included, on the directory at dirAbs. When the process holds

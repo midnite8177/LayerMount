@@ -81,14 +81,14 @@ private:
 
     // Copies the merged view of oldName to stagedPath, a new path in the
     // work directory, as a plain directory. lowerSource is the first lower
-    // that holds oldName, and it is not a link: the caller copies a link
-    // with CopyLinkThroughWorkDir. A lower directory reparse point that is
-    // not a link also copies as a plain directory. The copy gets the layout,
-    // streams, attributes, times and security of the upper directory of
-    // oldName, or of lowerSource when the upper has none, and the copy-up
-    // record of lowerSource, and is marked opaque. A lower directory that
-    // the merge cannot list fails the copy. On failure, stagedPath can hold
-    // a partial tree, and the caller removes it.
+    // that holds oldName, and it is not a link: the caller clones a link
+    // with CloneReparsePointThroughWorkDir. A lower directory reparse point
+    // that is not a link also copies as a plain directory. The copy gets
+    // the layout, streams, attributes, times and security of the upper
+    // directory of oldName, or of lowerSource when the upper has none, and
+    // the copy-up record of lowerSource, and is marked opaque. A lower
+    // directory that the merge cannot list fails the copy. On failure,
+    // stagedPath can hold a partial tree, and the caller removes it.
     NTSTATUS CopyMergedDirectory(const ResolvedPath& lowerSource,
                                  const RenamedName& oldName,
                                  const std::wstring& stagedPath);

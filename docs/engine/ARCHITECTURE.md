@@ -621,12 +621,20 @@ A lower junction or directory symbolic link copies up as a link, and
 so does a lower file symbolic link in `CopyUpFile`. The engine creates
 the link in a container in the work directory, writes its copy-up
 record on the link, and one rename moves the link to its upper path.
-The link target stays as it was. Any other lower directory reparse
-point copies up as a plain directory. When no filter handles its
-reparse tag, the engine cannot read its streams, and the copy-up fails
-with `STATUS_IO_REPARSE_TAG_NOT_HANDLED`. No copy takes the pin or
-offline attributes of its source, because the copy is outside the sync
-provider or storage manager that set them.
+The link target stays as it was. A lower file with the reparse tag of
+a WSL special file (a Unix socket, FIFO, character device or block
+device) or of an app execution alias also copies up as a clone of its
+reparse point. Overlayfs copies up a special file as a special file.
+Each clone also gets the extended attributes of its source, because
+WSL keeps the mode and device number of a special file in them, and
+overlayfs copies xattrs. Any other lower file reparse point, such as
+a cloud placeholder or a deduplicated file, copies up as a plain file
+with its data, as overlayfs copies the data of a regular file. Any
+other lower directory reparse point copies up as a plain directory.
+When no filter handles its reparse tag, the engine cannot read its
+streams, and the copy-up fails with `STATUS_IO_REPARSE_TAG_NOT_HANDLED`.
+No copy takes the pin or offline attributes of its source, because the
+copy is outside the sync provider or storage manager that set them.
 
 A move does not recompute inherited ACEs. So an entry that the engine
 builds for a new upper path in the work directory goes into a
@@ -667,6 +675,10 @@ The engine handles ten cases. The last three also apply to a file source:
   lists, each from the layer that gives it, with that layer's name
   case. A file copies with its data, sparse state and ADS, a link
   copies as a link, and a directory copies with its merged children.
+  A file reparse point copies as in a file copy-up. A WSL special file
+  or an app execution alias copies as a clone of its reparse point,
+  and any other file, such as a cloud placeholder, copies with its
+  data.
   Thus an entry that only a deeper lower holds also copies. The merge
   applies the whiteouts and opaque markers of every layer, so the copy
   holds no marker files. A directory the engine cannot list fails the

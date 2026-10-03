@@ -15,6 +15,7 @@
 
 #include <cfapi.h>
 
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <rpc.h>
@@ -540,41 +541,77 @@ inline bool EncryptedOrSkipped(const std::wstring& path) {
     return false;
 }
 
-// Gives the empty directory at dir a reparse point with a tag that is not
-// a Microsoft tag and not a name surrogate, so the directory is not a
-// link. No filter handles the tag, so a listing of dir fails with
+// Sets the reparse point in buffer, a whole reparse data buffer, on the
+// entry at path. Logs a skip and returns false when the reparse point
+// cannot be set.
+inline bool ReparseBufferSetOrSkipped(const std::wstring& path, const std::vector<BYTE>& buffer) {
+    ::LayerMount::ScopedHandle handle(::CreateFileW(
+        path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    DWORD returned = 0;
+    const bool set = handle.IsValid() &&
+                     ::DeviceIoControl(handle.Get(), FSCTL_SET_REPARSE_POINT,
+                                       const_cast<BYTE*>(buffer.data()),
+                                       static_cast<DWORD>(buffer.size()), nullptr, 0, &returned,
+                                       nullptr) != FALSE;
+    if (!set || !HasAttribute(path, FILE_ATTRIBUTE_REPARSE_POINT)) {
+        Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+            (L"[SKIP] the test could not set a reparse tag on " + path).c_str());
+        return false;
+    }
+    return true;
+}
+
+// Gives the file or directory at path a reparse point with a tag that is
+// not a Microsoft tag and not a name surrogate, so a directory is not a
+// link. No filter handles the tag, so a listing of a directory fails with
 // ERROR_CANT_ACCESS_FILE. Logs a skip and returns false when the tag
 // cannot be set.
-inline bool NonLinkReparseTagSetOrSkipped(const std::wstring& dir) {
-    ::LayerMount::ScopedHandle handle(::CreateFileW(
-        dir.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+inline bool NonLinkReparseTagSetOrSkipped(const std::wstring& path) {
     constexpr DWORD kDataLength = 4;
     std::vector<BYTE> buffer(REPARSE_GUID_DATA_BUFFER_HEADER_SIZE + kDataLength);
     auto* reparse = reinterpret_cast<REPARSE_GUID_DATA_BUFFER*>(buffer.data());
     reparse->ReparseTag = 0x00001234;
     reparse->ReparseDataLength = kDataLength;
     reparse->ReparseGuid = {0x6d1b5a8e, 0x2f4c, 0x4b7a, {0x9e, 0x31, 0x5c, 0x0d, 0x7a, 0x42, 0x18, 0x66}};
-    DWORD returned = 0;
-    const bool set = handle.IsValid() &&
-                     ::DeviceIoControl(handle.Get(), FSCTL_SET_REPARSE_POINT, buffer.data(),
-                                       static_cast<DWORD>(buffer.size()), nullptr, 0, &returned,
-                                       nullptr) != FALSE;
-    if (!set || !HasAttribute(dir, FILE_ATTRIBUTE_REPARSE_POINT)) {
-        Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
-            (L"[SKIP] the test could not set a reparse tag on " + dir).c_str());
-        return false;
+    return ReparseBufferSetOrSkipped(path, buffer);
+}
+
+// Gives the empty file at path a reparse point with the Microsoft reparse
+// tag in tag and no reparse data. The header of a Microsoft reparse point
+// has no GUID. Logs a skip and returns false when the tag cannot be set.
+inline bool MicrosoftReparseTagSetOrSkipped(const std::wstring& path, DWORD tag) {
+    constexpr size_t kHeaderSize = sizeof(DWORD) + 2 * sizeof(WORD);
+    std::vector<BYTE> buffer(kHeaderSize);
+    std::memcpy(buffer.data(), &tag, sizeof(tag));
+    return ReparseBufferSetOrSkipped(path, buffer);
+}
+
+// Returns the reparse tag of the entry at path, or 0 when the entry is not
+// a reparse point or the tag cannot be read.
+inline DWORD ReparseTagOf(const std::wstring& path) {
+    ::LayerMount::ScopedHandle handle(::CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    FILE_ATTRIBUTE_TAG_INFO info{};
+    if (!handle.IsValid() ||
+        !::GetFileInformationByHandleEx(handle.Get(), FileAttributeTagInfo, &info,
+                                        sizeof(info)) ||
+        (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+        return 0;
     }
-    return true;
+    return info.ReparseTag;
 }
 
 // Registers the directory at root as a Windows Cloud Files sync root and
 // shows cloud placeholders to the calling thread as reparse points. A
-// cloud tag is not a name surrogate, so a placeholder directory is not a
-// link. The sync root has full population, so a placeholder directory
-// lists without a sync provider. The destructor unregisters the sync root,
-// which turns each placeholder back into a plain directory, and restores
-// the thread's placeholder mode.
+// placeholder is a file or a directory. A cloud tag is not a name
+// surrogate, so a placeholder is not a link. The sync root has full
+// population, so a placeholder directory lists without a sync provider.
+// The destructor unregisters the sync root, which turns each placeholder
+// directory back into a plain directory, and restores the thread's
+// placeholder mode.
 class CloudSyncRoot {
 public:
     explicit CloudSyncRoot(std::wstring root) : root_(std::move(root)) {
@@ -617,37 +654,37 @@ public:
     CloudSyncRoot(const CloudSyncRoot&) = delete;
     CloudSyncRoot& operator=(const CloudSyncRoot&) = delete;
 
-    // Converts the directory at dir, under the sync root, to an in-sync
-    // placeholder. Logs a skip and returns false when the platform refuses
-    // the sync root or the conversion, or when dir then shows no reparse
-    // attribute.
-    bool PlaceholderMadeOrSkipped(const std::wstring& dir) const {
+    // Converts the file or directory at path, under the sync root, to an
+    // in-sync placeholder. A converted file keeps its data. Logs a skip and
+    // returns false when the platform refuses the sync root or the
+    // conversion, or when path then shows no reparse attribute.
+    bool PlaceholderMadeOrSkipped(const std::wstring& path) const {
         HRESULT result = registerResult_;
         if (SUCCEEDED(result)) {
-            const ::LayerMount::ScopedHandle handle = OpenPlaceholder(dir);
+            const ::LayerMount::ScopedHandle handle = OpenPlaceholder(path);
             constexpr char kIdentity[] = "placeholder";
             result = handle.IsValid()
                 ? ::CfConvertToPlaceholder(handle.Get(), kIdentity, sizeof(kIdentity),
                                            CF_CONVERT_FLAG_MARK_IN_SYNC, nullptr, nullptr)
                 : HRESULT_FROM_WIN32(::GetLastError());
         }
-        if (FAILED(result) || !HasAttribute(dir, FILE_ATTRIBUTE_REPARSE_POINT)) {
-            LogSkip(L"the test could not make a cloud placeholder of " + dir, result);
+        if (FAILED(result) || !HasAttribute(path, FILE_ATTRIBUTE_REPARSE_POINT)) {
+            LogSkip(L"the test could not make a cloud placeholder of " + path, result);
             return false;
         }
         return true;
     }
 
-    // Pins the placeholder directory at dir, which gives it
+    // Pins the placeholder file or directory at path, which gives it
     // FILE_ATTRIBUTE_PINNED. Logs a skip and returns false when the
-    // platform refuses or dir then shows no pinned attribute.
-    bool PinnedOrSkipped(const std::wstring& dir) const {
-        const ::LayerMount::ScopedHandle handle = OpenPlaceholder(dir);
+    // platform refuses or path then shows no pinned attribute.
+    bool PinnedOrSkipped(const std::wstring& path) const {
+        const ::LayerMount::ScopedHandle handle = OpenPlaceholder(path);
         const HRESULT result = handle.IsValid()
             ? ::CfSetPinState(handle.Get(), CF_PIN_STATE_PINNED, CF_SET_PIN_FLAG_NONE, nullptr)
             : HRESULT_FROM_WIN32(::GetLastError());
-        if (FAILED(result) || !HasAttribute(dir, FILE_ATTRIBUTE_PINNED)) {
-            LogSkip(L"the test could not pin the cloud placeholder " + dir, result);
+        if (FAILED(result) || !HasAttribute(path, FILE_ATTRIBUTE_PINNED)) {
+            LogSkip(L"the test could not pin the cloud placeholder " + path, result);
             return false;
         }
         return true;
@@ -658,9 +695,9 @@ private:
 
     static constexpr CHAR kExposePlaceholders = 2;
 
-    static ::LayerMount::ScopedHandle OpenPlaceholder(const std::wstring& dir) {
+    static ::LayerMount::ScopedHandle OpenPlaceholder(const std::wstring& path) {
         return ::LayerMount::ScopedHandle(::CreateFileW(
-            dir.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+            path.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     }
@@ -693,6 +730,14 @@ struct CloudPlaceholderLayers {
                                       const std::string& content) {
         env.WriteFile(env.Lower(0), file, content);
         return syncRoot.PlaceholderMadeOrSkipped(env.Lower(0) + L"\\" + dir);
+    }
+
+    // Writes content to the lower file at file, relative to the lower, then
+    // makes that file an in-sync placeholder that keeps the content. Logs a
+    // skip and returns false when the platform refuses.
+    bool PlaceholderFileOrSkipped(const std::wstring& file, const std::string& content) {
+        env.WriteFile(env.Lower(0), file, content);
+        return syncRoot.PlaceholderMadeOrSkipped(env.Lower(0) + L"\\" + file);
     }
 };
 

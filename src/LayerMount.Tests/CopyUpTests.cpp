@@ -3,8 +3,11 @@
 
 #include "CopyUp.h"
 #include "MetadataStore.h"
+#include "NtdllExport.h"
+#include "NtStatusUtil.h"
 
 #include <winioctl.h>
+#include <cstring>
 #include <set>
 
 #include "StreamTestHelpers.h"
@@ -21,6 +24,81 @@ static_assert(RefusesTemporaryConfig<CopyUp, PathResolver&, WhiteoutManager&, Ca
     "CopyUp keeps a reference to its LayerConfig");
 
 namespace {
+
+// The user-mode SDK headers define no names for the WSL FIFO, character
+// device and block device tags.
+constexpr DWORD kReparseTagLxFifo = 0x80000024;
+constexpr DWORD kReparseTagLxChr = 0x80000025;
+constexpr DWORD kReparseTagLxBlk = 0x80000026;
+
+// The header of FILE_FULL_EA_INFORMATION, which the user-mode SDK headers
+// do not define. The name, a NUL and the value follow it.
+struct FullEaHeader {
+    ULONG nextEntryOffset;
+    UCHAR flags;
+    UCHAR nameLength;
+    USHORT valueLength;
+};
+
+using NtSetEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG);
+using NtQueryEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG, BOOLEAN,
+                                         PVOID, ULONG, PULONG, BOOLEAN);
+
+// Writes the extended attribute name with value on the entry at path, not
+// on its target. Returns the status of NtSetEaFile, or of the open.
+NTSTATUS SetExtendedAttribute(const std::wstring& path, const std::string& name,
+                              const std::string& value) {
+    ScopedHandle handle(::CreateFileW(
+        path.c_str(), FILE_WRITE_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (!handle.IsValid()) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+    std::vector<BYTE> buffer(sizeof(FullEaHeader) + name.size() + 1 + value.size());
+    auto* header = reinterpret_cast<FullEaHeader*>(buffer.data());
+    header->nameLength = static_cast<UCHAR>(name.size());
+    header->valueLength = static_cast<USHORT>(value.size());
+    std::memcpy(buffer.data() + sizeof(FullEaHeader), name.data(), name.size());
+    std::memcpy(buffer.data() + sizeof(FullEaHeader) + name.size() + 1, value.data(),
+                value.size());
+    const auto setEa = LoadNtdllExport<NtSetEaFileFn>("NtSetEaFile");
+    IO_STATUS_BLOCK io{};
+    return setEa(handle.Get(), &io, buffer.data(), static_cast<ULONG>(buffer.size()));
+}
+
+// Returns the value of the extended attribute name on the entry at path,
+// not on its target, or none when the entry has no such attribute or the
+// read fails.
+std::optional<std::string> ExtendedAttributeOf(const std::wstring& path,
+                                               const std::string& name) {
+    ScopedHandle handle(::CreateFileW(
+        path.c_str(), FILE_READ_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (!handle.IsValid()) {
+        return std::nullopt;
+    }
+    // A FILE_GET_EA_INFORMATION entry: the offset of the next entry in a
+    // ULONG, the name length in one byte, the name and a NUL.
+    constexpr size_t kNameOffset = sizeof(ULONG) + 1;
+    std::vector<BYTE> query(kNameOffset + name.size() + 1);
+    query[sizeof(ULONG)] = static_cast<BYTE>(name.size());
+    std::memcpy(query.data() + kNameOffset, name.data(), name.size());
+    std::vector<BYTE> result(64 * 1024);
+    const auto queryEa = LoadNtdllExport<NtQueryEaFileFn>("NtQueryEaFile");
+    IO_STATUS_BLOCK io{};
+    const NTSTATUS status = queryEa(handle.Get(), &io, result.data(),
+                                    static_cast<ULONG>(result.size()), TRUE, query.data(),
+                                    static_cast<ULONG>(query.size()), nullptr, TRUE);
+    const auto* header = reinterpret_cast<const FullEaHeader*>(result.data());
+    if (!NT_SUCCESS(status) || header->valueLength == 0) {
+        return std::nullopt;
+    }
+    const auto* value = reinterpret_cast<const char*>(result.data()) + sizeof(FullEaHeader) +
+                        header->nameLength + 1;
+    return std::string(value, header->valueLength);
+}
 
 void AssertUpperLinkReadsThroughToTarget(const TempLayerEnvironment& env,
                                          const std::wstring& linkName,
@@ -310,6 +388,99 @@ public:
             L"The copy-up of the lower file symlink must succeed");
 
         AssertUpperLinkReadsThroughToTarget(env, L"link.txt", L"link.txt", "target", target);
+    }
+
+    TEST_METHOD(CopyUpFile_LowerCloudPlaceholderFile_CopiesUpAPlainFileWithTheLowersData) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderFileOrSkipped(L"x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"x.txt"),
+            L"The copy-up of the cloud placeholder file must succeed");
+
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\x.txt", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper file must not be a reparse point");
+        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Upper(), L"x.txt"),
+            L"The upper file must hold the data of the lower file");
+    }
+
+    TEST_METHOD(CopyUpFile_LowerWslSpecialFileOrAppExecutionAlias_CopiesUpWithItsReparseTag) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        const struct {
+            const wchar_t* name;
+            DWORD tag;
+        } entries[] = {
+            {L"socket", IO_REPARSE_TAG_AF_UNIX},
+            {L"fifo", kReparseTagLxFifo},
+            {L"chr", kReparseTagLxChr},
+            {L"blk", kReparseTagLxBlk},
+            {L"alias.exe", IO_REPARSE_TAG_APPEXECLINK},
+        };
+        TempLayerEnvironment env(1);
+        for (const auto& entry : entries) {
+            env.WriteFile(env.Lower(0), entry.name, "");
+            if (!MicrosoftReparseTagSetOrSkipped(env.Lower(0) + L"\\" + entry.name, entry.tag)) {
+                return;
+            }
+        }
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        for (const auto& entry : entries) {
+            const std::wstring name = entry.name;
+            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(name),
+                (L"The copy-up of " + name + L" must succeed").c_str());
+            Assert::AreEqual(static_cast<DWORD>(entry.tag), ReparseTagOf(env.Upper() + L"\\" + name),
+                (L"The upper " + name + L" must carry the reparse tag of the lower").c_str());
+        }
+    }
+
+    TEST_METHOD(CopyUpFile_LowerWslCharacterDeviceWithExtendedAttributes_CopiesUpTheExtendedAttributes) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        const std::wstring lowerPath = env.Lower(0) + L"\\chr";
+        env.WriteFile(env.Lower(0), L"chr", "");
+        if (!MicrosoftReparseTagSetOrSkipped(lowerPath, kReparseTagLxChr)) {
+            return;
+        }
+        const std::string mode("\xA4\x21\x00\x00", 4);
+        const std::string device("\x05\x00\x00\x00\x01\x00\x00\x00", 8);
+        AssertStatus(STATUS_SUCCESS, SetExtendedAttribute(lowerPath, "$LXMOD", mode),
+            L"The test must set $LXMOD on the lower file");
+        AssertStatus(STATUS_SUCCESS, SetExtendedAttribute(lowerPath, "$LXDEV", device),
+            L"The test must set $LXDEV on the lower file");
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"chr"),
+            L"The copy-up of the WSL character device must succeed");
+
+        const std::wstring upperPath = env.Upper() + L"\\chr";
+        Assert::AreEqual(kReparseTagLxChr, ReparseTagOf(upperPath),
+            L"The upper file must carry the reparse tag of the lower");
+        Assert::IsTrue(std::optional<std::string>(mode) == ExtendedAttributeOf(upperPath, "$LXMOD"),
+            L"The upper file must carry the $LXMOD of the lower");
+        Assert::IsTrue(std::optional<std::string>(device) == ExtendedAttributeOf(upperPath, "$LXDEV"),
+            L"The upper file must carry the $LXDEV of the lower");
+    }
+
+    TEST_METHOD(CopyUpFile_LowerFileWithUnhandledReparseTag_FailsAndLeavesNoUpperOrWorkEntry) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"x.txt", "lower");
+        if (!NonLinkReparseTagSetOrSkipped(env.Lower(0) + L"\\x.txt")) {
+            return;
+        }
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_IO_REPARSE_TAG_NOT_HANDLED, rig.copyUp.CopyUpFile(L"x.txt"),
+            L"The copy-up of a file whose reparse tag no filter handles must fail");
+
+        Assert::IsFalse(fs::exists(env.Upper() + L"\\x.txt"),
+            L"The failed copy-up must leave no upper entry");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The failed copy-up must leave nothing in the work directory");
     }
 
     TEST_METHOD(CopyUpFile_ExtendedWorkDirWithTrailingSeparator_CopiesContentToUpper) {
@@ -731,6 +902,27 @@ public:
 
         Assert::AreEqual(std::wstring(L"Lazy.BIN"), StoredLeafName(env.Upper() + L"\\lazy.bin"),
             L"The upper shell must keep the lower's name");
+    }
+
+    TEST_METHOD(CopyUpMetadataOnly_PinnedCloudPlaceholderFile_GivesTheShellNoPinnedAttributeAndFillsTheLowersData) {
+        CloudPlaceholderLayers layers;
+        const std::string content(2 * 1024 * 1024, 'P');
+        if (!layers.PlaceholderFileOrSkipped(L"big.bin", content) ||
+            !layers.syncRoot.PinnedOrSkipped(layers.env.Lower(0) + L"\\big.bin")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin"),
+            L"The metadata-only copy-up of the pinned placeholder file must succeed");
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\big.bin", FILE_ATTRIBUTE_PINNED),
+            L"The upper shell must not carry the pin state of the lower file");
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CompleteLazyCopyUp(L"big.bin"),
+            L"The fill of the upper shell must succeed");
+
+        Assert::IsTrue(content == env.ReadFile(env.Upper(), L"big.bin"),
+            L"The upper file must hold the data of the lower file");
     }
 
     TEST_METHOD(CopyUpMetadataOnly_WritesMetacopyADS) {

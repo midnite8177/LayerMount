@@ -57,6 +57,24 @@ DWORD WithoutReadOnly(DWORD attributes) {
     return attributes & ~FILE_ATTRIBUTE_READONLY;
 }
 
+// The source attributes that CreateFileW gives the metacopy shell. In the
+// flags of CreateFileW, a bit above 0xFFFF is a FILE_FLAG_* value, and a
+// source attribute such as FILE_ATTRIBUTE_PINNED uses such a bit. Thus
+// only attributes that CreateFileW sets go through. Read-only does not go
+// through, because NTFS refuses the stream of the copy-up record on a
+// read-only file. The guard in CopyUpMetadataOnly sets read-only after the
+// record. Offline does not go through, because the shell is outside the
+// sync root or the storage manager of the source. Last, the guard writes
+// the source times and each source attribute that a FileBasicInfo write
+// can set.
+DWORD MetacopyShellCreateAttributes(DWORD sourceAttributes) {
+    constexpr DWORD kCreatable = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
+                                 FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_TEMPORARY |
+                                 FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
+                                 FILE_ATTRIBUTE_ENCRYPTED;
+    return sourceAttributes & kCreatable;
+}
+
 // attributes must be the current attributes of the file at path. Writes
 // them without FILE_ATTRIBUTE_READONLY and keeps the stored times.
 bool ClearReadOnly(const std::wstring& path, DWORD attributes) {
@@ -230,10 +248,10 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
     return status;
 }
 
-NTSTATUS CopyUp::CopyUpLinkAndCount(const std::wstring& normalized,
-                                    const CopyUpTarget& target) {
-    const NTSTATUS status = CopyLinkThroughWorkDir(
-        target.source.absolutePath, target.source.attributes, GenerateWorkPath(),
+NTSTATUS CopyUp::CopyUpReparseCloneAndCount(const std::wstring& normalized,
+                                            const CopyUpTarget& target) {
+    const NTSTATUS status = CloneReparsePointThroughWorkDir(
+        {target.source.absolutePath, target.source.attributes}, GenerateWorkPath(),
         target.upperPath, {CopiedEntryRecord::NewFromSource, config_, capabilities_});
     if (!NT_SUCCESS(status)) {
         return status;
@@ -365,15 +383,13 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     const ResolvedPath& source = target.source;
     const std::wstring& upperPath = target.upperPath;
 
-    // A data copy would follow the link and put the target's data in a plain
-    // upper file.
     bool clonesReparsePoint = false;
     status = ClonesReparsePoint(source.absolutePath, source.attributes, &clonesReparsePoint);
     if (!NT_SUCCESS(status)) {
         return status;
     }
     if (clonesReparsePoint) {
-        return CopyUpLinkAndCount(normalized, target);
+        return CopyUpReparseCloneAndCount(normalized, target);
     }
 
     ScopedHandle srcHandle(CreateFileW(
@@ -440,9 +456,7 @@ NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
         0,
         nullptr,
         CREATE_NEW,
-        // NTFS refuses the stream of the copy-up record on a read-only file.
-        // The guard in CopyUpMetadataOnly sets read-only after the record.
-        WithoutReadOnly(srcAttrs.dwFileAttributes),
+        MetacopyShellCreateAttributes(srcAttrs.dwFileAttributes),
         nullptr));
 
     if (!dstHandle.IsValid()) {
@@ -704,7 +718,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return status;
     }
     if (clonesReparsePoint) {
-        return CopyUpLinkAndCount(normalized, target);
+        return CopyUpReparseCloneAndCount(normalized, target);
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
@@ -858,8 +872,8 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            status = CopyLinkThroughWorkDir(
-                source.absolutePath, source.attributes, GenerateWorkPath(), newUpperPath,
+            status = CloneReparsePointThroughWorkDir(
+                {source.absolutePath, source.attributes}, GenerateWorkPath(), newUpperPath,
                 {CopiedEntryRecord::NewFromSource, config_, capabilities_});
             if (!NT_SUCCESS(status)) {
                 return status;

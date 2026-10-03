@@ -2,6 +2,7 @@
 #include "LayerPath.h"
 #include "MetadataStore.h"
 #include "NtStatusUtil.h"
+#include "NtdllExport.h"
 #include "ScopedHandle.h"
 #include "ElevationUtil.h"
 
@@ -342,6 +343,15 @@ bool IsSparseHandle(HANDLE handle) {
            HasFileAttribute(info.dwFileAttributes, FILE_ATTRIBUTE_SPARSE_FILE);
 }
 
+using NtQueryEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG, BOOLEAN, PVOID,
+                                         ULONG, PULONG, BOOLEAN);
+using NtSetEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG);
+
+// NTFS keeps at most 64 KB of extended attributes on an entry. The
+// FILE_FULL_EA_INFORMATION list of them is a little larger, because each
+// entry has a header and padding.
+constexpr size_t kExtendedAttributeBufferSize = 128 * 1024;
+
 NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
                                  const std::wstring& dstAbsolute,
                                  DWORD srcAttrs) {
@@ -638,18 +648,73 @@ NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
     return StatusFromWin32Error(err, ERROR_WRITE_FAULT);
 }
 
-NTSTATUS CopyLinkWithCopyUpRecord(const std::wstring& srcAbsolute,
-                                  DWORD srcAttrs,
-                                  const std::wstring& dstAbsolute,
-                                  const EntryCopyPolicy& policy) {
-    const NewUpperEntryKind kind = NewUpperEntryKindOf(srcAttrs);
-    const NTSTATUS status = CopyUpReparsePointEntry(srcAbsolute, dstAbsolute, srcAttrs);
+NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring& dstPath) {
+    const auto queryEa = LoadNtdllExport<NtQueryEaFileFn>("NtQueryEaFile");
+    const auto setEa = LoadNtdllExport<NtSetEaFileFn>("NtSetEaFile");
+    if (queryEa == nullptr || setEa == nullptr) {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+    ScopedHandle srcHandle(::CreateFileW(
+        srcPath.c_str(), FILE_READ_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr));
+    if (!srcHandle.IsValid()) {
+        return StatusOfFailedCall(ERROR_READ_FAULT);
+    }
+    std::vector<BYTE> buffer(kExtendedAttributeBufferSize);
+    ScopedHandle dstHandle;
+    BOOLEAN restartScan = TRUE;
+    for (;;) {
+        IO_STATUS_BLOCK readIo{};
+        const NTSTATUS readStatus =
+            queryEa(srcHandle.Get(), &readIo, buffer.data(), static_cast<ULONG>(buffer.size()),
+                    FALSE, nullptr, 0, nullptr, restartScan);
+        restartScan = FALSE;
+        if (readStatus == STATUS_NO_EAS_ON_FILE || readStatus == STATUS_NO_MORE_EAS ||
+            readStatus == STATUS_EAS_NOT_SUPPORTED) {
+            return STATUS_SUCCESS;
+        }
+        // STATUS_BUFFER_OVERFLOW returns the entries that fit. The next
+        // read continues after them.
+        if (!NT_SUCCESS(readStatus) && readStatus != STATUS_BUFFER_OVERFLOW) {
+            return readStatus;
+        }
+        if (!dstHandle.IsValid()) {
+            dstHandle.Reset(::CreateFileW(
+                dstPath.c_str(), FILE_WRITE_EA,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+            if (!dstHandle.IsValid()) {
+                return StatusOfFailedCall(ERROR_WRITE_FAULT);
+            }
+        }
+        IO_STATUS_BLOCK writeIo{};
+        const NTSTATUS writeStatus = setEa(dstHandle.Get(), &writeIo, buffer.data(),
+                                           static_cast<ULONG>(readIo.Information));
+        // Overlayfs skips the xattr copy when the upper has no xattrs.
+        if (writeStatus == STATUS_EAS_NOT_SUPPORTED) {
+            return STATUS_SUCCESS;
+        }
+        if (!NT_SUCCESS(writeStatus)) {
+            return writeStatus;
+        }
+    }
+}
+
+NTSTATUS CloneReparsePointWithCopyUpRecord(const SourceEntry& source,
+                                           const std::wstring& dstAbsolute,
+                                           const EntryCopyPolicy& policy) {
+    const NewUpperEntryKind kind = NewUpperEntryKindOf(source.attributes);
+    NTSTATUS status = CopyUpReparsePointEntry(source.path, dstAbsolute, source.attributes);
+    if (NT_SUCCESS(status)) {
+        status = CopyExtendedAttributes(source.path, dstAbsolute);
+    }
     if (!NT_SUCCESS(status)) {
         RemoveNewUpperEntry(dstAbsolute, kind);
         return status;
     }
     return WriteCopyUpRecordOrRemoveEntry(
-        dstAbsolute, CopiedEntryMetadata(srcAbsolute, policy.record, policy.config), kind,
+        dstAbsolute, CopiedEntryMetadata(source.path, policy.record, policy.config), kind,
         policy.config);
 }
 
@@ -681,14 +746,13 @@ NTSTATUS WriteSecurityToInheritAs(const std::wstring& dirAbs, const std::wstring
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyLinkThroughWorkDir(const std::wstring& srcAbsolute,
-                                DWORD srcAttrs,
-                                const std::wstring& containerPath,
-                                const std::wstring& upperPath,
-                                const EntryCopyPolicy& policy) {
+NTSTATUS CloneReparsePointThroughWorkDir(const SourceEntry& source,
+                                         const std::wstring& containerPath,
+                                         const std::wstring& upperPath,
+                                         const EntryCopyPolicy& policy) {
     return BuildInContainerAndMove(
         containerPath, upperPath, policy.config, [&](const std::wstring& stagedPath) {
-            return CopyLinkWithCopyUpRecord(srcAbsolute, srcAttrs, stagedPath, policy);
+            return CloneReparsePointWithCopyUpRecord(source, stagedPath, policy);
         });
 }
 

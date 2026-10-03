@@ -84,7 +84,11 @@ public:
     // Copies a lower parent directory up first. Builds the file in the
     // work directory: data, security, user streams, copy-up record, and
     // last the attributes and times. Then one rename moves it to the upper
-    // path. If an entry appears at the upper path before that move, the
+    // path. A lower file whose reparse point ClonesReparsePoint clones, such
+    // as a file symbolic link, copies up as a clone of that reparse point.
+    // Any other lower file reparse point copies up as a plain file with its
+    // data. A failure to read the reparse tag fails the copy-up with that
+    // error. If an entry appears at the upper path before that move, the
     // copy-up fails with STATUS_OBJECT_NAME_COLLISION and leaves that entry
     // as it was. A failure leaves no copy in the work directory.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
@@ -164,7 +168,7 @@ private:
     // STATUS_OBJECT_NAME_NOT_FOUND when no visible lower holds normalized.
     NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target);
 
-    NTSTATUS CopyUpLinkAndCount(const std::wstring& normalized, const CopyUpTarget& target);
+    NTSTATUS CopyUpReparseCloneAndCount(const std::wstring& normalized, const CopyUpTarget& target);
 
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
                                 ScopedHandle& srcHandle,

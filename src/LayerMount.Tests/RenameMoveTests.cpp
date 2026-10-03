@@ -1892,6 +1892,42 @@ public:
             L"The new name must not carry the pin state of the lower d");
     }
 
+    TEST_METHOD(Rename_LowerDirectoryHoldingCloudPlaceholderFile_ShowsAPlainFileWithTheLowersData) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderFileOrSkipped(L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory must succeed");
+
+        Assert::AreEqual<UINT32>(0u,
+            FileAttributesThroughMount(mount, L"e\\x.txt") & FILE_ATTRIBUTE_REPARSE_POINT,
+            L"The placeholder file must open as a plain file under the new name");
+        Assert::AreEqual(std::string("lower"), ReadThroughMount(mount, L"e\\x.txt"),
+            L"The data of the placeholder file must read through the new name");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryHoldingUnixSocketFile_KeepsTheSocketTagUnderTheNewName) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\socket", "");
+        if (!MicrosoftReparseTagSetOrSkipped(env.Lower(0) + L"\\d\\socket",
+                                             IO_REPARSE_TAG_AF_UNIX)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory must succeed");
+
+        Assert::AreEqual(static_cast<DWORD>(IO_REPARSE_TAG_AF_UNIX),
+            ReparseTagOf(env.Upper() + L"\\e\\socket"),
+            L"The socket file under the new name must carry the reparse tag of the lower");
+    }
+
     TEST_METHOD(Rename_LowerDirectoryWithUnhandledReparseTag_FailsAndLeavesBothNamesAsTheyWere) {
         UNIT_SKIP_IF_NOT_NTFS();
         TempLayerEnvironment env(1);

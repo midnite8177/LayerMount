@@ -84,11 +84,15 @@ NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLin
 NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind* kind);
 
 // Sets *clones to whether a copy of the entry at path clones its reparse
-// point. A file reparse point and a link as IsDirectoryLink defines it do.
-// Any other entry, a non-link directory reparse point included, copies as
-// a plain file or directory. attributes are the entry's own, as
-// IsDirectoryLink takes them. When the reparse tag cannot be read, returns
-// that error and leaves *clones false.
+// point. An entry whose reparse tag is a name surrogate clones, such as a
+// file symbolic link or a link as IsDirectoryLink defines it. A file with
+// the tag of a WSL special file or of an app execution alias also clones.
+// Any other entry, such as a cloud placeholder file or a deduplicated file,
+// copies as a plain file with its data or as a plain directory. attributes
+// are the entry's own, as IsDirectoryLink takes them. Reads the tag only
+// for a reparse point. When the tag cannot be read, returns that error and
+// leaves *clones false. INVALID_FILE_ATTRIBUTES returns
+// STATUS_INVALID_PARAMETER.
 NTSTATUS ClonesReparsePoint(const std::wstring& path, DWORD attributes, bool* clones);
 
 enum class ReplaceExisting { No, Yes };

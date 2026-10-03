@@ -279,7 +279,7 @@ NTSTATUS CopyEntry(const std::wstring& srcAbs,
         return cloneStatus;
     }
     if (clonesReparsePoint) {
-        return CopyLinkWithCopyUpRecord(srcAbs, srcAttrs, dstAbs, policy);
+        return CloneReparsePointWithCopyUpRecord({srcAbs, srcAttrs}, dstAbs, policy);
     }
     if ((srcAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
         return CopyFilePreservingMetadata(srcAbs, dstAbs, policy);
@@ -400,9 +400,9 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
 
     const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
     const NTSTATUS status = sourceKind == RenameEntryKind::Link
-        ? CopyLinkThroughWorkDir(source.absolutePath, source.attributes,
-                                 copyUp_.GenerateWorkPath(), newUpperPath,
-                                 {CopiedEntryRecord::NewFromSource, config_, capabilities_})
+        ? CloneReparsePointThroughWorkDir({source.absolutePath, source.attributes},
+                                          copyUp_.GenerateWorkPath(), newUpperPath,
+                                          {CopiedEntryRecord::NewFromSource, config_, capabilities_})
         : BuildInContainerAndMove(
               copyUp_.GenerateWorkPath(), newUpperPath, config_,
               [&](const std::wstring& stagedPath) {
