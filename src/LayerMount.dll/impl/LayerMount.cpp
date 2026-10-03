@@ -2281,8 +2281,7 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
 
     RenameDestinationAside destinationAside(config_, *whiteoutMgr_, *cache_);
     if (replaceIfExists && kinds.destination.has_value()) {
-        status = copyUp_->SetRenameDestinationAside(newNorm, kinds.source,
-                                                    *kinds.destination,
+        status = copyUp_->SetRenameDestinationAside(newNorm, *kinds.destination,
                                                     &destinationAside);
         if (!NT_SUCCESS(status)) return status;
     }

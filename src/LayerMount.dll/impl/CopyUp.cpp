@@ -1664,19 +1664,22 @@ void RenameDestinationAside::Commit() {
 }
 
 NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
-                                           RenameEntryKind sourceKind,
                                            RenameEntryKind destinationKind,
                                            RenameDestinationAside* aside) {
     const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
-    if (::GetFileAttributesW(upperPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    const DWORD attributes = ::GetFileAttributesW(upperPath.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
         if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
             return STATUS_SUCCESS;
         }
         return ::LayerMount::NtStatusFromWin32(probeErr);
     }
-    if (sourceKind == RenameEntryKind::File && destinationKind == RenameEntryKind::File) {
-        return STATUS_SUCCESS;
+    // NTFS refuses a replace of a read-only file, but not a move of one into
+    // the work directory.
+    if (destinationKind == RenameEntryKind::File &&
+        (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
+        return STATUS_ACCESS_DENIED;
     }
 
     // A link gets no opaque marker, as overlayfs gives a symlink no opaque

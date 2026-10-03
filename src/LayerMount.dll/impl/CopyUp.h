@@ -158,17 +158,17 @@ public:
                                   ReplaceExisting replace);
 
     // Moves the upper entry at newNorm into the work directory, so a
-    // replace-rename can put its source at the path. destinationKind is the
-    // kind of the merged view's entry at newNorm. A Directory loses its
-    // opaque marker first. A Link moves as a link, and its target keeps its
-    // markers. Nothing moves and aside stays empty when the upper has no
-    // entry at newNorm, or when both kinds are File, because the move of a
-    // file replaces a file. When the work directory is on another volume,
-    // a File destination moves there as a copy. A Directory or a Link
-    // destination cannot, so the method removes it at once and aside stays
-    // empty, and a failed rename cannot restore it. aside must be empty.
+    // replace-rename can put its source at the path. destinationKind is
+    // the kind of the merged view's entry at newNorm. A Directory loses
+    // its opaque marker first. A Link moves as a link, and its target
+    // keeps its markers. Nothing moves and aside stays empty when the
+    // upper has no entry at newNorm. A read-only File destination fails
+    // with STATUS_ACCESS_DENIED, and nothing moves. When the work
+    // directory is on another volume, a File destination moves there as a
+    // copy. A Directory or a Link destination cannot, so the method
+    // removes it at once and aside stays empty, and a failed rename cannot
+    // restore it. aside must be empty.
     NTSTATUS SetRenameDestinationAside(const std::wstring& newNorm,
-                                       RenameEntryKind sourceKind,
                                        RenameEntryKind destinationKind,
                                        RenameDestinationAside* aside);
 

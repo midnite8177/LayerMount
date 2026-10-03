@@ -1502,11 +1502,8 @@ public:
             NTSTATUS status = STATUS_SUCCESS;
             {
                 // An open child without FILE_SHARE_DELETE blocks the move of src.
-                const ScopedHandle heldChild(::CreateFileW(
-                    (env.Upper() + L"\\src\\a.txt").c_str(), GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL, nullptr));
-                Assert::IsTrue(heldChild.IsValid(), L"The test must hold src\\a.txt open");
+                const ScopedHandle heldChild =
+                    HoldOpen(env.Upper() + L"\\src\\a.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
                 status = mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid);
             }
 
@@ -1594,11 +1591,8 @@ public:
         NTSTATUS status = STATUS_SUCCESS;
         {
             // An open handle without FILE_SHARE_DELETE blocks the move of f.txt.
-            const ScopedHandle heldSource(::CreateFileW(
-                (env.Upper() + L"\\f.txt").c_str(), GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL, nullptr));
-            Assert::IsTrue(heldSource.IsValid(), L"The test must hold f.txt open");
+            const ScopedHandle heldSource =
+                HoldOpen(env.Upper() + L"\\f.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
             status = mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid);
         }
 
@@ -2111,6 +2105,57 @@ public:
             L"The failed rename must leave no whiteout at the old name");
         AssertListedDirectoryWithChild(mount, L"d", L"a.txt");
         lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(ReplaceRename_UpperFileOntoUpperFileWhenTheWhiteoutFails_KeepsTheReplacedFile) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"a.txt", "lower");
+            env.WriteFile(env.Upper(), L"a.txt", "upper");
+            env.WriteFile(env.Upper(), L"b.txt", "keep");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"a.txt"), "");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            const LayerSnapshot upperBefore(env.Upper());
+            const LayerSnapshot lowerBefore(env.Lower(0));
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const ScopedHandle heldMarker =
+                    HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"a.txt"), 0);
+                status = mount.Rename(L"a.txt", L"b.txt", kReplaceIfExists, kNoCallerPid);
+            }
+
+            AssertStatus(STATUS_SHARING_VIOLATION, status,
+                L"The rename must fail when the engine cannot write the whiteout at the old name");
+            upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+            lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+            Assert::AreEqual(std::string("keep"), ReadThroughMount(mount, L"b.txt"),
+                L"b.txt must still show the replaced file");
+            Assert::AreEqual(std::string("upper"), ReadThroughMount(mount, L"a.txt"),
+                L"a.txt must show the upper file again");
+        });
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoReadOnlyUpperFile_FailsAndChangesNothing) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.txt", "lower");
+        env.WriteFile(env.Upper(), L"b.txt", "keep");
+        Assert::IsTrue(::SetFileAttributesW((env.Upper() + L"\\b.txt").c_str(),
+                                            FILE_ATTRIBUTE_READONLY) != FALSE,
+            L"The test must make the upper b.txt read-only");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+        const LayerSnapshot workBefore(env.Work());
+
+        AssertStatus(STATUS_ACCESS_DENIED,
+            mount.Rename(L"a.txt", L"b.txt", kReplaceIfExists, kNoCallerPid),
+            L"A replace-rename onto a read-only upper file must fail");
+        upperBefore.AssertUnchanged(L"The refused rename must not copy a.txt up");
+        workBefore.AssertUnchanged(L"The refused rename must leave nothing in the work directory");
+        Assert::AreEqual(std::string("keep"), ReadThroughMount(mount, L"b.txt"),
+            L"b.txt must still show the read-only file");
     }
 };
 

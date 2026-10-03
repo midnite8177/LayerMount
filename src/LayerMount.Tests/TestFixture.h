@@ -356,6 +356,14 @@ private:
     std::vector<std::wstring> entries_;
 };
 
+inline ::LayerMount::ScopedHandle HoldOpen(const std::wstring& path, DWORD shareMode) {
+    ::LayerMount::ScopedHandle held(::CreateFileW(path.c_str(), GENERIC_READ, shareMode, nullptr,
+                                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
+        held.IsValid(), (L"The test must hold " + path + L" open").c_str());
+    return held;
+}
+
 // The layer-relative path of the whiteout marker that hides relativePath:
 // L"a\\b\\c.txt" gives L"a\\b\\.wh.c.txt".
 inline std::wstring WhiteoutMarkerPath(const std::wstring& relativePath) {

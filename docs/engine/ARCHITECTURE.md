@@ -645,12 +645,24 @@ The engine handles ten cases. The last three also apply to a file source:
   copy, and a link destination goes at once, so a failed rename cannot
   restore it.
 
+With replace=true, an upper file that a file replaces also moves into
+the work directory before the rename. It comes back when the rename
+fails. With the work directory on another volume, the upper file moves
+there as a copy. A read-only upper file stops the rename with
+`STATUS_ACCESS_DENIED` before any side effects, as NTFS refuses to
+replace a read-only file. Overlayfs also gives this decision to the
+upper file system.
+
 `LayerMount` writes the whiteout at the source after the move, for a
 file and for a directory or a link. When that write fails, the engine
 moves the entry back to the source and the rename fails with the write
-error. The merged view stays as it was before the rename, with one
-exception. When a file replaced an upper file, the replaced file does
-not come back.
+error. An upper entry that the rename replaced then comes back from
+the work directory, and the merged view stays as it was before the
+rename. Two cases are different. With the work directory on another
+volume, a directory or a link destination went at once and does not
+come back. When the move back of the entry also fails, the entry stays
+at the destination, and the engine deletes the replaced entry in the
+work directory.
 
 Recursive copy-up is expensive and is the main reason single-file
 metacopy exists; the engine cannot apply the same trick to directories

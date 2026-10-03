@@ -513,16 +513,16 @@ public:
     // it, is a non-directory on either side of a rename. With
     // replaceIfExists TRUE, a file or a link replaces a link, and a link
     // replaces a file. The link moves as a link, and its target stays
-    // unchanged. Before the move, Rename moves the upper destination into
-    // the work directory, unless both the source and the destination are
-    // files. It puts the destination back when the move fails and removes
-    // it when the move succeeds. With the work directory on another volume,
-    // a file destination moves there as a copy, and a directory or link
-    // destination goes at once, so a failed rename cannot restore it. A
-    // failure to read the reparse tag of a source or destination fails the
-    // rename with that status before any change. The FileContext overload
-    // makes these checks before it closes ctx->handle, so a refused rename
-    // leaves the handle open.
+    // unchanged. Before the move, Rename moves the upper destination into the
+    // work directory. It puts the destination back when the move fails and
+    // removes it when the move succeeds. A replace of a read-only upper file
+    // fails with STATUS_ACCESS_DENIED before any side effects. With the work
+    // directory on another volume, a file destination moves there as a copy,
+    // and a directory or link destination goes at once, so a failed rename
+    // cannot restore it. A failure to read the reparse tag of a source or
+    // destination fails the rename with that status before any change. The
+    // FileContext overload makes these checks before it closes ctx->handle, so
+    // a refused rename leaves the handle open.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
                     const std::wstring& newRelativePath,
                     BOOLEAN replaceIfExists,
