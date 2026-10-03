@@ -112,7 +112,7 @@ public:
         const FILETIME srcWrite    = MakeFileTime(2017, 6, 15);
         StampFile(srcPath, srcCreation, srcAccess, srcWrite);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"ts.bin")));
 
@@ -154,7 +154,7 @@ public:
         StampFile(srcPath, MakeFileTime(2015, 6, 15), MakeFileTime(2016, 6, 15),
                   MakeFileTime(2017, 6, 15));
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"shell-ts.bin")));
 
@@ -183,7 +183,7 @@ public:
         const std::string payload(2 * 1024 * 1024, 'F');
         env.WriteFile(env.Lower(0), L"fail-ts.bin", payload);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"fail-ts.bin")));
 
@@ -226,7 +226,7 @@ public:
         Assert::IsTrue(ADSExists(srcPath, L"Zone.Identifier"),
             L"Preconditions: source ADS must be present");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"ads.bin")));
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"ads.bin")));
@@ -262,7 +262,7 @@ public:
         Assert::IsTrue(IsCompressed(srcPath),
             L"Preconditions: source file must report FILE_ATTRIBUTE_COMPRESSED");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"cmp.bin")));
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"cmp.bin")));
@@ -290,7 +290,7 @@ public:
         Assert::IsTrue(IsSparse(srcPath),
             L"Preconditions: source file must report FILE_ATTRIBUTE_SPARSE_FILE");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin")));
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"sparse.bin")));
@@ -319,7 +319,7 @@ public:
         Assert::IsTrue(LayerMountTests::AllocatedBytes(srcPath) < holeBytes,
             L"Precondition: the source allocates only the bytes past the hole");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin")));
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"sparse.bin")));
@@ -355,7 +355,7 @@ public:
         const FILETIME srcWrite = MakeFileTime(2017, 6, 15);
         StampFile(srcPath, srcWrite, srcWrite, srcWrite);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"eager.bin")));
 

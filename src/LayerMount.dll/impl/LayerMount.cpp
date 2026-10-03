@@ -5,6 +5,7 @@
 #include "Cache.h"
 #include "LayerPath.h"
 #include "CopyUp.h"
+#include "DirectoryRename.h"
 #include "UpperEntryRemover.h"
 #include "ElevationUtil.h"
 #include "ProcessTracker.h"
@@ -372,6 +373,8 @@ LayerMount::LayerMount(LayerConfig config)
     , pathResolver_(std::make_unique<PathResolver>(config_, *whiteoutMgr_, *cache_))
     , stats_()
     , copyUp_(std::make_unique<CopyUp>(config_, *pathResolver_, *whiteoutMgr_, *cache_, stats_))
+    , directoryRename_(std::make_unique<DirectoryRename>(
+          config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_, capabilities_))
     , upperEntryRemover_(std::make_unique<UpperEntryRemover>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_)) {
     copyUp_->SetCapabilityGate(capabilities_);
@@ -1498,9 +1501,9 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
     rollback.Arm();
 
     if (create.lowerIsDirectory) {
-        if (!whiteoutMgr_->SetOpaque(create.path.hostNorm)) {
-            DWORD err = ::GetLastError();
-            return NtStatusFromWin32(err != ERROR_SUCCESS ? err : ERROR_ACCESS_DENIED);
+        const NTSTATUS opaqueStatus = whiteoutMgr_->SetOpaque(create.path.hostNorm);
+        if (!NT_SUCCESS(opaqueStatus)) {
+            return opaqueStatus;
         }
     }
 
@@ -2170,10 +2173,10 @@ NTSTATUS LayerMount::WhiteOutRenameSource(const RenamePaths& paths,
                                           WhiteoutType type,
                                           const std::wstring& oldUpperPath,
                                           bool destHadWhiteout) {
-    if (whiteoutMgr_->CreateWhiteout(paths.oldNorm, type)) {
+    const NTSTATUS whiteout = whiteoutMgr_->CreateWhiteout(paths.oldNorm, type);
+    if (NT_SUCCESS(whiteout)) {
         return STATUS_SUCCESS;
     }
-    const DWORD whErr = ::GetLastError();
     const NTSTATUS moveBack = MoveUpperEntry(pathResolver_->GetStoredUpperPath(paths.newNorm),
                                              oldUpperPath, ReplaceExisting::No,
                                              CopyAcrossVolumes::No, config_);
@@ -2182,7 +2185,7 @@ NTSTATUS LayerMount::WhiteOutRenameSource(const RenamePaths& paths,
     }
     cache_->InvalidateWithAncestors(paths.oldNorm);
     cache_->InvalidateWithAncestors(paths.newNorm);
-    return whErr ? NtStatusFromWin32(whErr) : STATUS_ACCESS_DENIED;
+    return whiteout;
 }
 
 NTSTATUS LayerMount::DirectoryRenameRouteOf(const std::wstring& oldNorm,
@@ -2324,7 +2327,8 @@ NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
     const ReplaceExisting replace =
         replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No;
     if (route == DirectoryRenameRoute::MoveUpper) {
-        return copyUp_->RenameUpperDirectory(oldCallerPath, newCallerPath, sourceKind, replace);
+        return directoryRename_->RenameUpperDirectory(oldCallerPath, newCallerPath, sourceKind,
+                                                      replace);
     }
 
     // The name that the move back in WhiteOutRenameSource gives the entry.
@@ -2332,8 +2336,8 @@ NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
         ? pathResolver_->GetStoredUpperPath(oldRelativePath)
         : pathResolver_->GetUpperPathForCopyUp(oldNorm, pathResolver_->ResolveLowerPath(oldNorm));
     const NTSTATUS status = route == DirectoryRenameRoute::MergeLower
-        ? copyUp_->RenameLowerDirectory(oldCallerPath, newCallerPath, sourceKind, replace)
-        : copyUp_->RenameUpperDirectory(oldCallerPath, newCallerPath, sourceKind, replace);
+        ? directoryRename_->RenameLowerDirectory(oldCallerPath, newCallerPath, sourceKind, replace)
+        : directoryRename_->RenameUpperDirectory(oldCallerPath, newCallerPath, sourceKind, replace);
     if (!NT_SUCCESS(status)) return status;
     return WhiteOutRenameSource(RenamePaths{oldNorm, newNorm}, WhiteoutType::Directory,
                                 oldUpperPath, destHadWhiteout);

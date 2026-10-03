@@ -40,7 +40,9 @@ src/LayerMount.dll/
   impl/           LayerMount.{h,cpp}    Engine class + LayerConfig + utilities
                   PathResolver.{h,cpp} Layer-search + redirect resolution
                   WhiteoutManager.{h,cpp} `.wh.` markers + opaque dirs
-                  CopyUp.{h,cpp}       Full + metacopy copy-up + dir rename
+                  CopyUp.{h,cpp}       Full + metacopy copy-up
+                  DirectoryRename.{h,cpp} Cross-layer directory rename
+                  EntryCopy.{h,cpp}    Per-entry copy helpers for both
                   Cache.{h,cpp}        LRU resolved-path cache
                   MetadataStore.{h,cpp} Per-file metadata dispatcher
                   SidecarMetadata.{h,cpp} Non-NTFS metadata fallback store
@@ -235,10 +237,10 @@ The two main producers of opaque markers:
   the overlay again. An opaque ancestor already hides the lower
   directory, so a directory created under it gets no marker. Overlayfs
   likewise sets no marker on a new directory whose parent is not merged.
-- `CopyUp::RenameLowerDirectory`, which renames a directory that a lower
-  layer holds. After the recursive copy, the destination is opaque so
-  subsequent merges don't re-pull files from the lower-layer source
-  through the post-rename path.
+- `DirectoryRename::RenameLowerDirectory`, which renames a directory
+  that a lower layer holds. The destination is opaque after the
+  recursive copy, so a later merge does not take files from the lower
+  source again.
 
 ### Inheritance: ancestor whiteouts and ancestor opaques
 
@@ -481,7 +483,10 @@ not round-trippable through the overlay.
 
 Copy-up is the action of moving a file from a lower layer to the upper
 layer so the engine can mutate it. `CopyUp` (in `impl/CopyUp.cpp`)
-implements four flavors.
+implements the first three flavors below. `DirectoryRename` (in
+`impl/DirectoryRename.cpp`) implements the fourth, cross-layer directory
+rename, and calls `CopyUp` to copy up the parent of the destination.
+Helpers that both use to copy one entry live in `impl/EntryCopy.cpp`.
 
 ### Full copy-up (`CopyUpFile`)
 
@@ -577,19 +582,29 @@ The engine handles ten cases. The last three also apply to a file source:
   mark the destination opaque. A junction or directory symlink gets no
   opaque marker, because the marker would go into its target.
 - **lower → upper, dest-not-present**: recursive copy
-  via `CopyTreePreservingMetadata` (preserves reparse points, sparse
+  via `CopyTreeWithoutMarkers` (preserves reparse points, sparse
   bits, and ADS), then mark the destination opaque, then drop a
-  whiteout at the source. A junction or directory symlink copies up as
-  a link and gets no opaque marker.
+  whiteout at the source. The copy leaves out marker files and each
+  entry that a whiteout in the same lower hides. A directory the
+  engine cannot list fails the rename. A junction or directory symlink copies up as a link and gets
+  no opaque marker.
 - **upper source over a lower entry at the same path**: the top layer
   decides the kind, as in overlayfs. The engine merges the lower into
   the new name only when the upper entry is a directory without the
   opaque marker and the lower entry is a directory. In all other
   cases, the upper entry hides the lower entry. The engine moves the
-  upper entry as for upper → upper and drops a whiteout at the source.
-  It copies nothing up from the lower. When the engine cannot read the
-  reparse tag of the lower entry, the rename fails with that error
-  before any side effects.
+  upper entry as for upper → upper, drops a whiteout at the source,
+  and copies nothing up from the lower. When it merges, the engine
+  copies the lower tree to the new name as for a lower source, then
+  copies the upper entries over it at every depth. An upper whiteout
+  removes the entry it hides. An upper subdirectory merges the same
+  way only when it is not opaque, no upper whiteout hides it, the copy
+  holds a directory at its name, and neither one is a link. Any other
+  upper entry replaces what the copy holds. The merge copies no marker
+  file and marks the new name opaque. A directory the engine cannot
+  list fails the rename, and the old tree stays as it was. When the engine cannot read the reparse tag of
+  the lower entry, the rename fails with that error before any side
+  effects.
 - **replace=true, dest is a directory with visible children**: a child
   from the upper or from a lower shows in the merged view. The engine
   rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY` before any side

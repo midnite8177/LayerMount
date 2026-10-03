@@ -240,7 +240,7 @@ public:
         env.WriteFile(env.Lower(0), L"f.txt", "lower");
         env.WriteFile(env.Lower(0), L"f.txt:extra", "stream");
         {
-            CopyUpRig rig(env.MakeConfig());
+            CopyUpAndRenameRig rig(env.MakeConfig());
             Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"f.txt")),
                 L"Preconditions: the copy-up must stage a metacopy shell");
         }
@@ -259,7 +259,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"f.txt", "lower");
         {
-            CopyUpRig rig(env.MakeConfig());
+            CopyUpAndRenameRig rig(env.MakeConfig());
             Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"f.txt")),
                 L"Preconditions: the copy-up must stage a metacopy shell");
         }

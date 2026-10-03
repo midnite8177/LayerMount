@@ -47,8 +47,9 @@ public:
 
     bool HasWhiteoutInAnyLayer(const std::wstring& relativePath) const;
 
-    // Both functions change the upper layer only.
-    bool CreateWhiteout(const std::wstring& relativePath, WhiteoutType type);
+    // Both functions change the upper layer only. CreateWhiteout returns
+    // the error of the marker write that failed as an NTSTATUS.
+    NTSTATUS CreateWhiteout(const std::wstring& relativePath, WhiteoutType type);
     bool RemoveWhiteout(const std::wstring& relativePath);
 
     // Check if directory is opaque in the upper layer (ADS marker or .wh..wh..opq)
@@ -57,7 +58,10 @@ public:
     bool IsOpaqueInLayer(const std::wstring& dirRelativePath,
                          const std::wstring& layerPath) const;
 
-    bool SetOpaque(const std::wstring& dirRelativePath);
+    // Writes both opaque markers in the upper layer. Succeeds when either
+    // write does. When both fail, returns the error of the marker file
+    // create as an NTSTATUS.
+    NTSTATUS SetOpaque(const std::wstring& dirRelativePath);
     bool RemoveOpaque(const std::wstring& dirRelativePath);
 
     // Whether the directory, an ancestor of it, or the layer root is opaque in

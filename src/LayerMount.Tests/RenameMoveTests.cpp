@@ -17,6 +17,7 @@ using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::AddDenyAce;
 using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
 using LayerMountTestShared::DirectoryListingDenied;
+using LayerMountTestShared::AssertListingDenied;
 
 namespace LayerMountTests {
 
@@ -67,8 +68,10 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        const NTSTATUS st = cu.RenameUpperDirectory(
+        const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st));
@@ -91,8 +94,10 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(
+        Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::No)));
 
@@ -113,11 +118,13 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        Assert::IsTrue(wm.SetOpaque(L"src"));
+        AssertStatus(STATUS_SUCCESS, wm.SetOpaque(L"src"), L"SetOpaque must mark the upper directory");
         Assert::IsTrue(wm.IsOpaque(L"src"));
 
-        Assert::IsTrue(NT_SUCCESS(cu.RenameUpperDirectory(
+        Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::No)));
 
@@ -178,8 +185,10 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        Assert::IsTrue(NT_SUCCESS(cu.RenameLowerDirectory(
+        Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             CallerPath(L"ld"), CallerPath(L"newdir"),
             RenameEntryKind::Directory, ReplaceExisting::No)));
 
@@ -239,7 +248,8 @@ public:
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
 
-        Assert::IsTrue(wm.CreateWhiteout(L"target.txt", WhiteoutType::File));
+        AssertStatus(STATUS_SUCCESS, wm.CreateWhiteout(L"target.txt", WhiteoutType::File),
+                     L"CreateWhiteout must succeed");
         Assert::IsTrue(wm.HasWhiteout(L"target.txt", env.Upper()));
 
         Assert::IsTrue(NT_SUCCESS(
@@ -290,7 +300,8 @@ public:
         env.CreateDir(env.Upper(), L"box");
         env.WriteFile(env.Upper(), L"box\\a.txt", "data");
         auto config = env.MakeConfig();
-        Assert::IsTrue(WhiteoutManager(config, nullptr).SetOpaque(L"box"));
+        AssertStatus(STATUS_SUCCESS, WhiteoutManager(config, nullptr).SetOpaque(L"box"),
+            L"SetOpaque must mark the upper directory");
 
         Cache cache;
         WhiteoutManager wm(config, &cache);
@@ -339,8 +350,10 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        const NTSTATUS st = cu.RenameUpperDirectory(
+        const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
@@ -366,8 +379,10 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        const NTSTATUS st = cu.RenameLowerDirectory(
+        const NTSTATUS st = dirRename.RenameLowerDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
@@ -384,7 +399,8 @@ public:
         env.CreateDir(env.Upper(), L"src");
         env.WriteFile(env.Upper(), L"src\\content.txt", "src-payload");
         env.WriteFile(env.Lower(0), L"dst\\old.txt", "old-lower");
-        Assert::IsTrue(wm_CreateWhiteoutHelper(env, L"dst"));
+        AssertStatus(STATUS_SUCCESS, wm_CreateWhiteoutHelper(env, L"dst"),
+                     L"CreateWhiteout must succeed");
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -392,8 +408,10 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        const NTSTATUS st = cu.RenameUpperDirectory(
+        const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st),
@@ -413,10 +431,12 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
+        DirectoryRename dirRename(config, resolver, wm, cache, cu,
+                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
         // ReplaceExisting::Yes gets past the top-level collision check, so
         // the copy reaches the child conflict.
-        const NTSTATUS st = cu.RenameLowerDirectory(
+        const NTSTATUS st = dirRename.RenameLowerDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::Yes);
         Assert::AreEqual(
@@ -432,8 +452,8 @@ public:
     }
 
 private:
-    static bool wm_CreateWhiteoutHelper(TempLayerEnvironment& env,
-                                         const std::wstring& rel) {
+    static NTSTATUS wm_CreateWhiteoutHelper(TempLayerEnvironment& env,
+                                            const std::wstring& rel) {
         auto config = env.MakeConfig();
         Cache cache;
         WhiteoutManager wm(config, &cache);
@@ -1081,7 +1101,7 @@ public:
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = capabilities;
             {
-                CopyUpRig rig(config);
+                CopyUpAndRenameRig rig(config);
                 AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"d\\f.txt"),
                     L"The copy-up of the lower file must succeed");
                 AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"d\\sub"),
@@ -1129,7 +1149,7 @@ public:
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = capabilities;
             {
-                CopyUpRig rig(config);
+                CopyUpAndRenameRig rig(config);
                 AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"d\\jlink"),
                     L"The copy-up of the lower junction must succeed");
                 if (links.hasFileLink) {
@@ -1151,6 +1171,192 @@ public:
                     L"The copied-up file symlink must report the lower link's file ID");
             }
         });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithNestedDeletedLowerFile_KeepsTheFileHidden) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "deleted");
+            env.WriteFile(env.Lower(0), L"d\\sub\\y.txt", "kept");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            AssertStatus(STATUS_SUCCESS, mount.Delete(L"d\\sub\\x.txt", kNoCallerPid),
+                L"The delete of the nested lower file must succeed");
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+
+            AssertOnlyEntryShownAs(mount, L"e\\sub", L"y.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\x.txt"),
+                L"An open of the deleted file under the new name must find nothing");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithNestedOpaqueDirectory_ShowsOnlyItsUpperChildren) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+            env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            AssertStatus(STATUS_SUCCESS, mount.Delete(L"d\\sub\\x.txt", kNoCallerPid),
+                L"The delete of the nested lower file must succeed");
+            AssertStatus(STATUS_SUCCESS, mount.Delete(L"d\\sub", kNoCallerPid),
+                L"The delete of the emptied lower subdirectory must succeed");
+            AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d\\sub", FILE_DIRECTORY_FILE),
+                L"The create of the subdirectory over its whiteout must succeed");
+            AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d\\sub\\new.txt", kNoCreateOptions),
+                L"The create of a file in the new subdirectory must succeed");
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+
+            AssertOnlyEntryShownAs(mount, L"e\\sub", L"new.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\x.txt"),
+                L"An open of the hidden lower file under the new name must find nothing");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithNestedTypeConflicts_ShowsTheUpperEntries) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\sub\\lowerDir\\lower.txt", "lower");
+            env.WriteFile(env.Lower(0), L"d\\sub\\lowerFile", "lower");
+            env.WriteFile(env.Upper(), L"d\\sub\\lowerDir", "upper file");
+            env.WriteFile(env.Upper(), L"d\\sub\\lowerFile\\upper.txt", "upper");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+
+            Assert::AreEqual(std::string("upper file"), ReadThroughMount(mount, L"e\\sub\\lowerDir"),
+                L"The upper file over the lower directory must read the upper data");
+            AssertOnlyEntryShownAs(mount, L"e\\sub\\lowerFile", L"upper.txt");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithUpperDirectoryOverLowerJunction_WritesNothingThroughTheJunction) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+            env.WriteFile(env.Root(), L"target\\keep.txt", "target");
+            const std::wstring target = env.Root() + L"\\target";
+            if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\d\\j", target)) {
+                return;
+            }
+            env.WriteFile(env.Upper(), L"d\\j\\upper.txt", "upper");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            const LayerSnapshot targetBefore(target);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+
+            AssertOnlyEntryShownAs(mount, L"e\\j", L"upper.txt");
+            targetBefore.AssertUnchanged(L"The rename must write nothing into the junction's target");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithNestedOpaqueMetadataOnly_ShowsOnlyItsUpperChildren) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+            env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+            env.WriteFile(env.Upper(), L"d\\sub\\new.txt", "upper");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\d\\sub", &config),
+                L"The opaque metadata must mark the upper subdirectory");
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+
+            AssertOnlyEntryShownAs(mount, L"e\\sub", L"new.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\x.txt"),
+                L"An open of the hidden lower file under the new name must find nothing");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithWhitedOutUpperSubdirectory_ShowsOnlyItsUpperChildren) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\sub\\new.txt", "upper");
+        env.WriteFile(env.Upper(), L"d\\.wh.sub", "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\sub\\x.txt"),
+            L"An open of the hidden lower file under the old name must find nothing");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the merged directory must succeed");
+
+        AssertOnlyEntryShownAs(mount, L"e\\sub", L"new.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\x.txt"),
+            L"An open of the hidden lower file under the new name must find nothing");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWithFileWhitedOutInTheSameLower_KeepsTheFileHidden) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "hidden");
+        env.WriteFile(env.Lower(0), L"d\\sub\\.wh.x.txt", "");
+        env.WriteFile(env.Lower(0), L"d\\sub\\y.txt", "kept");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertOnlyEntryShownAs(mount, L"d\\sub", L"y.txt");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory must succeed");
+
+        AssertOnlyEntryShownAs(mount, L"e\\sub", L"y.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\x.txt"),
+            L"An open of the whited-out file under the new name must find nothing");
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithUnlistableUpperSubdirectory_FailsAndKeepsTheOldTree) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        {
+            DirectoryListingDenied denied(env.Upper() + L"\\d\\sub");
+            BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            AssertListingDenied(env.Upper() + L"\\d\\sub");
+
+            AssertStatus(STATUS_ACCESS_DENIED,
+                mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"A rename that cannot list an upper subdirectory must fail");
+        }
+
+        AssertEntryShownAs(mount, L"d", L"f.txt", L"f.txt");
+        AssertEntryShownAs(mount, L"d\\sub", L"x.txt", L"x.txt");
+        AssertEntryShownAs(mount, L"d\\sub", L"u.txt", L"u.txt");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWithUnlistableSubdirectory_FailsAndKeepsTheOldTree) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        {
+            DirectoryListingDenied denied(env.Lower(0) + L"\\d\\sub");
+            BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            AssertListingDenied(env.Lower(0) + L"\\d\\sub");
+
+            AssertStatus(STATUS_ACCESS_DENIED,
+                mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"A rename that cannot list a lower subdirectory must fail");
+        }
+
+        AssertEntryShownAs(mount, L"d", L"f.txt", L"f.txt");
+        AssertOnlyEntryShownAs(mount, L"d\\sub", L"x.txt");
     }
 
     TEST_METHOD(ReplaceRename_UpperFileOntoCopiedUpFile_ReportsTheMovedFilesId) {

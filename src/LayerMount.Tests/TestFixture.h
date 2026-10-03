@@ -5,6 +5,7 @@
 #include "LayerMount.h"
 #include "Cache.h"
 #include "CopyUp.h"
+#include "DirectoryRename.h"
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
 
@@ -661,16 +662,16 @@ inline UINT64 IndexNumberThroughMount(::LayerMount::LayerMount& mount,
     return info.IndexNumber;
 }
 
-// A CopyUp and the objects it depends on, all built from a copy of
-// layerConfig that the rig owns.
-struct CopyUpRig {
-    explicit CopyUpRig(LayerMount::LayerConfig layerConfig)
+struct CopyUpAndRenameRig {
+    explicit CopyUpAndRenameRig(LayerMount::LayerConfig layerConfig)
         : config(std::move(layerConfig)),
           cache(),
           whiteouts(config, &cache),
           resolver(config, whiteouts, cache),
           stats(),
-          copyUp(config, resolver, whiteouts, cache, stats) {}
+          copyUp(config, resolver, whiteouts, cache, stats),
+          directoryRename(config, resolver, whiteouts, cache, copyUp,
+                          ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities)) {}
 
     LayerMount::LayerConfig      config;
     LayerMount::Cache            cache;
@@ -678,6 +679,7 @@ struct CopyUpRig {
     LayerMount::PathResolver     resolver;
     LayerMount::LayerMountStats  stats;
     LayerMount::CopyUp           copyUp;
+    LayerMount::DirectoryRename  directoryRename;
 };
 
 struct FreshThreadOutcome {

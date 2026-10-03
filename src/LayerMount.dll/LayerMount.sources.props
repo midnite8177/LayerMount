@@ -62,6 +62,8 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\PathUtil.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\Cache.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\CopyUp.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\DirectoryRename.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\EntryCopy.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\MetadataStore.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerMount.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerPath.h" />
@@ -73,6 +75,8 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\Cache.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\CopyUp.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\DirectoryRename.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\EntryCopy.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\MetadataStore.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\LayerMount.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\LayerPath.cpp" />

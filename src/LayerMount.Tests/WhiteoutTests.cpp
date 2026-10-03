@@ -124,6 +124,13 @@ public:
         Assert::IsFalse(WhiteoutManager::IsWhiteoutName(L".w.foo"));
     }
 
+    TEST_METHOD(WhitedOutNameOfEntry_OpaqueMarkerInAnyCase_HidesNothing) {
+        for (const wchar_t* marker : {L".wh..wh..opq", L".WH..WH..OPQ", L".Wh..wH..Opq"}) {
+            Assert::IsFalse(WhiteoutManager::WhitedOutNameOfEntry(marker).has_value(),
+                (std::wstring(L"The opaque marker ") + marker + L" must hide no name").c_str());
+        }
+    }
+
     TEST_METHOD(GetWhiteoutFileName_RootFile_ProducesDotWhFile) {
         std::wstring result = WhiteoutManager::GetWhiteoutFileName(L"foo.txt");
         Assert::AreEqual(std::wstring(L".wh.foo.txt"), result);
@@ -146,7 +153,8 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        Assert::IsTrue(wm.CreateWhiteout(L"foo.txt", WhiteoutType::File));
+        AssertStatus(STATUS_SUCCESS, wm.CreateWhiteout(L"foo.txt", WhiteoutType::File),
+                     L"CreateWhiteout must succeed");
 
         std::wstring whPath = env.Upper() + L"\\" + WhiteoutMarkerPath(L"foo.txt");
         DWORD attrs = ::GetFileAttributesW(whPath.c_str());
@@ -161,7 +169,8 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        Assert::IsTrue(wm.CreateWhiteout(L"sub\\foo.txt", WhiteoutType::File));
+        AssertStatus(STATUS_SUCCESS, wm.CreateWhiteout(L"sub\\foo.txt", WhiteoutType::File),
+                     L"CreateWhiteout must succeed");
 
         std::wstring parentDir = env.Upper() + L"\\sub";
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
@@ -735,11 +744,23 @@ public:
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        Assert::IsTrue(wm.SetOpaque(L"sub"));
+        AssertStatus(STATUS_SUCCESS, wm.SetOpaque(L"sub"), L"SetOpaque must succeed");
 
         std::wstring dirPath = env.Upper() + L"\\sub";
         Assert::IsTrue(MetadataStore::HasOpaqueMetadata(dirPath, nullptr),
             L"SetOpaque should write :overlay.opaque ADS");
+    }
+
+    TEST_METHOD(SetOpaque_DirectoryUnderAnUpperFile_ReturnsTheMarkerWriteError) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"file", "data");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+
+        AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND, wm.SetOpaque(L"file\\sub"),
+            L"SetOpaque under a file must fail with the error of the marker write");
     }
 
     TEST_METHOD(SetOpaque_WritesDotWhOpqMarker) {

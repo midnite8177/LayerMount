@@ -45,7 +45,7 @@ void AssertLowerDirectoryLinkCopiesUpAsALink(LinkCreator createLink) {
     LayerConfig config = env.MakeConfig();
     Assert::IsTrue((config.hostCapabilities & LM_CAP_ADS) != 0,
         L"The metadata store must use ADS");
-    CopyUpRig rig(config);
+    CopyUpAndRenameRig rig(config);
     const LayerSnapshot targetBefore(target);
 
     AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"link"),
@@ -68,7 +68,7 @@ void AssertCopiedUpLinkKeepsTheLowerLinkId(LinkCreator createLink, LinkTarget ta
     LayerConfig config = env.MakeConfig();
     config.hostCapabilities = hostCapabilities;
     {
-        CopyUpRig rig(config);
+        CopyUpAndRenameRig rig(config);
         AssertStatus(STATUS_SUCCESS,
             targetKind == LinkTarget::File ? rig.copyUp.CopyUpFile(L"link")
                                            : rig.copyUp.CopyUpDirectory(L"link"),
@@ -100,7 +100,7 @@ public:
 
     TEST_METHOD(GenerateWorkPath_ReturnsUniquePathInWorkDir) {
         TempLayerEnvironment env(1);
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         std::wstring a = rig.copyUp.GenerateWorkPath();
         std::wstring b = rig.copyUp.GenerateWorkPath();
@@ -127,7 +127,7 @@ public:
 
          config.workDirPath = deepWork;
 
-         CopyUpRig rig(config);
+         CopyUpAndRenameRig rig(config);
 
          std::vector<std::wstring> paths;
          constexpr int kCount = 32;
@@ -155,7 +155,7 @@ public:
 
     TEST_METHOD(CleanWorkDirectory_RemovesHashTempFiles_LeavesOthers) {
         TempLayerEnvironment env(1);
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         std::wstring tempFile = env.Work() + L"\\#abc.tmp";
         HANDLE h1 = ::CreateFileW(tempFile.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -181,7 +181,7 @@ public:
         TempLayerEnvironment env(1);
         LayerConfig config = env.MakeConfig();
         config.workDirPath = ExtendedDirWithSeparator(env.Work());
-        CopyUpRig rig(config);
+        CopyUpAndRenameRig rig(config);
 
         std::wstring tempFile = env.Work() + L"\\#abc.tmp";
         env.WriteFile(env.Work(), L"#abc.tmp", "staged");
@@ -195,7 +195,7 @@ public:
 
     TEST_METHOD(CommitFromWorkDir_MovesFileFromWorkToFinalPath) {
         TempLayerEnvironment env(1);
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         std::wstring workPath = env.Work() + L"\\test.tmp";
         std::wstring finalPath = env.Upper() + L"\\final.txt";
@@ -214,7 +214,7 @@ public:
 
     TEST_METHOD(CommitFromWorkDir_CreatesParentDirectoriesIfMissing) {
         TempLayerEnvironment env(1);
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         std::wstring workPath = env.Work() + L"\\temp.tmp";
         env.WriteFile(env.Work(), L"temp.tmp", "x");
@@ -232,7 +232,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"foo.txt", "lower content");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         NTSTATUS status = rig.copyUp.CopyUpFile(L"foo.txt");
         Assert::IsTrue(NT_SUCCESS(status));
@@ -250,7 +250,7 @@ public:
             return;
         }
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"link.txt"),
             L"The copy-up of the lower file symlink must succeed");
@@ -272,7 +272,7 @@ public:
         LayerConfig config = env.MakeConfig();
         Assert::IsTrue((config.hostCapabilities & LM_CAP_ADS) != 0,
             L"The metadata store must use ADS");
-        CopyUpRig rig(config);
+        CopyUpAndRenameRig rig(config);
 
         AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"link.txt"),
             L"The copy-up of the lower file symlink must succeed");
@@ -286,7 +286,7 @@ public:
 
         LayerConfig config = env.MakeConfig();
         config.workDirPath = ExtendedDirWithSeparator(env.Work());
-        CopyUpRig rig(config);
+        CopyUpAndRenameRig rig(config);
 
         NTSTATUS status = rig.copyUp.CopyUpFile(L"foo.txt");
         Assert::IsTrue(NT_SUCCESS(status),
@@ -301,7 +301,7 @@ public:
         std::string content(8192, 'A');
         env.WriteFile(env.Lower(0), L"big.bin", content);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpFile(L"big.bin");
 
@@ -322,7 +322,7 @@ public:
             ::CloseHandle(h);
         }
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpFile(L"ts.txt");
 
@@ -348,7 +348,7 @@ public:
         std::wstring srcPath = env.Lower(0) + L"\\readonly.txt";
         ::SetFileAttributesW(srcPath.c_str(), FILE_ATTRIBUTE_READONLY);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpFile(L"readonly.txt");
 
@@ -362,7 +362,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"sub\\nested.txt", "x");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpFile(L"sub\\nested.txt");
 
@@ -376,7 +376,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"c.txt", "x");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.resolver.ResolvePath(L"c.txt");
         Assert::IsTrue(rig.cache.Get(L"c.txt").has_value(), L"Should be cached");
@@ -392,7 +392,7 @@ public:
         env.WriteFile(env.Upper(), L"both.txt", "upper");
         env.WriteFile(env.Lower(0), L"both.txt", "lower");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         NTSTATUS status = rig.copyUp.CopyUpFile(L"both.txt");
         Assert::IsTrue(NT_SUCCESS(status));
@@ -405,7 +405,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"count.txt", "x");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         uint64_t before = rig.stats.copyUpCount.load();
         rig.copyUp.CopyUpFile(L"count.txt");
@@ -417,7 +417,7 @@ public:
         env.CreateDir(env.Lower(0), L"mydir");
         env.WriteFile(env.Lower(0), L"mydir\\child.txt", "child");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpDirectory(L"mydir");
 
@@ -440,7 +440,7 @@ public:
         ::SetFileAttributesW(srcDir.c_str(),
             FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_HIDDEN);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpDirectory(L"hidden_dir");
 
@@ -464,7 +464,7 @@ public:
             ::CloseHandle(h);
         }
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpDirectory(L"td");
 
@@ -530,7 +530,7 @@ public:
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = capabilities;
             {
-                CopyUpRig rig(config);
+                CopyUpAndRenameRig rig(config);
                 AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"a.txt"),
                     L"The copy-up of the lower file must succeed");
             }
@@ -549,7 +549,7 @@ public:
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = capabilities;
             {
-                CopyUpRig rig(config);
+                CopyUpAndRenameRig rig(config);
                 AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"a.txt"),
                     L"The copy-up of the lower file must succeed");
             }
@@ -580,7 +580,7 @@ public:
         config.upperPath = upperThroughJunction;
         config.hostCapabilities = kHostCapabilitiesWithoutAds;
         {
-            CopyUpRig rig(config);
+            CopyUpAndRenameRig rig(config);
             AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"a.txt"),
                 L"The copy-up of the lower file must succeed");
         }
@@ -602,7 +602,7 @@ public:
         config.hostCapabilities = kHostCapabilitiesWithoutAds;
         {
             AccessDenied timesDenied(env.Lower(0) + L"\\a.txt", FILE_WRITE_ATTRIBUTES);
-            CopyUpRig rig(config);
+            CopyUpAndRenameRig rig(config);
             BackupPrivilegeDisabledOnThread noBackupPrivilege;
             DisableRestorePrivilegeOnThread();
 
@@ -624,9 +624,9 @@ public:
         env.CreateDir(env.Upper(), L"srcdir");
         env.WriteFile(env.Upper(), L"srcdir\\file.txt", "data");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        NTSTATUS status = rig.copyUp.RenameUpperDirectory(
+        NTSTATUS status = rig.directoryRename.RenameUpperDirectory(
             CallerPath(L"srcdir"), CallerPath(L"dstdir"),
             RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
@@ -648,9 +648,9 @@ public:
         env.CreateDir(env.Lower(0), L"ldir");
         env.WriteFile(env.Lower(0), L"ldir\\file.txt", "lower data");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
-        NTSTATUS status = rig.copyUp.RenameLowerDirectory(
+        NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"ldir"), CallerPath(L"newdir"),
             RenameEntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
@@ -672,7 +672,7 @@ public:
         std::string content(4096, 'Z');
         env.WriteFile(env.Lower(0), L"lazy.bin", content);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpMetadataOnly(L"lazy.bin");
 
@@ -692,7 +692,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"Lazy.BIN", "x");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"lazy.bin"),
             L"The metadata-only copy-up must succeed");
@@ -705,7 +705,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"m.txt", "x");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpMetadataOnly(L"m.txt");
 
@@ -728,7 +728,7 @@ public:
             ::CloseHandle(h);
         }
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpMetadataOnly(L"lts.txt");
 
@@ -751,7 +751,7 @@ public:
         std::wstring srcPath = env.Lower(0) + L"\\ro.bin";
         ::SetFileAttributesW(srcPath.c_str(), FILE_ATTRIBUTE_READONLY);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpMetadataOnly(L"ro.bin");
 
@@ -765,7 +765,7 @@ public:
         std::string content = "complete me please";
         env.WriteFile(env.Lower(0), L"cl.txt", content);
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpMetadataOnly(L"cl.txt");
         NTSTATUS status = rig.copyUp.CompleteLazyCopyUp(L"cl.txt");
@@ -778,7 +778,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"mc.txt", "data");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         rig.copyUp.CopyUpMetadataOnly(L"mc.txt");
         std::wstring upPath = env.Upper() + L"\\mc.txt";
@@ -793,7 +793,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Upper(), L"full.txt", "data");
 
-        CopyUpRig rig(env.MakeConfig());
+        CopyUpAndRenameRig rig(env.MakeConfig());
 
         NTSTATUS status = rig.copyUp.CompleteLazyCopyUp(L"full.txt");
         Assert::IsTrue(NT_SUCCESS(status),

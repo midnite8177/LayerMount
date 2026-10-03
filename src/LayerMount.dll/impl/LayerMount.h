@@ -161,6 +161,7 @@ enum class WhiteoutType;
 class MetadataStore;
 class Cache;
 class CopyUp;
+class DirectoryRename;
 class UpperEntryRemover;
 namespace VHD { class VHDLayerManager; }
 namespace VSS { class VSSManager; }
@@ -831,6 +832,7 @@ private:
     std::unique_ptr<PathResolver> pathResolver_;
     LayerMountStats stats_;
     std::unique_ptr<CopyUp> copyUp_;
+    std::unique_ptr<DirectoryRename> directoryRename_;
     std::unique_ptr<UpperEntryRemover> upperEntryRemover_;
     std::shared_ptr<ProcessTracker> processTracker_;
 

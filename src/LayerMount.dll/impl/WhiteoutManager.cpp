@@ -2,6 +2,7 @@
 #include "MetadataStore.h"
 #include "Cache.h"
 #include "LayerPath.h"
+#include "NtStatusUtil.h"
 #include "../abi/EventEmitter.h"
 
 #include <string_view>
@@ -33,9 +34,10 @@ bool AnyDirectoryUpToRoot(fs::path dir, LayerRoot root, const HasMarker& hasMark
     return root == LayerRoot::Probed && hasMarker(std::wstring());
 }
 
+// Returns ERROR_SUCCESS, or the Win32 error of the failed create.
 // FILE_FLAG_BACKUP_SEMANTICS lets SE_RESTORE_NAME pass an inherited
 // DENY-WRITE ACE on the parent directory; without it, the create fails there.
-bool CreateHiddenMarkerFile(const std::wstring& path) {
+DWORD CreateHiddenMarkerFile(const std::wstring& path) {
     HANDLE h = CreateFileW(
         path.c_str(),
         GENERIC_WRITE,
@@ -46,10 +48,10 @@ bool CreateHiddenMarkerFile(const std::wstring& path) {
             FILE_FLAG_BACKUP_SEMANTICS,
         nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        return false;
+        return GetLastError();
     }
     CloseHandle(h);
-    return true;
+    return ERROR_SUCCESS;
 }
 
 bool DeleteMarkerFile(const std::wstring& path) {
@@ -80,7 +82,9 @@ std::wstring WhiteoutManager::GetWhitedOutName(const std::wstring& whiteoutName)
 }
 
 std::optional<std::wstring> WhiteoutManager::WhitedOutNameOfEntry(const std::wstring& entryName) {
-    if (!IsWhiteoutName(entryName) || entryName == kOpaqueMarkerFile) return std::nullopt;
+    const bool isOpaqueMarker =
+        CompareStringOrdinal(entryName.c_str(), -1, kOpaqueMarkerFile, -1, TRUE) == CSTR_EQUAL;
+    if (!IsWhiteoutName(entryName) || isOpaqueMarker) return std::nullopt;
     return GetWhitedOutName(entryName);
 }
 
@@ -116,8 +120,8 @@ bool WhiteoutManager::HasWhiteoutInAnyLayer(const std::wstring& relativePath) co
     return false;
 }
 
-bool WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
-                                      WhiteoutType type) {
+NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
+                                         WhiteoutType type) {
     if (type == WhiteoutType::Opaque) {
         return SetOpaque(relativePath);
     }
@@ -129,8 +133,9 @@ bool WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
         EnsureDirectoryExists(parentDir.wstring());
     }
 
-    if (!CreateHiddenMarkerFile(whPath)) {
-        return false;
+    const DWORD markerError = CreateHiddenMarkerFile(whPath);
+    if (markerError != ERROR_SUCCESS) {
+        return NtStatusFromWin32(markerError);
     }
 
     if (cache_) {
@@ -144,7 +149,7 @@ bool WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
     if (events_ != nullptr) {
         events_->Emit(LM_EVT_WHITEOUT_CREATED, S_OK, relativePath.c_str(), nullptr);
     }
-    return true;
+    return STATUS_SUCCESS;
 }
 
 bool WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
@@ -176,13 +181,14 @@ bool WhiteoutManager::IsOpaqueInLayer(const std::wstring& dirRelativePath,
     return MarkerFileExists(JoinDirPath(dirFullPath, kOpaqueMarkerFile));
 }
 
-bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
+NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
     std::wstring dirFullPath = JoinDirPath(config_.upperPath, dirRelativePath);
 
     EnsureDirectoryExists(dirFullPath);
 
-    bool metadataOk = MetadataStore::SetOpaqueMetadata(dirFullPath, &config_);
-    bool fileOk = CreateHiddenMarkerFile(JoinDirPath(dirFullPath, kOpaqueMarkerFile));
+    const bool metadataOk = MetadataStore::SetOpaqueMetadata(dirFullPath, &config_);
+    const DWORD markerError =
+        CreateHiddenMarkerFile(JoinDirPath(dirFullPath, kOpaqueMarkerFile));
 
     if (cache_) {
         cache_->Invalidate(NormalizePath(dirRelativePath));
@@ -191,7 +197,10 @@ bool WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
     // Either marker makes IsOpaqueInLayer report the directory opaque. A
     // layer image packs the `.wh..wh..opq` file but not the `:overlay.opaque`
     // stream.
-    return metadataOk || fileOk;
+    if (metadataOk || markerError == ERROR_SUCCESS) {
+        return STATUS_SUCCESS;
+    }
+    return NtStatusFromWin32(markerError);
 }
 
 bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {

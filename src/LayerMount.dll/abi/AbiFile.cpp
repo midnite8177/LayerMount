@@ -995,10 +995,9 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(LM_HANDLE handle,
         return E_INVALIDARG;
     }
 
-    bool ok = mountHolder->core->Whiteouts().CreateWhiteout(relativePath,
+    return HresultFromNtStatus(mountHolder->core->Whiteouts().CreateWhiteout(relativePath,
         isDirectory ? ::LayerMount::WhiteoutType::Directory
-                    : ::LayerMount::WhiteoutType::File);
-    return ok ? S_OK : HRESULT_FROM_WIN32(::GetLastError());
+                    : ::LayerMount::WhiteoutType::File));
 
     LM_ABI_END();
 }
@@ -1026,8 +1025,7 @@ LM_API HRESULT LM_CALL LayerMountSetOpaque(LM_HANDLE handle, PCWSTR dirRelativeP
         return E_INVALIDARG;
     }
 
-    bool ok = mountHolder->core->Whiteouts().SetOpaque(dirRelativePath);
-    return ok ? S_OK : HRESULT_FROM_WIN32(::GetLastError());
+    return HresultFromNtStatus(mountHolder->core->Whiteouts().SetOpaque(dirRelativePath));
 
     LM_ABI_END();
 }

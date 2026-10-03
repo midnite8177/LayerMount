@@ -34,11 +34,11 @@ NTSTATUS UpperEntryRemover::Remove(const std::wstring& normalized) {
     }
 
     if (lowerHasIt) {
-        if (!whiteoutMgr_.CreateWhiteout(normalized,
-                isDirectory ? WhiteoutType::Directory : WhiteoutType::File)) {
-            const DWORD whErr = ::GetLastError();
+        const NTSTATUS whiteout = whiteoutMgr_.CreateWhiteout(normalized,
+            isDirectory ? WhiteoutType::Directory : WhiteoutType::File);
+        if (!NT_SUCCESS(whiteout)) {
             cache_.InvalidateWithAncestors(normalized);
-            return whErr ? NtStatusFromWin32(whErr) : STATUS_ACCESS_DENIED;
+            return whiteout;
         }
     }
 

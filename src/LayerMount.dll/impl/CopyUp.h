@@ -78,16 +78,6 @@ private:
     CopyAcrossVolumes restoreCopy_ = CopyAcrossVolumes::No;
 };
 
-enum class CopiedEntryRecord {
-    // A new record that holds the source entry's own file ID. For a copy
-    // out of a lower layer.
-    NewFromSource,
-    // The source entry's record, with the source entry's own file ID added
-    // when the record holds none. For a copy of upper entries to a new upper
-    // path, so each entry keeps the file ID it reports.
-    CarriedFromSource,
-};
-
 class CopyUp {
 public:
     CopyUp(ConfigRef config,
@@ -139,34 +129,6 @@ public:
     // is a file, and with ENOENT when the overlay shows no parent.
     NTSTATUS EnsureUpperParent(const std::wstring& normalizedPath);
 
-    // Copies the lower tree and the old upper shadow to the new upper path,
-    // marks it opaque, and removes the old upper entry. The caller writes the
-    // whiteout at the old path. sourceKind is Directory or Link. A Link
-    // source is copied as a link, without its upper shadow and without
-    // opacity.
-    // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
-    // destination exists in the merged view. The new upper entry gets its
-    // name in newCallerPath's case.
-    NTSTATUS RenameLowerDirectory(const CallerPath& oldCallerPath,
-                                  const CallerPath& newCallerPath,
-                                  RenameEntryKind sourceKind,
-                                  ReplaceExisting replace);
-
-    // Fails with STATUS_OBJECT_PATH_NOT_FOUND and writes nothing when
-    // EnsureUpperParent refuses the new parent. Moves the upper directory
-    // and carries its opaque marker. Marks the moved entry opaque when a
-    // lower layer has its new path, so lower children of a replaced destination stay
-    // hidden. sourceKind is Directory or Link. A moved Link never becomes
-    // opaque, because the marker would go into its target. The moved entry
-    // gets its name in newCallerPath's case. When a lower layer has the old
-    // path, the caller writes the whiteout there.
-    // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
-    // destination exists in the merged view.
-    NTSTATUS RenameUpperDirectory(const CallerPath& oldCallerPath,
-                                  const CallerPath& newCallerPath,
-                                  RenameEntryKind sourceKind,
-                                  ReplaceExisting replace);
-
     // Moves the upper entry at newNorm into the work directory, so a
     // replace-rename can put its source at the path. destinationKind is
     // the kind of the merged view's entry at newNorm. A Directory loses
@@ -184,36 +146,14 @@ public:
 
     // Renames a directory whose old and new paths differ only in case.
     // Copies a lower directory up first, then renames the upper entry in
-    // place to newCallerPath's case. RenameLowerDirectory and
-    // RenameUpperDirectory do not fit, because old and new name the same
-    // entry, so they would copy the tree onto itself, delete it and white
-    // it out. The move needs no replace flag for the same reason. sourceKind
-    // is Directory or Link. A lower Link source goes to the new name as a
-    // link, with a copy-up record and no opaque marker.
+    // place to newCallerPath's case. sourceKind is Directory or Link. A
+    // lower Link source goes to the new name as a link, with a copy-up
+    // record and no opaque marker.
     NTSTATUS RenameDirectoryCase(const CallerPath& oldCallerPath,
                                  const CallerPath& newCallerPath,
                                  RenameEntryKind sourceKind);
 
 private:
-    bool DestinationExistsInMerged(const std::wstring& normalizedPath) const;
-
-    // Fails with STATUS_OBJECT_NAME_COLLISION when replace is
-    // ReplaceExisting::No and the destination exists in the merged view.
-    // Then makes the parent of newCallerPath exist in the upper.
-    NTSTATUS PrepareRenameDestination(const CallerPath& newCallerPath,
-                                      ReplaceExisting replace);
-
-    NTSTATUS OverlayUpperShadow(const std::wstring& oldUpperPath,
-                                const std::wstring& newUpperPath);
-
-    NTSTATUS CopyTreePreservingMetadata(const std::wstring& srcAbs,
-                                         const std::wstring& dstAbs,
-                                         CopiedEntryRecord record);
-
-    NTSTATUS CopyDirectoryTree(const std::wstring& srcAbs,
-                               const std::wstring& dstAbs,
-                               CopiedEntryRecord record);
-
     bool CopySecurityDescriptor(const std::wstring& srcPath, const std::wstring& dstPath);
 
     bool CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle);
