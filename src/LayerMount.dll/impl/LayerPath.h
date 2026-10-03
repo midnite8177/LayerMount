@@ -84,20 +84,16 @@ NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind
 
 enum class ReplaceExisting { No, Yes };
 
-enum class CopyAcrossVolumes { No, Yes };
-
-// Renames an upper file or directory. A junction or a symbolic link moves
-// as a link, and its target stays. With CopyAcrossVolumes::Yes, a file
-// whose destination is on another volume moves as a copy and a delete. A
-// directory, a junction or a directory symbolic link cannot move to
-// another volume. An inherited deny-write ACE on the upper parent fails
-// the rename with STATUS_ACCESS_DENIED unless the process holds
-// SE_RESTORE_NAME. The sidecar records of the moved entries follow them;
-// see MetadataStore::MoveSidecarRecords.
+// Renames an upper file or directory within its volume. A junction or a
+// symbolic link moves as a link, and its target stays. With
+// ReplaceExisting::No, an entry at `to` fails the rename with
+// STATUS_OBJECT_NAME_COLLISION and stays as it was. An inherited deny-write
+// ACE on the upper parent fails the rename with STATUS_ACCESS_DENIED unless
+// the process holds SE_RESTORE_NAME. The sidecar records of the moved
+// entries follow them; see MetadataStore::MoveSidecarRecords.
 NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
                         ReplaceExisting replace,
-                        CopyAcrossVolumes copy,
                         const LayerConfig& config);
 
 // Removes the upper entry at path. A directory goes with its whole tree.

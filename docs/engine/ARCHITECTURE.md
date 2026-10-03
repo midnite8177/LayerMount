@@ -145,7 +145,15 @@ emits a debug warning when the upper layer's volume is not NTFS or
 ReFS — non-NTFS upper layers cannot use the ADS metadata path and fall
 back to sidecar JSON files.
 
-`LayerConfig::Prepare` creates the work directory if missing.
+`LayerConfig::Prepare` creates the work directory if missing. It fails
+with `E_INVALIDARG` when the work directory is on another volume than
+the upper layer, because every move from the work directory into the
+upper is one rename. It compares the 64-bit volume serial numbers when
+both file systems report them, and the 32-bit ones otherwise, as on
+FAT32. It reads them
+through an open that follows a mounted folder, so a work directory
+under a mounted folder counts as being on the mounted volume.
+A transient overlay uses the upper layer as its own work directory.
 
 A *root* path resolves directly to the upper layer's directory: every
 overlay always shows at least the upper layer's contents, even with no
@@ -534,11 +542,12 @@ unavailable. Steps:
    stream that fails to copy fails the copy-up with its status.
 7. Write the `:overlay` metadata record (origin layer, copy-up
    timestamp, captured stable index number).
-8. `MoveFileExW(work, upper, MOVEFILE_REPLACE_EXISTING |
-   MOVEFILE_WRITE_THROUGH)`. If the destination's parent DACL denies
-   the move, fall back to `SetFileInformationByHandle(FileRenameInfo)`
-   on a backup-semantics-opened source handle, which honors
-   `SE_RESTORE_NAME`.
+8. `MoveUpperEntry(work, upper, ReplaceExisting::Yes)`, one
+   `MoveFileExW` rename with `MOVEFILE_REPLACE_EXISTING`. If the
+   destination's parent DACL denies the move, it falls back to
+   `SetFileInformationByHandle(FileRenameInfo)` on a
+   backup-semantics-opened source handle, which honors
+   `SE_RESTORE_NAME`. A failed move removes the work file.
 9. Invalidate the cache for the affected path (and ancestors).
 10. Bump `stats.copyUpCount` and emit `LM_EVT_COPY_UP`.
 
@@ -579,11 +588,25 @@ with no benefit.
 
 ### Directory copy-up (`CopyUpDirectory`)
 
-Creates the directory in the upper layer if missing, copies the
-security descriptor and timestamps from the lower-layer source, writes
-the `:overlay` metadata, and (importantly) does **not** recurse. The
-directory's children remain in the lower layer until they themselves
-are copied up on demand.
+Builds the directory in the work directory, as overlayfs does. The
+engine creates it there and copies the lower directory's compression,
+encryption and user streams. Then it writes the security descriptor
+and the copy-up record, and last the attributes and timestamps. Then
+one rename moves the directory to its upper path. No reader of the
+upper sees a directory that lacks its streams, security or record. The
+copy-up does **not** recurse. The directory's children remain in the
+lower layer until they themselves are copied up on demand.
+
+A lower junction or directory symbolic link copies up as a link, and
+so does a lower file symbolic link in `CopyUpFile`. The engine creates
+the link in the work directory, writes its copy-up record on the link,
+and one rename moves the link to its upper path. The link target stays
+as it was.
+
+When an entry that the engine did not make holds the upper path at the
+rename, the copy-up fails with `STATUS_OBJECT_NAME_COLLISION` and
+leaves that entry as it was. A failed copy-up removes the copy in the
+work directory and leaves no entry of its own at the upper path.
 
 ### Cross-layer directory rename (`RenameLowerDirectory`, `RenameUpperDirectory`)
 
@@ -636,10 +659,8 @@ The engine handles ten cases. The last three also apply to a file source:
   rename as for a destination that is not present. When the rename
   fails, the engine moves the destination back and restores its opaque
   marker. When the rename succeeds, the engine removes the copy in the
-  work directory. With the work directory on another volume, the engine
-  removes the destination at once, and a failed rename cannot restore
-  it. The new directory is opaque when a lower layer has the destination
-  path, so no lower child of the old destination shows.
+  work directory. The new directory is opaque when a lower layer has
+  the destination path, so no lower child of the old destination shows.
 - **rename to a destination that already exists in the merged view
   (with replace=false)**: the engine rejects the rename with
   `STATUS_OBJECT_NAME_COLLISION` before any side effects.
@@ -675,15 +696,11 @@ The engine handles ten cases. The last three also apply to a file source:
   whiteout at its old path. The link target and its entries stay
   unchanged, and no opaque marker goes into the target. An upper
   destination moves into the work directory before the rename, as an
-  empty directory does, and comes back when the rename fails. With the
-  work directory on another volume, a file destination moves there as a
-  copy, and a link destination goes at once, so a failed rename cannot
-  restore it.
+  empty directory does, and comes back when the rename fails.
 
 With replace=true, an upper file that a file replaces also moves into
 the work directory before the rename. It comes back when the rename
-fails. With the work directory on another volume, the upper file moves
-there as a copy. A read-only upper file stops the rename with
+fails. A read-only upper file stops the rename with
 `STATUS_ACCESS_DENIED` before any side effects, as NTFS refuses to
 replace a read-only file. Overlayfs also gives this decision to the
 upper file system.
@@ -693,11 +710,9 @@ file and for a directory or a link. When that write fails, the engine
 moves the entry back to the source and the rename fails with the write
 error. An upper entry that the rename replaced then comes back from
 the work directory, and the merged view stays as it was before the
-rename. Two cases are different. With the work directory on another
-volume, a directory or a link destination went at once and does not
-come back. When the move back of the entry also fails, the entry stays
-at the destination, and the engine deletes the replaced entry in the
-work directory.
+rename. When the move back of the entry also fails, the entry stays at
+the destination, and the engine deletes the replaced entry in the work
+directory.
 
 Recursive copy-up is expensive and is the main reason single-file
 metacopy exists; the engine cannot apply the same trick to directories

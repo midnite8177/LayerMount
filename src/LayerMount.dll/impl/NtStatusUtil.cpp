@@ -145,4 +145,14 @@ NTSTATUS NtStatusFromWin32(DWORD win32Error) noexcept
     }
 }
 
+NTSTATUS StatusFromWin32Error(DWORD err, DWORD fallback) noexcept
+{
+    return NtStatusFromWin32(err != 0 ? err : fallback);
+}
+
+NTSTATUS StatusOfFailedCall(DWORD fallback) noexcept
+{
+    return StatusFromWin32Error(::GetLastError(), fallback);
+}
+
 } // namespace LayerMount

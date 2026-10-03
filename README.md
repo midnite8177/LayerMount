@@ -47,7 +47,7 @@ An overlay is composed of three path roles, borrowed from Linux `overlayfs`:
 
 - **Upper** — the writable layer. All new writes land here. Required.
 - **Lower** — read-only layers, prioritized left-to-right (first lower wins for reads). Zero or more.
-- **Work directory** — space used for atomic copy-up. Defaults to `<upperParent>\.layermount-work` if not supplied.
+- **Work directory** — space used for atomic copy-up. Required. It must be on the same volume as the upper, as in overlayfs, because a copy-up creates the file, directory or link in the work directory and moves it into the upper with one rename.
 
 When a file exists only in a lower layer, reads pass through. The first write copies up the file into the upper layer and subsequent access reads/writes the upper copy. Lower layers are never modified.
 

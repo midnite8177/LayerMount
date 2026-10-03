@@ -111,16 +111,6 @@ void SetCompressedDirectory(const std::wstring& path) {
 
 constexpr DWORD kCopyBufferSize = 64 * 1024;
 
-// A failed call that leaves the last error at 0 maps to fallback, never to
-// success.
-NTSTATUS StatusFromWin32Error(DWORD err, DWORD fallback) {
-    return ::LayerMount::NtStatusFromWin32(err != 0 ? err : fallback);
-}
-
-NTSTATUS StatusOfFailedCall(DWORD fallback) {
-    return StatusFromWin32Error(::GetLastError(), fallback);
-}
-
 // WriteFile returns success with a count below length on a full quota, on a
 // network volume and on some raw devices; that write fails with
 // ERROR_WRITE_FAULT.
@@ -543,12 +533,9 @@ NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, std::optional<DWORD
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
-    const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
-    if (!NT_SUCCESS(dirStatus)) {
-        return dirStatus;
-    }
+namespace {
 
+NTSTATUS CopyLayoutAndStreams(const std::wstring& srcAbs, const std::wstring& dstAbs) {
     const NTSTATUS layoutStatus =
         ApplyDirectoryLayout(dstAbs, AttributesOrNone(::GetFileAttributesW(srcAbs.c_str())));
     if (!NT_SUCCESS(layoutStatus)) {
@@ -556,6 +543,23 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstA
     }
 
     return CopyUserAlternateDataStreams(srcAbs, dstAbs);
+}
+
+}
+
+NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
+    const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
+    if (!NT_SUCCESS(dirStatus)) {
+        return dirStatus;
+    }
+    return CopyLayoutAndStreams(srcAbs, dstAbs);
+}
+
+NTSTATUS CopyNewDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
+    if (!::CreateDirectoryW(dstAbs.c_str(), nullptr)) {
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
+    }
+    return CopyLayoutAndStreams(srcAbs, dstAbs);
 }
 
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {

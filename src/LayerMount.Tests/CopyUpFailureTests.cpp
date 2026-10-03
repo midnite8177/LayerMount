@@ -8,6 +8,8 @@
 #include "MetadataStore.h"
 #include "EntryCopy.h"
 
+#include "AclTestHelpers.h"
+
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -15,6 +17,7 @@
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::AccessDenied;
 
 namespace LayerMountTests {
 
@@ -71,6 +74,161 @@ void LM_CALL RaceSecondCopyUpThenHoldLowerStream(const LM_EVENT* evt, void* cont
     race->heldStream = OpenNewStreamExclusively(race->heldStreamPath);
 }
 
+// Reports the changes to the direct children of a directory from
+// construction on.
+class DirectoryWatch {
+public:
+    DirectoryWatch(const std::wstring& dirPath, DWORD filter)
+        : dir_(::CreateFileW(dirPath.c_str(), FILE_LIST_DIRECTORY,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                             nullptr)),
+          event_(::CreateEventW(nullptr, TRUE, FALSE, nullptr)),
+          filter_(filter),
+          buffer_(16 * 1024) {
+        Assert::IsTrue(dir_.IsValid() && event_.IsValid(), L"The test must open the watched directory");
+        Issue();
+        Assert::IsTrue(pending_, L"ReadDirectoryChangesW must start the watch");
+    }
+    ~DirectoryWatch() {
+        if (pending_) {
+            ::CancelIoEx(dir_.Get(), &overlapped_);
+            DWORD bytes = 0;
+            ::GetOverlappedResult(dir_.Get(), &overlapped_, &bytes, TRUE);
+        }
+    }
+    DirectoryWatch(const DirectoryWatch&) = delete;
+    DirectoryWatch& operator=(const DirectoryWatch&) = delete;
+
+    // The actions reported for the child called name, in order. The file
+    // system queues a notification before the call that made the change
+    // returns, so the read stops when no notification comes within the wait.
+    std::vector<DWORD> ActionsFor(const std::wstring& name) {
+        std::vector<DWORD> actions;
+        while (pending_ && ::WaitForSingleObject(event_.Get(), 500) == WAIT_OBJECT_0) {
+            pending_ = false;
+            DWORD bytes = 0;
+            Assert::IsTrue(::GetOverlappedResult(dir_.Get(), &overlapped_, &bytes, FALSE) != FALSE,
+                L"The watch read must complete");
+            Assert::AreNotEqual<DWORD>(0, bytes, L"The watch buffer must hold every notification");
+            const BYTE* record = reinterpret_cast<const BYTE*>(buffer_.data());
+            for (;;) {
+                const auto* info = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(record);
+                const std::wstring changed(info->FileName, info->FileNameLength / sizeof(wchar_t));
+                if (_wcsicmp(changed.c_str(), name.c_str()) == 0) {
+                    actions.push_back(info->Action);
+                }
+                if (info->NextEntryOffset == 0) break;
+                record += info->NextEntryOffset;
+            }
+            Issue();
+        }
+        return actions;
+    }
+
+private:
+    void Issue() {
+        ::ResetEvent(event_.Get());
+        overlapped_ = {};
+        overlapped_.hEvent = event_.Get();
+        pending_ = ::ReadDirectoryChangesW(dir_.Get(), buffer_.data(),
+                                           static_cast<DWORD>(buffer_.size() * sizeof(DWORD)),
+                                           FALSE, filter_, nullptr, &overlapped_, nullptr) != FALSE;
+    }
+
+    ScopedHandle dir_;
+    ScopedHandle event_;
+    DWORD filter_;
+    std::vector<DWORD> buffer_;
+    OVERLAPPED overlapped_{};
+    bool pending_ = false;
+};
+
+// A directory that something other than the engine makes at the upper path
+// of a child, with one file in it and fixed times, while the engine copies
+// up the child's parent.
+struct ForeignDirectoryAtParentCopyUp {
+    std::wstring parent;
+    std::wstring foreignDir;
+    std::wstring heldStreamPath;
+    FILETIME stampedTime;
+    bool made = false;
+    ScopedHandle heldStream;
+};
+
+// Fires inside the copy-up of the child, at the copy-up of its parent. The
+// copy-up of the child has found no upper entry at its path by then.
+void LM_CALL MakeForeignDirectoryAtParentCopyUp(const LM_EVENT* evt, void* context) {
+    auto* foreign = static_cast<ForeignDirectoryAtParentCopyUp*>(context);
+    if (evt->type != LM_EVT_COPY_UP || evt->relativePath == nullptr ||
+        foreign->parent != evt->relativePath || foreign->made) {
+        return;
+    }
+    if (!::CreateDirectoryW(foreign->foreignDir.c_str(), nullptr)) {
+        return;
+    }
+    ScopedHandle file(::CreateFileW((foreign->foreignDir + L"\\f.txt").c_str(), GENERIC_WRITE, 0,
+                                    nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+    ScopedHandle dir(::CreateFileW(foreign->foreignDir.c_str(), FILE_WRITE_ATTRIBUTES,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                   FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    foreign->made = file.IsValid() && dir.IsValid() &&
+                    ::SetFileTime(dir.Get(), &foreign->stampedTime, &foreign->stampedTime,
+                                  &foreign->stampedTime) != FALSE;
+    if (!foreign->heldStreamPath.empty()) {
+        foreign->heldStream = OpenNewStreamExclusively(foreign->heldStreamPath);
+    }
+}
+
+void AssertForeignDirectoryUntouched(const ForeignDirectoryAtParentCopyUp& foreign,
+                                     const LayerConfig& config) {
+    Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+        ::GetFileAttributesW((foreign.foreignDir + L"\\f.txt").c_str()),
+        L"The foreign directory keeps its file");
+    const DWORD attributes = ::GetFileAttributesW(foreign.foreignDir.c_str());
+    Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES, attributes,
+        L"The foreign directory stays at the upper path");
+    Assert::AreEqual<DWORD>(0, attributes & FILE_ATTRIBUTE_HIDDEN,
+        L"The foreign directory does not take the lower directory's attributes");
+    Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+        ::GetFileAttributesW((foreign.foreignDir + L":s").c_str()),
+        L"The foreign directory does not take the lower directory's stream");
+    FILETIME creation{}, access{}, write{};
+    GetTimes(foreign.foreignDir, &creation, &access, &write);
+    Assert::IsTrue(FileTimesEqual(foreign.stampedTime, write),
+        L"The foreign directory keeps its last-write time");
+    Assert::IsTrue(FileTimesEqual(foreign.stampedTime, creation),
+        L"The foreign directory keeps its creation time");
+    Assert::AreEqual<DWORD>(0, attributes & FILE_ATTRIBUTE_REPARSE_POINT,
+        L"The foreign directory does not become a link");
+    Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(foreign.foreignDir, &config)
+                       .originLayer.empty(),
+        L"The foreign directory gets no copy-up record");
+}
+
+// Makes the lower directory at relativePath hidden, with a stream named s.
+void MakeHiddenLowerDirectoryWithStream(const TempLayerEnvironment& env,
+                                        const std::wstring& relativePath) {
+    env.CreateDir(env.Lower(0), relativePath);
+    const std::wstring lowerDir = env.Lower(0) + L"\\" + relativePath;
+    ScopedHandle stream(::CreateFileW((lowerDir + L":s").c_str(), GENERIC_WRITE, 0, nullptr,
+                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Assert::IsTrue(stream.IsValid(), L"The test must write the lower directory's stream");
+    stream.Reset();
+    Assert::IsTrue(::SetFileAttributesW(lowerDir.c_str(), FILE_ATTRIBUTE_HIDDEN) != FALSE,
+        L"The test must make the lower directory hidden");
+}
+
+// Makes the lower junction p\link to the directory target under the
+// environment root. Logs a skip and returns false when the junction cannot
+// be created.
+bool LowerJunctionCreatedOrSkipped(const TempLayerEnvironment& env) {
+    env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+    env.CreateDir(env.Lower(0), L"p");
+    return LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\p\\link",
+                                env.Root() + L"\\target");
+}
+
 }
 
 
@@ -125,8 +283,8 @@ public:
     // EnsureDirectoryExists call at commit time silently no-ops, and
     // MoveFileExW then fails because the parent is not a directory.
     //
-    // The failure cleanup path (DeleteFileW(workPath) on commit failure) must
-    // run, so the work dir ends with zero #*.tmp orphans.
+    // A failed commit removes the work file, so the work directory has no
+    // #*.tmp file left.
     // ------------------------------------------------------------------------
     TEST_METHOD(CopyUpFile_UpperParentIsFile_CommitFailsAndCleansWorkTemp) {
         LayerMountTests::TempLayerEnvironment env(1);
@@ -153,8 +311,6 @@ public:
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\doc.txt"),
             L"Failed commit must not land a file at the target path");
 
-        // Hygiene: the commit-failure branch in CopyUp::CommitFromWorkDir
-        // DeleteFileW's the work temp on MoveFileExW failure. No orphans.
         Assert::AreEqual<size_t>(0, CountWorkTempFiles(env.Work()),
             L"Work dir must be empty after failed commit");
     }
@@ -451,6 +607,212 @@ public:
         Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW((env.Upper() + L"\\dir").c_str()),
             L"A failed directory copy-up leaves no upper directory");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"A failed directory copy-up leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CopyUpDirectory_ParentWatch_SeesTheDirectoryArriveOnceAndNeverChange) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        MakeHiddenLowerDirectoryWithStream(env, L"d");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        DirectoryWatch watch(env.Upper(),
+            FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES |
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
+            FILE_NOTIFY_CHANGE_SECURITY);
+        const NTSTATUS status = rig.copyUp.CopyUpDirectory(L"d");
+        const std::vector<DWORD> actions = watch.ActionsFor(L"d");
+
+        Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, status, L"The directory copy-up succeeds");
+        // A move from the work directory reaches a watch of the upper parent
+        // as FILE_ACTION_ADDED, because NTFS reports a move between two
+        // directories as a remove and an add.
+        Assert::AreEqual<size_t>(1, actions.size(),
+            L"The parent sees one change for the directory: its arrival");
+        Assert::AreEqual<DWORD>(FILE_ACTION_ADDED, actions[0],
+            L"The directory arrives in the parent by a move from the work directory");
+        Assert::AreEqual<DWORD>(FILE_ATTRIBUTE_HIDDEN,
+            ::GetFileAttributesW((env.Upper() + L"\\d").c_str()) & FILE_ATTRIBUTE_HIDDEN,
+            L"The directory arrives with the lower directory's attributes");
+        Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW((env.Upper() + L"\\d:s").c_str()),
+            L"The directory arrives with the lower directory's stream");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The copy-up leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CopyUpDirectory_RecordFollowsTheDirectoryToItsUpperPath) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Lower(0), L"d");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"d"),
+                L"The directory copy-up succeeds");
+
+            const LayerMountMetadata md =
+                MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\d", &rig.config);
+            Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\d").c_str(), md.originLayer.c_str()),
+                L"The upper directory's copy-up record names the lower directory");
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The copy-up leaves nothing in the work directory");
+        });
+    }
+
+    TEST_METHOD(CopyUpDirectory_ForeignDirectoryAtTheUpperPath_FailsWithCollisionAndKeepsIt) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            MakeHiddenLowerDirectoryWithStream(env, L"p\\d");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            ForeignDirectoryAtParentCopyUp foreign;
+            foreign.parent = L"p";
+            foreign.foreignDir = env.Upper() + L"\\p\\d";
+            foreign.stampedTime = MakeFileTime(2001, 2, 3);
+            ::LayerMount::abi::EventEmitter events;
+            events.Set(&MakeForeignDirectoryAtParentCopyUp, &foreign);
+            rig.copyUp.SetEventEmitter(&events);
+            const NTSTATUS status = rig.copyUp.CopyUpDirectory(L"p\\d");
+            rig.copyUp.SetEventEmitter(nullptr);
+
+            Assert::IsTrue(foreign.made, L"The test makes the foreign directory at the upper path");
+            Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
+                L"The copy-up fails when an entry it did not make holds the upper path");
+            AssertForeignDirectoryUntouched(foreign, rig.config);
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The failed copy-up leaves nothing in the work directory");
+        });
+    }
+
+    TEST_METHOD(CopyUpDirectory_ForeignDirectoryAtTheUpperPathAndStreamCopyFails_KeepsIt) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        MakeHiddenLowerDirectoryWithStream(env, L"p\\d");
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        ForeignDirectoryAtParentCopyUp foreign;
+        foreign.parent = L"p";
+        foreign.foreignDir = env.Upper() + L"\\p\\d";
+        foreign.heldStreamPath = env.Lower(0) + L"\\p\\d:held";
+        foreign.stampedTime = MakeFileTime(2001, 2, 3);
+        ::LayerMount::abi::EventEmitter events;
+        events.Set(&MakeForeignDirectoryAtParentCopyUp, &foreign);
+        rig.copyUp.SetEventEmitter(&events);
+        const NTSTATUS status = rig.copyUp.CopyUpDirectory(L"p\\d");
+        const bool streamHeld = foreign.heldStream.IsValid();
+        foreign.heldStream.Reset();
+        rig.copyUp.SetEventEmitter(nullptr);
+
+        Assert::IsTrue(foreign.made, L"The test makes the foreign directory at the upper path");
+        Assert::IsTrue(streamHeld, L"The test holds the lower stream open with no sharing");
+        Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
+            L"The copy-up fails at the held stream");
+        AssertForeignDirectoryUntouched(foreign, rig.config);
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The failed copy-up leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerJunction_MovesTheLinkWithItsRecordToItsUpperPath) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            if (!LowerJunctionCreatedOrSkipped(env)) {
+                return;
+            }
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"p\\link"),
+                L"The copy-up of the lower junction succeeds");
+
+            const std::wstring upperLink = env.Upper() + L"\\p\\link";
+            Assert::IsTrue(HasAttribute(upperLink, FILE_ATTRIBUTE_REPARSE_POINT),
+                L"The upper entry is a link");
+            const LayerMountMetadata md =
+                MetadataStore::ReadLayerMountMetadata(upperLink, &rig.config);
+            Assert::AreEqual(0,
+                _wcsicmp((env.Lower(0) + L"\\p\\link").c_str(), md.originLayer.c_str()),
+                L"The upper link's copy-up record names the lower junction");
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The copy-up leaves nothing in the work directory");
+        });
+    }
+
+    TEST_METHOD(CopyUpDirectory_ForeignDirectoryAtTheUpperPathOfALowerJunction_FailsWithCollisionAndKeepsIt) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            if (!LowerJunctionCreatedOrSkipped(env)) {
+                return;
+            }
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            ForeignDirectoryAtParentCopyUp foreign;
+            foreign.parent = L"p";
+            foreign.foreignDir = env.Upper() + L"\\p\\link";
+            foreign.stampedTime = MakeFileTime(2001, 2, 3);
+            ::LayerMount::abi::EventEmitter events;
+            events.Set(&MakeForeignDirectoryAtParentCopyUp, &foreign);
+            rig.copyUp.SetEventEmitter(&events);
+            const NTSTATUS status = rig.copyUp.CopyUpDirectory(L"p\\link");
+            rig.copyUp.SetEventEmitter(nullptr);
+
+            Assert::IsTrue(foreign.made, L"The test makes the foreign directory at the upper path");
+            Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
+                L"The copy-up fails when an entry it did not make holds the upper path");
+            AssertForeignDirectoryUntouched(foreign, rig.config);
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The failed copy-up leaves nothing in the work directory");
+        });
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerDaclDeniesListingAndDelete_CommitsTheDirectory) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"p\\d");
+        const AccessDenied denied(env.Lower(0) + L"\\p\\d", FILE_LIST_DIRECTORY | DELETE);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"p\\d"),
+            L"The copy-up of a directory whose DACL denies listing and delete succeeds");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\p\\d", FILE_ATTRIBUTE_DIRECTORY),
+            L"The directory moves to its upper path");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The copy-up leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CopyUpDirectory_ForeignDirectoryAtTheUpperPathOfADeniedLowerDirectory_LeavesTheWorkDirectoryEmpty) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"p\\d");
+        const AccessDenied denied(env.Lower(0) + L"\\p\\d", FILE_LIST_DIRECTORY | DELETE);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        ForeignDirectoryAtParentCopyUp foreign;
+        foreign.parent = L"p";
+        foreign.foreignDir = env.Upper() + L"\\p\\d";
+        foreign.stampedTime = MakeFileTime(2001, 2, 3);
+        ::LayerMount::abi::EventEmitter events;
+        events.Set(&MakeForeignDirectoryAtParentCopyUp, &foreign);
+        rig.copyUp.SetEventEmitter(&events);
+        const NTSTATUS status = rig.copyUp.CopyUpDirectory(L"p\\d");
+        rig.copyUp.SetEventEmitter(nullptr);
+
+        Assert::IsTrue(foreign.made, L"The test makes the foreign directory at the upper path");
+        Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
+            L"The copy-up fails when an entry it did not make holds the upper path");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The failed copy-up removes its copy, which carries the denying DACL");
     }
 
     TEST_METHOD(CopyUpDirectory_RacingCopyUpFails_KeepsTheDirectoryTheOtherCommitted) {

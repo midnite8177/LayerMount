@@ -15,6 +15,13 @@ namespace LayerMount {
 // codes fall back to STATUS_UNSUCCESSFUL.
 NTSTATUS NtStatusFromWin32(DWORD win32Error) noexcept;
 
+// The NTSTATUS for err, or for fallback when err is 0, so a failed call
+// that leaves the last error at 0 never maps to success.
+NTSTATUS StatusFromWin32Error(DWORD err, DWORD fallback) noexcept;
+
+// StatusFromWin32Error for the last error of the call that just failed.
+NTSTATUS StatusOfFailedCall(DWORD fallback) noexcept;
+
 // The HRESULT the C ABI returns for an engine NTSTATUS: S_OK for success,
 // HRESULT_FROM_NT for everything else. A failed fill stores its message
 // under this value, so LayerMountGetLastErrorMessage finds it with the

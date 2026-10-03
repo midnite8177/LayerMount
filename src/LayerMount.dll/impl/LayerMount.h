@@ -45,11 +45,16 @@ struct LayerConfig {
     // so the engine takes the fast path.
     UINT32 hostCapabilities = 0;
 
-    // Pure validation — no side effects. Returns false and sets error on failure.
+    // Checks the layout and writes and deletes a probe file in upperPath.
+    // Returns false and sets error on failure.
     bool Validate(std::wstring& error) const;
 
-    // Creates workDirPath if it doesn't exist. Call after Validate().
-    bool Prepare(std::wstring& error);
+    // Creates workDirPath if it doesn't exist and checks that it is on the
+    // volume of upperPath. Call after Validate(). Returns E_FAIL when
+    // workDirPath is empty, the work directory cannot be created or either
+    // volume cannot be read, and E_INVALIDARG when the volumes differ, with
+    // the reason in error.
+    HRESULT Prepare(std::wstring& error);
 };
 
 // Keeps a reference to a LayerConfig. A temporary config would dangle, so
@@ -520,13 +525,11 @@ public:
     // unchanged. Before the move, Rename moves the upper destination into the
     // work directory. It puts the destination back when the move fails and
     // removes it when the move succeeds. A replace of a read-only upper file
-    // fails with STATUS_ACCESS_DENIED before any side effects. With the work
-    // directory on another volume, a file destination moves there as a copy,
-    // and a directory or link destination goes at once, so a failed rename
-    // cannot restore it. A failure to read the reparse tag of a source or
-    // destination fails the rename with that status before any change. The
-    // FileContext overload makes these checks before it closes ctx->handle, so
-    // a refused rename leaves the handle open.
+    // fails with STATUS_ACCESS_DENIED before any side effects. A failure to
+    // read the reparse tag of a source or destination fails the rename with
+    // that status before any change. The FileContext overload makes these
+    // checks before it closes ctx->handle, so a refused rename leaves the
+    // handle open.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
                     const std::wstring& newRelativePath,
                     BOOLEAN replaceIfExists,

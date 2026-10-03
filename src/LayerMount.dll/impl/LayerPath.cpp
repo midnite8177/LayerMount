@@ -125,11 +125,8 @@ namespace {
 
 NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
                               const std::wstring& to,
-                              ReplaceExisting replace,
-                              CopyAcrossVolumes copy) {
-    const DWORD flags =
-        (replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0) |
-        (copy == CopyAcrossVolumes::Yes ? MOVEFILE_COPY_ALLOWED : 0);
+                              ReplaceExisting replace) {
+    const DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
     if (::MoveFileExW(from.c_str(), to.c_str(), flags)) {
         return STATUS_SUCCESS;
     }
@@ -203,9 +200,8 @@ NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path) {
 NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
                         ReplaceExisting replace,
-                        CopyAcrossVolumes copy,
                         const LayerConfig& config) {
-    const NTSTATUS status = MoveUpperEntryOnDisk(from, to, replace, copy);
+    const NTSTATUS status = MoveUpperEntryOnDisk(from, to, replace);
     if (NT_SUCCESS(status)) {
         MetadataStore::MoveSidecarRecords(from, to, config);
     }

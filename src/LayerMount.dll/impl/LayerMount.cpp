@@ -24,6 +24,7 @@
 #include <climits>
 #include <cstring>
 #include <cwctype>
+#include <optional>
 #include <string_view>
 #include <system_error>
 
@@ -160,18 +161,73 @@ bool LayerConfig::Validate(std::wstring& error) const {
     return true;
 }
 
-bool LayerConfig::Prepare(std::wstring& error) {
+namespace {
+
+// wideSerial stays empty when the file system refuses the FileIdInfo query.
+struct VolumeSerial {
+    DWORD serial = 0;
+    std::optional<ULONGLONG> wideSerial;
+};
+
+// The open follows a mounted folder, so the serial numbers are those of the
+// mounted volume.
+bool ReadVolumeSerial(const std::wstring& path, VolumeSerial* volume) {
+    ScopedHandle directory(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
+                                         nullptr));
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!directory.IsValid() || !::GetFileInformationByHandle(directory.Get(), &info)) {
+        return false;
+    }
+    volume->serial = info.dwVolumeSerialNumber;
+    FILE_ID_INFO idInfo{};
+    if (::GetFileInformationByHandleEx(directory.Get(), FileIdInfo, &idInfo, sizeof(idInfo))) {
+        volume->wideSerial = idInfo.VolumeSerialNumber;
+    }
+    return true;
+}
+
+// Two volumes can share the 32-bit serial, so the 64-bit one decides when
+// both file systems report it.
+bool OnOneVolume(const VolumeSerial& a, const VolumeSerial& b) {
+    if (a.wideSerial && b.wideSerial) {
+        return *a.wideSerial == *b.wideSerial;
+    }
+    return a.serial == b.serial;
+}
+
+}
+
+HRESULT LayerConfig::Prepare(std::wstring& error) {
     if (workDirPath.empty()) {
         error = L"Work directory path is empty";
-        return false;
+        return E_FAIL;
     }
 
     if (!EnsureDirectoryExists(workDirPath)) {
         error = L"Failed to create work directory: " + workDirPath;
-        return false;
+        return E_FAIL;
     }
 
-    return true;
+    VolumeSerial upperVolume;
+    if (!ReadVolumeSerial(upperPath, &upperVolume)) {
+        error = L"Failed to read the volume of the upper layer: " + upperPath;
+        return E_FAIL;
+    }
+    VolumeSerial workVolume;
+    if (!ReadVolumeSerial(workDirPath, &workVolume)) {
+        error = L"Failed to read the volume of the work directory: " + workDirPath;
+        return E_FAIL;
+    }
+    // A copy-up moves an entry from the work directory into the upper with
+    // one rename, which only works within one volume.
+    if (!OnOneVolume(upperVolume, workVolume)) {
+        error = L"Work directory is not on the volume of the upper layer: " + workDirPath;
+        return E_INVALIDARG;
+    }
+
+    return S_OK;
 }
 
 std::wstring NormalizePath(const std::wstring& path) {
@@ -2025,8 +2081,7 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
 
     status = MoveUpperEntry(
         oldUpperPath, newUpperPath,
-        replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No,
-        CopyAcrossVolumes::No, config_);
+        replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No, config_);
     if (!NT_SUCCESS(status)) return status;
 
     if (lowerHasSource) {
@@ -2045,8 +2100,7 @@ NTSTATUS LayerMount::WhiteOutRenameSource(const RenamePaths& paths,
         return STATUS_SUCCESS;
     }
     const NTSTATUS moveBack = MoveUpperEntry(pathResolver_->GetStoredUpperPath(paths.newNorm),
-                                             oldUpperPath, ReplaceExisting::No,
-                                             CopyAcrossVolumes::No, config_);
+                                             oldUpperPath, ReplaceExisting::No, config_);
     if (!NT_SUCCESS(moveBack) && destHadWhiteout) {
         whiteoutMgr_->RemoveWhiteout(paths.newNorm);
     }

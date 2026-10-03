@@ -531,8 +531,7 @@ NTSTATUS DirectoryRename::RenameUpperDirectory(const CallerPath& oldCallerPath,
     const bool isLink = sourceKind == RenameEntryKind::Link;
     const bool wasOpaque = !isLink && whiteoutMgr_.IsOpaque(oldNorm);
 
-    const NTSTATUS moveStatus = MoveUpperEntry(oldUpperPath, newUpperPath, replace,
-                                               CopyAcrossVolumes::No, config_);
+    const NTSTATUS moveStatus = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);
     if (!NT_SUCCESS(moveStatus)) {
         return moveStatus;
     }

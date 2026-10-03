@@ -110,6 +110,23 @@ public:
         Assert::IsTrue(a.find(L".tmp") != std::wstring::npos, L"Path should end with .tmp");
     }
 
+    TEST_METHOD(Prepare_WorkDirectoryOnTheUppersVolume_CreatesItAndSucceeds) {
+        TempLayerEnvironment env(0);
+        LayerConfig config = env.MakeConfig();
+        config.workDirPath = env.Root() + L"\\new-work";
+        std::wstring error;
+
+        Assert::AreEqual<HRESULT>(S_OK, config.Prepare(error),
+            L"A work directory on the upper's volume passes the prepare");
+        Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW(config.workDirPath.c_str()),
+            L"The prepare creates a missing work directory");
+
+        config.workDirPath = config.upperPath;
+        Assert::AreEqual<HRESULT>(S_OK, config.Prepare(error),
+            L"The upper as its own work directory passes the prepare");
+    }
+
      TEST_METHOD(GenerateWorkPath_LongWorkDirPath_StillUniqueNoTruncation) {
          TempLayerEnvironment env(1);
          LayerConfig config = env.MakeConfig();

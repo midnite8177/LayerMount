@@ -83,6 +83,11 @@ NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, std::optional<DWORD
 // directory in place for the caller to remove.
 NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs);
 
+// CopyDirectoryShell for a directory that does not exist yet. Fails with
+// the create's status when an entry is already at dstAbs, and leaves that
+// entry as it was.
+NTSTATUS CopyNewDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs);
+
 // Copy the data of srcHandle to dstHandle. When both files are sparse, the
 // copy reads the allocated ranges of the source and writes only those, so a
 // hole of the source stays a hole in the destination: NTFS allocates

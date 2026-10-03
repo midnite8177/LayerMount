@@ -33,13 +33,12 @@ public:
     RenameDestinationAside& operator=(const RenameDestinationAside&) = delete;
 
     // Takes the entry that moved from upperPath to asidePath. The
-    // destructor moves it back with restoreCopy and, when wasOpaque is
-    // true, marks normalizedPath opaque again.
+    // destructor moves it back and, when wasOpaque is true, marks
+    // normalizedPath opaque again.
     void Hold(std::wstring normalizedPath,
               std::wstring upperPath,
               std::wstring asidePath,
-              bool wasOpaque,
-              CopyAcrossVolumes restoreCopy);
+              bool wasOpaque);
 
     void Commit();
 
@@ -51,7 +50,6 @@ private:
     std::wstring upperPath_;
     std::wstring asidePath_;
     bool wasOpaque_ = false;
-    CopyAcrossVolumes restoreCopy_ = CopyAcrossVolumes::No;
 };
 
 class CopyUp {
@@ -71,12 +69,13 @@ public:
 
     std::wstring GenerateWorkPath();
 
-    // Deletes every #*.tmp in the work directory. Call it only when no
+    // Deletes every #*.tmp file in the work directory. Call it only when no
     // copy-up is in flight.
     void CleanWorkDirectory();
 
-    // Replaces finalUpperPath. Atomic only when the work directory and the
-    // upper share a volume.
+    // Replaces finalUpperPath with the file at workPath. workPath must be on
+    // the upper's volume; the move is one rename. A failed move removes the
+    // file at workPath.
     NTSTATUS CommitFromWorkDir(const std::wstring& workPath,
                                const std::wstring& finalUpperPath);
 
@@ -94,7 +93,13 @@ public:
 
     // Copy a directory entry (not contents) from a lower layer to the upper layer.
     // The upper entry takes the lower entry's name, whatever the case of
-    // relativePath.
+    // relativePath. Returns success when the upper already has an entry at
+    // the path. Otherwise builds the directory, or the link for a lower
+    // junction or directory symbolic link, in the work directory and moves
+    // it to the upper path once it is complete. When an entry appears at
+    // the upper path before that move, fails with
+    // STATUS_OBJECT_NAME_COLLISION and leaves that entry as it was. A
+    // failure leaves no copy in the work directory.
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);
 
     // Returns success when the parent of normalizedPath is in the upper.
@@ -111,11 +116,7 @@ public:
     // its opaque marker first. A Link moves as a link, and its target
     // keeps its markers. Nothing moves and aside stays empty when the
     // upper has no entry at newNorm. A read-only File destination fails
-    // with STATUS_ACCESS_DENIED, and nothing moves. When the work
-    // directory is on another volume, a File destination moves there as a
-    // copy. A Directory or a Link destination cannot, so the method
-    // removes it at once and aside stays empty, and a failed rename cannot
-    // restore it. aside must be empty.
+    // with STATUS_ACCESS_DENIED, and nothing moves. aside must be empty.
     NTSTATUS SetRenameDestinationAside(const std::wstring& newNorm,
                                        RenameEntryKind destinationKind,
                                        RenameDestinationAside* aside);
@@ -148,6 +149,9 @@ private:
     // STATUS_OBJECT_NAME_NOT_FOUND when no visible lower holds normalized.
     NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target);
 
+    // Builds the link in the work directory and moves it to
+    // target.upperPath. When an entry holds target.upperPath, fails with
+    // STATUS_OBJECT_NAME_COLLISION and leaves that entry as it was.
     NTSTATUS CopyUpLinkAndCount(const std::wstring& normalized, const CopyUpTarget& target);
 
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
@@ -169,8 +173,12 @@ private:
     NTSTATUS FinishFilledShell(const std::wstring& upperPath,
                                LayerMountMetadata& metadata);
 
-    NTSTATUS BuildUpperDirectory(const std::wstring& sourcePath,
-                                 const std::wstring& upperPath);
+    // Creates the directory at stagedPath with the layout, streams,
+    // security and copy-up record of the directory at sourcePath. A
+    // failure can leave the directory at stagedPath for the caller to
+    // remove.
+    NTSTATUS BuildStagedDirectory(const std::wstring& sourcePath,
+                                  const std::wstring& stagedPath);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;

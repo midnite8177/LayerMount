@@ -74,6 +74,10 @@ public:
     }
     PathReservation(const PathReservation&) = delete;
     PathReservation& operator=(const PathReservation&) = delete;
+
+    bool ExistsInUpperWhileHeld() const {
+        return owner_.pathResolver_.ExistsInUpper(path_);
+    }
 private:
     CopyUp& owner_;
     std::wstring path_;
@@ -180,73 +184,25 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
         EnsureDirectoryExists(parentDir.wstring());
     }
 
-    // Without MOVEFILE_COPY_ALLOWED, MoveFileExW fails with
-    // ERROR_NOT_SAME_DEVICE when the work directory and the upper are on
-    // different volumes. With it, the move falls back to a copy and a delete,
-    // which is not crash-safe. On one volume the move stays an atomic rename.
-    DWORD flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH |
-                  MOVEFILE_COPY_ALLOWED;
-    if (MoveFileExW(workPath.c_str(), finalUpperPath.c_str(), flags)) {
-        return STATUS_SUCCESS;
+    const NTSTATUS status =
+        MoveUpperEntry(workPath, finalUpperPath, ReplaceExisting::Yes, config_);
+    if (!NT_SUCCESS(status)) {
+        RemoveUpperEntry(workPath, config_);
     }
-
-    const DWORD err = GetLastError();
-    if (err != ERROR_ACCESS_DENIED) {
-        DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err);
-    }
-
-    // Fallback path for restrictive parent ACLs. When CopyUpDirectory copied
-    // the lower parent's DACL up (e.g. an inherited DENY-WRITE for Everyone),
-    // upper\<parent> ends up denying WRITE to our own process — even though
-    // we created and own that directory. MoveFileExW then fails at the
-    // destination's ACL check with ERROR_ACCESS_DENIED.
-    //
-    // SE_RESTORE_NAME (enabled in EnableFileSystemPrivileges) lets a backup-
-    // semantics-opened source handle perform a rename via FileRenameInfo
-    // that bypasses the destination directory's DACL. This is the same
-    // mechanism backup/restore tools use to write into protected paths.
-    ScopedHandle src(CreateFileW(workPath.c_str(),
-                                  GENERIC_READ | DELETE | SYNCHRONIZE,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                      FILE_SHARE_DELETE,
-                                  nullptr, OPEN_EXISTING,
-                                  FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-    if (!src.IsValid()) {
-        const DWORD openErr = GetLastError();
-        DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(openErr);
-    }
-
-    // FILE_RENAME_INFO is a variable-length struct: a fixed header plus the
-    // destination path as UTF-16 (byte length in FileNameLength, NOT
-    // null-terminated). Allocate one contiguous buffer so the kernel can
-    // walk it without a separate allocation.
-    const size_t pathBytes = finalUpperPath.size() * sizeof(wchar_t);
-    std::vector<BYTE> buf(sizeof(FILE_RENAME_INFO) + pathBytes);
-    auto* ri = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
-    ri->ReplaceIfExists = TRUE;
-    ri->RootDirectory = nullptr;
-    ri->FileNameLength = static_cast<DWORD>(pathBytes);
-    memcpy(ri->FileName, finalUpperPath.data(), pathBytes);
-
-    if (!SetFileInformationByHandle(src.Get(), FileRenameInfo, ri,
-                                      static_cast<DWORD>(buf.size()))) {
-        const DWORD renameErr = GetLastError();
-        src.Reset();
-        DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(renameErr);
-    }
-
-    return STATUS_SUCCESS;
+    return status;
 }
 
 NTSTATUS CopyUp::CopyUpLinkAndCount(const std::wstring& normalized,
                                     const CopyUpTarget& target) {
-    const NTSTATUS status = CopyLinkWithCopyUpRecord(
-        target.source.absolutePath, target.source.attributes, target.upperPath,
+    const std::wstring stagedPath = GenerateWorkPath();
+    NTSTATUS status = CopyLinkWithCopyUpRecord(
+        target.source.absolutePath, target.source.attributes, stagedPath,
         {CopiedEntryRecord::NewFromSource, config_, capabilities_});
+    if (NT_SUCCESS(status)) {
+        status = MoveUpperEntry(stagedPath, target.upperPath, ReplaceExisting::No, config_);
+    }
     if (!NT_SUCCESS(status)) {
+        RemoveUpperEntry(stagedPath, config_);
         return status;
     }
 
@@ -694,12 +650,9 @@ NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
 NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     std::wstring normalized = NormalizePath(relativePath);
 
-    // Taken before the upper check and the link branch. Otherwise a racing
-    // copy-up adopts the directory that this call creates and removes it when
-    // the racer fails.
     PathReservation reservation(*this, normalized);
 
-    if (pathResolver_.ExistsInUpper(normalized)) {
+    if (reservation.ExistsInUpperWhileHeld()) {
         return STATUS_SUCCESS;
     }
 
@@ -726,17 +679,21 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         nullptr));
-    FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), upperPath);
+    const std::wstring stagedPath = GenerateWorkPath();
+    FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), stagedPath);
     srcHandle.Reset();
 
-    status = BuildUpperDirectory(source.absolutePath, upperPath);
+    status = BuildStagedDirectory(source.absolutePath, stagedPath);
+    if (NT_SUCCESS(status)) {
+        // The attributes go on after the streams, because NTFS refuses a
+        // new stream on a read-only directory.
+        basicInfo.Restore();
+        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config_);
+    }
     if (!NT_SUCCESS(status)) {
+        RemoveUpperEntry(stagedPath, config_);
         return status;
     }
-
-    // The attributes go on after the streams, because NTFS refuses a new
-    // stream on a read-only directory.
-    basicInfo.Restore();
 
     cache_.InvalidateWithAncestors(normalized);
     RecordCopyUp(normalized);
@@ -744,27 +701,26 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::BuildUpperDirectory(const std::wstring& sourcePath,
-                                     const std::wstring& upperPath) {
+NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
+                                      const std::wstring& stagedPath) {
+    NTSTATUS status = CopyNewDirectoryShell(sourcePath, stagedPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
     // A failed security copy is fatal: the directory's DACL is also the
     // template for auto-inheritance onto children created inside it, so
     // dropping the source's DACL would broaden or narrow access on every
     // child created later.
-    NTSTATUS status = CopyDirectoryShell(sourcePath, upperPath);
-    if (NT_SUCCESS(status) && !CopySecurityDescriptor(sourcePath, upperPath)) {
-        const DWORD err = ::GetLastError();
-        status = ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-    }
-    if (!NT_SUCCESS(status)) {
-        ::RemoveDirectoryW(upperPath.c_str());
-        return status;
+    if (!CopySecurityDescriptor(sourcePath, stagedPath)) {
+        return StatusOfFailedCall(ERROR_ACCESS_DENIED);
     }
 
-    // Write the copy-up record. Fatal on failure: without origin/stable-id
-    // the upper directory looks like a foreign creation and later
-    // resolution can misbehave. Tear down the staged upper directory.
-    return WriteCopyUpRecordOrRemoveEntry(upperPath, MakeCopyUpMetadata(sourcePath),
-                                          NewUpperEntryKind::Directory, config_);
+    // Without the record the directory has no origin and no stable file ID.
+    if (!MetadataStore::WriteLayerMountMetadata(stagedPath, MakeCopyUpMetadata(sourcePath),
+                                                &config_)) {
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
+    }
+    return STATUS_SUCCESS;
 }
 
 RenameDestinationAside::RenameDestinationAside(ConfigRef config,
@@ -779,7 +735,7 @@ RenameDestinationAside::~RenameDestinationAside() {
     if (::GetFileAttributesW(upperPath_.c_str()) != INVALID_FILE_ATTRIBUTES) {
         RemoveUpperEntry(asidePath_, config_);
     } else if (NT_SUCCESS(MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No,
-                                         restoreCopy_, config_)) &&
+                                         config_)) &&
                wasOpaque_) {
         whiteoutMgr_.SetOpaque(normalizedPath_);
     }
@@ -789,13 +745,11 @@ RenameDestinationAside::~RenameDestinationAside() {
 void RenameDestinationAside::Hold(std::wstring normalizedPath,
                                   std::wstring upperPath,
                                   std::wstring asidePath,
-                                  bool wasOpaque,
-                                  CopyAcrossVolumes restoreCopy) {
+                                  bool wasOpaque) {
     normalizedPath_ = std::move(normalizedPath);
     upperPath_ = std::move(upperPath);
     asidePath_ = std::move(asidePath);
     wasOpaque_ = wasOpaque;
-    restoreCopy_ = restoreCopy;
 }
 
 void RenameDestinationAside::Commit() {
@@ -833,18 +787,9 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
     if (wasOpaque) {
         whiteoutMgr_.RemoveOpaque(newNorm);
     }
-    const CopyAcrossVolumes copy = destinationKind == RenameEntryKind::File
-        ? CopyAcrossVolumes::Yes
-        : CopyAcrossVolumes::No;
     const std::wstring asidePath = GenerateWorkPath();
-    NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No, copy, config_);
-    if (moveStatus == ::LayerMount::NtStatusFromWin32(ERROR_NOT_SAME_DEVICE)) {
-        // MoveFileExW cannot move a directory or a link to another volume.
-        // The entry goes at once, so a failed rename cannot restore it.
-        moveStatus = RemoveUpperEntry(upperPath, config_);
-        cache_.InvalidateWithAncestors(newNorm);
-        return moveStatus;
-    }
+    const NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No,
+                                               config_);
     if (!NT_SUCCESS(moveStatus) && wasOpaque) {
         whiteoutMgr_.SetOpaque(newNorm);
     }
@@ -854,7 +799,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
         return moveStatus;
     }
 
-    aside->Hold(newNorm, upperPath, asidePath, wasOpaque, copy);
+    aside->Hold(newNorm, upperPath, asidePath, wasOpaque);
     return STATUS_SUCCESS;
 }
 
@@ -888,7 +833,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
     }
 
     status = MoveUpperEntry(pathResolver_.GetStoredUpperPath(oldCallerPath.Text()),
-                            newUpperPath, ReplaceExisting::No, CopyAcrossVolumes::No, config_);
+                            newUpperPath, ReplaceExisting::No, config_);
     cache_.InvalidateWithAncestors(normalized);
     return status;
 }

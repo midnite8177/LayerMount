@@ -538,15 +538,22 @@ LM_API HRESULT LM_CALL LayerMountGetLastFailureWasFill(BOOL* wasFill);
 /*
  * Creates an overlay from `config` and returns its handle in *outHandle.
  * Validates that the upper layer exists and is writable and that every
- * lower path exists, then creates the work directory if it is missing.
+ * lower path exists, then creates the work directory if it is missing and
+ * checks that it is on the same volume as the upper layer. A copy-up
+ * creates the file, directory or link in the work directory and renames
+ * it into the upper layer, and a rename cannot cross volumes.
  *
  * Returns:
  *   S_OK          -- overlay created
  *   E_POINTER     -- config or outHandle is NULL
  *   E_INVALIDARG  -- structSize too small, abiVersion does not match
- *                    LM_ABI_VERSION, a required path is NULL, or layer
- *                    validation failed (see LayerMountGetLastErrorMessage)
- *   E_FAIL        -- the work directory could not be created
+ *                    LM_ABI_VERSION, a required path is NULL, layer
+ *                    validation failed, or the work directory is on another
+ *                    volume than the upper layer (see
+ *                    LayerMountGetLastErrorMessage)
+ *   E_FAIL        -- workDirPath is an empty string, the work directory
+ *                    could not be created, or the volume of the work
+ *                    directory or the upper layer could not be read
  *   E_OUTOFMEMORY -- the overlay handle table is exhausted
  *   HRESULT_FROM_WIN32(ERROR_INVALID_DATA)
  *                 -- enableProcessTracking is set and the processRulesPath

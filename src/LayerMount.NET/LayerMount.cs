@@ -186,7 +186,8 @@ public sealed partial class LayerMount : IDisposable
     /// <summary>
     /// Creates an overlay from <paramref name="config"/>. Validates that
     /// the upper layer exists and is writable and that every lower path
-    /// exists, then creates the work directory if it is missing.
+    /// exists, then creates the work directory if it is missing and checks
+    /// that it is on the same volume as the upper layer.
     /// </summary>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="config"/> is null.
@@ -198,8 +199,9 @@ public sealed partial class LayerMount : IDisposable
     /// <exception cref="LayerMountException">
     /// The native call returns a non-success HRESULT: the ABI version
     /// does not match the loaded DLL, a required path failed layer
-    /// validation, the work directory could not be created, or the
-    /// overlay handle table is exhausted.
+    /// validation, the work directory is on another volume than the upper
+    /// layer, the work directory could not be created, or the overlay
+    /// handle table is exhausted.
     /// </exception>
     public static unsafe LayerMount Create(LayerMountConfig config)
     {

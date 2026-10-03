@@ -463,7 +463,7 @@ public:
             L"The upper file must hide the children of the FAT32 lower's directory");
     }
 
-    TEST_METHOD(ReplaceRename_WorkOnAnotherVolumeWhenTheWhiteoutFails_KeepsTheReplacedFile) {
+    TEST_METHOD(Prepare_WorkDirectoryOnAnotherVolume_FailsWithInvalidArg) {
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
@@ -473,54 +473,21 @@ public:
         std::wstring volumeGuid;
         MakeFat32Volume(mgr, vhd, handle, volumeGuid);
 
-        struct Outcome {
-            NTSTATUS status = STATUS_SUCCESS;
-            bool upperUnchanged = false;
-            std::string destination;
-            std::string source;
-        };
-        std::vector<Outcome> outcomes;
-        int run = 0;
-        ForEachMetadataStore([&](UINT32 capabilities) {
-            TempLayerEnvironment env(1);
-            env.WriteFile(env.Lower(0), L"a.txt", "lower");
-            env.WriteFile(env.Upper(), L"a.txt", "upper");
-            env.WriteFile(env.Upper(), L"b.txt", "keep");
-            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"a.txt"), "");
-            LayerMount::LayerConfig config = env.MakeConfig();
-            config.workDirPath = volumeGuid + L"work" + std::to_wstring(run++);
-            Assert::IsTrue(::CreateDirectoryW(config.workDirPath.c_str(), nullptr) != FALSE,
-                L"The test must make the work directory on the FAT32 volume");
-            config.hostCapabilities = capabilities;
-            ::LayerMount::LayerMount mount(config);
-            const std::vector<std::wstring> upperBefore = EntriesUnder(env.Upper());
-
-            Outcome outcome;
-            {
-                const auto heldMarker =
-                    HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"a.txt"), 0);
-                outcome.status = mount.Rename(L"a.txt", L"b.txt", kReplaceIfExists, kNoCallerPid);
-            }
-            outcome.upperUnchanged = EntriesUnder(env.Upper()) == upperBefore;
-            outcome.destination = ReadThroughMount(mount, L"b.txt");
-            outcome.source = ReadThroughMount(mount, L"a.txt");
-            outcomes.push_back(outcome);
-        });
+        TempLayerEnvironment env(0);
+        LayerMount::LayerConfig config = env.MakeConfig();
+        config.workDirPath = volumeGuid + L"work";
+        const bool workMade = ::CreateDirectoryW(config.workDirPath.c_str(), nullptr) != FALSE;
+        std::wstring error;
+        const HRESULT hr = config.Prepare(error);
 
         mgr.DetachVHD(vhd);
         handle.Close();
         CleanupWorkspace(root);
 
-        for (const Outcome& outcome : outcomes) {
-            AssertStatus(STATUS_SHARING_VIOLATION, outcome.status,
-                L"The rename must fail when the engine cannot write the whiteout at the old name");
-            Assert::IsTrue(outcome.upperUnchanged,
-                L"The failed rename must leave the upper as it was");
-            Assert::AreEqual(std::string("keep"), outcome.destination,
-                L"b.txt must show the replaced file, copied back from the other volume");
-            Assert::AreEqual(std::string("upper"), outcome.source,
-                L"a.txt must show the upper file again");
-        }
+        Assert::IsTrue(workMade, L"The test must make the work directory on the FAT32 volume");
+        Assert::AreEqual<HRESULT>(E_INVALIDARG, hr,
+            L"A work directory on another volume than the upper fails the prepare");
+        Assert::IsFalse(error.empty(), L"The failed prepare says why");
     }
 };
 

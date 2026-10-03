@@ -117,8 +117,9 @@ LM_API HRESULT LM_CALL LayerMountCreate(const LM_CONFIG* config,
     if (!layerCfg.Validate(err)) {
         throw LayerMountAbiException(E_INVALIDARG, std::move(err));
     }
-    if (!layerCfg.Prepare(err)) {
-        throw LayerMountAbiException(E_FAIL, std::move(err));
+    const HRESULT prepared = layerCfg.Prepare(err);
+    if (FAILED(prepared)) {
+        throw LayerMountAbiException(prepared, std::move(err));
     }
 
     auto holder = std::make_unique<LayerMountHolder>();
