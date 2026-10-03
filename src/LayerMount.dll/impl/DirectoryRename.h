@@ -56,6 +56,13 @@ public:
                                   ReplaceExisting replace);
 
 private:
+    // One name of the renamed directory: its normalized path and its path
+    // in the upper layer.
+    struct RenamedName {
+        std::wstring norm;
+        std::wstring upperPath;
+    };
+
     bool DestinationExistsInMerged(const std::wstring& normalizedPath) const;
 
     // Fails with STATUS_OBJECT_NAME_COLLISION when replace is
@@ -64,15 +71,23 @@ private:
     NTSTATUS PrepareRenameDestination(const CallerPath& newCallerPath,
                                       ReplaceExisting replace);
 
-    // Copies the lower directory at lowerAbs to newUpperPath, copies the old
-    // upper entries at oldUpperPath over it, and marks newNorm opaque. On
-    // failure it tries to remove newUpperPath.
-    NTSTATUS CopyMergedDirectory(const std::wstring& oldNorm,
-                                 const std::wstring& lowerAbs,
-                                 DWORD lowerAttrs,
-                                 const std::wstring& oldUpperPath,
-                                 const std::wstring& newNorm,
-                                 const std::wstring& newUpperPath);
+    // Copies the lower entry lowerSource to the upper path of newName,
+    // copies the upper entries of oldName over it, and marks newName
+    // opaque. For a directory root, the copy then gets the attributes,
+    // layout, times and security of the upper directory of oldName, or of
+    // lowerSource when the upper has none. A reparse-point root copies as
+    // a link. On failure it tries to remove the upper path of newName.
+    NTSTATUS CopyMergedDirectory(const ResolvedPath& lowerSource,
+                                 const RenamedName& oldName,
+                                 const RenamedName& newName);
+
+    NTSTATUS CopyMergedLink(const ResolvedPath& lowerSource,
+                            const RenamedName& oldName,
+                            const RenamedName& newName);
+
+    NTSTATUS CopyMergedDirectoryTree(const ResolvedPath& lowerSource,
+                                     const RenamedName& oldName,
+                                     const RenamedName& newName);
 
     // Copies the upper entries of the directory at oldUpperPath over the
     // lower copy at newUpperPath, at every depth, so the new tree shows the
@@ -114,6 +129,10 @@ private:
     NTSTATUS CopyDirectoryTreeWithoutMarkers(const std::wstring& srcAbs,
                                              const std::wstring& dstAbs,
                                              CopiedEntryRecord record);
+
+    NTSTATUS CopyChildrenWithoutMarkers(const std::wstring& srcAbs,
+                                        const std::wstring& dstAbs,
+                                        CopiedEntryRecord record);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;

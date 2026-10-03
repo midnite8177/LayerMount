@@ -77,7 +77,7 @@ public:
         FILETIME creation{}, access{}, write{};
         GetTimes(path, &creation, &access, &write);
         const FILETIME setAccess = MakeFileTime(2019, 6, 15);
-        StampFile(path, creation, setAccess, write);
+        StampTimes(path, creation, setAccess, write);
         GetTimes(path, &creation, &access, &write);
         Assert::IsTrue(FileTimesEqual(setAccess, access),
                        L"the stamp put the access time in place before the read");

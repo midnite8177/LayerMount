@@ -67,6 +67,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\MetadataStore.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerMount.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerPath.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\ScopedHandle.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\UpperEntryRemover.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\SidecarMetadata.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\PathResolver.h" />

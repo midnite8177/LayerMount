@@ -1,6 +1,7 @@
 #include "WhiteoutManager.h"
 #include "MetadataStore.h"
 #include "Cache.h"
+#include "EntryCopy.h"
 #include "LayerPath.h"
 #include "NtStatusUtil.h"
 #include "../abi/EventEmitter.h"
@@ -186,9 +187,15 @@ NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
 
     EnsureDirectoryExists(dirFullPath);
 
+    const std::optional<EntryTimes> before = ReadEntryTimes(dirFullPath);
+
     const bool metadataOk = MetadataStore::SetOpaqueMetadata(dirFullPath, &config_);
     const DWORD markerError =
         CreateHiddenMarkerFile(JoinDirPath(dirFullPath, kOpaqueMarkerFile));
+
+    if (before.has_value()) {
+        WriteEntryTimes(dirFullPath, *before, std::nullopt);
+    }
 
     if (cache_) {
         cache_->Invalidate(NormalizePath(dirRelativePath));

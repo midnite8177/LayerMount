@@ -11,6 +11,7 @@
 
 #include "AclTestHelpers.h"
 #include "FileIdTestHelpers.h"
+#include "FileTimeTestHelpers.h"
 
 #include <exception>
 #include <functional>
@@ -21,6 +22,10 @@
 namespace LayerMountTests {
 
 namespace fs = std::filesystem;
+
+using LayerMountTestShared::GetTimes;
+using LayerMountTestShared::MakeFileTime;
+using LayerMountTestShared::StampTimes;
 
 // True when T, built from a LayerConfig followed by Rest, accepts a named
 // config and refuses a temporary one.
@@ -244,44 +249,6 @@ private:
     std::wstring work_;
     std::vector<std::wstring> lowers_;
 };
-
-// A FILETIME for noon UTC on the given day.
-inline FILETIME MakeFileTime(WORD year, WORD month, WORD day) {
-    SYSTEMTIME st{};
-    st.wYear = year;
-    st.wMonth = month;
-    st.wDay = day;
-    st.wHour = 12;
-    FILETIME ft{};
-    ::SystemTimeToFileTime(&st, &ft);
-    return ft;
-}
-
-inline void StampFile(const std::wstring& path,
-                      const FILETIME& creation,
-                      const FILETIME& access,
-                      const FILETIME& write) {
-    HANDLE h = ::CreateFileW(path.c_str(),
-                              FILE_WRITE_ATTRIBUTES,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              nullptr, OPEN_EXISTING, 0, nullptr);
-    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreNotEqual<HANDLE>(
-        INVALID_HANDLE_VALUE, h, L"StampFile: CreateFileW must succeed");
-    ::SetFileTime(h, &creation, &access, &write);
-    ::CloseHandle(h);
-}
-
-inline void GetTimes(const std::wstring& path,
-                     FILETIME* creation, FILETIME* access, FILETIME* write) {
-    HANDLE h = ::CreateFileW(path.c_str(),
-                              FILE_READ_ATTRIBUTES,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr, OPEN_EXISTING, 0, nullptr);
-    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreNotEqual<HANDLE>(
-        INVALID_HANDLE_VALUE, h, L"GetTimes: CreateFileW must succeed");
-    ::GetFileTime(h, creation, access, write);
-    ::CloseHandle(h);
-}
 
 inline bool FileTimesEqual(const FILETIME& a, const FILETIME& b) {
     return a.dwLowDateTime == b.dwLowDateTime &&
@@ -624,6 +591,36 @@ inline UINT64 FileSizeThroughMount(::LayerMount::LayerMount& mount,
         L"FileSizeThroughMount: the open must succeed");
     mount.Close(ctx.get());
     return info.FileSize;
+}
+
+// Opens path through the mount for its attributes and returns the
+// last-write time that the open reports. Fails the test when the open
+// fails.
+inline UINT64 LastWriteTimeThroughMount(::LayerMount::LayerMount& mount,
+                                        const std::wstring& path) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    Assert::IsTrue(NT_SUCCESS(mount.Open(path, FILE_READ_ATTRIBUTES, kNoCreateOptions,
+                                         kNoCallerPid, &ctx, &info)),
+        L"LastWriteTimeThroughMount: the open must succeed");
+    mount.Close(ctx.get());
+    return info.LastWriteTime;
+}
+
+// Opens path through the mount for its attributes and returns the
+// attribute bits that the open reports. Fails the test when the open
+// fails.
+inline UINT32 FileAttributesThroughMount(::LayerMount::LayerMount& mount,
+                                         const std::wstring& path) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    Assert::IsTrue(NT_SUCCESS(mount.Open(path, FILE_READ_ATTRIBUTES, kNoCreateOptions,
+                                         kNoCallerPid, &ctx, &info)),
+        L"FileAttributesThroughMount: the open must succeed");
+    mount.Close(ctx.get());
+    return info.FileAttributes;
 }
 
 enum class LinkTarget { File, Directory };

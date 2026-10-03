@@ -4,6 +4,7 @@
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
 #include "Cache.h"
+#include "MetadataStore.h"
 #include "NtStatusUtil.h"
 #include "ElevationUtil.h"
 
@@ -158,8 +159,8 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
         ::CloseHandle(srcH);
         return ::LayerMount::NtStatusFromWin32(err);
     }
-    FILETIME ftCreate{}, ftAccess{}, ftWrite{};
-    ::GetFileTime(srcH, &ftCreate, &ftAccess, &ftWrite);
+    EntryTimes srcTimes{};
+    ::GetFileTime(srcH, &srcTimes.creation, &srcTimes.access, &srcTimes.write);
 
     HANDLE dstH = ::CreateFileW(dstAbs.c_str(), GENERIC_READ | GENERIC_WRITE,
                                   0, nullptr, CREATE_ALWAYS,
@@ -216,24 +217,19 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
         return recordStatus;
     }
 
-    // Re-apply attributes + timestamps last (both are perturbed by ADS writes
-    // on NTFS: WriteFile bumps LastWrite, and the dest was created with
-    // FILE_ATTRIBUTE_NORMAL).
-    ::SetFileAttributesW(dstAbs.c_str(), srcAttrs);
-    HANDLE tsH = ::CreateFileW(dstAbs.c_str(), FILE_WRITE_ATTRIBUTES,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                OPEN_EXISTING, 0, nullptr);
-    if (tsH != INVALID_HANDLE_VALUE) {
-        ::SetFileTime(tsH, &ftCreate, &ftAccess, &ftWrite);
-        ::CloseHandle(tsH);
-    }
+    // The data and stream writes move the last-write time, and the copy was
+    // created with FILE_ATTRIBUTE_NORMAL, so the attributes and times go on
+    // last.
+    WriteEntryTimes(dstAbs, srcTimes, srcAttrs);
 
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
-                             const std::wstring& dstAbs,
-                             const EntryCopyPolicy& policy) {
+// Creates the directory at dstAbs with the attributes and layout of the
+// directory at srcAbs. Each entry created inside dstAbs moves its
+// last-write time, so the caller writes the times after the children are
+// in place.
+NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
     const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
     if (!NT_SUCCESS(dirStatus)) {
         return dirStatus;
@@ -244,42 +240,55 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
         ::SetFileAttributesW(dstAbs.c_str(), srcAttrs);
     }
 
-    const NTSTATUS layoutStatus = ApplyDirectoryLayout(dstAbs, srcAttrs);
-    if (!NT_SUCCESS(layoutStatus)) {
-        return layoutStatus;
+    return ApplyDirectoryLayout(dstAbs, srcAttrs);
+}
+
+// Writes the copy-up record of the directory at srcAbs to the copy at
+// dstAbs. A failure leaves the copy in place for the caller to remove.
+NTSTATUS WriteDirectoryCopyUpRecord(const std::wstring& srcAbs,
+                                    const std::wstring& dstAbs,
+                                    const EntryCopyPolicy& policy) {
+    if (MetadataStore::WriteLayerMountMetadata(
+            dstAbs, CopiedEntryMetadata(srcAbs, policy.record, policy.config), &policy.config)) {
+        return STATUS_SUCCESS;
+    }
+    const DWORD err = ::GetLastError();
+    return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+}
+
+// Gives the copied directory at dstAbs the attributes and times of the
+// directory at srcAbs, then its security. Runs after the last write inside
+// dstAbs. It ignores a failure to read or set the attributes and times.
+// The security goes last because a copied DACL can deny listing, and a
+// failed rename must still remove the partial tree. The UNPROTECTED DACL
+// write passes inheritable ACEs on to the children already in place.
+NTSTATUS ApplyDirectoryBasicInfoAndSecurity(const std::wstring& srcAbs,
+                                            const std::wstring& dstAbs) {
+    WIN32_FILE_ATTRIBUTE_DATA source{};
+    if (::GetFileAttributesExW(srcAbs.c_str(), GetFileExInfoStandard, &source)) {
+        WriteEntryTimes(dstAbs, EntryTimesOf(source), source.dwFileAttributes);
     }
 
-    // Inheritable ACEs on the directory reach the children copied into it.
     const DWORD securityError = CopySecurityKeepingInheritance(srcAbs, dstAbs);
     if (securityError != ERROR_SUCCESS) {
         return ::LayerMount::NtStatusFromWin32(securityError);
     }
+    return STATUS_SUCCESS;
+}
 
-    const NTSTATUS recordStatus = WriteCopyUpRecordOrRemoveEntry(
-        dstAbs, CopiedEntryMetadata(srcAbs, policy.record, policy.config),
-        NewUpperEntryKind::Directory, policy.config);
+NTSTATUS FinishCopiedDirectory(const std::wstring& srcAbs,
+                               const std::wstring& dstAbs,
+                               const EntryCopyPolicy& policy) {
+    const NTSTATUS recordStatus = WriteDirectoryCopyUpRecord(srcAbs, dstAbs, policy);
     if (!NT_SUCCESS(recordStatus)) {
         return recordStatus;
     }
+    return ApplyDirectoryBasicInfoAndSecurity(srcAbs, dstAbs);
+}
 
-    HANDLE srcH = ::CreateFileW(srcAbs.c_str(), GENERIC_READ,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                  nullptr, OPEN_EXISTING,
-                                  FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (srcH != INVALID_HANDLE_VALUE) {
-        FILETIME c{}, a{}, w{};
-        ::GetFileTime(srcH, &c, &a, &w);
-        ::CloseHandle(srcH);
-        HANDLE dstH = ::CreateFileW(dstAbs.c_str(), FILE_WRITE_ATTRIBUTES,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                      nullptr, OPEN_EXISTING,
-                                      FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (dstH != INVALID_HANDLE_VALUE) {
-            ::SetFileTime(dstH, &c, &a, &w);
-            ::CloseHandle(dstH);
-        }
-    }
-    return STATUS_SUCCESS;
+bool IsDirectoryAt(const std::wstring& path) {
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 }
@@ -349,12 +358,16 @@ NTSTATUS DirectoryRename::OverlayUpperShadow(const std::wstring& oldRelativePath
         const std::wstring childSrc = oldUpperPath + L"\\" + name;
         const std::wstring childDst = newUpperPath + L"\\" + name;
         if (UpperEntryMergesIntoCopy(childRelative, fd.dwFileAttributes, childDst)) {
-            const NTSTATUS shellStatus = CopyDirectoryShell(
-                childSrc, childDst, {CopiedEntryRecord::CarriedFromSource, config_, capabilities_});
+            const NTSTATUS shellStatus = CopyDirectoryShell(childSrc, childDst);
             if (!NT_SUCCESS(shellStatus)) {
                 return shellStatus;
             }
-            return OverlayUpperShadow(childRelative, childSrc, childDst);
+            const NTSTATUS shadowStatus = OverlayUpperShadow(childRelative, childSrc, childDst);
+            if (!NT_SUCCESS(shadowStatus)) {
+                return shadowStatus;
+            }
+            return FinishCopiedDirectory(
+                childSrc, childDst, {CopiedEntryRecord::CarriedFromSource, config_, capabilities_});
         }
         const NTSTATUS removeStatus = RemoveUpperEntry(childDst, config_);
         if (!NT_SUCCESS(removeStatus)) {
@@ -365,26 +378,65 @@ NTSTATUS DirectoryRename::OverlayUpperShadow(const std::wstring& oldRelativePath
     });
 }
 
-NTSTATUS DirectoryRename::CopyMergedDirectory(const std::wstring& oldNorm,
-                                              const std::wstring& lowerAbs,
-                                              DWORD lowerAttrs,
-                                              const std::wstring& oldUpperPath,
-                                              const std::wstring& newNorm,
-                                              const std::wstring& newUpperPath) {
-    NTSTATUS status = CopyTreeWithoutMarkers(lowerAbs, lowerAttrs, newUpperPath,
-                                             CopiedEntryRecord::NewFromSource);
-    const DWORD oldUpperAttrs = ::GetFileAttributesW(oldUpperPath.c_str());
-    if (NT_SUCCESS(status) && oldUpperAttrs != INVALID_FILE_ATTRIBUTES &&
-        (oldUpperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        status = OverlayUpperShadow(oldNorm, oldUpperPath, newUpperPath);
-    }
-    if (NT_SUCCESS(status)) {
-        status = whiteoutMgr_.SetOpaque(newNorm);
-    }
+NTSTATUS DirectoryRename::CopyMergedDirectory(const ResolvedPath& lowerSource,
+                                              const RenamedName& oldName,
+                                              const RenamedName& newName) {
+    const NTSTATUS status = (lowerSource.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        ? CopyMergedLink(lowerSource, oldName, newName)
+        : CopyMergedDirectoryTree(lowerSource, oldName, newName);
     if (!NT_SUCCESS(status)) {
-        RemoveUpperEntry(newUpperPath, config_);
+        RemoveUpperEntry(newName.upperPath, config_);
     }
     return status;
+}
+
+NTSTATUS DirectoryRename::CopyMergedLink(const ResolvedPath& lowerSource,
+                                         const RenamedName& oldName,
+                                         const RenamedName& newName) {
+    NTSTATUS status = CopyLinkWithCopyUpRecord(
+        lowerSource.absolutePath, lowerSource.attributes, newName.upperPath,
+        {CopiedEntryRecord::NewFromSource, config_, capabilities_});
+    if (NT_SUCCESS(status) && IsDirectoryAt(oldName.upperPath)) {
+        status = OverlayUpperShadow(oldName.norm, oldName.upperPath, newName.upperPath);
+    }
+    if (NT_SUCCESS(status)) {
+        status = whiteoutMgr_.SetOpaque(newName.norm);
+    }
+    return status;
+}
+
+NTSTATUS DirectoryRename::CopyMergedDirectoryTree(const ResolvedPath& lowerSource,
+                                                  const RenamedName& oldName,
+                                                  const RenamedName& newName) {
+    const bool hasUpperShadow = IsDirectoryAt(oldName.upperPath);
+    const std::wstring& mergedViewSource =
+        hasUpperShadow ? oldName.upperPath : lowerSource.absolutePath;
+
+    NTSTATUS status = CopyDirectoryShell(mergedViewSource, newName.upperPath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = CopyChildrenWithoutMarkers(lowerSource.absolutePath, newName.upperPath,
+                                        CopiedEntryRecord::NewFromSource);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (hasUpperShadow) {
+        status = OverlayUpperShadow(oldName.norm, oldName.upperPath, newName.upperPath);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+    }
+    status = WriteDirectoryCopyUpRecord(lowerSource.absolutePath, newName.upperPath,
+                                        {CopiedEntryRecord::NewFromSource, config_, capabilities_});
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    status = whiteoutMgr_.SetOpaque(newName.norm);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    return ApplyDirectoryBasicInfoAndSecurity(mergedViewSource, newName.upperPath);
 }
 
 NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
@@ -409,8 +461,7 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
     const NTSTATUS copyStatus = sourceKind == RenameEntryKind::Link
         ? CopyLinkWithCopyUpRecord(source.absolutePath, source.attributes, newUpperPath,
                                    {CopiedEntryRecord::NewFromSource, config_, capabilities_})
-        : CopyMergedDirectory(oldNorm, source.absolutePath, source.attributes, oldUpperPath,
-                              newNorm, newUpperPath);
+        : CopyMergedDirectory(source, {oldNorm, oldUpperPath}, {newNorm, newUpperPath});
     if (!NT_SUCCESS(copyStatus)) {
         return copyStatus;
     }
@@ -477,12 +528,20 @@ NTSTATUS DirectoryRename::CopyTreeWithoutMarkers(const std::wstring& srcAbs,
 NTSTATUS DirectoryRename::CopyDirectoryTreeWithoutMarkers(const std::wstring& srcAbs,
                                                           const std::wstring& dstAbs,
                                                           CopiedEntryRecord record) {
-    const NTSTATUS shellStatus =
-        CopyDirectoryShell(srcAbs, dstAbs, {record, config_, capabilities_});
+    const NTSTATUS shellStatus = CopyDirectoryShell(srcAbs, dstAbs);
     if (!NT_SUCCESS(shellStatus)) {
         return shellStatus;
     }
+    const NTSTATUS childrenStatus = CopyChildrenWithoutMarkers(srcAbs, dstAbs, record);
+    if (!NT_SUCCESS(childrenStatus)) {
+        return childrenStatus;
+    }
+    return FinishCopiedDirectory(srcAbs, dstAbs, {record, config_, capabilities_});
+}
 
+NTSTATUS DirectoryRename::CopyChildrenWithoutMarkers(const std::wstring& srcAbs,
+                                                     const std::wstring& dstAbs,
+                                                     CopiedEntryRecord record) {
     const bool lowerSource = record == CopiedEntryRecord::NewFromSource;
     return ForEachChildEntry(srcAbs, [&](const WIN32_FIND_DATAW& fd) -> NTSTATUS {
         if (WhiteoutManager::IsWhiteoutName(fd.cFileName) ||

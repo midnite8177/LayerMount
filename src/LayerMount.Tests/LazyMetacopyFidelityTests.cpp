@@ -110,7 +110,7 @@ public:
         const FILETIME srcCreation = MakeFileTime(2015, 6, 15);
         const FILETIME srcAccess   = MakeFileTime(2016, 6, 15);
         const FILETIME srcWrite    = MakeFileTime(2017, 6, 15);
-        StampFile(srcPath, srcCreation, srcAccess, srcWrite);
+        StampTimes(srcPath, srcCreation, srcAccess, srcWrite);
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
@@ -151,8 +151,8 @@ public:
         env.WriteFile(env.Lower(0), L"shell-ts.bin", payload);
 
         const std::wstring srcPath = env.Lower(0) + L"\\shell-ts.bin";
-        StampFile(srcPath, MakeFileTime(2015, 6, 15), MakeFileTime(2016, 6, 15),
-                  MakeFileTime(2017, 6, 15));
+        StampTimes(srcPath, MakeFileTime(2015, 6, 15), MakeFileTime(2016, 6, 15),
+                   MakeFileTime(2017, 6, 15));
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
@@ -162,7 +162,7 @@ public:
         const FILETIME shellCreation = MakeFileTime(2020, 1, 10);
         const FILETIME shellAccess   = MakeFileTime(2021, 1, 10);
         const FILETIME shellWrite    = MakeFileTime(2022, 1, 10);
-        StampFile(upperPath, shellCreation, shellAccess, shellWrite);
+        StampTimes(upperPath, shellCreation, shellAccess, shellWrite);
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"shell-ts.bin")));
 
@@ -191,7 +191,7 @@ public:
         const FILETIME shellCreation = MakeFileTime(2020, 1, 10);
         const FILETIME shellAccess   = MakeFileTime(2021, 1, 10);
         const FILETIME shellWrite    = MakeFileTime(2022, 1, 10);
-        StampFile(upperPath, shellCreation, shellAccess, shellWrite);
+        StampTimes(upperPath, shellCreation, shellAccess, shellWrite);
 
         NTSTATUS fillStatus = STATUS_SUCCESS;
         {
@@ -353,7 +353,7 @@ public:
         const bool compressed = EnableCompression(srcPath);
         // Stamp LAST, after all ADS / compression writes have bumped times.
         const FILETIME srcWrite = MakeFileTime(2017, 6, 15);
-        StampFile(srcPath, srcWrite, srcWrite, srcWrite);
+        StampTimes(srcPath, srcWrite, srcWrite, srcWrite);
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 

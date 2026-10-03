@@ -3,6 +3,7 @@
 #include "LayerMount.h"
 #include "../abi/CapabilityGate.h"
 
+#include <optional>
 #include <string>
 
 namespace LayerMount {
@@ -74,6 +75,29 @@ NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, DWORD srcAttrs);
 // of file becomes the source size, so a trailing hole keeps the logical
 // size.
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle);
+
+struct EntryTimes {
+    FILETIME creation;
+    FILETIME access;
+    FILETIME write;
+};
+
+EntryTimes EntryTimesOf(const WIN32_FILE_ATTRIBUTE_DATA& data);
+
+// The times of the entry at path, or none when GetFileAttributesExW fails.
+std::optional<EntryTimes> ReadEntryTimes(const std::wstring& path);
+
+// Writes times to the entry at path, and the attribute bits too when
+// attributes holds them, in one call. A zero time keeps the stored value.
+// Only the bits a FileBasicInfo write can set go through. A state bit such
+// as FILE_ATTRIBUTE_COMPRESSED or FILE_ATTRIBUTE_SPARSE_FILE is left out.
+// The open uses FILE_FLAG_BACKUP_SEMANTICS, so it opens a
+// directory, and with SE_BACKUP_NAME and SE_RESTORE_NAME enabled a DACL
+// that denies the write does not stop it. Returns false with the Win32
+// error in GetLastError.
+bool WriteEntryTimes(const std::wstring& path,
+                     const EntryTimes& times,
+                     std::optional<DWORD> attributes);
 
 // Writes metadata as the copy-up record of the new entry at upperPath. When
 // the write fails, removes the entry and returns the write's error.

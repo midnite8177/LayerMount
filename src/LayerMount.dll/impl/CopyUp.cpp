@@ -99,29 +99,21 @@ namespace LayerMount {
 // A zero time keeps the stored value, so a capture that failed and left
 // a time at zero restores nothing for that field.
 //
-// Restore() opens the target with FILE_FLAG_BACKUP_SEMANTICS. Path-based
-// SetFileAttributesW and a plain CreateFileW(FILE_WRITE_ATTRIBUTES) both
-// do DACL checks, so a lower file that inherited a DENY-WRITE from its
-// parent blocks the restore even though EnableFileSystemPrivileges enabled
-// SE_BACKUP_NAME and SE_RESTORE_NAME. Backup semantics honor those
-// privileges and let a directory open. Restore() returns false with the
-// Win32 error in GetLastError.
+// Restore() returns false with the Win32 error in GetLastError.
 class FileBasicInfoGuard {
 public:
     FileBasicInfoGuard(HANDLE source, std::optional<DWORD> attributes,
                        std::wstring targetPath)
         : attributes_(attributes), targetPath_(std::move(targetPath)) {
-        GetFileTime(source, &creation_, &access_, &write_);
+        GetFileTime(source, &times_.creation, &times_.access, &times_.write);
     }
     FileBasicInfoGuard(const WIN32_FILE_ATTRIBUTE_DATA& source,
                        std::optional<DWORD> attributes, std::wstring targetPath)
-        : creation_(source.ftCreationTime),
-          access_(source.ftLastAccessTime),
-          write_(source.ftLastWriteTime),
+        : times_(EntryTimesOf(source)),
           attributes_(attributes),
           targetPath_(std::move(targetPath)) {}
-    // The result is discarded here. On a failure path the caller can have
-    // deleted the target already, and then the open in Restore() fails.
+    // The result is discarded, because on a failure path the caller can
+    // have deleted the target already.
     ~FileBasicInfoGuard() {
         if (!restored_) {
             Restore();
@@ -132,47 +124,11 @@ public:
 
     bool Restore() {
         restored_ = true;
-        ::LayerMount::ScopedHandle handle(CreateFileW(
-            targetPath_.c_str(),
-            FILE_WRITE_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-        if (!handle.IsValid()) {
-            return false;
-        }
-        BOOL ok = FALSE;
-        if (attributes_.has_value()) {
-            // One FileBasicInfo call writes the attribute bits and the
-            // times together.
-            FILE_BASIC_INFO basic{};
-            basic.CreationTime.LowPart    = creation_.dwLowDateTime;
-            basic.CreationTime.HighPart   = static_cast<LONG>(creation_.dwHighDateTime);
-            basic.LastAccessTime.LowPart  = access_.dwLowDateTime;
-            basic.LastAccessTime.HighPart = static_cast<LONG>(access_.dwHighDateTime);
-            basic.LastWriteTime.LowPart   = write_.dwLowDateTime;
-            basic.LastWriteTime.HighPart  = static_cast<LONG>(write_.dwHighDateTime);
-            // A ChangeTime of -1 keeps the stored value.
-            basic.ChangeTime.QuadPart     = -1;
-            basic.FileAttributes          = *attributes_;
-            ok = SetFileInformationByHandle(handle.Get(), FileBasicInfo,
-                                            &basic, sizeof(basic));
-        } else {
-            ok = SetFileTime(handle.Get(), &creation_, &access_, &write_);
-        }
-        if (!ok) {
-            const DWORD err = ::GetLastError();
-            handle.Reset();
-            ::SetLastError(err);
-            return false;
-        }
-        return true;
+        return WriteEntryTimes(targetPath_, times_, attributes_);
     }
 
 private:
-    FILETIME creation_{};
-    FILETIME access_{};
-    FILETIME write_{};
+    EntryTimes times_{};
     std::optional<DWORD> attributes_;
     std::wstring targetPath_;
     bool restored_ = false;

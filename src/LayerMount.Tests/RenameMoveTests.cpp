@@ -1337,6 +1337,10 @@ public:
         AssertEntryShownAs(mount, L"d", L"f.txt", L"f.txt");
         AssertEntryShownAs(mount, L"d\\sub", L"x.txt", L"x.txt");
         AssertEntryShownAs(mount, L"d\\sub", L"u.txt", L"u.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e"),
+            L"An open of the new name after the failed rename must find nothing");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"e"),
+            L"The failed rename must leave no new name in the upper");
     }
 
     TEST_METHOD(Rename_LowerDirectoryWithUnlistableSubdirectory_FailsAndKeepsTheOldTree) {
@@ -1357,6 +1361,158 @@ public:
 
         AssertEntryShownAs(mount, L"d", L"f.txt", L"f.txt");
         AssertOnlyEntryShownAs(mount, L"d\\sub", L"x.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e"),
+            L"An open of the new name after the failed rename must find nothing");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"e"),
+            L"The failed rename must leave no new name in the upper");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWithInheritableAceOverSubdirectoryThatDeniesListing_CopiesTheTree) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+        AddDenyAce(env.Lower(0) + L"\\d", FILE_WRITE_EA,
+                   OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        {
+            DirectoryListingDenied denied(env.Lower(0) + L"\\d\\sub");
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename must succeed when the engine holds backup privilege");
+        }
+
+        AssertOnlyEntryShownAs(mount, L"e\\sub", L"x.txt");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWithSubdirectory_KeepsTheLastWriteTimesOfBoth) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+        const FILETIME subWrite = MakeFileTime(2011, 3, 4);
+        const FILETIME dWrite = MakeFileTime(2012, 5, 6);
+        StampTimes(env.Lower(0) + L"\\d\\sub", MakeFileTime(2010, 1, 2),
+                   MakeFileTime(2011, 3, 5), subWrite);
+        StampTimes(env.Lower(0) + L"\\d", MakeFileTime(2010, 1, 3),
+                   MakeFileTime(2012, 5, 7), dWrite);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        Assert::AreEqual(ComposeUInt64(dWrite.dwHighDateTime, dWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"d"),
+            L"The overlay must show the stamped last-write time of d before the rename");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory must succeed");
+
+        Assert::AreEqual(ComposeUInt64(dWrite.dwHighDateTime, dWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"e"),
+            L"The new name must keep the last-write time of the renamed directory");
+        Assert::AreEqual(ComposeUInt64(subWrite.dwHighDateTime, subWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"e\\sub"),
+            L"The subdirectory must keep its last-write time under the new name");
+    }
+
+    TEST_METHOD(Rename_MergedDirectory_GivesTheNewNameTheLastWriteTimeOfTheUpperDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\u.txt", "upper");
+        const FILETIME upperWrite = MakeFileTime(2014, 7, 8);
+        StampTimes(env.Lower(0) + L"\\d", MakeFileTime(2013, 1, 2),
+                   MakeFileTime(2013, 3, 4), MakeFileTime(2013, 5, 6));
+        StampTimes(env.Upper() + L"\\d", MakeFileTime(2014, 1, 2),
+                   MakeFileTime(2014, 3, 4), upperWrite);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        Assert::AreEqual(ComposeUInt64(upperWrite.dwHighDateTime, upperWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"d"),
+            L"The overlay must show the last-write time of the upper d before the rename");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the merged directory must succeed");
+
+        Assert::AreEqual(ComposeUInt64(upperWrite.dwHighDateTime, upperWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"e"),
+            L"The new name must show the last-write time of the upper d");
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithMergedSubdirectory_GivesItTheUpperSubdirectorysLastWriteTime) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        const FILETIME upperSubWrite = MakeFileTime(2018, 6, 7);
+        StampTimes(env.Lower(0) + L"\\d\\sub", MakeFileTime(2019, 1, 2),
+                   MakeFileTime(2019, 3, 4), MakeFileTime(2019, 5, 6));
+        StampTimes(env.Upper() + L"\\d\\sub", MakeFileTime(2018, 1, 2),
+                   MakeFileTime(2018, 3, 4), upperSubWrite);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        Assert::AreEqual(ComposeUInt64(upperSubWrite.dwHighDateTime, upperSubWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"d\\sub"),
+            L"The overlay must show the last-write time of the upper d\\sub before the rename");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the merged directory must succeed");
+
+        Assert::AreEqual(ComposeUInt64(upperSubWrite.dwHighDateTime, upperSubWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"e\\sub"),
+            L"The merged subdirectory must show the last-write time of the upper d\\sub");
+        AssertEntryShownAs(mount, L"e\\sub", L"x.txt", L"x.txt");
+        AssertEntryShownAs(mount, L"e\\sub", L"u.txt", L"u.txt");
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithCompressedUpperDirectory_CompressesTheNewName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\u.txt", "upper");
+        if (!EnableCompression(env.Upper() + L"\\d")) {
+            Logger::WriteMessage(
+                L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the upper directory");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the merged directory must succeed");
+
+        Assert::IsTrue((FileAttributesThroughMount(mount, L"e") & FILE_ATTRIBUTE_COMPRESSED) != 0,
+            L"The new name must be compressed like the upper d");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryUnderParentDenyingWriteAttributes_KeepsTheFilesLastWriteTime) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"p\\d\\f.txt", "lower");
+        const FILETIME fileWrite = MakeFileTime(2017, 2, 3);
+        StampTimes(env.Lower(0) + L"\\p\\d\\f.txt", MakeFileTime(2017, 1, 2),
+                   MakeFileTime(2017, 2, 4), fileWrite);
+        AddDenyAce(env.Lower(0) + L"\\p", FILE_WRITE_ATTRIBUTES,
+                   OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"p\\d", L"p\\e", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory must succeed");
+
+        Assert::AreEqual(ComposeUInt64(fileWrite.dwHighDateTime, fileWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"p\\e\\f.txt"),
+            L"The file must keep its last-write time under the new name");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryOntoWhitedOutLowerDirectory_KeepsItsLastWriteTime) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"e\\old.txt", "lower");
+        env.WriteFile(env.Upper(), L".wh.e", "");
+        env.WriteFile(env.Upper(), L"d\\u.txt", "upper");
+        const FILETIME dWrite = MakeFileTime(2015, 9, 10);
+        StampTimes(env.Upper() + L"\\d", MakeFileTime(2015, 1, 2),
+                   MakeFileTime(2015, 3, 4), dWrite);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        Assert::AreEqual(ComposeUInt64(dWrite.dwHighDateTime, dWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"d"),
+            L"The overlay must show the stamped last-write time of d before the rename");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename onto the whited-out name must succeed");
+
+        AssertOnlyEntryShownAs(mount, L"e", L"u.txt");
+        Assert::AreEqual(ComposeUInt64(dWrite.dwHighDateTime, dWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"e"),
+            L"Marking the moved directory opaque must keep its last-write time");
     }
 
     TEST_METHOD(ReplaceRename_UpperFileOntoCopiedUpFile_ReportsTheMovedFilesId) {

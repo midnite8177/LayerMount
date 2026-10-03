@@ -2,6 +2,7 @@
 #include "LayerPath.h"
 #include "MetadataStore.h"
 #include "NtStatusUtil.h"
+#include "ScopedHandle.h"
 
 #include <winioctl.h>
 #include <climits>
@@ -552,6 +553,72 @@ NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
         return CopyBytesFromStart(srcHandle, dstHandle);
     }
     return ExtendToSize(dstHandle, srcSize);
+}
+
+namespace {
+
+DWORD AttributesFileBasicInfoCanSet(DWORD attributes) {
+    constexpr DWORD settable = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN |
+                               FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE |
+                               FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE |
+                               FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
+                               FILE_ATTRIBUTE_NO_SCRUB_DATA | FILE_ATTRIBUTE_PINNED |
+                               FILE_ATTRIBUTE_UNPINNED;
+    const DWORD kept = attributes & settable;
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return kept | FILE_ATTRIBUTE_DIRECTORY;
+    }
+    // A FileAttributes of 0 keeps the stored bits, and NORMAL clears them.
+    return kept != 0 ? kept : FILE_ATTRIBUTE_NORMAL;
+}
+
+}
+
+EntryTimes EntryTimesOf(const WIN32_FILE_ATTRIBUTE_DATA& data) {
+    return {data.ftCreationTime, data.ftLastAccessTime, data.ftLastWriteTime};
+}
+
+std::optional<EntryTimes> ReadEntryTimes(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+        return std::nullopt;
+    }
+    return EntryTimesOf(data);
+}
+
+bool WriteEntryTimes(const std::wstring& path,
+                     const EntryTimes& times,
+                     std::optional<DWORD> attributes) {
+    ScopedHandle handle(::CreateFileW(
+        path.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!handle.IsValid()) {
+        return false;
+    }
+    BOOL ok = FALSE;
+    if (attributes.has_value()) {
+        FILE_BASIC_INFO basic{};
+        basic.CreationTime.LowPart    = times.creation.dwLowDateTime;
+        basic.CreationTime.HighPart   = static_cast<LONG>(times.creation.dwHighDateTime);
+        basic.LastAccessTime.LowPart  = times.access.dwLowDateTime;
+        basic.LastAccessTime.HighPart = static_cast<LONG>(times.access.dwHighDateTime);
+        basic.LastWriteTime.LowPart   = times.write.dwLowDateTime;
+        basic.LastWriteTime.HighPart  = static_cast<LONG>(times.write.dwHighDateTime);
+        // A ChangeTime of -1 keeps the stored value.
+        basic.ChangeTime.QuadPart     = -1;
+        basic.FileAttributes          = AttributesFileBasicInfoCanSet(*attributes);
+        ok = ::SetFileInformationByHandle(handle.Get(), FileBasicInfo, &basic, sizeof(basic));
+    } else {
+        ok = ::SetFileTime(handle.Get(), &times.creation, &times.access, &times.write);
+    }
+    if (!ok) {
+        const DWORD err = ::GetLastError();
+        handle.Reset();
+        ::SetLastError(err);
+        return false;
+    }
+    return true;
 }
 
 NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,

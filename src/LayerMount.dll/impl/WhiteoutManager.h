@@ -60,7 +60,9 @@ public:
 
     // Writes both opaque markers in the upper layer. Succeeds when either
     // write does. When both fail, returns the error of the marker file
-    // create as an NTSTATUS.
+    // create as an NTSTATUS. The directory keeps its times; SetOpaque
+    // ignores a failure to restore them. Overlayfs keeps opacity in an
+    // extended attribute, which does not change mtime.
     NTSTATUS SetOpaque(const std::wstring& dirRelativePath);
     bool RemoveOpaque(const std::wstring& dirRelativePath);
 

@@ -1,7 +1,11 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "FileTimeTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+using LayerMountTestShared::GetTimes;
+using LayerMountTestShared::MakeFileTime;
+using LayerMountTestShared::StampTimes;
 
 namespace LayerMountAbiTests {
 
@@ -43,6 +47,23 @@ public:
         Assert::AreEqual<HRESULT>(E_INVALIDARG,
             ::LayerMountSetOpaque(mount.Get(), L"\\sub\\.wh.x"),
             L"An opaque mark on a path with a marker segment must be rejected");
+    }
+
+    TEST_METHOD(SetOpaque_UpperDirectory_KeepsItsLastWriteTime) {
+        TempLayerEnv  env(1);
+        env.WriteUpperFile(L"sub\\a.txt", "a");
+        const std::wstring dir = env.Upper() + L"\\sub";
+        const FILETIME stamped = MakeFileTime(2016, 4, 5);
+        StampTimes(dir, MakeFileTime(2016, 1, 2), MakeFileTime(2016, 3, 4), stamped);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountSetOpaque(mount.Get(), L"sub"),
+            L"The opaque mark on the upper directory must succeed");
+
+        FILETIME creation{}, access{}, write{};
+        GetTimes(dir, &creation, &access, &write);
+        Assert::AreEqual(0L, ::CompareFileTime(&stamped, &write),
+            L"The opaque mark must leave the directory's last-write time as it was");
     }
 
     TEST_METHOD(ResolvePath_ShortBuffer_ReturnsMoreDataAndRequired) {
