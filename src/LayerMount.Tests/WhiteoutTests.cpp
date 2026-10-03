@@ -547,6 +547,60 @@ public:
             L"An upper file at an ancestor of the listed directory must hide the lower entries");
     }
 
+    TEST_METHOD(MergeDirectoryEntries_UpperDirectoryWithWhiteoutAtItOrAncestor_ListsOnlyUpperEntries) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"d\\u.txt", "upper");
+        env.WriteFile(env.Upper(), L"d\\sub\\v.txt", "upper");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"d"), "");
+        env.WriteFile(env.Lower(0), L"d\\x.txt", "lower");
+        env.WriteFile(env.Lower(0), L"d\\sub\\y.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        const MergedDirectory atDir = mount.MergeDirectoryEntries(L"d");
+        const MergedDirectory underDir = mount.MergeDirectoryEntries(L"d\\sub");
+
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\x.txt"),
+            L"An open of the lower file under the whited-out upper directory must find nothing");
+        AssertStatus(STATUS_SUCCESS, atDir.status, L"The merge at the upper directory must succeed");
+        Assert::AreEqual(size_t{2}, atDir.entries.size(),
+            L"The listing of the upper directory must hold only its upper entries");
+        Assert::IsTrue(atDir.entries.count(L"u.txt") == 1 && atDir.entries.count(L"sub") == 1,
+            L"The listing of the upper directory must hold u.txt and sub");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\sub\\y.txt"),
+            L"An open of the lower file under the whited-out ancestor must find nothing");
+        AssertStatus(STATUS_SUCCESS, underDir.status, L"The merge under the upper directory must succeed");
+        Assert::AreEqual(size_t{1}, underDir.entries.size(),
+            L"The listing under the whited-out ancestor must hold only the upper entry");
+        Assert::IsTrue(underDir.entries.count(L"v.txt") == 1,
+            L"The listing under the whited-out ancestor must hold v.txt");
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_LowerWhiteoutAtListedDirOrAncestor_HidesDeeperLowersEntries) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "lower0");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"d\\sub"), "");
+        env.WriteFile(env.Lower(1), L"d\\sub\\x.txt", "lower1");
+        env.WriteFile(env.Lower(1), L"d\\sub\\deep\\y.txt", "lower1");
+        env.CreateDir(env.Upper(), L"d\\sub\\deep");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        const MergedDirectory atDir = mount.MergeDirectoryEntries(L"d\\sub");
+        const MergedDirectory underDir = mount.MergeDirectoryEntries(L"d\\sub\\deep");
+
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\sub\\x.txt"),
+            L"An open of the deeper lower's file under the whiteout must find nothing");
+        AssertStatus(STATUS_SUCCESS, atDir.status, L"The merge at the whited-out directory must succeed");
+        Assert::AreEqual(size_t{1}, atDir.entries.size(),
+            L"The listing of the whited-out directory must hold only the upper entry");
+        Assert::IsTrue(atDir.entries.count(L"deep") == 1,
+            L"The listing of the whited-out directory must hold the upper deep");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\sub\\deep\\y.txt"),
+            L"An open of the deeper lower's file under the whited-out ancestor must find nothing");
+        AssertStatus(STATUS_SUCCESS, underDir.status, L"The merge under the whiteout must succeed");
+        Assert::IsTrue(underDir.entries.empty(),
+            L"The listing under the whited-out ancestor must hold no lower entry");
+    }
+
     TEST_METHOD(MergeDirectoryEntries_JunctionInUpperAtListedDirOrAncestor_ListsOnlyTargetEntries) {
         TempLayerEnvironment env(1);
         if (!BuildLinkOverDirectory(env, LayerSource::Upper, CreateDirectoryJunction)) {

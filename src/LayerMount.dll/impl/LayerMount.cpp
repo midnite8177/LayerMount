@@ -5,6 +5,7 @@
 #include "Cache.h"
 #include "LayerPath.h"
 #include "CopyUp.h"
+#include "DirectoryMerge.h"
 #include "DirectoryRename.h"
 #include "UpperEntryRemover.h"
 #include "ElevationUtil.h"
@@ -25,7 +26,6 @@
 #include <cwctype>
 #include <string_view>
 #include <system_error>
-#include <unordered_set>
 
 namespace LayerMount {
 
@@ -714,156 +714,8 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
     return STATUS_SUCCESS;
 }
 
-namespace {
-
-std::wstring CaseFoldedName(const std::wstring& name) {
-    std::wstring folded = name;
-    CharLowerBuffW(folded.data(), static_cast<DWORD>(folded.size()));
-    return folded;
-}
-
-std::optional<std::wstring> VisibleEntryKey(const std::wstring& dirNorm,
-                                            const std::wstring& name) {
-    if (name == L"." || name == L"..") return std::nullopt;
-    if (WhiteoutManager::IsWhiteoutName(name)) return std::nullopt;
-    std::wstring key = CaseFoldedName(name);
-    if (dirNorm.empty() && IsReservedRelativePath(key)) return std::nullopt;
-    return key;
-}
-
-struct DirectoryMerge {
-    std::map<std::wstring, MergedEntry> entries;
-    std::unordered_set<std::wstring> whitedOutNames;
-};
-
-// FindFirstFileW gives ERROR_DIRECTORY when the layer holds a file at the
-// directory's path. The layer then has no directory there to list.
-bool IsDirectoryAbsentError(DWORD error) {
-    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ||
-           error == ERROR_DIRECTORY;
-}
-
-// Maps a failed scan's Win32 error to its NTSTATUS. An error that maps to a
-// success status, such as ERROR_IO_PENDING, gives STATUS_UNSUCCESSFUL, so an
-// incomplete scan never counts as complete.
-NTSTATUS ScanFailureStatus(DWORD error) {
-    const NTSTATUS status = NtStatusFromWin32(error);
-    return NT_SUCCESS(status) ? STATUS_UNSUCCESSFUL : status;
-}
-
-struct LayerDirectoryEntry {
-    std::wstring key;
-    WIN32_FIND_DATAW findData;
-};
-
-struct LayerDirectoryScan {
-    NTSTATUS status;
-    std::vector<std::wstring> whitedOutNames;
-    std::vector<LayerDirectoryEntry> entries;
-};
-
-// Reads one layer's directory in one enumeration. whitedOutNames holds the
-// case-folded names that the layer's whiteouts hide, and entries holds the
-// layer's visible entries. A directory absent from the layer gives
-// STATUS_SUCCESS and no names. A failed scan gives the status of its Win32
-// error and holds what it read before the failure.
-LayerDirectoryScan ScanLayerDirectory(const std::wstring& layerPath,
-                                      const std::wstring& dirNorm) {
-    LayerDirectoryScan scan{STATUS_SUCCESS, {}, {}};
-    WIN32_FIND_DATAW findData;
-    const std::wstring searchPath = JoinLayerScanPath(layerPath, dirNorm);
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        const DWORD openError = ::GetLastError();
-        if (!IsDirectoryAbsentError(openError)) {
-            scan.status = ScanFailureStatus(openError);
-        }
-        return scan;
-    }
-
-    do {
-        const std::wstring name = findData.cFileName;
-        if (const std::optional<std::wstring> hidden =
-                WhiteoutManager::WhitedOutNameOfEntry(name)) {
-            scan.whitedOutNames.push_back(CaseFoldedName(*hidden));
-            continue;
-        }
-        const std::optional<std::wstring> key = VisibleEntryKey(dirNorm, name);
-        if (!key) continue;
-        scan.entries.push_back(LayerDirectoryEntry{*key, findData});
-    } while (FindNextFileW(hFind, &findData));
-
-    // FindNextFileW returns false both at the end of the directory and on a
-    // failure. FindClose can overwrite the error, so read it first.
-    const DWORD scanEndError = ::GetLastError();
-    FindClose(hFind);
-    if (scanEndError != ERROR_NO_MORE_FILES) scan.status = ScanFailureStatus(scanEndError);
-    return scan;
-}
-
-void AddLayerWhiteouts(const LayerDirectoryScan& scan, DirectoryMerge& merge) {
-    merge.whitedOutNames.insert(scan.whitedOutNames.begin(), scan.whitedOutNames.end());
-}
-
-// Adds the layer's entries in the directory that no higher layer lists and
-// that no whiteout hides, and adds the names that the layer's whiteouts hide
-// to merge.whitedOutNames. A lower's whiteouts hide its own entries too; the
-// upper's whiteouts hide only the lowers' entries. On success, sets
-// lowersBelow to whether the lowers below the layer can add entries to the
-// directory. A failed scan adds nothing, leaves lowersBelow unset, and
-// returns the scan's status.
-NTSTATUS MergeLayerEntries(const LayerDirectory& dir,
-                           LayerSource source,
-                           DirectoryMerge& merge,
-                           LowerVisibility& lowersBelow) {
-    const LayerDirectoryScan scan = ScanLayerDirectory(dir.layerPath, dir.dirNorm);
-    if (!NT_SUCCESS(scan.status)) return scan.status;
-
-    // An upper entry wins over an upper whiteout of the same name.
-    if (source == LayerSource::Lower) AddLayerWhiteouts(scan, merge);
-    for (const LayerDirectoryEntry& entry : scan.entries) {
-        if (merge.entries.count(entry.key) || merge.whitedOutNames.count(entry.key)) continue;
-        merge.entries[entry.key] = MergedEntry{entry.findData, source};
-    }
-    if (source == LayerSource::Upper) AddLayerWhiteouts(scan, merge);
-
-    lowersBelow = LowersBelow(dir);
-    return STATUS_SUCCESS;
-}
-
-}
-
 MergedDirectory LayerMount::MergeDirectoryEntries(const std::wstring& dirRelativePath) const {
-    const std::wstring dirNorm = NormalizePath(dirRelativePath);
-
-    if (!dirNorm.empty() && !IsSafeRelativePath(dirNorm)) {
-        return MergedDirectory{STATUS_SUCCESS, {}};
-    }
-    if (IsReservedRelativePath(dirNorm)) {
-        return MergedDirectory{STATUS_SUCCESS, {}};
-    }
-
-    DirectoryMerge merge;
-    LowerVisibility lowersBelow;
-    const NTSTATUS upperStatus = MergeLayerEntries(
-        LayerDirectory{*whiteoutMgr_, config_.upperPath, dirNorm}, LayerSource::Upper,
-        merge, lowersBelow);
-    if (!NT_SUCCESS(upperStatus)) {
-        return MergedDirectory{upperStatus, {}};
-    }
-
-    for (size_t lower = 0; lower < config_.lowerPaths.size(); ++lower) {
-        if (lowersBelow != LowerVisibility::Visible) break;
-        if (HasLinkUnderHigherLayerEntry(config_, lower, dirNorm)) break;
-        const NTSTATUS lowerStatus = MergeLayerEntries(
-            LayerDirectory{*whiteoutMgr_, config_.lowerPaths[lower], dirNorm}, LayerSource::Lower,
-            merge, lowersBelow);
-        if (!NT_SUCCESS(lowerStatus)) {
-            return MergedDirectory{lowerStatus, {}};
-        }
-    }
-
-    return MergedDirectory{STATUS_SUCCESS, std::move(merge.entries)};
+    return MergeDirectoryAcrossLayers(config_, *whiteoutMgr_, dirRelativePath);
 }
 
 namespace {

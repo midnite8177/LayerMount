@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LayerMount.h"
+#include "DirectoryMerge.h"
 #include "LayerPath.h"
 #include "EntryCopy.h"
 #include "../abi/CapabilityGate.h"
@@ -25,7 +26,7 @@ public:
                     CopyUp& copyUp,
                     ::LayerMount::abi::CapabilityGate capabilities);
 
-    // Copies the lower tree and the old upper shadow to the new upper path,
+    // Copies the merged view of the old directory to the new upper path,
     // marks it opaque, and removes the old upper entry. The caller writes the
     // whiteout at the old path. sourceKind is Directory or Link. A Link
     // source is copied as a link, without its upper shadow and without
@@ -71,12 +72,13 @@ private:
     NTSTATUS PrepareRenameDestination(const CallerPath& newCallerPath,
                                       ReplaceExisting replace);
 
-    // Copies the lower entry lowerSource to the upper path of newName,
-    // copies the upper entries of oldName over it, and marks newName
-    // opaque. For a directory root, the copy then gets the attributes,
-    // layout, times and security of the upper directory of oldName, or of
-    // lowerSource when the upper has none. A reparse-point root copies as
-    // a link. On failure it tries to remove the upper path of newName.
+    // Copies the merged view of oldName to the upper path of newName and
+    // marks newName opaque. lowerSource is the first lower that holds
+    // oldName. For a directory root, the copy then gets the copy-up record
+    // of lowerSource, and the attributes, layout, times and security of the
+    // upper directory of oldName, or of lowerSource when the upper has
+    // none. A reparse-point root copies as a link. On failure it tries to
+    // remove the upper path of newName.
     NTSTATUS CopyMergedDirectory(const ResolvedPath& lowerSource,
                                  const RenamedName& oldName,
                                  const RenamedName& newName);
@@ -89,9 +91,26 @@ private:
                                      const RenamedName& oldName,
                                      const RenamedName& newName);
 
-    // Copies the upper entries of the directory at oldUpperPath over the
-    // lower copy at newUpperPath, at every depth, so the new tree shows the
-    // old merged view. A whiteout removes the entry it hides, unless the old
+    // Copies each entry of oldDir, a merge of a directory, into the
+    // directory at newUpperPath, at every depth. The merge applies the
+    // whiteouts and opaque markers of every layer, so the copy holds no
+    // marker files, and newUpperPath or a directory above it must be opaque.
+    // A directory that the merge cannot list fails the copy. On failure,
+    // newUpperPath holds a partial tree, and the caller removes it.
+    NTSTATUS CopyMergedChildren(const MergedDirectoryWithAncestry& oldDir,
+                                const std::wstring& newUpperPath);
+
+    // Copies entry, which the merge oldParent lists, from the layer that
+    // gives it into newParentUpperPath. The copy keeps the name that layer
+    // gives the entry. An upper entry keeps its copy-up record, and a lower
+    // entry gets a new one. A link copies as a link.
+    NTSTATUS CopyMergedEntry(const MergedDirectoryWithAncestry& oldParent,
+                             const MergedEntry& entry,
+                             const std::wstring& newParentUpperPath);
+
+    // Copies the upper entries of the directory at oldUpperPath into the
+    // copy of a lower root that is a directory reparse point but not a link,
+    // at newUpperPath. A whiteout removes the entry it hides, unless the old
     // upper also holds an entry of that name. oldRelativePath is
     // oldUpperPath relative to the upper root. On failure, newUpperPath
     // holds a partial tree, and the caller removes it.
@@ -115,24 +134,14 @@ private:
                                   DWORD upperAttrs,
                                   const std::wstring& copyPath) const;
 
-    // Copies the entry at srcAbs, whose attributes are srcAttrs, to dstAbs:
-    // a link as a link, a file with its data and streams, and a directory
-    // with its whole tree. The copy drops whiteout and opaque marker files,
-    // so dstAbs or a directory above it must be opaque. With
-    // CopiedEntryRecord::NewFromSource the source is a lower layer, and the
-    // copy also skips each entry that a whiteout beside it hides.
+    // Copies the upper entry at srcAbs, whose attributes are srcAttrs, to
+    // dstAbs: a link as a link, a file with its data and streams, and a
+    // directory with its whole tree. Each copy keeps its copy-up record. The
+    // copy drops whiteout and opaque marker files, so dstAbs or a directory
+    // above it must be opaque.
     NTSTATUS CopyTreeWithoutMarkers(const std::wstring& srcAbs,
                                     DWORD srcAttrs,
-                                    const std::wstring& dstAbs,
-                                    CopiedEntryRecord record);
-
-    NTSTATUS CopyDirectoryTreeWithoutMarkers(const std::wstring& srcAbs,
-                                             const std::wstring& dstAbs,
-                                             CopiedEntryRecord record);
-
-    NTSTATUS CopyChildrenWithoutMarkers(const std::wstring& srcAbs,
-                                        const std::wstring& dstAbs,
-                                        CopiedEntryRecord record);
+                                    const std::wstring& dstAbs);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;

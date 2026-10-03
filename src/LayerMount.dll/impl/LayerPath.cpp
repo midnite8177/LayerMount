@@ -20,6 +20,12 @@ std::wstring JoinDirPath(const std::wstring& dirPath,
     return DirWithSeparator(dirPath) + relativePath;
 }
 
+std::wstring CaseFoldedName(const std::wstring& name) {
+    std::wstring folded = name;
+    CharLowerBuffW(folded.data(), static_cast<DWORD>(folded.size()));
+    return folded;
+}
+
 std::wstring NormalizePathPreserveCase(const std::wstring& path) {
     if (path.empty()) {
         return {};
@@ -263,24 +269,17 @@ LayerWalk WalkToFirstNonDirectory(const std::wstring& layerPath,
     fs::path walked;
     for (const fs::path& component : fs::path(dirRelativePath)) {
         walked /= component;
-        const std::wstring componentPath = JoinDirPath(layerPath, walked.wstring());
-        const DWORD attrs = GetFileAttributesW(componentPath.c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES) {
-            const DWORD error = ::GetLastError();
-            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
-                return LayerWalk{WalkStop::None, {}};
-            }
+        switch (ComponentKindInLayer(layerPath, walked.wstring())) {
+        case ComponentKind::Missing:
+            return LayerWalk{WalkStop::None, {}};
+        case ComponentKind::Unreadable:
             return LayerWalk{WalkStop::Unreadable, walked.wstring()};
-        }
-        RenameEntryKind kind = RenameEntryKind::Directory;
-        if (!NT_SUCCESS(EntryKindOf(componentPath, attrs, &kind))) {
-            return LayerWalk{WalkStop::Unreadable, walked.wstring()};
-        }
-        if (kind == RenameEntryKind::File) {
+        case ComponentKind::File:
             return LayerWalk{WalkStop::File, walked.wstring()};
-        }
-        if (kind == RenameEntryKind::Link) {
+        case ComponentKind::Link:
             return LayerWalk{WalkStop::Link, walked.wstring()};
+        case ComponentKind::Directory:
+            break;
         }
     }
     return LayerWalk{WalkStop::None, {}};
@@ -300,6 +299,31 @@ bool HoldsEntryInLayer(const std::wstring& layerPath, const std::wstring& relati
 
 }
 
+ComponentKind ComponentKindInLayer(const std::wstring& layerPath,
+                                   const std::wstring& relativePath) {
+    const std::wstring componentPath = JoinDirPath(layerPath, relativePath);
+    const DWORD attrs = GetFileAttributesW(componentPath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = ::GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+            ? ComponentKind::Missing
+            : ComponentKind::Unreadable;
+    }
+    RenameEntryKind kind = RenameEntryKind::Directory;
+    if (!NT_SUCCESS(EntryKindOf(componentPath, attrs, &kind))) {
+        return ComponentKind::Unreadable;
+    }
+    switch (kind) {
+    case RenameEntryKind::File:
+        return ComponentKind::File;
+    case RenameEntryKind::Link:
+        return ComponentKind::Link;
+    case RenameEntryKind::Directory:
+        break;
+    }
+    return ComponentKind::Directory;
+}
+
 bool HasNonDirectoryOrLinkSelfOrAncestorInLayer(const std::wstring& layerPath,
                                                 const std::wstring& dirRelativePath) {
     return WalkToFirstNonDirectory(layerPath, dirRelativePath).stop != WalkStop::None;
@@ -309,18 +333,60 @@ bool HasLinkUnderHigherLayerEntry(const LayerConfig& config,
                                   size_t lowerIndex,
                                   const std::wstring& dirRelativePath) {
     const LayerWalk walk = WalkToFirstNonDirectory(config.lowerPaths[lowerIndex], dirRelativePath);
-    if (walk.stop != WalkStop::Link) {
-        return false;
-    }
-    if (HoldsEntryInLayer(config.upperPath, walk.component)) {
+    return walk.stop == WalkStop::Link &&
+           HigherLayerHoldsEntry(config, lowerIndex, walk.component);
+}
+
+bool HigherLayerHoldsEntry(const LayerConfig& config,
+                           size_t lowerIndex,
+                           const std::wstring& relativePath) {
+    if (HoldsEntryInLayer(config.upperPath, relativePath)) {
         return true;
     }
     for (size_t higher = 0; higher < lowerIndex; ++higher) {
-        if (HoldsEntryInLayer(config.lowerPaths[higher], walk.component)) {
+        if (HoldsEntryInLayer(config.lowerPaths[higher], relativePath)) {
             return true;
         }
     }
     return false;
+}
+
+LayerAncestry StepLayerAncestry(const LayerConfig& config,
+                                const LayerDirectory& dir,
+                                int lowerIndex,
+                                const LayerAncestry& parent) {
+    if (parent.absent) {
+        return parent;
+    }
+    LayerAncestry ancestry = parent;
+    ancestry.whitedOut = parent.whitedOut || dir.whiteoutMgr.HasWhiteout(dir.dirNorm, dir.layerPath);
+    ancestry.opaque = parent.opaque || dir.whiteoutMgr.IsOpaqueInLayer(dir.dirNorm, dir.layerPath);
+    if (parent.nonDirectoryOrLink) {
+        return ancestry;
+    }
+    const ComponentKind kind = ComponentKindInLayer(dir.layerPath, dir.dirNorm);
+    ancestry.absent = kind == ComponentKind::Missing;
+    ancestry.nonDirectoryOrLink = kind == ComponentKind::File || kind == ComponentKind::Link ||
+                                  kind == ComponentKind::Unreadable;
+    ancestry.linkUnderHigherEntry =
+        kind == ComponentKind::Link && lowerIndex >= 0 &&
+        HigherLayerHoldsEntry(config, static_cast<size_t>(lowerIndex), dir.dirNorm);
+    return ancestry;
+}
+
+LayerAncestry LayerAncestryOf(const LayerConfig& config,
+                              const LayerDirectory& dir,
+                              int lowerIndex) {
+    LayerAncestry ancestry{false, dir.whiteoutMgr.IsOpaqueInLayer(std::wstring(), dir.layerPath),
+                           false, false, false};
+    fs::path walked;
+    for (const fs::path& component : fs::path(dir.dirNorm)) {
+        walked /= component;
+        const std::wstring walkedPath = walked.wstring();
+        ancestry = StepLayerAncestry(
+            config, LayerDirectory{dir.whiteoutMgr, dir.layerPath, walkedPath}, lowerIndex, ancestry);
+    }
+    return ancestry;
 }
 
 LowerVisibility LowersBelow(const LayerDirectory& dir) {

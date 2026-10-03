@@ -42,6 +42,7 @@ src/LayerMount.dll/
                   WhiteoutManager.{h,cpp} `.wh.` markers + opaque dirs
                   CopyUp.{h,cpp}       Full + metacopy copy-up
                   DirectoryRename.{h,cpp} Cross-layer directory rename
+                  DirectoryMerge.{h,cpp} Directory listing merged across layers
                   EntryCopy.{h,cpp}    Per-entry copy helpers for both
                   Cache.{h,cpp}        LRU resolved-path cache
                   MetadataStore.{h,cpp} Per-file metadata dispatcher
@@ -238,9 +239,9 @@ The two main producers of opaque markers:
   directory, so a directory created under it gets no marker. Overlayfs
   likewise sets no marker on a new directory whose parent is not merged.
 - `DirectoryRename::RenameLowerDirectory`, which renames a directory
-  that a lower layer holds. The destination is opaque after the
-  recursive copy, so a later merge does not take files from the lower
-  source again.
+  that a lower layer holds. The destination is opaque after the copy
+  of the merged view, so a later merge does not take files from the
+  lowers again.
 
 ### Inheritance: ancestor whiteouts and ancestor opaques
 
@@ -320,7 +321,8 @@ Whiteout markers are *never* visible in the overlay. The resolver
 returns not found for any path with a segment that starts with `.wh.`,
 so a caller who knows a marker's name still cannot open, read, delete
 or rename it. See "Path safety guards". Directory merging in
-`LayerMount::MergeDirectoryEntries`:
+`MergeDirectoryAcrossLayers` (`impl/DirectoryMerge.cpp`), which
+`LayerMount::MergeDirectoryEntries` and the directory rename use:
 
 1. Enumerates upper. For each `.wh.<name>` it sees, it strips the prefix
    and adds `<name>` to a `whitedOutNames` set, then *skips* the marker
@@ -330,7 +332,12 @@ or rename it. See "Path safety guards". Directory merging in
    lowers, because the file hides everything under its path. An upper
    link at the path or at an ancestor's path adds the entries that the
    scan reads through the link, and stops the merge before the lowers.
-   See "Links in a layer". A scan that
+   See "Links in a layer". An upper whiteout at the path or at an
+   ancestor's path stops the merge before the lowers too, because the
+   resolver hides the lower entries under it from an open. The upper
+   entries at the path stay in the listing. Overlayfs cannot hold a
+   whiteout and an entry of the same name in one layer, so it gives no
+   rule for this state, and the engine keeps the upper entries. A scan that
    fails in any other way, at the first read or mid-stream, adds nothing
    from the upper and stops the merge before the lowers, because a
    whiteout that the scan did not read can hide a lower's entry. The
@@ -344,10 +351,12 @@ or rename it. See "Path safety guards". Directory merging in
    ancestor's path adds the entries that the scan reads through the link,
    and stops the merge, when no higher layer holds the link's name. When
    the upper or a higher lower holds that name, the lower adds nothing and
-   stops the merge. See "Links in a layer". A scan that fails in any other
-   way, at the first read or mid-stream, stops the merge, because a
-   whiteout that the scan did not read can hide an entry in a deeper
-   lower. The merge then returns the scan's status and no entries, not
+   stops the merge. See "Links in a layer". A lower that has a whiteout
+   for the path, or for an ancestor's path, adds nothing and stops the
+   merge, as the resolver stops its walk of the lowers there. A scan that
+   fails in any other way, at the first read or mid-stream, stops the
+   merge, because a whiteout that the scan did not read can hide an entry
+   in a deeper lower. The merge then returns the scan's status and no entries, not
    the entries of the layers above.
 3. After a clean scan, the merge adds a held-back lower entry only if no
    higher layer already produced it AND the name is not in
@@ -358,6 +367,13 @@ or rename it. See "Path safety guards". Directory merging in
    opaque in lower N, the merge enumerates lower N and skips lowers
    N+1..end. An opaque ancestor in a layer, the layer root included,
    makes the directory opaque in that layer.
+
+Each layer's facts about the directory and its ancestors (whiteout,
+opaque marker, file or link, link under a higher entry) are a
+`LayerAncestry` in `impl/LayerPath.h`. A listing reads them from the
+layer root. The directory rename walks a tree, so it uses
+`MergeChildDirectory`, which reads only the child's own component in
+each layer, starting from the facts of the parent.
 
 `CanDelete` returns a failed merge's status instead of reading the
 missing entries as an empty directory, and `LayerMountMergeDirectory`
@@ -385,8 +401,7 @@ algorithm (in `impl/PathResolver.cpp`):
     beneath a marker-named directory.
 3.  Cache lookup; return on hit.
 4.  Probe upper. If present, read `:overlay` ADS:
-      - If `redirect` is set, recurse with depth+1 (renamed-from-lower
-        bookkeeping; see CopyUp section).
+      - If `redirect` is set, recurse with depth+1.
       - Otherwise return the upper hit.
 5.  If upper has a whiteout marker for this path, return isWhiteout=true.
 5a. If any ancestor in upper carries a whiteout marker, treat the
@@ -424,13 +439,11 @@ empty path is not found. Create, delete, copy-up and rename use it when the
 engine needs the *lower* state independent of an upper entry at the path
 itself.
 
-The redirect step (4) is the metacopy mechanism. After a `Rename` of an
-entry that lived in a lower layer, the engine writes a metacopy stub
-into the upper layer's *destination* path with `:overlay.redirect`
-pointing back at the source. A subsequent resolve of the destination
-follows the redirect to the lower-layer source until a real copy-up
-materializes the data. The 40-step depth cap defends against malformed
-chains.
+The redirect step (4) follows the `redirect` metadata of an upper entry
+to another path. The 40-step depth cap defends against malformed chains.
+No engine path writes a redirect. A rename of a lower directory copies
+the merged view to the new name instead. See "Cross-layer directory
+rename".
 
 ### Path safety guards
 
@@ -581,13 +594,19 @@ The engine handles ten cases. The last three also apply to a file source:
   if present. When a lower layer has an entry at the destination path,
   mark the destination opaque. A junction or directory symlink gets no
   opaque marker, because the marker would go into its target.
-- **lower → upper, dest-not-present**: recursive copy
-  via `CopyTreeWithoutMarkers` (preserves reparse points, sparse
-  bits, and ADS), then mark the destination opaque, then drop a
-  whiteout at the source. The copy leaves out marker files and each
-  entry that a whiteout in the same lower hides. A directory the
-  engine cannot list fails the rename. A junction or directory symlink copies up as a link and gets
-  no opaque marker.
+- **lower → upper, dest-not-present**: copy the merged view of the
+  source to the destination, then mark the destination opaque, then
+  drop a whiteout at the source. At each depth, the copy takes the
+  entries that `MergeDirectoryAcrossLayers` lists, each from the layer
+  that gives it, with that layer's name case. A file copies with its
+  data, sparse state and ADS, a link copies as a link, and a directory
+  copies with its merged children. Thus an entry that only a deeper
+  lower holds also copies. The merge applies the whiteouts and opaque
+  markers of every layer, so the copy holds no marker files. A
+  directory the engine cannot list fails the rename. A junction or
+  directory symlink source copies up as a link and gets no opaque
+  marker. Overlayfs without `redirect_dir` refuses this rename with
+  `EXDEV`, and the caller then copies the same merged view.
 - **upper source over a lower entry at the same path**: the top layer
   decides the kind, as in overlayfs. The engine merges the lower into
   the new name only when the upper entry is a directory without the
@@ -595,13 +614,13 @@ The engine handles ten cases. The last three also apply to a file source:
   cases, the upper entry hides the lower entry. The engine moves the
   upper entry as for upper → upper, drops a whiteout at the source,
   and copies nothing up from the lower. When it merges, the engine
-  copies the lower tree to the new name as for a lower source, then
-  copies the upper entries over it at every depth. An upper whiteout
-  removes the entry it hides. An upper subdirectory merges the same
-  way only when it is not opaque, no upper whiteout hides it, the copy
-  holds a directory at its name, and neither one is a link. Any other
-  upper entry replaces what the copy holds. The merge copies no marker
-  file and marks the new name opaque. A directory the engine cannot
+  copies the merged view to the new name as for a lower source. An
+  upper entry keeps its copy-up record, and an upper whiteout hides the
+  lower entries of its name. An upper subdirectory takes lower entries
+  by the rules of the listing merge. It takes none when it is opaque,
+  when an upper whiteout has its name, or when the first lower that
+  holds its name holds a file or a link there. The copy holds no marker
+  file, and the engine marks the new name opaque. A directory the engine cannot
   list fails the rename, and the old tree stays as it was. When the engine cannot read the reparse tag of
   the lower entry, the rename fails with that error before any side
   effects.
@@ -721,7 +740,7 @@ Each upper-layer file can carry overlay metadata:
 struct LayerMountMetadata {
     bool         opaque         = false;
     bool         metacopy       = false;
-    std::wstring redirect;          // for renamed-from-lower indirection
+    std::wstring redirect;          // a path the resolver follows; no engine path writes one
     FILETIME     copyUpTimestamp;
     std::wstring originLayer;       // path of the source layer
     bool         hasStableIndexNumber;

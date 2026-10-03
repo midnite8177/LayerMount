@@ -62,6 +62,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\PathUtil.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\Cache.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\CopyUp.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\DirectoryMerge.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\DirectoryRename.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\EntryCopy.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\MetadataStore.h" />
@@ -76,6 +77,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\Cache.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\CopyUp.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\DirectoryMerge.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\DirectoryRename.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\EntryCopy.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\MetadataStore.cpp" />

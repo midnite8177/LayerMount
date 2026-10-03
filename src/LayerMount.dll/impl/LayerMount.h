@@ -246,6 +246,7 @@ bool EnsureDirectoryExists(const std::wstring& path);
 struct MergedEntry {
     WIN32_FIND_DATAW findData;
     LayerSource source;
+    int lowerIndex;             // which lower layer (0-based), -1 if upper
 };
 
 // One directory's entries merged across the layers, keyed by lowercase

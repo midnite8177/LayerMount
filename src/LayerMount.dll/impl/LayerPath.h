@@ -23,6 +23,10 @@ std::wstring DirWithSeparator(const std::wstring& dirPath);
 std::wstring JoinDirPath(const std::wstring& dirPath,
                          const std::wstring& relativePath);
 
+// Returns name in lowercase. The merged view keys its entries and its
+// whiteout names with this fold.
+std::wstring CaseFoldedName(const std::wstring& name);
+
 // A path in the case the caller wrote it. A normalized path is lowercase,
 // so the constructor is explicit: a call site that holds only a normalized
 // path has to name the conversion.
@@ -123,6 +127,25 @@ std::wstring JoinLayerScanPath(const std::wstring& layerPath,
 bool HasNonDirectoryOrLinkSelfOrAncestorInLayer(const std::wstring& layerPath,
                                                 const std::wstring& dirRelativePath);
 
+// What a layer holds at one path. Unreadable is an entry whose attributes
+// or reparse tag the engine cannot read, for a reason other than a missing
+// path.
+enum class ComponentKind { Missing, Directory, File, Link, Unreadable };
+
+// Reads what the layer at layerPath holds at relativePath. A link is a link
+// as IsDirectoryLink defines it. Costs one GetFileAttributesW, and one more
+// open for a directory reparse point.
+ComponentKind ComponentKindInLayer(const std::wstring& layerPath,
+                                   const std::wstring& relativePath);
+
+// Whether the upper or a lower above lowerIndex holds an entry at
+// relativePath. A failure to read an entry's attributes, other than a
+// missing path, counts as holding it, so an unreadable higher layer hides
+// a lower link.
+bool HigherLayerHoldsEntry(const LayerConfig& config,
+                           size_t lowerIndex,
+                           const std::wstring& relativePath);
+
 // Whether the lower at lowerIndex holds a link at dirRelativePath or at an
 // ancestor, at a path that the upper or a higher lower also holds. Overlayfs
 // follows a lower symlink only when no higher layer holds its name. So such
@@ -157,5 +180,41 @@ enum class LowerVisibility {
 // GetFileAttributesW per component and one more open per directory reparse
 // point.
 LowerVisibility LowersBelow(const LayerDirectory& dir);
+
+// What one layer holds at a directory and at its ancestors. A directory
+// merge reads it to find what the layer and the layers below it add to the
+// directory. LayerAncestryOf reads a whole path. StepLayerAncestry reads
+// one more component, so a walk down a tree reads each component once.
+struct LayerAncestry {
+    // A whiteout in the layer at the directory or at an ancestor.
+    bool whitedOut;
+    // An opaque marker at the directory, at an ancestor or at the layer
+    // root, as LowersBelow reads it.
+    bool opaque;
+    // A non-directory, a link or an unreadable entry at the directory or at
+    // an ancestor, as HasNonDirectoryOrLinkSelfOrAncestorInLayer reads it.
+    bool nonDirectoryOrLink;
+    // For a lower: the first such entry is a link at a path that a higher
+    // layer also holds, as HasLinkUnderHigherLayerEntry reads it. Always
+    // false for the upper.
+    bool linkUnderHigherEntry;
+    // The layer holds no entry at the directory, or no entry at an ancestor.
+    // Nothing below the directory can then hide a lower.
+    bool absent;
+};
+
+// The ancestry of dir, read from the layer root. lowerIndex is the index
+// of the lower at dir.layerPath, or -1 for the upper.
+LayerAncestry LayerAncestryOf(const LayerConfig& config,
+                              const LayerDirectory& dir,
+                              int lowerIndex);
+
+// The ancestry of dir, from parent, the ancestry of the parent directory
+// of dir in the same layer. Reads only the last component of dir.dirNorm.
+// lowerIndex is as LayerAncestryOf takes it.
+LayerAncestry StepLayerAncestry(const LayerConfig& config,
+                                const LayerDirectory& dir,
+                                int lowerIndex,
+                                const LayerAncestry& parent);
 
 }

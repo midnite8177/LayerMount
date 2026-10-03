@@ -1317,6 +1317,168 @@ public:
             L"An open of the whited-out file under the new name must find nothing");
     }
 
+    TEST_METHOD(Rename_DirectoryInTwoLowers_ShowsTheEntriesOfBothLowers) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(2);
+            env.WriteFile(env.Lower(0), L"d\\a.txt", "first");
+            env.WriteFile(env.Lower(1), L"d\\B.txt", "second");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the directory in two lowers must succeed");
+
+            const MergedDirectory listing = mount.MergeDirectoryEntries(L"e");
+            AssertStatus(STATUS_SUCCESS, listing.status, L"The listing of e must succeed");
+            Assert::AreEqual(size_t{2}, listing.entries.size(), L"The listing of e must hold two entries");
+            AssertEntryShownAs(mount, L"e", L"a.txt", L"a.txt");
+            AssertEntryShownAs(mount, L"e", L"b.txt", L"B.txt");
+            Assert::AreEqual(std::string("second"), ReadThroughMount(mount, L"e\\B.txt"),
+                L"The file from the second lower must read the second lower's data");
+        });
+    }
+
+    TEST_METHOD(Rename_DirectoryInTwoLowers_MergesTheSubdirectoryOfBothLowers) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(2);
+            env.WriteFile(env.Lower(0), L"d\\sub\\a.txt", "first");
+            env.WriteFile(env.Lower(1), L"d\\sub\\b.txt", "second");
+            env.WriteFile(env.Lower(1), L"d\\sub\\deep\\c.txt", "deep");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the directory in two lowers must succeed");
+
+            const MergedDirectory listing = mount.MergeDirectoryEntries(L"e\\sub");
+            AssertStatus(STATUS_SUCCESS, listing.status, L"The listing of e\\sub must succeed");
+            Assert::AreEqual(size_t{3}, listing.entries.size(),
+                L"The listing of e\\sub must hold the entries of both lowers");
+            AssertEntryShownAs(mount, L"e\\sub", L"a.txt", L"a.txt");
+            AssertEntryShownAs(mount, L"e\\sub", L"b.txt", L"b.txt");
+            AssertOnlyEntryShownAs(mount, L"e\\sub\\deep", L"c.txt");
+            Assert::AreEqual(std::string("deep"), ReadThroughMount(mount, L"e\\sub\\deep\\c.txt"),
+                L"The nested file from the second lower must read the second lower's data");
+        });
+    }
+
+    TEST_METHOD(Rename_DirectoryInTwoLowers_StillHidesTheEntryThatAWhiteoutInTheFirstLowerHides) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(2);
+            env.WriteFile(env.Lower(0), L"d\\sub\\a.txt", "first");
+            env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"d\\sub\\b.txt"), "");
+            env.WriteFile(env.Lower(1), L"d\\sub\\b.txt", "second");
+            env.WriteFile(env.Lower(1), L"d\\c.txt", "second");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            AssertOnlyEntryShownAs(mount, L"d\\sub", L"a.txt");
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the directory in two lowers must succeed");
+
+            AssertEntryShownAs(mount, L"e", L"c.txt", L"c.txt");
+            AssertOnlyEntryShownAs(mount, L"e\\sub", L"a.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\b.txt"),
+                L"An open of the whited-out file under the new name must find nothing");
+        });
+    }
+
+    TEST_METHOD(Rename_DirectoryInTwoLowers_StillHidesTheSecondLowersChildrenOfAnOpaqueSubdirectory) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(2);
+            env.WriteFile(env.Lower(0), L"d\\sub\\a.txt", "first");
+            env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"d\\sub"), "");
+            env.WriteFile(env.Lower(1), L"d\\sub\\b.txt", "second");
+            env.WriteFile(env.Lower(1), L"d\\c.txt", "second");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            AssertOnlyEntryShownAs(mount, L"d\\sub", L"a.txt");
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the directory in two lowers must succeed");
+
+            AssertEntryShownAs(mount, L"e", L"c.txt", L"c.txt");
+            AssertOnlyEntryShownAs(mount, L"e\\sub", L"a.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\b.txt"),
+                L"An open of the hidden file under the new name must find nothing");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWithUpperSubdirectoryOverFirstLowerWhiteout_StillHidesTheSecondLowersChildren) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "first");
+        env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"d\\sub"), "");
+        env.WriteFile(env.Lower(1), L"d\\sub\\x.txt", "second");
+        env.WriteFile(env.Lower(1), L"d\\sub\\deep\\y.txt", "second");
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        env.WriteFile(env.Upper(), L"d\\sub\\deep\\v.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\sub\\x.txt"),
+            L"An open of the file under the whited-out subdirectory must find nothing");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\sub\\deep\\y.txt"),
+            L"An open of the file under the whited-out ancestor must find nothing");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the merged directory must succeed");
+
+        const MergedDirectory listing = mount.MergeDirectoryEntries(L"e\\sub");
+        AssertStatus(STATUS_SUCCESS, listing.status, L"The listing of e\\sub must succeed");
+        Assert::AreEqual(size_t{2}, listing.entries.size(),
+            L"The listing of e\\sub must hold only the upper entries");
+        AssertEntryShownAs(mount, L"e\\sub", L"u.txt", L"u.txt");
+        AssertEntryShownAs(mount, L"e\\sub", L"deep", L"deep");
+        AssertOnlyEntryShownAs(mount, L"e\\sub\\deep", L"v.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\x.txt"),
+            L"An open of the second lower's file under the new name must find nothing");
+    }
+
+    TEST_METHOD(Rename_DirectoryWithFirstLowerJunctionOverSecondLowerDirectory_CopiesTheJunction) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "target");
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "first");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\d\\sub",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        env.WriteFile(env.Lower(1), L"d\\sub\\second.txt", "second");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertOnlyEntryShownAs(mount, L"d\\sub", L"inside.txt");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the directory in two lowers must succeed");
+
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\e\\sub", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper e\\sub must be a link");
+        AssertOnlyEntryShownAs(mount, L"e\\sub", L"inside.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\sub\\second.txt"),
+            L"An open of the second lower's file under the copied junction must find nothing");
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryOverTwoLowers_StillHidesTheSecondLowerEntryThatAnUpperWhiteoutHides) {
+        TempLayerEnvironment env(2);
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "first");
+        env.WriteFile(env.Lower(1), L"d\\b.txt", "second");
+        env.WriteFile(env.Lower(1), L"d\\c.txt", "second");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"d\\b.txt", kNoCallerPid),
+            L"The delete of the file in the second lower must succeed");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the merged directory must succeed");
+
+        const MergedDirectory listing = mount.MergeDirectoryEntries(L"e");
+        AssertStatus(STATUS_SUCCESS, listing.status, L"The listing of e must succeed");
+        Assert::AreEqual(size_t{2}, listing.entries.size(), L"The listing of e must hold two entries");
+        AssertEntryShownAs(mount, L"e", L"a.txt", L"a.txt");
+        AssertEntryShownAs(mount, L"e", L"c.txt", L"c.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e\\b.txt"),
+            L"An open of the deleted file under the new name must find nothing");
+    }
+
     TEST_METHOD(Rename_MergedDirectoryWithUnlistableUpperSubdirectory_FailsAndKeepsTheOldTree) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
