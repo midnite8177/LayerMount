@@ -15,8 +15,9 @@ class WhiteoutManager;
 class Cache;
 class CopyUp;
 
-// Renames a directory or a directory link in the merged view. Copies a
-// lower source to the new upper path, and moves an upper source there.
+// Renames a directory or a directory link in the merged view. Builds a copy
+// of a lower source in the work directory and moves it to the new upper
+// path, and moves an upper source there.
 class DirectoryRename {
 public:
     DirectoryRename(ConfigRef config,
@@ -26,15 +27,21 @@ public:
                     CopyUp& copyUp,
                     ::LayerMount::abi::CapabilityGate capabilities);
 
-    // Copies the merged view of the old directory to the new upper path,
-    // marks it opaque, and removes the old upper entry. The caller writes the
-    // whiteout at the old path. sourceKind is Directory or Link. A Link
-    // source is copied as a link, without its upper shadow and without
-    // opacity.
+    // Builds a copy of the merged view of the old directory in the work
+    // directory, marks it opaque, moves it to the new upper path, and removes
+    // the old upper entry. The copy inherits the ACEs that the new upper
+    // parent gives. The caller writes the whiteout at the old path.
+    // sourceKind is Directory or Link. A Link source copies as a link,
+    // without its upper shadow and without opacity.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
-    // destination exists in the merged view. The new upper entry gets its
-    // name in newCallerPath's case. A failed copy leaves the old tree as it
-    // was and tries to remove the new upper entry.
+    // destination exists in the merged view. The move fails with
+    // STATUS_OBJECT_NAME_COLLISION when an entry holds the new upper path,
+    // and that entry stays as it was. The new upper entry gets its name in
+    // newCallerPath's case. A failure leaves the old tree as it was and
+    // tries to remove the copy in the work directory.
+    // Warning: this call never replaces an entry. With ReplaceExisting::Yes,
+    // the caller must first move the destination aside with
+    // CopyUp::SetRenameDestinationAside.
     NTSTATUS RenameLowerDirectory(const CallerPath& oldCallerPath,
                                   const CallerPath& newCallerPath,
                                   RenameEntryKind sourceKind,
@@ -72,57 +79,57 @@ private:
     NTSTATUS PrepareRenameDestination(const CallerPath& newCallerPath,
                                       ReplaceExisting replace);
 
-    // Copies the merged view of oldName to the upper path of newName and
-    // marks newName opaque. lowerSource is the first lower that holds
-    // oldName. For a directory root, the copy then gets the copy-up record
-    // of lowerSource, and the attributes, layout, times and security of the
-    // upper directory of oldName, or of lowerSource when the upper has
-    // none. A reparse-point root copies as a link. On failure it tries to
-    // remove the upper path of newName.
+    // Copies the merged view of oldName to stagedPath, a new path in the
+    // work directory, and marks the copy opaque. lowerSource is the first
+    // lower that holds oldName. For a directory root, the copy then gets the
+    // copy-up record of lowerSource, and the attributes, layout, times and
+    // security of the upper directory of oldName, or of lowerSource when the
+    // upper has none. A reparse-point root copies as a link. On failure,
+    // stagedPath can hold a partial tree, and the caller removes it.
     NTSTATUS CopyMergedDirectory(const ResolvedPath& lowerSource,
                                  const RenamedName& oldName,
-                                 const RenamedName& newName);
+                                 const std::wstring& stagedPath);
 
     NTSTATUS CopyMergedLink(const ResolvedPath& lowerSource,
                             const RenamedName& oldName,
-                            const RenamedName& newName);
+                            const std::wstring& stagedPath);
 
     NTSTATUS CopyMergedDirectoryTree(const ResolvedPath& lowerSource,
                                      const RenamedName& oldName,
-                                     const RenamedName& newName);
+                                     const std::wstring& stagedPath);
 
     // Copies each entry of oldDir, a merge of a directory, into the
-    // directory at newUpperPath, at every depth. The merge applies the
-    // whiteouts and opaque markers of every layer, so the copy holds no
-    // marker files, and newUpperPath or a directory above it must be opaque.
-    // A directory that the merge cannot list fails the copy. On failure,
-    // newUpperPath holds a partial tree, and the caller removes it.
+    // directory at dstPath, at every depth. The merge applies the whiteouts
+    // and opaque markers of every layer, so the copy holds no marker files.
+    // The caller marks the root of the copy opaque. A directory that the
+    // merge cannot list fails the copy. On failure, dstPath holds a partial
+    // tree, and the caller removes it.
     NTSTATUS CopyMergedChildren(const MergedDirectoryWithAncestry& oldDir,
-                                const std::wstring& newUpperPath);
+                                const std::wstring& dstPath);
 
     // Copies entry, which the merge oldParent lists, from the layer that
-    // gives it into newParentUpperPath. The copy keeps the name that layer
+    // gives it into dstParentPath. The copy keeps the name that layer
     // gives the entry. An upper entry keeps its copy-up record, and a lower
     // entry gets a new one. A link copies as a link.
     NTSTATUS CopyMergedEntry(const MergedDirectoryWithAncestry& oldParent,
                              const MergedEntry& entry,
-                             const std::wstring& newParentUpperPath);
+                             const std::wstring& dstParentPath);
 
     // Copies the upper entries of the directory at oldUpperPath into the
     // copy of a lower root that is a directory reparse point but not a link,
-    // at newUpperPath. A whiteout removes the entry it hides, unless the old
+    // at dstPath. A whiteout removes the entry it hides, unless the old
     // upper also holds an entry of that name. oldRelativePath is
-    // oldUpperPath relative to the upper root. On failure, newUpperPath
-    // holds a partial tree, and the caller removes it.
+    // oldUpperPath relative to the upper root. On failure, dstPath holds a
+    // partial tree, and the caller removes it.
     NTSTATUS OverlayUpperShadow(const std::wstring& oldRelativePath,
                                 const std::wstring& oldUpperPath,
-                                const std::wstring& newUpperPath);
+                                const std::wstring& dstPath);
 
-    // Removes from the copy at newUpperPath the entry that the upper
+    // Removes from the copy at dstPath the entry that the upper
     // whiteout whiteoutName hides, unless the old upper at oldUpperPath
     // also holds an entry of that name.
     NTSTATUS RemoveEntryHiddenByUpperWhiteout(const std::wstring& oldUpperPath,
-                                              const std::wstring& newUpperPath,
+                                              const std::wstring& dstPath,
                                               const std::wstring& whiteoutName);
 
     // Whether the upper entry at relativePath, with attributes upperAttrs,

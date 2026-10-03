@@ -419,11 +419,11 @@ public:
             L"without replace must succeed, not collision.");
     }
 
-    TEST_METHOD(DirRename_ChildTypeConflict_FailsAndTearsDownDst) {
+    TEST_METHOD(DirRename_EntryAtTheNewUpperName_FailsWithCollisionAndKeepsIt) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"src\\sub\\inner.txt", "inner");
         env.CreateDir(env.Upper(), L"dst");
-        env.WriteFile(env.Upper(), L"dst\\sub", "file-not-dir");
+        env.WriteFile(env.Upper(), L"dst\\sub", "upper dst file");
 
         auto config = env.MakeConfig();
         Cache cache;
@@ -434,21 +434,23 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu,
                                   ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
 
-        // ReplaceExisting::Yes gets past the top-level collision check, so
-        // the copy reaches the child conflict.
+        // ReplaceExisting::Yes skips the merged-view collision check, so the
+        // call reaches the move while dst is still in the upper.
         const NTSTATUS st = dirRename.RenameLowerDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
             RenameEntryKind::Directory, ReplaceExisting::Yes);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
-            L"File-over-directory type conflict during child copy must "
-            L"surface STATUS_OBJECT_NAME_COLLISION — not a silent success "
-            L"with a partial tree.");
+            L"The rename fails when an upper entry holds the new name");
 
+        Assert::AreEqual(std::string("upper dst file"), env.ReadFile(env.Upper(), L"dst\\sub"),
+            L"The entry at the new name keeps its file");
         Assert::IsFalse(env.FileExists(env.Upper(), L"dst\\sub\\inner.txt"));
         Assert::IsFalse(wm.IsOpaque(L"dst"));
         Assert::IsFalse(wm.HasWhiteout(L"src", env.Upper()));
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The failed rename leaves nothing in the work directory");
     }
 
 private:

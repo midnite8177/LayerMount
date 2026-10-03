@@ -599,9 +599,20 @@ lower layer until they themselves are copied up on demand.
 
 A lower junction or directory symbolic link copies up as a link, and
 so does a lower file symbolic link in `CopyUpFile`. The engine creates
-the link in the work directory, writes its copy-up record on the link,
-and one rename moves the link to its upper path. The link target stays
-as it was.
+the link in a container in the work directory, writes its copy-up
+record on the link, and one rename moves the link to its upper path.
+The link target stays as it was.
+
+A move does not recompute inherited ACEs. So an entry that the engine
+builds for a new upper path in the work directory goes into a
+container, a directory in the work directory whose protected DACL
+holds the ACEs of the DACL of the upper parent. When the process holds
+`SE_SECURITY_NAME`, the container also gets a protected SACL with the
+ACEs of the SACL of the upper parent. Without it, the container keeps
+the SACL that it inherits from the work directory. The entry and its
+subtree inherit as they do at the upper path, and no security write
+follows the move. The engine removes the container after the move and
+after a failure.
 
 When an entry that the engine did not make holds the upper path at the
 rename, the copy-up fails with `STATUS_OBJECT_NAME_COLLISION` and
@@ -618,19 +629,27 @@ The engine handles ten cases. The last three also apply to a file source:
   if present. When a lower layer has an entry at the destination path,
   mark the destination opaque. A junction or directory symlink gets no
   opaque marker, because the marker would go into its target.
-- **lower → upper, dest-not-present**: copy the merged view of the
-  source to the destination, then mark the destination opaque, then
-  drop a whiteout at the source. At each depth, the copy takes the
-  entries that `MergeDirectoryAcrossLayers` lists, each from the layer
-  that gives it, with that layer's name case. A file copies with its
-  data, sparse state and ADS, a link copies as a link, and a directory
-  copies with its merged children. Thus an entry that only a deeper
-  lower holds also copies. The merge applies the whiteouts and opaque
-  markers of every layer, so the copy holds no marker files. A
-  directory the engine cannot list fails the rename. A junction or
-  directory symlink source copies up as a link and gets no opaque
-  marker. Overlayfs without `redirect_dir` refuses this rename with
-  `EXDEV`, and the caller then copies the same merged view.
+- **lower → upper, dest-not-present**: build a copy of the merged view
+  of the source in a container, as for a link copy-up. The copy gets
+  its copy-up record, then the opaque marker, and last its attributes,
+  times and security. Then one rename moves the copy to the
+  destination, and the engine drops a whiteout at the source. No reader
+  of the upper sees a partial copy at the destination. When an entry
+  that the engine did not make holds the destination at the move, the
+  rename fails with `STATUS_OBJECT_NAME_COLLISION` and leaves that
+  entry as it was. A failed rename removes the container. At each
+  depth, the copy takes the entries that `MergeDirectoryAcrossLayers`
+  lists, each from the layer that gives it, with that layer's name
+  case. A file copies with its data, sparse state and ADS, a link
+  copies as a link, and a directory copies with its merged children.
+  Thus an entry that only a deeper lower holds also copies. The merge
+  applies the whiteouts and opaque markers of every layer, so the copy
+  holds no marker files. A directory the engine cannot list fails the
+  rename. A junction or directory symlink source copies up as a link,
+  as in a link copy-up, and gets no opaque marker. A case-only rename
+  of a lower link does the same. Overlayfs without `redirect_dir`
+  refuses this rename with `EXDEV`, and the caller then copies the same
+  merged view.
 - **upper source over a lower entry at the same path**: the top layer
   decides the kind, as in overlayfs. The engine merges the lower into
   the new name only when the upper entry is a directory without the

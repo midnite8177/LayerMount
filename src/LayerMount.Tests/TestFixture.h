@@ -392,6 +392,18 @@ inline bool LinkCreatedOrSkipped(LinkCreator createLink,
     return false;
 }
 
+// Makes the lower junction parent\link to the directory target under the
+// environment root. Logs a skip and returns false when the junction cannot
+// be created.
+inline bool LowerJunctionCreatedOrSkipped(const TempLayerEnvironment& env,
+                                          const std::wstring& parent) {
+    env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+    env.CreateDir(env.Lower(0), parent);
+    return LinkCreatedOrSkipped(CreateDirectoryJunction,
+                                env.Lower(0) + L"\\" + parent + L"\\link",
+                                env.Root() + L"\\target");
+}
+
 // Creates "link" in the upper for LayerSource::Upper, or in the first lower
 // for LayerSource::Lower, and a directory of the same name in the next layer
 // down. The link targets a directory outside the layers. Logs a skip and

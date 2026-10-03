@@ -344,14 +344,14 @@ NTSTATUS DirectoryRename::PrepareRenameDestination(const CallerPath& newCallerPa
 }
 
 NTSTATUS DirectoryRename::RemoveEntryHiddenByUpperWhiteout(const std::wstring& oldUpperPath,
-                                                           const std::wstring& newUpperPath,
+                                                           const std::wstring& dstPath,
                                                            const std::wstring& whiteoutName) {
     const std::optional<std::wstring> hidden = WhiteoutManager::WhitedOutNameOfEntry(whiteoutName);
     if (!hidden.has_value() ||
         ::GetFileAttributesW((oldUpperPath + L"\\" + *hidden).c_str()) != INVALID_FILE_ATTRIBUTES) {
         return STATUS_SUCCESS;
     }
-    return RemoveUpperEntry(newUpperPath + L"\\" + *hidden, config_);
+    return RemoveUpperEntry(dstPath + L"\\" + *hidden, config_);
 }
 
 bool DirectoryRename::UpperEntryMergesIntoCopy(const std::wstring& relativePath,
@@ -366,15 +366,15 @@ bool DirectoryRename::UpperEntryMergesIntoCopy(const std::wstring& relativePath,
 
 NTSTATUS DirectoryRename::OverlayUpperShadow(const std::wstring& oldRelativePath,
                                              const std::wstring& oldUpperPath,
-                                             const std::wstring& newUpperPath) {
+                                             const std::wstring& dstPath) {
     return ForEachChildEntry(oldUpperPath, [&](const WIN32_FIND_DATAW& fd) -> NTSTATUS {
         const std::wstring name = fd.cFileName;
         if (WhiteoutManager::IsWhiteoutName(name)) {
-            return RemoveEntryHiddenByUpperWhiteout(oldUpperPath, newUpperPath, name);
+            return RemoveEntryHiddenByUpperWhiteout(oldUpperPath, dstPath, name);
         }
         const std::wstring childRelative = oldRelativePath + L"\\" + name;
         const std::wstring childSrc = oldUpperPath + L"\\" + name;
-        const std::wstring childDst = newUpperPath + L"\\" + name;
+        const std::wstring childDst = dstPath + L"\\" + name;
         if (UpperEntryMergesIntoCopy(childRelative, fd.dwFileAttributes, childDst)) {
             const NTSTATUS shellStatus = CopyDirectoryShell(childSrc, childDst);
             if (!NT_SUCCESS(shellStatus)) {
@@ -397,66 +397,62 @@ NTSTATUS DirectoryRename::OverlayUpperShadow(const std::wstring& oldRelativePath
 
 NTSTATUS DirectoryRename::CopyMergedDirectory(const ResolvedPath& lowerSource,
                                               const RenamedName& oldName,
-                                              const RenamedName& newName) {
-    const NTSTATUS status = (lowerSource.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
-        ? CopyMergedLink(lowerSource, oldName, newName)
-        : CopyMergedDirectoryTree(lowerSource, oldName, newName);
-    if (!NT_SUCCESS(status)) {
-        RemoveUpperEntry(newName.upperPath, config_);
-    }
-    return status;
+                                              const std::wstring& stagedPath) {
+    return (lowerSource.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        ? CopyMergedLink(lowerSource, oldName, stagedPath)
+        : CopyMergedDirectoryTree(lowerSource, oldName, stagedPath);
 }
 
 NTSTATUS DirectoryRename::CopyMergedLink(const ResolvedPath& lowerSource,
                                          const RenamedName& oldName,
-                                         const RenamedName& newName) {
+                                         const std::wstring& stagedPath) {
     NTSTATUS status = CopyLinkWithCopyUpRecord(
-        lowerSource.absolutePath, lowerSource.attributes, newName.upperPath,
+        lowerSource.absolutePath, lowerSource.attributes, stagedPath,
         {CopiedEntryRecord::NewFromSource, config_, capabilities_});
     if (NT_SUCCESS(status) && IsDirectoryAt(oldName.upperPath)) {
-        status = OverlayUpperShadow(oldName.norm, oldName.upperPath, newName.upperPath);
+        status = OverlayUpperShadow(oldName.norm, oldName.upperPath, stagedPath);
     }
     if (NT_SUCCESS(status)) {
-        status = whiteoutMgr_.SetOpaque(newName.norm);
+        status = whiteoutMgr_.SetOpaqueAtPath(stagedPath);
     }
     return status;
 }
 
 NTSTATUS DirectoryRename::CopyMergedDirectoryTree(const ResolvedPath& lowerSource,
                                                   const RenamedName& oldName,
-                                                  const RenamedName& newName) {
+                                                  const std::wstring& stagedPath) {
     const bool hasUpperShadow = IsDirectoryAt(oldName.upperPath);
     const std::wstring& mergedViewSource =
         hasUpperShadow ? oldName.upperPath : lowerSource.absolutePath;
 
-    NTSTATUS status = CopyDirectoryShell(mergedViewSource, newName.upperPath);
+    NTSTATUS status = CopyNewDirectoryShell(mergedViewSource, stagedPath);
     if (!NT_SUCCESS(status)) {
         return status;
     }
     status = CopyMergedChildren(MergeDirectoryWithAncestry(config_, whiteoutMgr_, oldName.norm),
-                                newName.upperPath);
+                                stagedPath);
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    status = WriteDirectoryCopyUpRecord(lowerSource.absolutePath, newName.upperPath,
+    status = WriteDirectoryCopyUpRecord(lowerSource.absolutePath, stagedPath,
                                         {CopiedEntryRecord::NewFromSource, config_, capabilities_});
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    status = whiteoutMgr_.SetOpaque(newName.norm);
+    status = whiteoutMgr_.SetOpaqueAtPath(stagedPath);
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    return ApplyDirectoryBasicInfoAndSecurity(mergedViewSource, newName.upperPath);
+    return ApplyDirectoryBasicInfoAndSecurity(mergedViewSource, stagedPath);
 }
 
 NTSTATUS DirectoryRename::CopyMergedChildren(const MergedDirectoryWithAncestry& oldDir,
-                                             const std::wstring& newUpperPath) {
+                                             const std::wstring& dstPath) {
     if (!NT_SUCCESS(oldDir.merged.status)) {
         return oldDir.merged.status;
     }
     for (const auto& keyAndEntry : oldDir.merged.entries) {
-        const NTSTATUS status = CopyMergedEntry(oldDir, keyAndEntry.second, newUpperPath);
+        const NTSTATUS status = CopyMergedEntry(oldDir, keyAndEntry.second, dstPath);
         if (!NT_SUCCESS(status)) {
             return status;
         }
@@ -466,10 +462,10 @@ NTSTATUS DirectoryRename::CopyMergedChildren(const MergedDirectoryWithAncestry& 
 
 NTSTATUS DirectoryRename::CopyMergedEntry(const MergedDirectoryWithAncestry& oldParent,
                                           const MergedEntry& entry,
-                                          const std::wstring& newParentUpperPath) {
+                                          const std::wstring& dstParentPath) {
     const std::wstring name = entry.findData.cFileName;
     const MergedEntrySource source = SourceOf(config_, entry);
-    const std::wstring dstAbs = newParentUpperPath + L"\\" + name;
+    const std::wstring dstAbs = dstParentPath + L"\\" + name;
     return CopyEntry(
         JoinDirPath(source.root, oldParent.dirPath) + L"\\" + name,
         entry.findData.dwFileAttributes, dstAbs, {source.record, config_, capabilities_},
@@ -498,12 +494,17 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
     }
 
     const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
-    const NTSTATUS copyStatus = sourceKind == RenameEntryKind::Link
-        ? CopyLinkWithCopyUpRecord(source.absolutePath, source.attributes, newUpperPath,
-                                   {CopiedEntryRecord::NewFromSource, config_, capabilities_})
-        : CopyMergedDirectory(source, {oldNorm, oldUpperPath}, {newNorm, newUpperPath});
-    if (!NT_SUCCESS(copyStatus)) {
-        return copyStatus;
+    const NTSTATUS status = sourceKind == RenameEntryKind::Link
+        ? CopyLinkThroughWorkDir(source.absolutePath, source.attributes,
+                                 copyUp_.GenerateWorkPath(), newUpperPath,
+                                 {CopiedEntryRecord::NewFromSource, config_, capabilities_})
+        : BuildInContainerAndMove(
+              copyUp_.GenerateWorkPath(), newUpperPath, config_,
+              [&](const std::wstring& stagedPath) {
+                  return CopyMergedDirectory(source, {oldNorm, oldUpperPath}, stagedPath);
+              });
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
     RemoveUpperEntry(oldUpperPath, config_);

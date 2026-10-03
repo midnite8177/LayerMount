@@ -194,15 +194,10 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
 
 NTSTATUS CopyUp::CopyUpLinkAndCount(const std::wstring& normalized,
                                     const CopyUpTarget& target) {
-    const std::wstring stagedPath = GenerateWorkPath();
-    NTSTATUS status = CopyLinkWithCopyUpRecord(
-        target.source.absolutePath, target.source.attributes, stagedPath,
-        {CopiedEntryRecord::NewFromSource, config_, capabilities_});
-    if (NT_SUCCESS(status)) {
-        status = MoveUpperEntry(stagedPath, target.upperPath, ReplaceExisting::No, config_);
-    }
+    const NTSTATUS status = CopyLinkThroughWorkDir(
+        target.source.absolutePath, target.source.attributes, GenerateWorkPath(),
+        target.upperPath, {CopiedEntryRecord::NewFromSource, config_, capabilities_});
     if (!NT_SUCCESS(status)) {
-        RemoveUpperEntry(stagedPath, config_);
         return status;
     }
 
@@ -816,8 +811,8 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            status = CopyLinkWithCopyUpRecord(
-                source.absolutePath, source.attributes, newUpperPath,
+            status = CopyLinkThroughWorkDir(
+                source.absolutePath, source.attributes, GenerateWorkPath(), newUpperPath,
                 {CopiedEntryRecord::NewFromSource, config_, capabilities_});
             if (!NT_SUCCESS(status)) {
                 return status;

@@ -2,6 +2,7 @@
 #include "MetadataStore.h"
 #include "NtStatusUtil.h"
 #include "WhiteoutManager.h"
+#include "EntryCopy.h"
 
 #include <algorithm>
 #include <cstring>
@@ -393,6 +394,24 @@ LowerVisibility LowersBelow(const LayerDirectory& dir) {
         return LowerVisibility::HiddenByNonDirectoryOrLink;
     }
     return LowerVisibility::Visible;
+}
+
+NTSTATUS BuildInContainerAndMove(const std::wstring& containerPath,
+                                 const std::wstring& upperPath,
+                                 const LayerConfig& config,
+                                 const std::function<NTSTATUS(const std::wstring&)>& build) {
+    const std::wstring stagedPath = containerPath + L"\\entry";
+    NTSTATUS status = ::CreateDirectoryW(containerPath.c_str(), nullptr)
+        ? WriteSecurityToInheritAs(containerPath, fs::path(upperPath).parent_path().wstring())
+        : StatusOfFailedCall(ERROR_WRITE_FAULT);
+    if (NT_SUCCESS(status)) {
+        status = build(stagedPath);
+    }
+    if (NT_SUCCESS(status)) {
+        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config);
+    }
+    RemoveUpperEntry(containerPath, config);
+    return status;
 }
 
 }

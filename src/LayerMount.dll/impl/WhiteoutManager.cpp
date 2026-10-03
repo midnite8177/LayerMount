@@ -187,6 +187,15 @@ NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
 
     EnsureDirectoryExists(dirFullPath);
 
+    const NTSTATUS status = SetOpaqueAtPath(dirFullPath);
+
+    if (cache_) {
+        cache_->Invalidate(NormalizePath(dirRelativePath));
+    }
+    return status;
+}
+
+NTSTATUS WhiteoutManager::SetOpaqueAtPath(const std::wstring& dirFullPath) {
     const std::optional<EntryTimes> before = ReadEntryTimes(dirFullPath);
 
     const bool metadataOk = MetadataStore::SetOpaqueMetadata(dirFullPath, &config_);
@@ -195,10 +204,6 @@ NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
 
     if (before.has_value()) {
         WriteEntryTimes(dirFullPath, *before, std::nullopt);
-    }
-
-    if (cache_) {
-        cache_->Invalidate(NormalizePath(dirRelativePath));
     }
 
     // Either marker makes IsOpaqueInLayer report the directory opaque. A

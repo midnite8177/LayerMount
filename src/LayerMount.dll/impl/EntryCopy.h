@@ -136,4 +136,24 @@ NTSTATUS CopyLinkWithCopyUpRecord(const std::wstring& srcAbsolute,
                                   const std::wstring& dstAbsolute,
                                   const EntryCopyPolicy& policy);
 
+// Copies the link at srcAbsolute, whose attributes are srcAttrs, to
+// upperPath, with the copy-up record that policy.record selects. The link
+// is built in containerPath, a new path in the work directory, through
+// BuildInContainerAndMove, so it inherits the ACEs of its upper parent.
+// When an entry holds upperPath, fails with STATUS_OBJECT_NAME_COLLISION
+// and leaves that entry as it was.
+NTSTATUS CopyLinkThroughWorkDir(const std::wstring& srcAbsolute,
+                                DWORD srcAttrs,
+                                const std::wstring& containerPath,
+                                const std::wstring& upperPath,
+                                const EntryCopyPolicy& policy);
+
+// Writes the ACEs of the DACL of the directory at parentAbs, the inherited
+// ones included, on the directory at dirAbs. When the process holds
+// SE_SECURITY_NAME, also writes the ACEs of the SACL of parentAbs. The DACL,
+// and the SACL when written, are protected. Without SE_SECURITY_NAME,
+// dirAbs keeps the SACL that it inherits from its own parent. An entry made
+// in dirAbs then inherits the DACL ACEs that it inherits in parentAbs.
+NTSTATUS WriteSecurityToInheritAs(const std::wstring& dirAbs, const std::wstring& parentAbs);
+
 }

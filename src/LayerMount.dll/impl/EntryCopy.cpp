@@ -3,10 +3,13 @@
 #include "MetadataStore.h"
 #include "NtStatusUtil.h"
 #include "ScopedHandle.h"
+#include "ElevationUtil.h"
 
+#include <aclapi.h>
 #include <winioctl.h>
 #include <climits>
 #include <iterator>
+#include <memory>
 #include <string_view>
 
 #pragma comment(lib, "advapi32.lib")
@@ -675,6 +678,45 @@ NTSTATUS CopyLinkWithCopyUpRecord(const std::wstring& srcAbsolute,
     return WriteCopyUpRecordOrRemoveEntry(
         dstAbsolute, CopiedEntryMetadata(srcAbsolute, policy.record, policy.config), kind,
         policy.config);
+}
+
+NTSTATUS WriteSecurityToInheritAs(const std::wstring& dirAbs, const std::wstring& parentAbs) {
+    const SECURITY_INFORMATION lists =
+        DropSaclWithoutPrivilege(DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION);
+    PACL parentDacl = nullptr;
+    PACL parentSacl = nullptr;
+    PSECURITY_DESCRIPTOR rawParentSd = nullptr;
+    const DWORD readError = ::GetNamedSecurityInfoW(parentAbs.c_str(), SE_FILE_OBJECT, lists,
+                                                    nullptr, nullptr, &parentDacl, &parentSacl,
+                                                    &rawParentSd);
+    if (readError != ERROR_SUCCESS) {
+        return NtStatusFromWin32(readError);
+    }
+    const std::unique_ptr<void, decltype(&::LocalFree)> parentSd(rawParentSd, &::LocalFree);
+
+    // A protected write keeps the ACEs that parentAbs inherits in the list.
+    // So a child of dirAbs also inherits the inheritable ACEs among them.
+    const SECURITY_INFORMATION protection = (lists & SACL_SECURITY_INFORMATION) != 0
+        ? PROTECTED_DACL_SECURITY_INFORMATION | PROTECTED_SACL_SECURITY_INFORMATION
+        : PROTECTED_DACL_SECURITY_INFORMATION;
+    const DWORD writeError = ::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(dirAbs.c_str()), SE_FILE_OBJECT, lists | protection,
+        nullptr, nullptr, parentDacl, parentSacl);
+    if (writeError != ERROR_SUCCESS) {
+        return NtStatusFromWin32(writeError);
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyLinkThroughWorkDir(const std::wstring& srcAbsolute,
+                                DWORD srcAttrs,
+                                const std::wstring& containerPath,
+                                const std::wstring& upperPath,
+                                const EntryCopyPolicy& policy) {
+    return BuildInContainerAndMove(
+        containerPath, upperPath, policy.config, [&](const std::wstring& stagedPath) {
+            return CopyLinkWithCopyUpRecord(srcAbsolute, srcAttrs, stagedPath, policy);
+        });
 }
 
 }

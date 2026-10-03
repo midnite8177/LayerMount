@@ -11,10 +11,13 @@
 #include <aclapi.h>
 #include <sddl.h>
 
+#include <algorithm>
+
 #pragma comment(lib, "advapi32.lib")
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::AddDenyAce;
 using LayerMountTestShared::EveryoneSid;
 
@@ -102,6 +105,96 @@ bool HasInheritedAceForSid(const std::wstring& path, PSID target) {
         if (::EqualSid(aceSid, target)) return true;
     }
     return false;
+}
+
+std::vector<BYTE> AceFlagsForSid(const std::wstring& path, PSID target) {
+    ScopedHandle entry(::CreateFileW(path.c_str(), READ_CONTROL,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING,
+                                     FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                     nullptr));
+    Assert::IsTrue(entry.IsValid(), (L"The test must open " + path).c_str());
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+        ::GetSecurityInfo(entry.Get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                          nullptr, nullptr, &dacl, nullptr, &sd),
+        (L"The test must read the DACL of " + path).c_str());
+    std::vector<BYTE> flags;
+    for (WORD i = 0; dacl != nullptr && i < dacl->AceCount; ++i) {
+        ACE_HEADER* hdr = nullptr;
+        if (!::GetAce(dacl, i, reinterpret_cast<LPVOID*>(&hdr))) continue;
+        PSID aceSid = nullptr;
+        if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
+            aceSid = &reinterpret_cast<ACCESS_ALLOWED_ACE*>(hdr)->SidStart;
+        } else if (hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
+            aceSid = &reinterpret_cast<ACCESS_DENIED_ACE*>(hdr)->SidStart;
+        } else {
+            continue;
+        }
+        if (::EqualSid(aceSid, target)) flags.push_back(hdr->AceFlags);
+    }
+    ::LocalFree(sd);
+    return flags;
+}
+
+struct WellKnownSid {
+    explicit WellKnownSid(WELL_KNOWN_SID_TYPE type) {
+        DWORD size = sizeof(buffer);
+        Assert::IsTrue(::CreateWellKnownSid(type, nullptr, buffer, &size) != FALSE,
+            L"The test must build the well-known SID");
+    }
+    PSID Get() const { return const_cast<BYTE*>(buffer); }
+    BYTE buffer[SECURITY_MAX_SID_SIZE];
+};
+
+void GrantInheritableReadAttributes(const std::wstring& path, PSID sid) {
+    PACL current = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+        ::GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, &current, nullptr, &sd),
+        L"The test must read the directory's DACL");
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = FILE_READ_ATTRIBUTES;
+    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(sid);
+    PACL merged = nullptr;
+    const DWORD mergeStatus = ::SetEntriesInAclW(1, &ea, current, &merged);
+    ::LocalFree(sd);
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, mergeStatus, L"The grant must merge into the DACL");
+    const DWORD setStatus = ::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, merged, nullptr);
+    ::LocalFree(merged);
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, setStatus, L"The directory's DACL must take the grant");
+}
+
+// upper\p holds an inherited ACE for parentSid, and the work directory an
+// explicit inheritable ACE for workSid.
+struct RenameInheritanceSetup {
+    explicit RenameInheritanceSetup(const TempLayerEnvironment& env)
+        : parentSid(WinBatchSid), workSid(WinDialupSid) {
+        GrantInheritableReadAttributes(env.Upper(), parentSid.Get());
+        env.CreateDir(env.Upper(), L"p");
+        GrantInheritableReadAttributes(env.Work(), workSid.Get());
+    }
+    WellKnownSid parentSid;
+    WellKnownSid workSid;
+};
+
+void AssertInheritsOnlyFromTheNewParent(const std::wstring& path,
+                                        const RenameInheritanceSetup& setup) {
+    const std::vector<BYTE> parentFlags = AceFlagsForSid(path, setup.parentSid.Get());
+    Assert::IsTrue(std::any_of(parentFlags.begin(), parentFlags.end(),
+                               [](BYTE f) { return (f & INHERITED_ACE) != 0; }),
+        (path + L" inherits the ACE of its new upper parent").c_str());
+    Assert::IsTrue(AceFlagsForSid(path, setup.workSid.Get()).empty(),
+        (path + L" carries no ACE of the work directory").c_str());
 }
 
 constexpr const wchar_t* kUpperRootHoldsEveryoneAce =
@@ -409,6 +502,114 @@ public:
             L"SACL (audit ACE) must be preserved on copy-up. When this "
             L"regresses, compliance-relevant audit rules silently drop on "
             L"first modification.");
+    }
+
+    TEST_METHOD(DirectoryRenameFromLower_TreeInheritsFromTheNewUpperParentOnly) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"tree\\sub\\x.txt", "x");
+        const RenameInheritanceSetup setup(env);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"p\\moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No),
+            L"The rename of the lower directory succeeds");
+
+        const std::wstring moved = env.Upper() + L"\\p\\moved";
+        AssertInheritsOnlyFromTheNewParent(moved, setup);
+        AssertInheritsOnlyFromTheNewParent(moved + L"\\sub", setup);
+        AssertInheritsOnlyFromTheNewParent(moved + L"\\sub\\x.txt", setup);
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The rename leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(DirectoryRenameFromLower_JunctionInheritsFromTheNewUpperParentOnly) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        const RenameInheritanceSetup setup(env);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"link"), CallerPath(L"p\\moved"),
+            RenameEntryKind::Link, ReplaceExisting::No),
+            L"The rename of the lower junction succeeds");
+
+        AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\moved", setup);
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The rename leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerJunctionInheritsFromItsUpperParentOnly) {
+        TempLayerEnvironment env(1);
+        if (!LowerJunctionCreatedOrSkipped(env, L"p")) {
+            return;
+        }
+        const RenameInheritanceSetup setup(env);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"p\\link"),
+            L"The copy-up of the lower junction succeeds");
+
+        AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\link", setup);
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The copy-up leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CaseOnlyRename_LowerJunctionInheritsFromItsUpperParentOnly) {
+        TempLayerEnvironment env(1);
+        if (!LowerJunctionCreatedOrSkipped(env, L"p")) {
+            return;
+        }
+        const RenameInheritanceSetup setup(env);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.RenameDirectoryCase(
+            CallerPath(L"p\\link"), CallerPath(L"p\\LINK"), RenameEntryKind::Link),
+            L"The case-only rename of the lower junction succeeds");
+
+        AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\LINK", setup);
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The rename leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerJunctionUnderAParentThatDeniesAdding_Succeeds) {
+        TempLayerEnvironment env(1);
+        if (!LowerJunctionCreatedOrSkipped(env, L"p")) {
+            return;
+        }
+        env.CreateDir(env.Upper(), L"p");
+        const AccessDenied denied(env.Upper() + L"\\p", FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"p\\link"),
+            L"The copy-up of the lower junction succeeds");
+
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\p\\link", FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The upper entry is a link");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The copy-up leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(DirectoryRenameFromLower_IntoAParentThatDeniesAdding_Succeeds) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"tree\\sub\\x.txt", "x");
+        env.CreateDir(env.Upper(), L"p");
+        const AccessDenied denied(env.Upper() + L"\\p", FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"p\\moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No),
+            L"The rename of the lower tree succeeds");
+
+        Assert::AreEqual(std::string("x"), env.ReadFile(env.Upper(), L"p\\moved\\sub\\x.txt"),
+            L"The tree arrives at the new name");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The rename leaves nothing in the work directory");
     }
 };
 

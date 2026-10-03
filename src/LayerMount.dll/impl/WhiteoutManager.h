@@ -64,6 +64,11 @@ public:
     // ignores a failure to restore them. Overlayfs keeps opacity in an
     // extended attribute, which does not change mtime.
     NTSTATUS SetOpaque(const std::wstring& dirRelativePath);
+
+    // Writes both opaque markers on the directory at dirFullPath, as
+    // SetOpaque does. The directory must exist. Makes no directory and
+    // invalidates no cache entry.
+    NTSTATUS SetOpaqueAtPath(const std::wstring& dirFullPath);
     bool RemoveOpaque(const std::wstring& dirRelativePath);
 
     // Whether the directory, an ancestor of it, or the layer root is opaque in

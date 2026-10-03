@@ -2,6 +2,7 @@
 
 #include "LayerMount.h"
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -101,6 +102,19 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
 // does not exist is success. The sidecar records of the removed entries
 // also go.
 NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config);
+
+// Creates a container directory at containerPath, a new path in the work
+// directory, and calls build with the path of an entry in the container.
+// The container gets the ACEs of the parent of upperPath through
+// WriteSecurityToInheritAs. A move does not recompute inherited ACEs, so
+// the entry that build makes inherits there as it does at upperPath. Then the entry moves to upperPath with
+// ReplaceExisting::No. An entry at upperPath fails the move with
+// STATUS_OBJECT_NAME_COLLISION and stays as it was. The call removes the
+// container after a success and after a failure. Returns the first failure.
+NTSTATUS BuildInContainerAndMove(const std::wstring& containerPath,
+                                 const std::wstring& upperPath,
+                                 const LayerConfig& config,
+                                 const std::function<NTSTATUS(const std::wstring&)>& build);
 
 // Creates a directory at path. A directory already there is success. Any
 // other entry there returns STATUS_OBJECT_NAME_COLLISION, so no caller

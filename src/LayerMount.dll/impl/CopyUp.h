@@ -125,7 +125,8 @@ public:
     // Copies a lower directory up first, then renames the upper entry in
     // place to newCallerPath's case. sourceKind is Directory or Link. A
     // lower Link source goes to the new name as a link, with a copy-up
-    // record and no opaque marker.
+    // record and no opaque marker. That rename does not count as a copy-up
+    // and emits no LM_EVT_COPY_UP.
     NTSTATUS RenameDirectoryCase(const CallerPath& oldCallerPath,
                                  const CallerPath& newCallerPath,
                                  RenameEntryKind sourceKind);
@@ -149,9 +150,6 @@ private:
     // STATUS_OBJECT_NAME_NOT_FOUND when no visible lower holds normalized.
     NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target);
 
-    // Builds the link in the work directory and moves it to
-    // target.upperPath. When an entry holds target.upperPath, fails with
-    // STATUS_OBJECT_NAME_COLLISION and leaves that entry as it was.
     NTSTATUS CopyUpLinkAndCount(const std::wstring& normalized, const CopyUpTarget& target);
 
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
