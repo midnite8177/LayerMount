@@ -5,6 +5,7 @@
 
 #include <CppUnitTest.h>
 
+#include <memory>
 #include <string>
 
 #pragma comment(lib, "advapi32.lib")
@@ -162,6 +163,57 @@ inline void AssertListingDenied(const std::wstring& dirPath) {
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual<DWORD>(
         ERROR_ACCESS_DENIED, FindFirstFileError(dirPath + L"\\*"),
         L"The deny ACE must make the directory scan fail");
+}
+
+// Creates a new file at path with backup intent and returns the error, or
+// ERROR_SUCCESS after it deletes the file it made.
+inline DWORD NewFileError(const std::wstring& path) {
+    const HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                      FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return ::GetLastError();
+    ::CloseHandle(file);
+    ::DeleteFileW(path.c_str());
+    return ERROR_SUCCESS;
+}
+
+// Creates a new directory at path and returns the error, or ERROR_SUCCESS
+// after it removes the directory it made.
+inline DWORD NewDirectoryError(const std::wstring& path) {
+    if (!::CreateDirectoryW(path.c_str(), nullptr)) return ::GetLastError();
+    ::RemoveDirectoryW(path.c_str());
+    return ERROR_SUCCESS;
+}
+
+// Calls visit(header, mask, sid) for each allow and deny ACE in the DACL of
+// the entry at path, in DACL order, and skips the other ACE types. A
+// reparse point gives its own DACL, not the DACL of its target. Asserts
+// when the DACL or one of its ACEs cannot be read.
+template <typename Visit>
+void ForEachAllowOrDenyAce(const std::wstring& path, const Visit& visit) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    const HANDLE entry = ::CreateFileW(path.c_str(), READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    Assert::IsTrue(entry != INVALID_HANDLE_VALUE, (L"The test must open " + path).c_str());
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    const DWORD readError = ::GetSecurityInfo(entry, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                              nullptr, nullptr, &dacl, nullptr, &sd);
+    ::CloseHandle(entry);
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, readError,
+        (L"The test must read the DACL of " + path).c_str());
+    const std::unique_ptr<void, decltype(&::LocalFree)> sdOwner(sd, &::LocalFree);
+    for (WORD i = 0; dacl != nullptr && i < dacl->AceCount; ++i) {
+        ACE_HEADER* header = nullptr;
+        Assert::IsTrue(::GetAce(dacl, i, reinterpret_cast<LPVOID*>(&header)) != FALSE,
+            (L"The test must read each ACE in the DACL of " + path).c_str());
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE &&
+            header->AceType != ACCESS_DENIED_ACE_TYPE) {
+            continue;
+        }
+        auto* ace = reinterpret_cast<ACCESS_ALLOWED_ACE*>(header);
+        visit(*header, ace->Mask, static_cast<PSID>(&ace->SidStart));
+    }
 }
 
 

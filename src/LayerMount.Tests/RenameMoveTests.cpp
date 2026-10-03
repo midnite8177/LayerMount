@@ -9,6 +9,8 @@
 
 #include "AclTestHelpers.h"
 
+#include <sddl.h>
+
 #include <cstdlib>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -18,6 +20,9 @@ using LayerMountTestShared::AddDenyAce;
 using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
 using LayerMountTestShared::DirectoryListingDenied;
 using LayerMountTestShared::AssertListingDenied;
+using LayerMountTestShared::ForEachAllowOrDenyAce;
+using LayerMountTestShared::NewDirectoryError;
+using LayerMountTestShared::NewFileError;
 
 namespace LayerMountTests {
 
@@ -707,17 +712,9 @@ public:
         : addFileDenied_(upper, FILE_ADD_FILE) {
         DisableRestorePrivilegeOnThread();
         const std::wstring probe = upper + L"\\probe";
-        Assert::IsTrue(::CreateDirectoryW(probe.c_str(), nullptr) != FALSE &&
-                       ::RemoveDirectoryW(probe.c_str()) != FALSE,
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, NewDirectoryError(probe),
             L"The upper root must still take a new directory");
-        const HANDLE file = ::CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        const DWORD fileError = file == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
-        if (file != INVALID_HANDLE_VALUE) {
-            ::CloseHandle(file);
-            ::DeleteFileW(probe.c_str());
-        }
-        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, fileError,
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, NewFileError(probe),
             L"The upper root must refuse a new file");
     }
 
@@ -728,6 +725,49 @@ private:
     AccessDenied addFileDenied_;
     BackupPrivilegeDisabledOnThread noBackupPrivilege_;
 };
+
+// Denies FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY and FILE_DELETE_CHILD on the
+// directory at path and disables SE_BACKUP_NAME and SE_RESTORE_NAME on the
+// thread. Declare it after the mount, because the mount enables the
+// privileges on the process, and with them the deny does not apply.
+class DirectoryRefusesNewEntries {
+public:
+    explicit DirectoryRefusesNewEntries(const std::wstring& path)
+        : denied_(path, FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD) {
+        DisableRestorePrivilegeOnThread();
+        const std::wstring probe = path + L"\\probe";
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, NewFileError(probe),
+            (path + L" must refuse a new file").c_str());
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, NewDirectoryError(probe),
+            (path + L" must refuse a new directory").c_str());
+    }
+
+    DirectoryRefusesNewEntries(const DirectoryRefusesNewEntries&) = delete;
+    DirectoryRefusesNewEntries& operator=(const DirectoryRefusesNewEntries&) = delete;
+
+private:
+    AccessDenied denied_;
+    BackupPrivilegeDisabledOnThread noBackupPrivilege_;
+};
+
+// Returns the explicit allow and deny ACEs in the DACL of path, in order,
+// as one "(type;flags;mask;sid)" group each.
+std::wstring ExplicitAcesOf(const std::wstring& path) {
+    std::wstring aces;
+    ForEachAllowOrDenyAce(path, [&](const ACE_HEADER& header, ACCESS_MASK mask, PSID sid) {
+        if ((header.AceFlags & INHERITED_ACE) != 0) {
+            return;
+        }
+        LPWSTR sidString = nullptr;
+        Assert::IsTrue(::ConvertSidToStringSidW(sid, &sidString) != FALSE,
+            (L"The test must convert an ACE SID in the DACL of " + path).c_str());
+        aces += L"(" + std::to_wstring(header.AceType) + L";" +
+                std::to_wstring(header.AceFlags) + L";" + std::to_wstring(mask) + L";" +
+                sidString + L")";
+        ::LocalFree(sidString);
+    });
+    return aces;
+}
 
 }
 
@@ -1617,6 +1657,32 @@ public:
             L"The merged subdirectory must show the last-write time of the upper d\\sub");
         AssertEntryShownAs(mount, L"e\\sub", L"x.txt", L"x.txt");
         AssertEntryShownAs(mount, L"e\\sub", L"u.txt", L"u.txt");
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWhoseLowerSubdirectoryRefusesNewEntries_GivesItTheUpperSubdirectorysDacl) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\sub\\x.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        const DWORD deniedOnlyOnTheUpperSub = FILE_WRITE_EA;
+        AddDenyAce(env.Upper() + L"\\d\\sub", deniedOnlyOnTheUpperSub, NO_INHERITANCE);
+        const std::wstring upperSubAces = ExplicitAcesOf(env.Upper() + L"\\d\\sub");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        {
+            DirectoryRefusesNewEntries lowerSubRefuses(env.Lower(0) + L"\\d\\sub");
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+        }
+
+        AssertEntryShownAs(mount, L"e\\sub", L"x.txt", L"x.txt");
+        AssertEntryShownAs(mount, L"e\\sub", L"u.txt", L"u.txt");
+        Assert::AreEqual(std::string("lower"), ReadThroughMount(mount, L"e\\sub\\x.txt"),
+            L"The lower file must read through the new name");
+        Assert::AreEqual(std::string("upper"), ReadThroughMount(mount, L"e\\sub\\u.txt"),
+            L"The upper file must read through the new name");
+        Assert::AreEqual(upperSubAces, ExplicitAcesOf(env.Upper() + L"\\e\\sub"),
+            L"The merged subdirectory must carry the explicit ACEs of the upper d\\sub");
     }
 
     TEST_METHOD(Rename_MergedDirectoryWithCompressedUpperDirectory_CompressesTheNewName) {

@@ -20,6 +20,7 @@ using namespace LayerMount;
 using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::AddDenyAce;
 using LayerMountTestShared::EveryoneSid;
+using LayerMountTestShared::ForEachAllowOrDenyAce;
 
 namespace LayerMountTests {
 
@@ -46,95 +47,27 @@ std::wstring GetOwnerSidString(const std::wstring& path) {
     return result;
 }
 
-// Count ACEs in the DACL that EqualSid to the target.
 size_t CountDaclAcesForSid(const std::wstring& path, PSID target) {
-    DWORD size = 0;
-    ::GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION,
-                        nullptr, 0, &size);
-    if (size == 0) return 0;
-    std::vector<BYTE> buf(size);
-    auto sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(buf.data());
-    if (!::GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION,
-                              sd, size, &size)) return 0;
-    BOOL daclPresent = FALSE, defaulted = FALSE;
-    PACL dacl = nullptr;
-    if (!::GetSecurityDescriptorDacl(sd, &daclPresent, &dacl, &defaulted) ||
-        !daclPresent || !dacl) return 0;
     size_t count = 0;
-    for (WORD i = 0; i < dacl->AceCount; ++i) {
-        ACE_HEADER* hdr = nullptr;
-        if (!::GetAce(dacl, i, reinterpret_cast<LPVOID*>(&hdr))) continue;
-        PSID aceSid = nullptr;
-        if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
-            aceSid = &reinterpret_cast<ACCESS_ALLOWED_ACE*>(hdr)->SidStart;
-        } else if (hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
-            aceSid = &reinterpret_cast<ACCESS_DENIED_ACE*>(hdr)->SidStart;
-        } else {
-            continue;
-        }
-        if (::EqualSid(aceSid, target)) ++count;
-    }
+    ForEachAllowOrDenyAce(path, [&](const ACE_HEADER&, ACCESS_MASK, PSID sid) {
+        if (::EqualSid(sid, target)) ++count;
+    });
     return count;
 }
 
 bool HasInheritedAceForSid(const std::wstring& path, PSID target) {
-    DWORD size = 0;
-    ::GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION,
-                        nullptr, 0, &size);
-    if (size == 0) return false;
-    std::vector<BYTE> buf(size);
-    auto sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(buf.data());
-    if (!::GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION,
-                              sd, size, &size)) return false;
-    BOOL daclPresent = FALSE, defaulted = FALSE;
-    PACL dacl = nullptr;
-    if (!::GetSecurityDescriptorDacl(sd, &daclPresent, &dacl, &defaulted) ||
-        !daclPresent || !dacl) return false;
-    for (WORD i = 0; i < dacl->AceCount; ++i) {
-        ACE_HEADER* hdr = nullptr;
-        if (!::GetAce(dacl, i, reinterpret_cast<LPVOID*>(&hdr))) continue;
-        if ((hdr->AceFlags & INHERITED_ACE) == 0) continue;
-        PSID aceSid = nullptr;
-        if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
-            aceSid = &reinterpret_cast<ACCESS_ALLOWED_ACE*>(hdr)->SidStart;
-        } else if (hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
-            aceSid = &reinterpret_cast<ACCESS_DENIED_ACE*>(hdr)->SidStart;
-        } else {
-            continue;
-        }
-        if (::EqualSid(aceSid, target)) return true;
-    }
-    return false;
+    bool found = false;
+    ForEachAllowOrDenyAce(path, [&](const ACE_HEADER& header, ACCESS_MASK, PSID sid) {
+        if ((header.AceFlags & INHERITED_ACE) != 0 && ::EqualSid(sid, target)) found = true;
+    });
+    return found;
 }
 
 std::vector<BYTE> AceFlagsForSid(const std::wstring& path, PSID target) {
-    ScopedHandle entry(::CreateFileW(path.c_str(), READ_CONTROL,
-                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                     nullptr, OPEN_EXISTING,
-                                     FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                                     nullptr));
-    Assert::IsTrue(entry.IsValid(), (L"The test must open " + path).c_str());
-    PACL dacl = nullptr;
-    PSECURITY_DESCRIPTOR sd = nullptr;
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        ::GetSecurityInfo(entry.Get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-                          nullptr, nullptr, &dacl, nullptr, &sd),
-        (L"The test must read the DACL of " + path).c_str());
     std::vector<BYTE> flags;
-    for (WORD i = 0; dacl != nullptr && i < dacl->AceCount; ++i) {
-        ACE_HEADER* hdr = nullptr;
-        if (!::GetAce(dacl, i, reinterpret_cast<LPVOID*>(&hdr))) continue;
-        PSID aceSid = nullptr;
-        if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
-            aceSid = &reinterpret_cast<ACCESS_ALLOWED_ACE*>(hdr)->SidStart;
-        } else if (hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
-            aceSid = &reinterpret_cast<ACCESS_DENIED_ACE*>(hdr)->SidStart;
-        } else {
-            continue;
-        }
-        if (::EqualSid(aceSid, target)) flags.push_back(hdr->AceFlags);
-    }
-    ::LocalFree(sd);
+    ForEachAllowOrDenyAce(path, [&](const ACE_HEADER& header, ACCESS_MASK, PSID sid) {
+        if (::EqualSid(sid, target)) flags.push_back(header.AceFlags);
+    });
     return flags;
 }
 
