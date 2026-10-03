@@ -70,23 +70,18 @@ NTSTATUS SparseRefusalStatus();
 
 void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs);
 
-// SetFileAttributes ignores FILE_ATTRIBUTE_COMPRESSED; only the FSCTL sets
-// it on a directory. Without the FSCTL on the upper directory, a file
-// created inside it through the mount lands dense. A failed encrypted state
-// returns the failure status.
-NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, std::optional<DWORD> srcAttrs);
-
-// Creates the directory at dstAbs with the layout and user streams of the
-// directory at srcAbs. Each entry created inside dstAbs moves its
-// last-write time, and NTFS refuses a new stream on a read-only directory,
-// so the caller writes the attributes and times last. A failure leaves the
-// directory in place for the caller to remove.
-NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs);
-
-// CopyDirectoryShell for a directory that does not exist yet. Fails with
-// the create's status when an entry is already at dstAbs, and leaves that
-// entry as it was.
-NTSTATUS CopyNewDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs);
+// Gives the directory at dstAbs the compression, encryption and user
+// streams of the directory at srcAbs. NTFS compresses or encrypts an entry
+// only when it creates it, so a call after the children are in place leaves
+// each child with its own state; a dstAbs that was already compressed or
+// encrypted gave that state to them. SetFileAttributes ignores
+// FILE_ATTRIBUTE_COMPRESSED, so compression goes through the FSCTL, and a
+// refusal of it is ignored. Without it, a file created in the directory
+// through the mount lands dense. A refused encryption or stream copy
+// returns its status. Unreadable source attributes skip the compression and
+// encryption. NTFS refuses a new stream on a read-only directory, so the
+// caller writes the attributes and times last.
+NTSTATUS CopyDirectoryLayoutAndStreams(const std::wstring& srcAbs, const std::wstring& dstAbs);
 
 // Copy the data of srcHandle to dstHandle. When both files are sparse, the
 // copy reads the allocated ranges of the source and writes only those, so a

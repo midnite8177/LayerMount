@@ -525,6 +525,19 @@ inline bool EnableCompression(const std::wstring& path) {
     return ok != FALSE;
 }
 
+// Encrypts the file or directory at path. Logs a skip with the error and
+// returns false when EFS refuses.
+inline bool EncryptedOrSkipped(const std::wstring& path) {
+    if (::EncryptFileW(path.c_str())) {
+        return true;
+    }
+    const DWORD err = ::GetLastError();
+    Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+        (L"[SKIP] EncryptFileW on " + path + L" failed (error " + std::to_wstring(err) +
+         L"). EFS unavailable or user has no cert.").c_str());
+    return false;
+}
+
 // Returns up to length bytes at offset in the file at path, fewer when the
 // file ends inside the range.
 inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD length) {

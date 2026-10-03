@@ -1637,6 +1637,28 @@ public:
             L"The new name must be compressed like the upper d");
     }
 
+    TEST_METHOD(Rename_MergedDirectoryWithCompressedUpperDirectory_KeepsTheLowerFileUncompressed) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\f.txt", std::string(64 * 1024, 'f'));
+        env.WriteFile(env.Upper(), L"d\\u.txt", "upper");
+        if (!EnableCompression(env.Upper() + L"\\d")) {
+            Logger::WriteMessage(
+                L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the upper directory");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        Assert::IsFalse((FileAttributesThroughMount(mount, L"d\\f.txt") & FILE_ATTRIBUTE_COMPRESSED) != 0,
+            L"Precondition: the lower d\\f.txt must be uncompressed");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the merged directory must succeed");
+
+        Assert::IsFalse((FileAttributesThroughMount(mount, L"e\\f.txt") & FILE_ATTRIBUTE_COMPRESSED) != 0,
+            L"The lower file must stay uncompressed under the new name");
+        Assert::IsTrue((FileAttributesThroughMount(mount, L"e") & FILE_ATTRIBUTE_COMPRESSED) != 0,
+            L"The new name must be compressed like the upper d");
+    }
+
     TEST_METHOD(Rename_LowerDirectoryUnderParentDenyingWriteAttributes_KeepsTheFilesLastWriteTime) {
         UNIT_SKIP_IF_NOT_ADMIN();
         TempLayerEnvironment env(1);

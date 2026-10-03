@@ -523,46 +523,17 @@ void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs) {
     }
 }
 
-NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, std::optional<DWORD> srcAttrs) {
-    if (!srcAttrs) {
-        return STATUS_SUCCESS;
+NTSTATUS CopyDirectoryLayoutAndStreams(const std::wstring& srcAbs, const std::wstring& dstAbs) {
+    const DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
+    if (srcAttrs != INVALID_FILE_ATTRIBUTES) {
+        if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
+            SetCompressedDirectory(dstAbs);
+        }
+        if (!ApplyEncryptedStateIfNeeded(dstAbs, srcAttrs)) {
+            return StatusOfFailedCall(ERROR_ACCESS_DENIED);
+        }
     }
-    if (HasFileAttribute(*srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
-        SetCompressedDirectory(upperPath);
-    }
-    if (!ApplyEncryptedStateIfNeeded(upperPath, *srcAttrs)) {
-        return StatusOfFailedCall(ERROR_ACCESS_DENIED);
-    }
-    return STATUS_SUCCESS;
-}
-
-namespace {
-
-NTSTATUS CopyLayoutAndStreams(const std::wstring& srcAbs, const std::wstring& dstAbs) {
-    const NTSTATUS layoutStatus =
-        ApplyDirectoryLayout(dstAbs, AttributesOrNone(::GetFileAttributesW(srcAbs.c_str())));
-    if (!NT_SUCCESS(layoutStatus)) {
-        return layoutStatus;
-    }
-
     return CopyUserAlternateDataStreams(srcAbs, dstAbs);
-}
-
-}
-
-NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
-    const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
-    if (!NT_SUCCESS(dirStatus)) {
-        return dirStatus;
-    }
-    return CopyLayoutAndStreams(srcAbs, dstAbs);
-}
-
-NTSTATUS CopyNewDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
-    if (!::CreateDirectoryW(dstAbs.c_str(), nullptr)) {
-        return StatusOfFailedCall(ERROR_WRITE_FAULT);
-    }
-    return CopyLayoutAndStreams(srcAbs, dstAbs);
 }
 
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {

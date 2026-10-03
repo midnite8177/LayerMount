@@ -95,12 +95,7 @@ public:
         env.WriteFile(env.Lower(0), L"secret.bin", "top-secret-payload");
 
         const std::wstring lowerPath = env.Lower(0) + L"\\secret.bin";
-        if (!::EncryptFileW(lowerPath.c_str())) {
-            const DWORD err = ::GetLastError();
-            wchar_t msg[160];
-            swprintf_s(msg, L"[SKIP] EncryptFileW on lower failed (error %lu). "
-                            L"EFS unavailable or user has no cert.", err);
-            Logger::WriteMessage(msg);
+        if (!EncryptedOrSkipped(lowerPath)) {
             return;
         }
         Assert::IsTrue(HasAttribute(lowerPath, FILE_ATTRIBUTE_ENCRYPTED),
@@ -127,12 +122,7 @@ public:
         env.CreateDir(env.Lower(0), L"secret-dir");
 
         const std::wstring lowerDir = env.Lower(0) + L"\\secret-dir";
-        if (!::EncryptFileW(lowerDir.c_str())) {
-            const DWORD err = ::GetLastError();
-            wchar_t msg[160];
-            swprintf_s(msg, L"[SKIP] EncryptFileW on lower dir failed (error %lu). "
-                            L"EFS unavailable or user has no cert.", err);
-            Logger::WriteMessage(msg);
+        if (!EncryptedOrSkipped(lowerDir)) {
             return;
         }
         Assert::IsTrue(HasAttribute(lowerDir, FILE_ATTRIBUTE_ENCRYPTED),

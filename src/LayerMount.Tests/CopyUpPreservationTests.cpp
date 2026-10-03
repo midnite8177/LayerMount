@@ -276,6 +276,84 @@ public:
         Assert::AreEqual(payload, env.ReadFile(env.Upper(), L"moved\\cmp.bin"));
     }
 
+    TEST_METHOD(DirectoryRename_CompressedDirectory_KeepsEachChildFilesCompression) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        const std::string payload(64 * 1024, 'p');
+        env.WriteFile(env.Lower(0), L"tree\\plain.bin", payload);
+        env.WriteFile(env.Lower(0), L"tree\\cmp.bin", payload);
+        const std::wstring lowerTree = env.Lower(0) + L"\\tree";
+        if (!EnableCompression(lowerTree + L"\\cmp.bin") || !EnableCompression(lowerTree)) {
+            Logger::WriteMessage(L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the lower tree");
+            return;
+        }
+        Assert::IsFalse(HasAttribute(lowerTree + L"\\plain.bin", FILE_ATTRIBUTE_COMPRESSED),
+            L"Precondition: lower plain.bin must be uncompressed");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
+
+        const std::wstring movedTree = env.Upper() + L"\\moved";
+        Assert::IsFalse(HasAttribute(movedTree + L"\\plain.bin", FILE_ATTRIBUTE_COMPRESSED),
+            L"The tree copy keeps an uncompressed child uncompressed");
+        Assert::IsTrue(HasAttribute(movedTree + L"\\cmp.bin", FILE_ATTRIBUTE_COMPRESSED),
+            L"The tree copy keeps a compressed child compressed");
+        Assert::IsTrue(HasAttribute(movedTree, FILE_ATTRIBUTE_COMPRESSED),
+            L"The tree copy keeps the directory compressed");
+        Assert::AreEqual(payload, env.ReadFile(env.Upper(), L"moved\\plain.bin"));
+    }
+
+    TEST_METHOD(DirectoryRename_CompressedDirectory_KeepsUncompressedSubdirectoryUncompressed) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree\\sub");
+        env.WriteFile(env.Lower(0), L"tree\\sub\\f.txt", "lower");
+        const std::wstring lowerTree = env.Lower(0) + L"\\tree";
+        if (!EnableCompression(lowerTree)) {
+            Logger::WriteMessage(L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the lower tree");
+            return;
+        }
+        Assert::IsFalse(HasAttribute(lowerTree + L"\\sub", FILE_ATTRIBUTE_COMPRESSED),
+            L"Precondition: lower tree\\sub must be uncompressed");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
+
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved\\sub", FILE_ATTRIBUTE_COMPRESSED),
+            L"The tree copy keeps an uncompressed subdirectory uncompressed");
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved\\sub\\f.txt", FILE_ATTRIBUTE_COMPRESSED),
+            L"The tree copy keeps a file of the uncompressed subdirectory uncompressed");
+    }
+
+    TEST_METHOD(DirectoryRename_EncryptedDirectory_KeepsPlaintextChildUnencrypted) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        env.WriteFile(env.Lower(0), L"tree\\plain.txt", "plaintext");
+        const std::wstring lowerTree = env.Lower(0) + L"\\tree";
+        if (!EncryptedOrSkipped(lowerTree)) {
+            return;
+        }
+        Assert::IsFalse(HasAttribute(lowerTree + L"\\plain.txt", FILE_ATTRIBUTE_ENCRYPTED),
+            L"Precondition: lower plain.txt must be unencrypted");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
+
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved\\plain.txt", FILE_ATTRIBUTE_ENCRYPTED),
+            L"The tree copy keeps an unencrypted child unencrypted");
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved", FILE_ATTRIBUTE_ENCRYPTED),
+            L"The tree copy keeps the directory encrypted");
+        Assert::AreEqual(std::string("plaintext"), env.ReadFile(env.Upper(), L"moved\\plain.txt"));
+    }
+
 
     TEST_METHOD(CopyUpFile_PreservesUserAlternateDataStreams) {
         TempLayerEnvironment env(1);

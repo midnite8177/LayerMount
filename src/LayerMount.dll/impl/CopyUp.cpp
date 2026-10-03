@@ -732,7 +732,12 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
 
 NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
                                       const std::wstring& stagedPath) {
-    NTSTATUS status = CopyNewDirectoryShell(sourcePath, stagedPath);
+    if (!::CreateDirectoryW(stagedPath.c_str(), nullptr)) {
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
+    }
+    // The staged directory has no children yet, so its layout goes on now
+    // and passes to the entries created in it later.
+    const NTSTATUS status = CopyDirectoryLayoutAndStreams(sourcePath, stagedPath);
     if (!NT_SUCCESS(status)) {
         return status;
     }
