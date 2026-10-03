@@ -58,6 +58,10 @@ std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
 std::wstring WithStoredLeafName(const std::wstring& targetPath,
                                 const std::wstring& entryPath);
 
+// Returns true for a directory that is not a reparse point. A scan of a
+// junction or a directory symbolic link lists the entries of its target.
+bool IsEnumerableDirectory(DWORD attributes);
+
 // Sets *isLink to whether the entry at path is a junction or a directory
 // symbolic link. Such a link is a directory reparse point whose reparse
 // tag is a name surrogate. Any other directory reparse point is not a

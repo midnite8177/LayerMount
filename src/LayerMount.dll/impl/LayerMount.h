@@ -161,6 +161,7 @@ enum class WhiteoutType;
 class MetadataStore;
 class Cache;
 class CopyUp;
+class UpperEntryRemover;
 namespace VHD { class VHDLayerManager; }
 namespace VSS { class VSSManager; }
 namespace LayerImage { class LayerImageManager; }
@@ -742,6 +743,12 @@ private:
     // STATUS_SUCCESS otherwise.
     NTSTATUS DirectoryEmptinessStatus(const std::wstring& dirNorm) const;
 
+    // Deletes the alternate data stream streamSuffix of the upper file at
+    // hostNorm. Returns STATUS_OBJECT_NAME_NOT_FOUND when the upper does
+    // not hold the host file.
+    NTSTATUS DeleteStreamByPath(const std::wstring& hostNorm,
+                                const std::wstring& streamSuffix);
+
     // The source and destination paths of a rename, in NormalizePath form.
     struct RenamePaths {
         const std::wstring& oldNorm;
@@ -824,6 +831,7 @@ private:
     std::unique_ptr<PathResolver> pathResolver_;
     LayerMountStats stats_;
     std::unique_ptr<CopyUp> copyUp_;
+    std::unique_ptr<UpperEntryRemover> upperEntryRemover_;
     std::shared_ptr<ProcessTracker> processTracker_;
 
     // Lazy VHD/VSS/LayerImage subsystems. Each subsystem's mutex guards

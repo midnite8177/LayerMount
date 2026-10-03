@@ -5,6 +5,7 @@
 #include "Cache.h"
 #include "LayerPath.h"
 #include "CopyUp.h"
+#include "UpperEntryRemover.h"
 #include "ElevationUtil.h"
 #include "ProcessTracker.h"
 #include "NtStatusUtil.h"
@@ -370,7 +371,9 @@ LayerMount::LayerMount(LayerConfig config)
     , whiteoutMgr_(std::make_unique<WhiteoutManager>(config_, cache_.get()))
     , pathResolver_(std::make_unique<PathResolver>(config_, *whiteoutMgr_, *cache_))
     , stats_()
-    , copyUp_(std::make_unique<CopyUp>(config_, *pathResolver_, *whiteoutMgr_, *cache_, stats_)) {
+    , copyUp_(std::make_unique<CopyUp>(config_, *pathResolver_, *whiteoutMgr_, *cache_, stats_))
+    , upperEntryRemover_(std::make_unique<UpperEntryRemover>(
+          config_, *pathResolver_, *whiteoutMgr_, *cache_)) {
     copyUp_->SetCapabilityGate(capabilities_);
     copyUp_->SetEventEmitter(&events_);
     whiteoutMgr_->SetEventEmitter(&events_);
@@ -2000,7 +2003,7 @@ NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid
         return STATUS_SUCCESS;
     }
 
-    if (isDirectory) {
+    if (IsEnumerableDirectory(resolved.attributes)) {
         return DirectoryEmptinessStatus(hostNorm);
     }
 
@@ -2040,13 +2043,7 @@ NTSTATUS LayerMount::CanDelete(FileContext* ctx) {
         return STATUS_SUCCESS;
     }
 
-    const bool openedAsReparsePoint =
-        (ctx->createOptions & FILE_OPEN_REPARSE_POINT) != 0 &&
-        (resolved.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-    const bool isEnumerableDirectory =
-        isDirectory && !openedAsReparsePoint &&
-        (resolved.attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-    if (isEnumerableDirectory) {
+    if (IsEnumerableDirectory(resolved.attributes)) {
         return DirectoryEmptinessStatus(normalized);
     }
 
@@ -2068,54 +2065,31 @@ NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
     }
 
     if (!streamSuffix.empty()) {
-        const std::wstring hostUpperPath = pathResolver_->GetUpperPath(hostNorm);
-        if (!pathResolver_->ExistsInUpper(hostNorm)) {
-            return STATUS_OBJECT_NAME_NOT_FOUND;
-        }
-        const std::wstring streamPath = hostUpperPath + streamSuffix;
-        HANDLE h = ::CreateFileW(streamPath.c_str(),
-            DELETE | SYNCHRONIZE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
-            return NtStatusFromWin32(::GetLastError());
-        }
-        NTSTATUS status = SetDeleteDispositionAndClose(h);
-        if (!NT_SUCCESS(status)) {
-            return status;
-        }
-        cache_->InvalidateWithAncestors(hostNorm);
-        return STATUS_SUCCESS;
+        return DeleteStreamByPath(hostNorm, streamSuffix);
     }
 
-    ResolvedPath resolved = pathResolver_->ResolvePath(hostNorm);
-    const bool isDirectory = resolved.Found() &&
-        (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(hostNorm);
-    const bool lowerHasIt = lowerResolved.Found();
+    return upperEntryRemover_->Remove(hostNorm);
+}
 
-    const std::wstring upperPath = pathResolver_->GetUpperPath(hostNorm);
-    if (::GetFileAttributesW(upperPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        if (isDirectory && whiteoutMgr_->IsOpaque(normalized)) {
-            whiteoutMgr_->RemoveOpaque(normalized);
-        }
-        const NTSTATUS removal = RemoveUpperEntry(upperPath, config_);
-        if (!NT_SUCCESS(removal)) {
-            cache_->InvalidateWithAncestors(normalized);
-            return removal;
-        }
+NTSTATUS LayerMount::DeleteStreamByPath(const std::wstring& hostNorm,
+                                        const std::wstring& streamSuffix) {
+    const std::wstring hostUpperPath = pathResolver_->GetUpperPath(hostNorm);
+    if (!pathResolver_->ExistsInUpper(hostNorm)) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-
-    if (lowerHasIt) {
-        if (!whiteoutMgr_->CreateWhiteout(normalized,
-                isDirectory ? WhiteoutType::Directory : WhiteoutType::File)) {
-            const DWORD whErr = ::GetLastError();
-            cache_->InvalidateWithAncestors(normalized);
-            return whErr ? NtStatusFromWin32(whErr) : STATUS_ACCESS_DENIED;
-        }
+    const std::wstring streamPath = hostUpperPath + streamSuffix;
+    HANDLE h = ::CreateFileW(streamPath.c_str(),
+        DELETE | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return NtStatusFromWin32(::GetLastError());
     }
-
-    cache_->InvalidateWithAncestors(normalized);
+    NTSTATUS status = SetDeleteDispositionAndClose(h);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    cache_->InvalidateWithAncestors(hostNorm);
     return STATUS_SUCCESS;
 }
 
@@ -2152,41 +2126,10 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
         return DeleteStreamOnContext(ctx);
     }
 
-    std::wstring normalized = NormalizePath(ctx->relativePath);
-    ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
-    const bool isDirectory = resolved.Found() &&
-        (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    ResolvedPath lowerResolved = pathResolver_->ResolveLowerPath(normalized);
-    const bool lowerHasIt = lowerResolved.Found();
-
     CloseContextHandle(ctx);
     ctx->handleNeedsReopen = false;
 
-    const std::wstring upperPath = pathResolver_->GetUpperPath(normalized);
-    const DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
-    if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        if ((upperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-            whiteoutMgr_->IsOpaque(normalized)) {
-            whiteoutMgr_->RemoveOpaque(normalized);
-        }
-        const NTSTATUS removal = RemoveUpperEntry(upperPath, config_);
-        if (!NT_SUCCESS(removal)) {
-            cache_->InvalidateWithAncestors(normalized);
-            return removal;
-        }
-    }
-
-    if (lowerHasIt) {
-        if (!whiteoutMgr_->CreateWhiteout(normalized,
-                isDirectory ? WhiteoutType::Directory : WhiteoutType::File)) {
-            const DWORD whErr = ::GetLastError();
-            cache_->InvalidateWithAncestors(normalized);
-            return whErr ? NtStatusFromWin32(whErr) : STATUS_ACCESS_DENIED;
-        }
-    }
-
-    cache_->InvalidateWithAncestors(normalized);
-    return STATUS_SUCCESS;
+    return upperEntryRemover_->Remove(NormalizePath(ctx->relativePath));
 }
 
 NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,

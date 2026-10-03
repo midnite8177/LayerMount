@@ -65,6 +65,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\MetadataStore.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerMount.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerPath.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\UpperEntryRemover.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\SidecarMetadata.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\PathResolver.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\ProcessTracker.h" />
@@ -75,6 +76,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\MetadataStore.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\LayerMount.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\LayerPath.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\UpperEntryRemover.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\SidecarMetadata.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\PathResolver.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\ProcessTracker.cpp" />

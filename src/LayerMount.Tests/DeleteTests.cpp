@@ -387,6 +387,105 @@ public:
         Assert::IsTrue(mount.MergeDirectoryEntries(L"sub").entries.count(L"x.txt") == 1,
             L"The lower's entry must stay in the listing");
     }
+
+    static bool CreateUpperLinkToTargetContaining(TempLayerEnvironment& env,
+                                                  LinkCreator createLink,
+                                                  const std::wstring& targetFile) {
+        env.WriteFile(env.Root(), L"target\\" + targetFile, "");
+        return LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", env.Root() + L"\\target");
+    }
+
+    static void AssertLinkGoneAndTargetFileKept(TempLayerEnvironment& env,
+                                                const std::wstring& targetFile) {
+        Assert::IsFalse(env.FileExists(env.Upper(), L"link"),
+            L"The delete must remove the upper link");
+        Assert::IsTrue(env.FileExists(env.Root(), L"target\\" + targetFile),
+            L"The delete of the link must leave the file in the link target");
+    }
+
+    static void AssertPathDeleteOfUpperLinkKeepsTargetFile(LinkCreator createLink,
+                                                           const std::wstring& targetFile) {
+        TempLayerEnvironment env(1);
+        if (!CreateUpperLinkToTargetContaining(env, createLink, targetFile)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"link", kNoCallerPid),
+            L"The delete of the upper link by path must succeed");
+
+        AssertLinkGoneAndTargetFileKept(env, targetFile);
+    }
+
+    static void AssertContextDeleteOfUpperLinkKeepsTargetFile(LinkCreator createLink,
+                                                              const std::wstring& targetFile) {
+        TempLayerEnvironment env(1);
+        if (!CreateUpperLinkToTargetContaining(env, createLink, targetFile)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"link", FILE_READ_ATTRIBUTES | DELETE,
+                                             FILE_OPEN_REPARSE_POINT, kNoCallerPid, &ctx, &info)),
+            L"Preconditions: the upper link must open as a link for delete");
+
+        const NTSTATUS status = mount.Delete(ctx.get());
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The delete of the open upper link must succeed");
+        AssertLinkGoneAndTargetFileKept(env, targetFile);
+    }
+
+    TEST_METHOD(Delete_UpperJunctionToOpaqueMarkedTarget_KeepsTheTargetMarker) {
+        AssertPathDeleteOfUpperLinkKeepsTargetFile(CreateDirectoryJunction, L".wh..wh..opq");
+    }
+
+    TEST_METHOD(Delete_UpperDirectorySymlinkToOpaqueMarkedTarget_KeepsTheTargetMarker) {
+        AssertPathDeleteOfUpperLinkKeepsTargetFile(CreateDirectorySymlink, L".wh..wh..opq");
+    }
+
+    TEST_METHOD(DeleteContext_UpperJunctionToOpaqueMarkedTarget_KeepsTheTargetMarker) {
+        AssertContextDeleteOfUpperLinkKeepsTargetFile(CreateDirectoryJunction, L".wh..wh..opq");
+    }
+
+    TEST_METHOD(DeleteContext_UpperDirectorySymlinkToOpaqueMarkedTarget_KeepsTheTargetMarker) {
+        AssertContextDeleteOfUpperLinkKeepsTargetFile(CreateDirectorySymlink, L".wh..wh..opq");
+    }
+
+    TEST_METHOD(Delete_UpperJunctionToTargetHoldingAFile_Succeeds) {
+        AssertPathDeleteOfUpperLinkKeepsTargetFile(CreateDirectoryJunction, L"inside.txt");
+    }
+
+    TEST_METHOD(Delete_UpperDirectorySymlinkToTargetHoldingAFile_Succeeds) {
+        AssertPathDeleteOfUpperLinkKeepsTargetFile(CreateDirectorySymlink, L"inside.txt");
+    }
+
+    static void AssertPathDeleteOfLowerLinkWhitesItOutAndKeepsTargetFile(LinkCreator createLink) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "");
+        if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"link", kNoCallerPid),
+            L"The delete of the lower link by path must succeed");
+
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"link")),
+            L"The delete of the lower link must write a whiteout for its name");
+        Assert::IsTrue(env.FileExists(env.Root(), L"target\\inside.txt"),
+            L"The delete of the link must leave the file in the link target");
+    }
+
+    TEST_METHOD(Delete_LowerJunctionToTargetHoldingAFile_WritesAWhiteout) {
+        AssertPathDeleteOfLowerLinkWhitesItOutAndKeepsTargetFile(CreateDirectoryJunction);
+    }
+
+    TEST_METHOD(Delete_LowerDirectorySymlinkToTargetHoldingAFile_WritesAWhiteout) {
+        AssertPathDeleteOfLowerLinkWhitesItOutAndKeepsTargetFile(CreateDirectorySymlink);
+    }
 };
 
 }

@@ -67,6 +67,11 @@ std::wstring WithStoredLeafName(const std::wstring& targetPath,
     return targetPath.substr(0, targetPath.find_last_of(L'\\') + 1) + fd.cFileName;
 }
 
+bool IsEnumerableDirectory(DWORD attributes) {
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
 NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLink) {
     *isLink = false;
     if (attributes == INVALID_FILE_ATTRIBUTES) {
@@ -169,13 +174,13 @@ NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path) {
         return NtStatusFromWin32(probeErr);
     }
 
-    const bool isDirectory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    if (isDirectory && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+    if (IsEnumerableDirectory(attrs)) {
         std::error_code ec;
         fs::remove_all(path, ec);
         return ec ? NtStatusFromWin32(static_cast<DWORD>(ec.value())) : STATUS_SUCCESS;
     }
 
+    const bool isDirectory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
     const BOOL removed = isDirectory ? ::RemoveDirectoryW(path.c_str())
                                      : ::DeleteFileW(path.c_str());
     if (!removed) {
