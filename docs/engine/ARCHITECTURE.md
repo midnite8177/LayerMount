@@ -109,10 +109,11 @@ or `STATUS_*`, never a generic `E_FAIL`. A failed metacopy fill keeps the
 status of the step that failed, and `LayerMountGetLastFailureWasFill`
 tells it apart from a refusal with the same status.
 
-**Atomicity at the boundary.** Anything that mutates the upper layer
-(file copy-up, directory rename across layers, whiteout creation) goes
-through the work directory and lands in the upper layer with a single
-rename, so a crash mid-operation never leaves a half-built shadow.
+**Atomicity at the boundary.** A file copy-up, a metacopy, a directory
+copy-up and a directory rename across layers build their entry in the
+work directory, with its streams, security, copy-up record, attributes
+and times. A single rename moves the entry into the upper layer, so a
+reader of the upper never sees a half-built entry.
 
 ---
 
@@ -522,7 +523,8 @@ unavailable. Steps:
 3. Ensure parent directories exist in the upper layer. Each missing
    parent triggers `CopyUpDirectory` so security descriptors and
    timestamps propagate.
-4. Generate a unique work-dir path under `workDirPath`.
+4. Generate a unique work-dir path under `workDirPath`. Steps 5 to 8
+   build the file at that path.
 5. Stream data from the lower handle into the work-dir handle in 64 KB
    chunks. Open the source with `FILE_FLAG_BACKUP_SEMANTICS` so
    `SE_BACKUP_NAME` can read past restrictive DACLs. With the sparse
@@ -536,46 +538,63 @@ unavailable. Steps:
    refusal, so on a volume that cannot compress the upper copy is dense
    and the copy-up succeeds. Compression has no capability bit. This
    matches a Windows copy of a compressed file to such a volume.
-6. Mirror metadata: file attributes, all three timestamps, security
-   descriptor (DACL/SACL/owner/group), and every alternate data stream
-   except the reserved ones, `:overlay` and every `:overlay.*` stream. A
-   stream that fails to copy fails the copy-up with its status.
-7. Write the `:overlay` metadata record (origin layer, copy-up
-   timestamp, captured stable index number).
-8. `MoveUpperEntry(work, upper, ReplaceExisting::Yes)`, one
-   `MoveFileExW` rename with `MOVEFILE_REPLACE_EXISTING`. If the
-   destination's parent DACL denies the move, it falls back to
-   `SetFileInformationByHandle(FileRenameInfo)` on a
-   backup-semantics-opened source handle, which honors
-   `SE_RESTORE_NAME`. A failed move removes the work file.
-9. Invalidate the cache for the affected path (and ancestors).
-10. Bump `stats.copyUpCount` and emit `LM_EVT_COPY_UP`.
+6. Copy the security descriptor (DACL/SACL/owner/group) and every
+   alternate data stream except the reserved ones, `:overlay` and every
+   `:overlay.*` stream. A stream that fails to copy fails the copy-up
+   with its status.
+7. Write the copy-up record (origin layer, copy-up timestamp, captured
+   stable index number). In the sidecar store the record moves with the
+   file in step 9.
+8. Set the file attributes and all three timestamps last, because NTFS
+   refuses a new stream on a read-only file. The staged file also gets
+   `FILE_ATTRIBUTE_ARCHIVE`, because the rename in step 9 sets it on a
+   file. So the move changes no attribute at the upper path.
+9. `MoveUpperEntry(work, upper, ReplaceExisting::No)`, one
+   `MoveFileExW` rename. If the destination's parent DACL denies the
+   move, it falls back to `SetFileInformationByHandle(FileRenameInfo)`
+   on a backup-semantics-opened source handle, which honors
+   `SE_RESTORE_NAME`. When an entry holds the upper path at the move,
+   the copy-up fails with `STATUS_OBJECT_NAME_COLLISION` and leaves that
+   entry as it was, as overlayfs fails the link of its temporary file
+   with `EEXIST`. A failure in steps 5 to 9 removes the work file and
+   its sidecar record, also when the file is read-only. The upper path
+   then has no entry.
+10. Invalidate the cache for the affected path (and ancestors).
+11. Bump `stats.copyUpCount` and emit `LM_EVT_COPY_UP`.
 
 ### Metacopy (`CopyUpMetadataOnly`)
 
 For files larger than 1 MiB on host adapters that support sparse files
-(`LM_CAP_SPARSE_FILES`), the engine stages a *metacopy shell* in the
-upper layer instead of a full data copy:
+(`LM_CAP_SPARSE_FILES`), the engine builds a *metacopy shell* in the
+work directory instead of a full data copy, and one rename moves it to
+the upper layer:
 
-1. Create the upper file as a sparse file (`FSCTL_SET_SPARSE`) of the
-   correct logical size, with no allocated data blocks. A compressed
-   lower file gives a compressed shell, under the same rule as the eager
-   copy-up. A refused `FSCTL_SET_COMPRESSION` leaves the shell dense and
-   never fails the metacopy, so a small file and a large file give the
-   same result.
-2. Mirror security, attributes, and timestamps. The lower's streams
-   arrive with the fill, together with the data.
-3. Write the `:overlay` metadata with `metacopy = true` and the origin
-   layer recorded.
-4. Ownership flips to the upper layer; the file context is marked
+1. Create the file in the work directory as a sparse file
+   (`FSCTL_SET_SPARSE`) of the correct logical size, with no allocated
+   data blocks. A compressed lower file gives a compressed shell, under
+   the same rule as the eager copy-up. A refused `FSCTL_SET_COMPRESSION`
+   leaves the shell dense and never fails the metacopy, so a small file
+   and a large file give the same result.
+2. Copy the security descriptor. The lower's streams arrive with the
+   fill, together with the data.
+3. Write the copy-up record with `metacopy = true` and the origin
+   layer, as overlayfs sets the metacopy xattr on its temporary file.
+4. Set the read-only attribute and the timestamps last, as in the full
+   copy-up. The shell gets its other attributes when it is created.
+5. Move the shell to the upper path with `ReplaceExisting::No`, under
+   the same rules as step 9 of the full copy-up.
+6. Ownership flips to the upper layer; the file context is marked
    `isMetacopyOnly = true`.
 
 The shell fills at the first open that asks for data: read data, write
 data, append data, or execute. `Open` calls `CompleteLazyCopyUp` before
 it opens the handle. The call streams the data from the recorded origin
 into the upper sparse skeleton and clears the metacopy flag. The fill
-takes the sparse attribute off unless the lower file is sparse, so a
-filled file has the allocation of a normal copy. An open for
+works on the upper file in place, as overlayfs fills a metacopy file.
+The fill takes the read-only attribute off a read-only shell for the
+writes and puts it back at the end. The fill takes the sparse attribute
+off unless the lower file is sparse, so a filled file has the allocation
+of a normal copy. An open for
 attributes, security, or delete keeps the shell sparse. A failed fill
 fails the open with the fill's status and returns no handle. `Read`
 never copies a file up and never reopens the handle for a fill. The one

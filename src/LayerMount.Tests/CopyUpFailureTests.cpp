@@ -182,39 +182,42 @@ void LM_CALL MakeForeignDirectoryAtParentCopyUp(const LM_EVENT* evt, void* conte
     }
 }
 
-// While it lives, makes the copy-up of foreign.parent create a foreign
-// directory at foreign.foreignDir. When foreign.heldStreamPath is not
-// empty, it also holds that stream open with no sharing.
-class ForeignDirectoryArmed {
+// While it lives, makes the copy-up of foreign.parent call MakeForeign,
+// which makes the foreign entry that foreign describes.
+template <typename Foreign, LM_EVENT_CALLBACK MakeForeign>
+class ForeignEntryArmed {
 public:
-    ForeignDirectoryArmed(CopyUp& copyUp,
-                          const std::wstring& parent,
-                          const std::wstring& foreignDir,
-                          const std::wstring& heldStreamPath)
-        : copyUp_(copyUp) {
-        foreign.parent = parent;
-        foreign.foreignDir = foreignDir;
-        foreign.heldStreamPath = heldStreamPath;
-        foreign.stampedTime = MakeFileTime(2001, 2, 3);
-        events_.Set(&MakeForeignDirectoryAtParentCopyUp, &foreign);
+    ForeignEntryArmed(CopyUp& copyUp, Foreign armed)
+        : foreign(std::move(armed)), copyUp_(copyUp) {
+        events_.Set(MakeForeign, &foreign);
         copyUp_.SetEventEmitter(&events_);
     }
-    ~ForeignDirectoryArmed() { copyUp_.SetEventEmitter(nullptr); }
-    ForeignDirectoryArmed(const ForeignDirectoryArmed&) = delete;
-    ForeignDirectoryArmed& operator=(const ForeignDirectoryArmed&) = delete;
+    ~ForeignEntryArmed() { copyUp_.SetEventEmitter(nullptr); }
+    ForeignEntryArmed(const ForeignEntryArmed&) = delete;
+    ForeignEntryArmed& operator=(const ForeignEntryArmed&) = delete;
 
-    ForeignDirectoryAtParentCopyUp foreign;
+    Foreign foreign;
 
 private:
     CopyUp& copyUp_;
     ::LayerMount::abi::EventEmitter events_;
 };
 
+using ForeignDirectoryArmed =
+    ForeignEntryArmed<ForeignDirectoryAtParentCopyUp, &MakeForeignDirectoryAtParentCopyUp>;
+
+// When heldStreamPath is not empty, the armed copy-up also holds that
+// stream open with no sharing.
 ForeignDirectoryArmed ArmForeignDirectoryAt(CopyUpAndRenameRig& rig,
                                             const std::wstring& parent,
                                             const std::wstring& foreignDir,
                                             const std::wstring& heldStreamPath) {
-    return ForeignDirectoryArmed(rig.copyUp, parent, foreignDir, heldStreamPath);
+    ForeignDirectoryAtParentCopyUp foreign;
+    foreign.parent = parent;
+    foreign.foreignDir = foreignDir;
+    foreign.heldStreamPath = heldStreamPath;
+    foreign.stampedTime = MakeFileTime(2001, 2, 3);
+    return ForeignDirectoryArmed(rig.copyUp, std::move(foreign));
 }
 
 void AssertForeignDirectoryUntouched(const ForeignDirectoryAtParentCopyUp& foreign,
@@ -242,6 +245,105 @@ void AssertForeignDirectoryUntouched(const ForeignDirectoryAtParentCopyUp& forei
                        .originLayer.empty(),
         L"The foreign directory gets no copy-up record");
 }
+
+// A file that something other than the engine makes at the upper path of a
+// child, with fixed contents and times, while the engine copies up the
+// child's parent.
+struct ForeignFileAtParentCopyUp {
+    std::wstring parent;
+    std::wstring foreignFile;
+    FILETIME stampedTime;
+    bool made = false;
+};
+
+// Fires inside the copy-up of the child, at the copy-up of its parent. The
+// copy-up of the child has found no upper entry at its path by then.
+void LM_CALL MakeForeignFileAtParentCopyUp(const LM_EVENT* evt, void* context) {
+    auto* foreign = static_cast<ForeignFileAtParentCopyUp*>(context);
+    if (evt->type != LM_EVT_COPY_UP || evt->relativePath == nullptr ||
+        foreign->parent != evt->relativePath || foreign->made) {
+        return;
+    }
+    ScopedHandle file(::CreateFileW(foreign->foreignFile.c_str(), GENERIC_WRITE, 0, nullptr,
+                                    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+    DWORD written = 0;
+    foreign->made = file.IsValid() &&
+                    ::WriteFile(file.Get(), "foreign", 7, &written, nullptr) != FALSE &&
+                    ::SetFileTime(file.Get(), &foreign->stampedTime, &foreign->stampedTime,
+                                  &foreign->stampedTime) != FALSE;
+}
+
+using ForeignFileArmed =
+    ForeignEntryArmed<ForeignFileAtParentCopyUp, &MakeForeignFileAtParentCopyUp>;
+
+ForeignFileArmed ArmForeignFileAt(CopyUpAndRenameRig& rig,
+                                  const std::wstring& parent,
+                                  const std::wstring& foreignFile) {
+    ForeignFileAtParentCopyUp foreign;
+    foreign.parent = parent;
+    foreign.foreignFile = foreignFile;
+    foreign.stampedTime = MakeFileTime(2001, 2, 3);
+    return ForeignFileArmed(rig.copyUp, std::move(foreign));
+}
+
+void AssertForeignFileUntouched(const TempLayerEnvironment& env,
+                                const std::wstring& relativePath,
+                                const ForeignFileAtParentCopyUp& foreign,
+                                const LayerConfig& config) {
+    const DWORD attributes = ::GetFileAttributesW(foreign.foreignFile.c_str());
+    Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES, attributes,
+        L"The foreign file stays at the upper path");
+    Assert::AreEqual(std::string("foreign"), env.ReadFile(env.Upper(), relativePath),
+        L"The foreign file keeps its contents");
+    Assert::AreEqual<DWORD>(0, attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+        L"The foreign file does not take the lower file's attributes");
+    Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+        ::GetFileAttributesW((foreign.foreignFile + L":s").c_str()),
+        L"The foreign file does not take the lower file's stream");
+    FILETIME creation{}, access{}, write{};
+    GetTimes(foreign.foreignFile, &creation, &access, &write);
+    Assert::IsTrue(FileTimesEqual(foreign.stampedTime, write),
+        L"The foreign file keeps its last-write time");
+    Assert::IsTrue(FileTimesEqual(foreign.stampedTime, creation),
+        L"The foreign file keeps its creation time");
+    Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(foreign.foreignFile, &config)
+                       .originLayer.empty(),
+        L"The foreign file gets no copy-up record");
+}
+
+FILETIME StampedLowerFileTime() {
+    return MakeFileTime(1999, 5, 6);
+}
+
+// Makes the lower file at relativePath read-only and hidden, with a stream
+// named s and the times of StampedLowerFileTime.
+void MakeReadOnlyHiddenLowerFileWithStream(const TempLayerEnvironment& env,
+                                           const std::wstring& relativePath) {
+    env.WriteFile(env.Lower(0), relativePath, "lower");
+    const std::wstring lowerFile = env.Lower(0) + L"\\" + relativePath;
+    ScopedHandle stream(::CreateFileW((lowerFile + L":s").c_str(), GENERIC_WRITE, 0, nullptr,
+                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Assert::IsTrue(stream.IsValid(), L"The test must write the lower file's stream");
+    stream.Reset();
+    const FILETIME stamped = StampedLowerFileTime();
+    StampTimes(lowerFile, stamped, stamped, stamped);
+    Assert::IsTrue(::SetFileAttributesW(lowerFile.c_str(),
+                                        FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN) != FALSE,
+        L"The test must make the lower file read-only and hidden");
+}
+
+void AssertTimesOfLowerFile(const std::wstring& upperFile) {
+    FILETIME creation{}, access{}, write{};
+    GetTimes(upperFile, &creation, &access, &write);
+    Assert::IsTrue(FileTimesEqual(StampedLowerFileTime(), write),
+        L"The upper file has the lower file's last-write time");
+    Assert::IsTrue(FileTimesEqual(StampedLowerFileTime(), creation),
+        L"The upper file has the lower file's creation time");
+}
+
+constexpr DWORD kFileChanges = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_ATTRIBUTES |
+                               FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE |
+                               FILE_NOTIFY_CHANGE_CREATION | FILE_NOTIFY_CHANGE_SECURITY;
 
 // Makes the lower directory at relativePath hidden, with a stream named s.
 void MakeHiddenLowerDirectoryWithStream(const TempLayerEnvironment& env,
@@ -643,6 +745,170 @@ public:
 
         Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
             L"The copy reports the status of the stream that failed");
+    }
+
+    TEST_METHOD(CopyUpFile_ParentWatch_SeesTheFileArriveOnceWithItsStreamAndRecord) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            MakeReadOnlyHiddenLowerFileWithStream(env, L"f.txt");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            DirectoryWatch watch(env.Upper(), kFileChanges);
+            const NTSTATUS status = rig.copyUp.CopyUpFile(L"f.txt");
+            const std::vector<DWORD> actions = watch.ActionsFor(L"f.txt");
+
+            Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, status, L"The file copy-up succeeds");
+            Assert::AreEqual<size_t>(1, actions.size(),
+                L"The parent sees one change for the file, its arrival");
+            Assert::AreEqual<DWORD>(FILE_ACTION_ADDED, actions[0],
+                L"The file arrives in the parent by a move from the work directory");
+            const std::wstring upperFile = env.Upper() + L"\\f.txt";
+            Assert::AreEqual<DWORD>(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
+                ::GetFileAttributesW(upperFile.c_str()) &
+                    (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+                L"The file arrives with the lower file's attributes");
+            AssertTimesOfLowerFile(upperFile);
+            Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+                ::GetFileAttributesW((upperFile + L":s").c_str()),
+                L"The file arrives with the lower file's stream");
+            Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\f.txt").c_str(),
+                MetadataStore::ReadLayerMountMetadata(upperFile, &rig.config).originLayer.c_str()),
+                L"The upper file's copy-up record names the lower file");
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The copy-up leaves nothing in the work directory");
+        });
+    }
+
+    TEST_METHOD(CopyUpFile_StreamCopyFails_ReturnsThatStreamsStatusAndShowsNothingAtTheUpperPath) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"f.txt", "lower");
+        ScopedHandle heldSrc = HoldNewStreamExclusively(env.Lower(0) + L"\\f.txt:held");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        DirectoryWatch watch(env.Upper(), FILE_NOTIFY_CHANGE_FILE_NAME);
+        const NTSTATUS status = rig.copyUp.CopyUpFile(L"f.txt");
+        heldSrc.Reset();
+        const std::vector<DWORD> actions = watch.ActionsFor(L"f.txt");
+
+        Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
+            L"The file copy-up reports the status of the stream that failed");
+        Assert::IsTrue(actions.empty(), L"The parent never sees an entry at the upper path");
+        Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW((env.Upper() + L"\\f.txt").c_str()),
+            L"A failed file copy-up leaves no upper file");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"A failed file copy-up leaves nothing in the work directory");
+    }
+
+    TEST_METHOD(CopyUpFile_ForeignFileAtTheUpperPath_FailsWithCollisionAndKeepsIt) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            MakeReadOnlyHiddenLowerFileWithStream(env, L"p\\f.txt");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            auto armed = ArmForeignFileAt(rig, L"p", env.Upper() + L"\\p\\f.txt");
+            const NTSTATUS status = rig.copyUp.CopyUpFile(L"p\\f.txt");
+
+            Assert::IsTrue(armed.foreign.made, L"The test makes the foreign file at the upper path");
+            Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
+                L"The copy-up fails when an entry it did not make holds the upper path");
+            AssertForeignFileUntouched(env, L"p\\f.txt", armed.foreign, rig.config);
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The failed copy-up removes its read-only copy from the work directory");
+        });
+    }
+
+    TEST_METHOD(CopyUpMetadataOnly_ParentWatch_SeesTheShellArriveOnceWithItsRecord) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            MakeReadOnlyHiddenLowerFileWithStream(env, L"f.txt");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            DirectoryWatch watch(env.Upper(), kFileChanges);
+            const NTSTATUS status = rig.copyUp.CopyUpMetadataOnly(L"f.txt");
+            const std::vector<DWORD> actions = watch.ActionsFor(L"f.txt");
+
+            Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, status, L"The metacopy succeeds");
+            Assert::AreEqual<size_t>(1, actions.size(),
+                L"The parent sees one change for the shell, its arrival");
+            Assert::AreEqual<DWORD>(FILE_ACTION_ADDED, actions[0],
+                L"The shell arrives in the parent by a move from the work directory");
+            const std::wstring upperFile = env.Upper() + L"\\f.txt";
+            Assert::AreEqual<DWORD>(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
+                ::GetFileAttributesW(upperFile.c_str()) &
+                    (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+                L"The shell arrives with the lower file's attributes");
+            AssertTimesOfLowerFile(upperFile);
+            const LayerMountMetadata md =
+                MetadataStore::ReadLayerMountMetadata(upperFile, &rig.config);
+            Assert::IsTrue(md.metacopy, L"The shell's copy-up record has the metacopy flag");
+            Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\f.txt").c_str(),
+                md.originLayer.c_str()),
+                L"The shell's copy-up record names the lower file");
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The metacopy leaves nothing in the work directory");
+        });
+    }
+
+    TEST_METHOD(CompleteLazyCopyUp_ReadOnlyShell_FillsTheShellAndKeepsItReadOnly) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            MakeReadOnlyHiddenLowerFileWithStream(env, L"f.txt");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"f.txt"),
+                L"The metacopy of the read-only lower file succeeds");
+
+            AssertStatus(STATUS_SUCCESS, rig.copyUp.CompleteLazyCopyUp(L"f.txt"),
+                L"The fill of the read-only shell succeeds");
+
+            const std::wstring upperFile = env.Upper() + L"\\f.txt";
+            Assert::AreEqual(std::string("lower"), env.ReadFile(env.Upper(), L"f.txt"),
+                L"The filled file has the lower file's data");
+            Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+                ::GetFileAttributesW((upperFile + L":s").c_str()),
+                L"The filled file has the lower file's stream");
+            Assert::IsFalse(MetadataStore::ReadLayerMountMetadata(upperFile, &rig.config).metacopy,
+                L"The fill clears the metacopy flag");
+            Assert::AreEqual<DWORD>(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
+                ::GetFileAttributesW(upperFile.c_str()) &
+                    (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+                L"The filled file keeps the lower file's attributes");
+            AssertTimesOfLowerFile(upperFile);
+        });
+    }
+
+    TEST_METHOD(CopyUpMetadataOnly_ForeignFileAtTheUpperPath_FailsWithCollisionAndKeepsIt) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            TempLayerEnvironment env(1);
+            MakeReadOnlyHiddenLowerFileWithStream(env, L"p\\f.txt");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            CopyUpAndRenameRig rig(config);
+
+            auto armed = ArmForeignFileAt(rig, L"p", env.Upper() + L"\\p\\f.txt");
+            const NTSTATUS status = rig.copyUp.CopyUpMetadataOnly(L"p\\f.txt");
+
+            Assert::IsTrue(armed.foreign.made, L"The test makes the foreign file at the upper path");
+            Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
+                L"The metacopy fails when an entry it did not make holds the upper path");
+            AssertForeignFileUntouched(env, L"p\\f.txt", armed.foreign, rig.config);
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The failed metacopy removes its read-only shell from the work directory");
+        });
     }
 
     TEST_METHOD(CopyUpDirectory_StreamCopyFails_ReturnsThatStreamsStatusAndLeavesNoUpperDirectory) {

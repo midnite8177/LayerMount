@@ -51,6 +51,41 @@ bool ClearSparseAndTrimAllocation(HANDLE handle) {
 
 namespace LayerMount {
 
+namespace {
+
+DWORD WithoutReadOnly(DWORD attributes) {
+    return attributes & ~FILE_ATTRIBUTE_READONLY;
+}
+
+// attributes must be the current attributes of the file at path. Writes
+// them without FILE_ATTRIBUTE_READONLY and keeps the stored times.
+bool ClearReadOnly(const std::wstring& path, DWORD attributes) {
+    return (attributes & FILE_ATTRIBUTE_READONLY) == 0 ||
+           WriteEntryTimes(path, EntryTimes{}, WithoutReadOnly(attributes));
+}
+
+// A delete refuses a read-only file, and a staged file is read-only once
+// its attributes go on.
+void RemoveStagedFile(const std::wstring& workPath, const LayerConfig& config) {
+    const DWORD attributes = ::GetFileAttributesW(workPath.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        ClearReadOnly(workPath, attributes);
+    }
+    RemoveUpperEntry(workPath, config);
+}
+
+// A rename sets FILE_ATTRIBUTE_ARCHIVE on a file. The staged file gets the
+// bit before the move, so the move changes no attribute at the upper path.
+std::optional<DWORD> StagedFileAttributes(DWORD sourceAttributes) {
+    std::optional<DWORD> attributes = AttributesOrNone(sourceAttributes);
+    if (attributes.has_value()) {
+        *attributes |= FILE_ATTRIBUTE_ARCHIVE;
+    }
+    return attributes;
+}
+
+}
+
 // Serializes copy-ups of one relative path. The constructor blocks until no
 // other thread holds `path`. The reservation is not reentrant: a thread that
 // reserves a path it already holds deadlocks. A nested reservation goes from a
@@ -118,6 +153,10 @@ public:
         return WriteEntryTimes(targetPath_, times_, attributes_);
     }
 
+    // The destructor then writes nothing. A failed staged copy calls this
+    // before its removal, so a copy that the removal leaves stays writable.
+    void Cancel() { restored_ = true; }
+
 private:
     EntryTimes times_{};
     std::optional<DWORD> attributes_;
@@ -170,8 +209,7 @@ void CopyUp::CleanWorkDirectory() {
     }
 
     do {
-        std::wstring filePath = JoinDirPath(config_.workDirPath, findData.cFileName);
-        DeleteFileW(filePath.c_str());
+        RemoveStagedFile(JoinDirPath(config_.workDirPath, findData.cFileName), config_);
     } while (FindNextFileW(hFind, &findData));
 
     FindClose(hFind);
@@ -185,9 +223,9 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
     }
 
     const NTSTATUS status =
-        MoveUpperEntry(workPath, finalUpperPath, ReplaceExisting::Yes, config_);
+        MoveUpperEntry(workPath, finalUpperPath, ReplaceExisting::No, config_);
     if (!NT_SUCCESS(status)) {
-        RemoveUpperEntry(workPath, config_);
+        RemoveStagedFile(workPath, config_);
     }
     return status;
 }
@@ -243,7 +281,6 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
         return status;
     }
 
-    // Close handles before commit (MoveFileEx needs exclusive access)
     srcHandle.Reset();
     dstHandle.Reset();
 
@@ -267,26 +304,27 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::FinishCommittedFile(const std::wstring& sourcePath,
-                                     const std::wstring& upperPath,
-                                     FileBasicInfoGuard& basicInfo) {
-    const NTSTATUS streamStatus = CopyUserAlternateDataStreams(sourcePath, upperPath);
+NTSTATUS CopyUp::FinishStagedFile(const std::wstring& sourcePath,
+                                  const std::wstring& workPath,
+                                  FileBasicInfoGuard& basicInfo) {
+    const NTSTATUS streamStatus = CopyUserAlternateDataStreams(sourcePath, workPath);
     if (!NT_SUCCESS(streamStatus)) {
-        ::DeleteFileW(upperPath.c_str());
         return streamStatus;
     }
+    return RecordStagedFile(workPath, MakeCopyUpMetadata(sourcePath), basicInfo);
+}
 
-    LayerMountMetadata metadata = MakeCopyUpMetadata(sourcePath);
-    NTSTATUS metadataStatus = WriteCopyUpRecordOrRemoveEntry(
-        upperPath, metadata, NewUpperEntryKind::File, config_);
-    if (!NT_SUCCESS(metadataStatus)) {
-        return metadataStatus;
+NTSTATUS CopyUp::RecordStagedFile(const std::wstring& workPath,
+                                  const LayerMountMetadata& metadata,
+                                  FileBasicInfoGuard& basicInfo) {
+    if (!MetadataStore::WriteLayerMountMetadata(workPath, metadata, &config_)) {
+        return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
 
+    // The attributes go on after the streams and the record, because NTFS
+    // refuses a new stream on a read-only file.
     if (!basicInfo.Restore()) {
-        const DWORD err = ::GetLastError();
-        RemoveUpperEntry(upperPath, config_);
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+        return StatusOfFailedCall(ERROR_ACCESS_DENIED);
     }
 
     return STATUS_SUCCESS;
@@ -310,15 +348,11 @@ NTSTATUS CopyUp::PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarge
 NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     std::wstring normalized = NormalizePath(relativePath);
 
-    // Serialize concurrent copy-ups to the same path. The reservation blocks
-    // any second thread until ours completes; on wake-up the second thread
-    // re-checks ExistsInUpper below and short-circuits to STATUS_SUCCESS
-    // because our commit has already landed. Without serialization, racers
-    // would all fight at MoveFileExW commit time (losers see ACCESS_DENIED
-    // or sharing violations from the just-placed target).
     PathReservation reservation(*this, normalized);
 
-    // Check if already in upper layer (could have been copied by concurrent thread)
+    // A copy-up that waited on the reservation finds the copy of the one
+    // before it here. Without this check, its move fails with
+    // STATUS_OBJECT_NAME_COLLISION.
     if (pathResolver_.ExistsInUpper(normalized)) {
         return STATUS_SUCCESS;
     }
@@ -351,21 +385,26 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
-    FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), upperPath);
+    const std::wstring workPath = GenerateWorkPath();
+    FileBasicInfoGuard basicInfo(srcHandle.Get(), StagedFileAttributes(srcAttrs), workPath);
 
-    std::wstring workPath = GenerateWorkPath();
     status = StageFileInWorkDir(source.absolutePath, srcHandle, srcAttrs, workPath);
+    if (NT_SUCCESS(status)) {
+        status = FinishStagedFile(source.absolutePath, workPath, basicInfo);
+    }
     if (!NT_SUCCESS(status)) {
+        basicInfo.Cancel();
+        RemoveStagedFile(workPath, config_);
         return status;
     }
 
-    // Atomic commit from work dir to upper layer
-    status = CommitFromWorkDir(workPath, upperPath);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
+    return CommitStagedFile(normalized, workPath, upperPath);
+}
 
-    status = FinishCommittedFile(source.absolutePath, upperPath, basicInfo);
+NTSTATUS CopyUp::CommitStagedFile(const std::wstring& normalized,
+                                  const std::wstring& workPath,
+                                  const std::wstring& upperPath) {
+    const NTSTATUS status = CommitFromWorkDir(workPath, upperPath);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -373,8 +412,6 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     cache_.InvalidateWithAncestors(normalized);
     RecordCopyUp(normalized);
 
-    // Reservation released by RAII at scope exit; waiters then re-check
-    // ExistsInUpper and short-circuit with SUCCESS — our commit is done.
     return STATUS_SUCCESS;
 }
 
@@ -398,7 +435,9 @@ NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
         0,
         nullptr,
         CREATE_NEW,
-        srcAttrs.dwFileAttributes,
+        // NTFS refuses the stream of the copy-up record on a read-only file.
+        // The guard in CopyUpMetadataOnly sets read-only after the record.
+        WithoutReadOnly(srcAttrs.dwFileAttributes),
         nullptr));
 
     if (!dstHandle.IsValid()) {
@@ -448,16 +487,11 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
-    // Serialize concurrent metacopy stages on the same path. Without this,
-    // two threads can both stage a sparse shell into the work dir and race
-    // at MoveFileExW commit. The loser sees ACCESS_DENIED and leaves an
-    // orphaned work file behind, while the winner's metacopy can later be
-    // overwritten by an interleaved second commit. Same invariant CopyUpFile
-    // enforces.
     PathReservation reservation(*this, normalized);
 
-    // Re-check after the reservation is held. A winner can have committed
-    // while we waited, in which case there's nothing to do.
+    // A metacopy that waited on the reservation finds the copy of the one
+    // before it here. Without this check, its move fails with
+    // STATUS_OBJECT_NAME_COLLISION.
     if (pathResolver_.ExistsInUpper(normalized)) {
         return STATUS_SUCCESS;
     }
@@ -476,36 +510,23 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
-    // CreateFileW below sets the attribute bits on the shell, so the guard
-    // carries the times only.
-    FileBasicInfoGuard basicInfo(srcAttrs, std::nullopt, upperPath);
+    const std::wstring workPath = GenerateWorkPath();
+    FileBasicInfoGuard basicInfo(srcAttrs, StagedFileAttributes(srcAttrs.dwFileAttributes),
+                                 workPath);
 
-    std::wstring workPath = GenerateWorkPath();
     status = StageMetacopyShellInWorkDir(source.absolutePath, srcAttrs, workPath);
+    if (NT_SUCCESS(status)) {
+        LayerMountMetadata metacopyMetadata = MakeCopyUpMetadata(source.absolutePath);
+        metacopyMetadata.metacopy = true;
+        status = RecordStagedFile(workPath, metacopyMetadata, basicInfo);
+    }
     if (!NT_SUCCESS(status)) {
+        basicInfo.Cancel();
+        RemoveStagedFile(workPath, config_);
         return status;
     }
 
-    // Atomic commit
-    status = CommitFromWorkDir(workPath, upperPath);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    LayerMountMetadata metacopyMetadata = MakeCopyUpMetadata(source.absolutePath);
-    metacopyMetadata.metacopy = true;
-    NTSTATUS metacopyMetadataStatus = WriteCopyUpRecordOrRemoveEntry(
-        upperPath, metacopyMetadata, NewUpperEntryKind::File, config_);
-    if (!NT_SUCCESS(metacopyMetadataStatus)) {
-        return metacopyMetadataStatus;
-    }
-
-    basicInfo.Restore();
-
-    cache_.InvalidateWithAncestors(normalized);
-    RecordCopyUp(normalized);
-
-    return STATUS_SUCCESS;
+    return CommitStagedFile(normalized, workPath, upperPath);
 }
 
 NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
@@ -544,11 +565,20 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     }
 
     WIN32_FILE_ATTRIBUTE_DATA shellInfo{};
-    GetFileAttributesExW(upperPath.c_str(), GetFileExInfoStandard, &shellInfo);
+    const std::optional<DWORD> shellAttributes =
+        GetFileAttributesExW(upperPath.c_str(), GetFileExInfoStandard, &shellInfo)
+            ? std::optional<DWORD>(shellInfo.dwFileAttributes)
+            : std::nullopt;
     // The write handle on the shell lives inside FillMetacopyShell, which
     // returns before this guard is destroyed, so the handle closes first.
     // The close of a written handle is the last write of LastWriteTime.
-    FileBasicInfoGuard basicInfo(shellInfo, std::nullopt, upperPath);
+    FileBasicInfoGuard basicInfo(shellInfo, shellAttributes, upperPath);
+
+    // A read-only shell refuses the data write and a new stream.
+    if (shellAttributes.has_value() && !ClearReadOnly(upperPath, *shellAttributes)) {
+        return RecordFillFailure(normalized, L"clear the read-only attribute of the shell",
+                                 StatusOfFailedCall(ERROR_ACCESS_DENIED));
+    }
 
     NTSTATUS status = FillMetacopyShell(srcHandle, upperPath);
     if (!NT_SUCCESS(status)) {
@@ -561,7 +591,11 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         return RecordFillFailure(normalized, L"finish the filled shell", status);
     }
 
-    basicInfo.Restore();
+    if (!basicInfo.Restore()) {
+        return RecordFillFailure(normalized,
+                                 L"restore the attributes and times of the filled file",
+                                 StatusOfFailedCall(ERROR_ACCESS_DENIED));
+    }
 
     return STATUS_SUCCESS;
 }

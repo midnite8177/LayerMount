@@ -194,6 +194,21 @@ public:
             L"Non-matching file should remain");
     }
 
+    TEST_METHOD(CleanWorkDirectory_ReadOnlyHashTempFile_RemovesIt) {
+        TempLayerEnvironment env(1);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        env.WriteFile(env.Work(), L"#abc.tmp", "staged");
+        const std::wstring tempFile = env.Work() + L"\\#abc.tmp";
+        Assert::IsTrue(::SetFileAttributesW(tempFile.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE,
+            L"The test must make the staged file read-only");
+
+        rig.copyUp.CleanWorkDirectory();
+
+        Assert::AreEqual(INVALID_FILE_ATTRIBUTES, ::GetFileAttributesW(tempFile.c_str()),
+            L"CleanWorkDirectory removes a read-only staged file");
+    }
+
     TEST_METHOD(CleanWorkDirectory_ExtendedWorkDirWithTrailingSeparator_RemovesHashTempFiles) {
         TempLayerEnvironment env(1);
         LayerConfig config = env.MakeConfig();

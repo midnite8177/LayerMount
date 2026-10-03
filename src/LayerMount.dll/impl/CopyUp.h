@@ -73,22 +73,34 @@ public:
     // copy-up is in flight.
     void CleanWorkDirectory();
 
-    // Replaces finalUpperPath with the file at workPath. workPath must be on
-    // the upper's volume; the move is one rename. A failed move removes the
-    // file at workPath.
+    // Moves the file at workPath to finalUpperPath with one rename. workPath
+    // must be on the upper's volume. An entry at finalUpperPath fails the
+    // move with STATUS_OBJECT_NAME_COLLISION and stays as it was. A failed
+    // move removes the file at workPath and its sidecar record, also when
+    // the file is read-only.
     NTSTATUS CommitFromWorkDir(const std::wstring& workPath,
                                const std::wstring& finalUpperPath);
 
-    // Copies a lower parent directory up first. Preserves security,
-    // timestamps, data.
+    // Copies a lower parent directory up first. Builds the file in the
+    // work directory: data, security, user streams, copy-up record, and
+    // last the attributes and times. Then one rename moves it to the upper
+    // path. If an entry appears at the upper path before that move, the
+    // copy-up fails with STATUS_OBJECT_NAME_COLLISION and leaves that entry
+    // as it was. A failure leaves no copy in the work directory.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
 
-    // Copy only metadata (security, timestamps) as a sparse file. Data copied on demand.
+    // Builds a sparse shell of the lower file's size in the work directory,
+    // with security, a copy-up record with the metacopy flag, and last the
+    // attributes and times. Then one rename moves it to the upper path, as
+    // in CopyUpFile. CompleteLazyCopyUp copies the data later.
     NTSTATUS CopyUpMetadataOnly(const std::wstring& relativePath);
 
     // Complete a metacopy by copying actual file data from the lower layer.
     // Keeps the shell's timestamps, so a set-times on the sparse shell
-    // survives the fill. Clears the metacopy ADS flag when done.
+    // survives the fill. Fills a read-only shell too, and keeps the shell's
+    // attributes, except that the sparse attribute comes off unless the
+    // lower file is sparse. Clears the metacopy flag of the copy-up record
+    // when done.
     NTSTATUS CompleteLazyCopyUp(const std::wstring& relativePath);
 
     // Copy a directory entry (not contents) from a lower layer to the upper layer.
@@ -157,9 +169,17 @@ private:
                                 DWORD srcAttrs,
                                 const std::wstring& workPath);
 
-    NTSTATUS FinishCommittedFile(const std::wstring& sourcePath,
-                                 const std::wstring& upperPath,
-                                 FileBasicInfoGuard& basicInfo);
+    NTSTATUS FinishStagedFile(const std::wstring& sourcePath,
+                              const std::wstring& workPath,
+                              FileBasicInfoGuard& basicInfo);
+
+    NTSTATUS RecordStagedFile(const std::wstring& workPath,
+                              const LayerMountMetadata& metadata,
+                              FileBasicInfoGuard& basicInfo);
+
+    NTSTATUS CommitStagedFile(const std::wstring& normalized,
+                              const std::wstring& workPath,
+                              const std::wstring& upperPath);
 
     NTSTATUS StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
                                          const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
