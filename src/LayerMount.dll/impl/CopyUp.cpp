@@ -80,18 +80,40 @@ bool TryGetStableIndexNumberFromPath(const std::wstring& path,
     return ok;
 }
 
-LayerMount::LayerMountMetadata MakeCopyUpMetadata(const std::wstring& sourcePath) {
-    LayerMount::LayerMountMetadata metadata = {};
-    ::GetSystemTimeAsFileTime(&metadata.copyUpTimestamp);
-    metadata.originLayer = sourcePath;
-
+void AddSourceFileId(LayerMount::LayerMountMetadata& metadata,
+                     const std::wstring& sourcePath) {
     uint64_t stableIndexNumber = 0;
     if (TryGetStableIndexNumberFromPath(sourcePath, stableIndexNumber)) {
         metadata.hasStableIndexNumber = true;
         metadata.stableIndexNumber = stableIndexNumber;
     }
+}
 
+LayerMount::LayerMountMetadata MakeCopyUpMetadata(const std::wstring& sourcePath) {
+    LayerMount::LayerMountMetadata metadata = {};
+    ::GetSystemTimeAsFileTime(&metadata.copyUpTimestamp);
+    metadata.originLayer = sourcePath;
+    AddSourceFileId(metadata, sourcePath);
     return metadata;
+}
+
+LayerMount::LayerMountMetadata CarriedCopyUpMetadata(const std::wstring& sourcePath,
+                                                     const LayerMount::LayerConfig& config) {
+    LayerMount::LayerMountMetadata metadata =
+        LayerMount::MetadataStore::ReadLayerMountMetadata(sourcePath, &config);
+    if (!metadata.hasStableIndexNumber) {
+        AddSourceFileId(metadata, sourcePath);
+    }
+    return metadata;
+}
+
+LayerMount::LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
+                                                   LayerMount::CopiedEntryRecord record,
+                                                   const LayerMount::LayerConfig& config) {
+    if (record == LayerMount::CopiedEntryRecord::CarriedFromSource) {
+        return CarriedCopyUpMetadata(sourcePath, config);
+    }
+    return MakeCopyUpMetadata(sourcePath);
 }
 
 // Is this stream name one of the overlay's reserved bookkeeping streams?
@@ -896,29 +918,36 @@ static NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
     return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
 }
 
-// Copies the link at srcAbsolute to dstAbsolute as a link, with a copy-up
-// record that holds the source link's own file ID, as overlayfs keeps the
-// origin and inode number of a copied-up symlink. The record belongs to the
-// link, not to its target. A link gets no opaque marker, as overlayfs gives
-// a symlink no opaque xattr. A failure removes the new link.
+struct EntryCopyPolicy {
+    CopiedEntryRecord record;
+    const LayerConfig& config;
+    ::LayerMount::abi::CapabilityGate capabilities;
+};
+
+// Copies the link at srcAbsolute to dstAbsolute as a link and writes the
+// copy-up record `policy.record` selects on the new link, not on its
+// target, as overlayfs keeps the inode number of a copied-up symlink. A
+// failure removes the new link.
 static NTSTATUS CopyLinkWithCopyUpRecord(const std::wstring& srcAbsolute,
                                          DWORD srcAttrs,
                                          const std::wstring& dstAbsolute,
-                                         const LayerConfig& config) {
+                                         const EntryCopyPolicy& policy) {
     const NewUpperEntryKind kind = NewUpperEntryKindOf(srcAttrs);
     const NTSTATUS status = CopyUpReparsePointEntry(srcAbsolute, dstAbsolute, srcAttrs);
     if (!NT_SUCCESS(status)) {
         RemoveNewUpperEntry(dstAbsolute, kind);
         return status;
     }
-    return WriteCopyUpRecordOrRemoveEntry(dstAbsolute, MakeCopyUpMetadata(srcAbsolute), kind,
-                                          config);
+    return WriteCopyUpRecordOrRemoveEntry(
+        dstAbsolute, CopiedEntryMetadata(srcAbsolute, policy.record, policy.config), kind,
+        policy.config);
 }
 
 NTSTATUS CopyUp::CopyUpLinkAndCount(const std::wstring& normalized,
                                     const CopyUpTarget& target) {
     const NTSTATUS status = CopyLinkWithCopyUpRecord(
-        target.source.absolutePath, target.source.attributes, target.upperPath, config_);
+        target.source.absolutePath, target.source.attributes, target.upperPath,
+        {CopiedEntryRecord::NewFromSource, config_, capabilities_});
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1513,7 +1542,8 @@ NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             RemoveUpperEntry(childDst, config_);
         }
-        const NTSTATUS childStatus = CopyTreePreservingMetadata(childSrc, childDst);
+        const NTSTATUS childStatus = CopyTreePreservingMetadata(
+            childSrc, childDst, CopiedEntryRecord::CarriedFromSource);
         if (!NT_SUCCESS(childStatus)) {
             ::FindClose(hFind);
             return childStatus;
@@ -1543,7 +1573,8 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
 
     if (sourceKind == RenameEntryKind::Link) {
         NTSTATUS rpStatus = CopyLinkWithCopyUpRecord(
-            source.absolutePath, source.attributes, newUpperPath, config_);
+            source.absolutePath, source.attributes, newUpperPath,
+            {CopiedEntryRecord::NewFromSource, config_, capabilities_});
         if (!NT_SUCCESS(rpStatus)) {
             return rpStatus;
         }
@@ -1556,7 +1587,7 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
     }
 
     NTSTATUS copyStatus = CopyTreePreservingMetadata(
-        source.absolutePath, newUpperPath);
+        source.absolutePath, newUpperPath, CopiedEntryRecord::NewFromSource);
     if (!NT_SUCCESS(copyStatus)) {
         RemoveUpperEntry(newUpperPath, config_);
         return copyStatus;
@@ -1729,7 +1760,8 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
                 return status;
             }
             status = CopyLinkWithCopyUpRecord(
-                source.absolutePath, source.attributes, newUpperPath, config_);
+                source.absolutePath, source.attributes, newUpperPath,
+                {CopiedEntryRecord::NewFromSource, config_, capabilities_});
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -1751,13 +1783,94 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
 
 namespace {
 
-// Copy a single regular file with its ADS, and its sparse state when the
-// host adapter has the sparse capability. No work-dir commit: on failure
-// the caller removes the whole new subtree.
+// Copies the owner, group, DACL and SACL of srcAbs to dstAbs. The DACL and
+// SACL go through SetNamedSecurityInfoW with the UNPROTECTED flags, so the
+// destination drops the source's inherited ACEs and inherits from its own
+// parent, and explicit ACEs stay explicit. SetFileSecurityW would write the
+// inherited ACEs as explicit ones. The SACL copies only when the process
+// holds SE_SECURITY_NAME, because a SACL read fails without it. Tries every
+// part and returns the Win32 error of the first write that failed, or
+// ERROR_SUCCESS.
+DWORD CopySecurityKeepingInheritance(const std::wstring& srcAbs, const std::wstring& dstAbs) {
+    DWORD firstError = ERROR_SUCCESS;
+    const auto keepFirst = [&firstError](DWORD error) {
+        if (firstError == ERROR_SUCCESS) {
+            firstError = error;
+        }
+    };
+
+    const SECURITY_INFORMATION ogInfo = OWNER_SECURITY_INFORMATION |
+                                        GROUP_SECURITY_INFORMATION;
+    DWORD sdSize = 0;
+    ::GetFileSecurityW(srcAbs.c_str(), ogInfo, nullptr, 0, &sdSize);
+    if (sdSize > 0) {
+        std::vector<BYTE> sdBuf(sdSize);
+        auto* sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sdBuf.data());
+        if (::GetFileSecurityW(srcAbs.c_str(), ogInfo, sd, sdSize, &sdSize) &&
+            !::SetFileSecurityW(dstAbs.c_str(), ogInfo, sd)) {
+            const DWORD err = ::GetLastError();
+            keepFirst(err ? err : ERROR_ACCESS_DENIED);
+        }
+    }
+
+    DWORD dSize = 0;
+    ::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &dSize);
+    if (dSize > 0) {
+        std::vector<BYTE> dBuf(dSize);
+        auto* dsd = reinterpret_cast<PSECURITY_DESCRIPTOR>(dBuf.data());
+        if (::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION,
+                               dsd, dSize, &dSize)) {
+            BOOL present = FALSE, defaulted = FALSE;
+            PACL dacl = nullptr;
+            if (::GetSecurityDescriptorDacl(dsd, &present, &dacl, &defaulted) &&
+                present && dacl) {
+                const DWORD rc = ::SetNamedSecurityInfoW(
+                    const_cast<LPWSTR>(dstAbs.c_str()),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                    nullptr, nullptr, dacl, nullptr);
+                if (rc != ERROR_SUCCESS) {
+                    keepFirst(rc);
+                }
+            }
+        }
+    }
+
+    if (IsSecurityPrivilegeHeld()) {
+        DWORD ssSize = 0;
+        ::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION, nullptr, 0, &ssSize);
+        if (ssSize > 0) {
+            std::vector<BYTE> ssBuf(ssSize);
+            auto* ssd = reinterpret_cast<PSECURITY_DESCRIPTOR>(ssBuf.data());
+            if (::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION,
+                                   ssd, ssSize, &ssSize)) {
+                BOOL present = FALSE, defaulted = FALSE;
+                PACL sacl = nullptr;
+                if (::GetSecurityDescriptorSacl(ssd, &present, &sacl, &defaulted) &&
+                    present && sacl) {
+                    const DWORD rc = ::SetNamedSecurityInfoW(
+                        const_cast<LPWSTR>(dstAbs.c_str()),
+                        SE_FILE_OBJECT,
+                        SACL_SECURITY_INFORMATION | UNPROTECTED_SACL_SECURITY_INFORMATION,
+                        nullptr, nullptr, nullptr, sacl);
+                    if (rc != ERROR_SUCCESS) {
+                        keepFirst(rc);
+                    }
+                }
+            }
+        }
+    }
+
+    return firstError;
+}
+
+// Copies a regular file with its ADS, its sparse state when the host
+// adapter has the sparse capability, and the copy-up record
+// `policy.record` selects. Does not commit through the work directory. On
+// failure the caller removes the whole new subtree.
 NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
                                      const std::wstring& dstAbs,
-                                     const LayerConfig* config,
-                                     ::LayerMount::abi::CapabilityGate capabilities) {
+                                     const EntryCopyPolicy& policy) {
     HANDLE srcH = ::CreateFileW(srcAbs.c_str(), GENERIC_READ,
                                   FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                   FILE_FLAG_SEQUENTIAL_SCAN |
@@ -1787,7 +1900,7 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
 
     // SetFileAttributes cannot set FILE_ATTRIBUTE_SPARSE_FILE. Only FSCTL_SET_SPARSE can.
     if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
-        capabilities.HasSparseFiles() &&
+        policy.capabilities.HasSparseFiles() &&
         !SetSparse(dstH)) {
         const NTSTATUS status = SparseRefusalStatus();
         ::CloseHandle(srcH);
@@ -1815,113 +1928,19 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
     // and the overlay's own :overlay bookkeeping streams.
     CopyUserAlternateDataStreams(srcAbs, dstAbs);
 
-    // Security propagation: copy only OWNER+GROUP (and preserve any explicit
-    // ACEs in the source by merging them via SetNamedSecurityInfoW with the
-    // UNPROTECTED flag so the destination also auto-inherits from its parent.
-    // Plain SetFileSecurityW with a DACL containing INHERITED_ACE-flagged
-    // entries writes them as explicit non-inherited ACEs, which bypasses
-    // the kernel's inheritance semantics and leaves children with a
-    // snapshot-in-time ACL that can diverge from their parent.
-    //
-    // The approach:
-    //   1. Copy owner + group verbatim (these are identity, not inheritable).
-    //   2. Copy DACL via SetNamedSecurityInfoW with UNPROTECTED so Windows
-    //      drops the INHERITED bit on the source's inherited ACEs and
-    //      re-derives them from the new parent's inheritable ACEs. Explicit
-    //      (non-inherited) ACEs from the source are preserved as explicit.
-    //   3. Copy SACL (audit ACEs) verbatim iff SE_SECURITY_NAME is held —
-    //      otherwise the GetFileSecurityW(SACL) call fails with
-    //      ERROR_PRIVILEGE_NOT_HELD and we silently drop audit rules.
-    // Treat set-security failures as fatal for this copy path: the
-    // destination file has been committed, and silently dropping to default
-    // DACL inheritance would broaden or narrow access relative to the source
-    // -- a security boundary regression. On failure, delete the destination
-    // so the caller can retry from a clean state and return the mapped error.
-    {
-        SECURITY_INFORMATION ogInfo = OWNER_SECURITY_INFORMATION |
-                                        GROUP_SECURITY_INFORMATION;
-        DWORD sdSize = 0;
-        ::GetFileSecurityW(srcAbs.c_str(), ogInfo, nullptr, 0, &sdSize);
-        if (sdSize > 0) {
-            std::vector<BYTE> sdBuf(sdSize);
-            auto* sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sdBuf.data());
-            if (::GetFileSecurityW(srcAbs.c_str(), ogInfo, sd, sdSize, &sdSize)) {
-                if (!::SetFileSecurityW(dstAbs.c_str(), ogInfo, sd)) {
-                    DWORD err = ::GetLastError();
-                    ::DeleteFileW(dstAbs.c_str());
-                    return ::LayerMount::NtStatusFromWin32(
-                        err ? err : ERROR_ACCESS_DENIED);
-                }
-            }
-        }
-        // DACL: pull it out, filter to explicit ACEs only, apply as
-        // UNPROTECTED so parent inheritance still contributes.
-        DWORD dSize = 0;
-        ::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION,
-                            nullptr, 0, &dSize);
-        if (dSize > 0) {
-            std::vector<BYTE> dBuf(dSize);
-            auto* dsd = reinterpret_cast<PSECURITY_DESCRIPTOR>(dBuf.data());
-            if (::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION,
-                                      dsd, dSize, &dSize)) {
-                BOOL present = FALSE, defaulted = FALSE;
-                PACL dacl = nullptr;
-                if (::GetSecurityDescriptorDacl(dsd, &present, &dacl, &defaulted) &&
-                    present && dacl) {
-                    DWORD rc = ::SetNamedSecurityInfoW(
-                        const_cast<LPWSTR>(dstAbs.c_str()),
-                        SE_FILE_OBJECT,
-                        DACL_SECURITY_INFORMATION |
-                            UNPROTECTED_DACL_SECURITY_INFORMATION,
-                        nullptr, nullptr, dacl, nullptr);
-                    if (rc != ERROR_SUCCESS) {
-                        ::DeleteFileW(dstAbs.c_str());
-                        return ::LayerMount::NtStatusFromWin32(rc);
-                    }
-                }
-            }
-        }
-        if (IsSecurityPrivilegeHeld()) {
-            DWORD ssSize = 0;
-            ::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION,
-                                nullptr, 0, &ssSize);
-            if (ssSize > 0) {
-                std::vector<BYTE> ssBuf(ssSize);
-                auto* ssd = reinterpret_cast<PSECURITY_DESCRIPTOR>(ssBuf.data());
-                if (::GetFileSecurityW(srcAbs.c_str(),
-                                         SACL_SECURITY_INFORMATION,
-                                         ssd, ssSize, &ssSize)) {
-                    BOOL present = FALSE, defaulted = FALSE;
-                    PACL sacl = nullptr;
-                    if (::GetSecurityDescriptorSacl(ssd, &present, &sacl,
-                                                      &defaulted) &&
-                        present && sacl) {
-                        DWORD rc = ::SetNamedSecurityInfoW(
-                            const_cast<LPWSTR>(dstAbs.c_str()),
-                            SE_FILE_OBJECT,
-                            SACL_SECURITY_INFORMATION |
-                                UNPROTECTED_SACL_SECURITY_INFORMATION,
-                            nullptr, nullptr, nullptr, sacl);
-                        if (rc != ERROR_SUCCESS) {
-                            ::DeleteFileW(dstAbs.c_str());
-                            return ::LayerMount::NtStatusFromWin32(rc);
-                        }
-                    }
-                }
-            }
-        }
+    // A destination with a different DACL would grant different access than
+    // the source, so a failed security copy fails the copy.
+    const DWORD securityError = CopySecurityKeepingInheritance(srcAbs, dstAbs);
+    if (securityError != ERROR_SUCCESS) {
+        ::DeleteFileW(dstAbs.c_str());
+        return ::LayerMount::NtStatusFromWin32(securityError);
     }
 
-    // Persist the source object's visible file ID so apps that key off
-    // IndexNumber keep seeing the same logical object after lower->upper
-    // materialization. Pass the caller's LayerConfig so hosts without ADS
-    // (!LM_CAP_ADS) fall through to the sidecar store instead of silently
-    // dropping the metadata write. Fatal on failure: without the stable-id
-    // metadata, post-rename IndexNumber reporting diverges from the source
-    // and apps that key off it (build caches, git) see the file as a
-    // different object.
+    // A copy without its record reports a different file ID, so a failed
+    // write fails the copy.
     const NTSTATUS recordStatus = WriteCopyUpRecordOrRemoveEntry(
-        dstAbs, MakeCopyUpMetadata(srcAbs), NewUpperEntryKind::File, *config);
+        dstAbs, CopiedEntryMetadata(srcAbs, policy.record, policy.config),
+        NewUpperEntryKind::File, policy.config);
     if (!NT_SUCCESS(recordStatus)) {
         return recordStatus;
     }
@@ -1941,10 +1960,9 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
     return STATUS_SUCCESS;
 }
 
-// Copy a directory entry (not its contents) preserving attrs/timestamps.
 NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
                              const std::wstring& dstAbs,
-                             const LayerConfig* config) {
+                             const EntryCopyPolicy& policy) {
     const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
     if (!NT_SUCCESS(dirStatus)) {
         return dirStatus;
@@ -1960,89 +1978,15 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
         return layoutStatus;
     }
 
-    // Copy security descriptor on the directory itself so inheritable
-    // ACEs propagate to children created inside. Without this, children
-    // recursively copied into an opaque upper directory lose the access-
-    // control state that the source parent was enforcing.
-    //
-    // Use SetNamedSecurityInfoW instead of SetFileSecurityW so Windows
-    // handles the inheritance semantics correctly: the inheritable ACEs
-    // copied in will re-inherit onto subsequently-created children via
-    // the kernel's own auto-inheritance path. SetFileSecurityW bypasses
-    // that logic and would leave children without the inherited ACEs.
-    {
-        DWORD sdSize = 0;
-        const SECURITY_INFORMATION ogInfo = OWNER_SECURITY_INFORMATION |
-                                              GROUP_SECURITY_INFORMATION;
-        ::GetFileSecurityW(srcAbs.c_str(), ogInfo, nullptr, 0, &sdSize);
-        if (sdSize > 0) {
-            std::vector<BYTE> sdBuf(sdSize);
-            auto* sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sdBuf.data());
-            if (::GetFileSecurityW(srcAbs.c_str(), ogInfo, sd, sdSize, &sdSize)) {
-                ::SetFileSecurityW(dstAbs.c_str(), ogInfo, sd);
-            }
-        }
-        DWORD dSize = 0;
-        ::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION,
-                            nullptr, 0, &dSize);
-        if (dSize > 0) {
-            std::vector<BYTE> dBuf(dSize);
-            auto* dsd = reinterpret_cast<PSECURITY_DESCRIPTOR>(dBuf.data());
-            if (::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION,
-                                      dsd, dSize, &dSize)) {
-                BOOL present = FALSE, defaulted = FALSE;
-                PACL dacl = nullptr;
-                if (::GetSecurityDescriptorDacl(dsd, &present, &dacl, &defaulted) &&
-                    present && dacl) {
-                    ::SetNamedSecurityInfoW(
-                        const_cast<LPWSTR>(dstAbs.c_str()),
-                        SE_FILE_OBJECT,
-                        DACL_SECURITY_INFORMATION |
-                            UNPROTECTED_DACL_SECURITY_INFORMATION,
-                        nullptr, nullptr, dacl, nullptr);
-                }
-            }
-        }
-        // SACL: audit ACEs. Gated on SE_SECURITY_NAME — without the
-        // privilege, GetFileSecurityW(SACL) fails with
-        // ERROR_PRIVILEGE_NOT_HELD; querying would silently lose it, and
-        // requesting SACL bits in the OWNER|GROUP call above would fail
-        // the whole descriptor fetch. Keep this as a best-effort pass.
-        if (IsSecurityPrivilegeHeld()) {
-            DWORD ssSize = 0;
-            ::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION,
-                                nullptr, 0, &ssSize);
-            if (ssSize > 0) {
-                std::vector<BYTE> ssBuf(ssSize);
-                auto* ssd = reinterpret_cast<PSECURITY_DESCRIPTOR>(ssBuf.data());
-                if (::GetFileSecurityW(srcAbs.c_str(),
-                                         SACL_SECURITY_INFORMATION,
-                                         ssd, ssSize, &ssSize)) {
-                    BOOL present = FALSE, defaulted = FALSE;
-                    PACL sacl = nullptr;
-                    if (::GetSecurityDescriptorSacl(ssd, &present, &sacl,
-                                                      &defaulted) &&
-                        present && sacl) {
-                        ::SetNamedSecurityInfoW(
-                            const_cast<LPWSTR>(dstAbs.c_str()),
-                            SE_FILE_OBJECT,
-                            SACL_SECURITY_INFORMATION |
-                                UNPROTECTED_SACL_SECURITY_INFORMATION,
-                            nullptr, nullptr, nullptr, sacl);
-                    }
-                }
-            }
-        }
-    }
+    // Inheritable ACEs on the directory reach the children copied into it.
+    // A failure here leaves the directory with inherited security only.
+    CopySecurityKeepingInheritance(srcAbs, dstAbs);
 
-    // Pass the caller's LayerConfig so hosts without ADS (!LM_CAP_ADS)
-    // fall through to the sidecar store. Without this the directory's
-    // copy-up metadata (origin layer, stable id) is silently dropped.
-    // Fatal on failure: a directory shell without origin/stable-id looks
-    // like a foreign creation to later resolution, which can misroute
-    // child lookups during subsequent rename fanout.
+    // A copy without its record reports a different file ID, so a failed
+    // write fails the copy.
     const NTSTATUS recordStatus = WriteCopyUpRecordOrRemoveEntry(
-        dstAbs, MakeCopyUpMetadata(srcAbs), NewUpperEntryKind::Directory, *config);
+        dstAbs, CopiedEntryMetadata(srcAbs, policy.record, policy.config),
+        NewUpperEntryKind::Directory, policy.config);
     if (!NT_SUCCESS(recordStatus)) {
         return recordStatus;
     }
@@ -2070,26 +2014,28 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
 }
 
 NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
-                                              const std::wstring& dstAbs) {
-    // Top-level reparse point: treat the whole tree as a single link.
+                                              const std::wstring& dstAbs,
+                                              CopiedEntryRecord record) {
+    const EntryCopyPolicy policy{record, config_, capabilities_};
     DWORD topAttrs = ::GetFileAttributesW(srcAbs.c_str());
     if (topAttrs != INVALID_FILE_ATTRIBUTES &&
         (topAttrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyLinkWithCopyUpRecord(srcAbs, topAttrs, dstAbs, config_);
+        return CopyLinkWithCopyUpRecord(srcAbs, topAttrs, dstAbs, policy);
     }
 
-    // Top-level regular file: copy directly.
     if (topAttrs != INVALID_FILE_ATTRIBUTES &&
         (topAttrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        return CopyFilePreservingMetadata(srcAbs, dstAbs, &config_, capabilities_);
+        return CopyFilePreservingMetadata(srcAbs, dstAbs, policy);
     }
 
-    return CopyDirectoryTree(srcAbs, dstAbs);
+    return CopyDirectoryTree(srcAbs, dstAbs, record);
 }
 
 NTSTATUS CopyUp::CopyDirectoryTree(const std::wstring& srcAbs,
-                                   const std::wstring& dstAbs) {
-    NTSTATUS status = CopyDirectoryShell(srcAbs, dstAbs, &config_);
+                                   const std::wstring& dstAbs,
+                                   CopiedEntryRecord record) {
+    const EntryCopyPolicy policy{record, config_, capabilities_};
+    NTSTATUS status = CopyDirectoryShell(srcAbs, dstAbs, policy);
     if (!NT_SUCCESS(status)) return status;
 
     WIN32_FIND_DATAW fd{};
@@ -2112,12 +2058,11 @@ NTSTATUS CopyUp::CopyDirectoryTree(const std::wstring& srcAbs,
         NTSTATUS childStatus = STATUS_SUCCESS;
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             childStatus = CopyLinkWithCopyUpRecord(childSrc, fd.dwFileAttributes, childDst,
-                                                   config_);
+                                                   policy);
         } else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            childStatus = CopyTreePreservingMetadata(childSrc, childDst);
+            childStatus = CopyTreePreservingMetadata(childSrc, childDst, record);
         } else {
-            childStatus = CopyFilePreservingMetadata(childSrc, childDst, &config_,
-                                                     capabilities_);
+            childStatus = CopyFilePreservingMetadata(childSrc, childDst, policy);
         }
         if (!NT_SUCCESS(childStatus)) {
             walkStatus = childStatus;

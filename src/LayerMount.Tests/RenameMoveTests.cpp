@@ -661,6 +661,20 @@ void AssertRenamedLowerLinkKeepsItsId(LinkCreator createLink, LinkTarget targetK
         (L"An open of " + newName + L" as a link must report the lower link's file ID").c_str());
 }
 
+// A file symlink named flink and a junction named jlink in lowerDir. A host
+// that cannot create a file symlink has only the junction.
+struct LowerLinks {
+    bool hasFileLink;
+    bool hasJunction;
+};
+
+LowerLinks CreateLowerLinks(const TempLayerEnvironment& env, const std::wstring& lowerDir) {
+    return {LinkToTargetCreatedOrSkipped(env, CreateFileSymlink, LinkTarget::File,
+                                         lowerDir + L"\\flink"),
+            LinkCreatedOrSkipped(CreateDirectoryJunction, lowerDir + L"\\jlink",
+                                 LinkTargetPath(env, LinkTarget::Directory))};
+}
+
 // Denies FILE_ADD_FILE on the upper root and disables SE_BACKUP_NAME and
 // SE_RESTORE_NAME on the thread. A whiteout marker then cannot go into the
 // upper root, but a directory or a link can still move there. Declare it
@@ -1004,14 +1018,13 @@ public:
             TempLayerEnvironment env(1);
             env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
             const std::wstring lowerDir = env.Lower(0) + L"\\d";
-            if (!LinkToTargetCreatedOrSkipped(env, CreateFileSymlink, LinkTarget::File,
-                                              lowerDir + L"\\flink") ||
-                !LinkCreatedOrSkipped(CreateDirectoryJunction, lowerDir + L"\\jlink",
-                                      LinkTargetPath(env, LinkTarget::Directory))) {
+            const LowerLinks links = CreateLowerLinks(env, lowerDir);
+            if (!links.hasJunction) {
                 return;
             }
             const UINT64 fileId = NtfsFileIdOf(lowerDir + L"\\f.txt", LinkOpen::Follow);
-            const UINT64 fileLinkId = NtfsFileIdOf(lowerDir + L"\\flink", LinkOpen::Itself);
+            const UINT64 fileLinkId =
+                links.hasFileLink ? NtfsFileIdOf(lowerDir + L"\\flink", LinkOpen::Itself) : 0;
             const UINT64 junctionId = NtfsFileIdOf(lowerDir + L"\\jlink", LinkOpen::Itself);
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = capabilities;
@@ -1022,12 +1035,14 @@ public:
 
             Assert::AreEqual(fileId, IndexNumberThroughMount(mount, L"e\\f.txt", kNoCreateOptions),
                 L"The copied file must report the lower file's ID");
-            Assert::AreEqual(fileLinkId,
-                IndexNumberThroughMount(mount, L"e\\flink", FILE_OPEN_REPARSE_POINT),
-                L"The copied file symlink must report the lower link's file ID");
             Assert::AreEqual(junctionId,
                 IndexNumberThroughMount(mount, L"e\\jlink", FILE_OPEN_REPARSE_POINT),
                 L"The copied junction must report the lower link's file ID");
+            if (links.hasFileLink) {
+                Assert::AreEqual(fileLinkId,
+                    IndexNumberThroughMount(mount, L"e\\flink", FILE_OPEN_REPARSE_POINT),
+                    L"The copied file symlink must report the lower link's file ID");
+            }
         });
     }
 
@@ -1049,6 +1064,92 @@ public:
 
             Assert::AreEqual(lowerId, IndexNumberThroughMount(mount, L"e\\x.txt", kNoCreateOptions),
                 L"The file must keep the lower file's ID through both renames");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryHoldingCopiedUpEntries_KeepsEachEntrysId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+            env.WriteFile(env.Lower(0), L"d\\sub\\g.txt", "nested");
+            env.WriteFile(env.Lower(0), L"d\\lazy.bin", "lazy lower data");
+            const std::wstring lowerDir = env.Lower(0) + L"\\d";
+            const UINT64 fileId = NtfsFileIdOf(lowerDir + L"\\f.txt", LinkOpen::Follow);
+            const UINT64 subId = NtfsFileIdOf(lowerDir + L"\\sub", LinkOpen::Follow);
+            const UINT64 nestedId = NtfsFileIdOf(lowerDir + L"\\sub\\g.txt", LinkOpen::Follow);
+            const UINT64 lazyId = NtfsFileIdOf(lowerDir + L"\\lazy.bin", LinkOpen::Follow);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            {
+                CopyUpRig rig(config);
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"d\\f.txt"),
+                    L"The copy-up of the lower file must succeed");
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"d\\sub"),
+                    L"The copy-up of the lower subdirectory must succeed");
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"d\\sub\\g.txt"),
+                    L"The copy-up of the nested lower file must succeed");
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"d\\lazy.bin"),
+                    L"The metadata-only copy-up of the lower file must succeed");
+            }
+            env.WriteFile(env.Upper(), L"d\\new.txt", "upper");
+            ::LayerMount::LayerMount mount(config);
+            const UINT64 newFileId = IndexNumberThroughMount(mount, L"d\\new.txt", kNoCreateOptions);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+
+            Assert::AreEqual(fileId, IndexNumberThroughMount(mount, L"e\\f.txt", kNoCreateOptions),
+                L"The copied-up file must report the lower file's ID");
+            Assert::AreEqual(subId, IndexNumberThroughMount(mount, L"e\\sub", kNoCreateOptions),
+                L"The copied-up subdirectory must report the lower subdirectory's ID");
+            Assert::AreEqual(nestedId,
+                IndexNumberThroughMount(mount, L"e\\sub\\g.txt", kNoCreateOptions),
+                L"The copied-up nested file must report the lower file's ID");
+            Assert::AreEqual(lazyId, IndexNumberThroughMount(mount, L"e\\lazy.bin", kNoCreateOptions),
+                L"The metacopy shell must report the lower file's ID");
+            Assert::AreEqual(newFileId, IndexNumberThroughMount(mount, L"e\\new.txt", kNoCreateOptions),
+                L"The file new in the upper must keep the ID it had before the rename");
+            Assert::AreEqual(std::string("lazy lower data"), ReadThroughMount(mount, L"e\\lazy.bin"),
+                L"The metacopy shell must read the lower file's data");
+        });
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryHoldingCopiedUpLinks_KeepsEachLinksId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+            const std::wstring lowerDir = env.Lower(0) + L"\\d";
+            const LowerLinks links = CreateLowerLinks(env, lowerDir);
+            if (!links.hasJunction) {
+                return;
+            }
+            const UINT64 fileLinkId =
+                links.hasFileLink ? NtfsFileIdOf(lowerDir + L"\\flink", LinkOpen::Itself) : 0;
+            const UINT64 junctionId = NtfsFileIdOf(lowerDir + L"\\jlink", LinkOpen::Itself);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            {
+                CopyUpRig rig(config);
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"d\\jlink"),
+                    L"The copy-up of the lower junction must succeed");
+                if (links.hasFileLink) {
+                    AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"d\\flink"),
+                        L"The copy-up of the lower file symlink must succeed");
+                }
+            }
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the merged directory must succeed");
+
+            Assert::AreEqual(junctionId,
+                IndexNumberThroughMount(mount, L"e\\jlink", FILE_OPEN_REPARSE_POINT),
+                L"The copied-up junction must report the lower link's file ID");
+            if (links.hasFileLink) {
+                Assert::AreEqual(fileLinkId,
+                    IndexNumberThroughMount(mount, L"e\\flink", FILE_OPEN_REPARSE_POINT),
+                    L"The copied-up file symlink must report the lower link's file ID");
+            }
         });
     }
 

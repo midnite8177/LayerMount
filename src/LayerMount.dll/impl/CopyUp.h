@@ -78,6 +78,16 @@ private:
     CopyAcrossVolumes restoreCopy_ = CopyAcrossVolumes::No;
 };
 
+enum class CopiedEntryRecord {
+    // A new record that holds the source entry's own file ID. For a copy
+    // out of a lower layer.
+    NewFromSource,
+    // The source entry's record, with the source entry's own file ID added
+    // when the record holds none. For a copy of upper entries to a new upper
+    // path, so each entry keeps the file ID it reports.
+    CarriedFromSource,
+};
+
 class CopyUp {
 public:
     CopyUp(ConfigRef config,
@@ -197,10 +207,12 @@ private:
                                 const std::wstring& newUpperPath);
 
     NTSTATUS CopyTreePreservingMetadata(const std::wstring& srcAbs,
-                                         const std::wstring& dstAbs);
+                                         const std::wstring& dstAbs,
+                                         CopiedEntryRecord record);
 
     NTSTATUS CopyDirectoryTree(const std::wstring& srcAbs,
-                               const std::wstring& dstAbs);
+                               const std::wstring& dstAbs,
+                               CopiedEntryRecord record);
 
     bool CopySecurityDescriptor(const std::wstring& srcPath, const std::wstring& dstPath);
 
