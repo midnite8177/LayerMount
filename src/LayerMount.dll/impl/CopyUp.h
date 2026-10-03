@@ -50,7 +50,7 @@ private:
 // removes that copy. An object that holds no entry does nothing.
 class RenameDestinationAside {
 public:
-    RenameDestinationAside() = default;
+    RenameDestinationAside(ConfigRef config, WhiteoutManager& whiteoutMgr, Cache& cache);
     ~RenameDestinationAside();
 
     RenameDestinationAside(const RenameDestinationAside&) = delete;
@@ -59,9 +59,7 @@ public:
     // Takes the entry that moved from upperPath to asidePath. The
     // destructor moves it back with restoreCopy and, when wasOpaque is
     // true, marks normalizedPath opaque again.
-    void Hold(WhiteoutManager* whiteoutMgr,
-              Cache* cache,
-              std::wstring normalizedPath,
+    void Hold(std::wstring normalizedPath,
               std::wstring upperPath,
               std::wstring asidePath,
               bool wasOpaque,
@@ -70,8 +68,9 @@ public:
     void Commit();
 
 private:
-    WhiteoutManager* whiteoutMgr_ = nullptr;
-    Cache* cache_ = nullptr;
+    const LayerConfig& config_;
+    WhiteoutManager& whiteoutMgr_;
+    Cache& cache_;
     std::wstring normalizedPath_;
     std::wstring upperPath_;
     std::wstring asidePath_;
@@ -180,7 +179,7 @@ public:
     // entry, so they would copy the tree onto itself, delete it and white
     // it out. The move needs no replace flag for the same reason. sourceKind
     // is Directory or Link. A lower Link source goes to the new name as a
-    // link, with no copy-up metadata and no opaque marker.
+    // link, with a copy-up record and no opaque marker.
     NTSTATUS RenameDirectoryCase(const CallerPath& oldCallerPath,
                                  const CallerPath& newCallerPath,
                                  RenameEntryKind sourceKind);
@@ -207,9 +206,6 @@ private:
 
     bool CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle);
 
-    NTSTATUS WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
-                                        const LayerMountMetadata& metadata);
-
     NTSTATUS MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
                                           const std::wstring& workPath);
 
@@ -224,7 +220,7 @@ private:
     // STATUS_OBJECT_NAME_NOT_FOUND when no visible lower holds normalized.
     NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target);
 
-    NTSTATUS CopyUpLinkAndRecord(const std::wstring& normalized, const CopyUpTarget& target);
+    NTSTATUS CopyUpLinkAndCount(const std::wstring& normalized, const CopyUpTarget& target);
 
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
                                 ScopedHandle& srcHandle,

@@ -324,8 +324,45 @@ bool EnsureDirectoryExists(const std::wstring& path) {
     return true;
 }
 
+namespace {
+
+// The path that GetFinalPathNameByHandleW gives for handle, in extended
+// form. Returns an empty path when the path cannot be read.
+std::wstring FinalPathNameOf(HANDLE handle) {
+    constexpr DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    const DWORD size = ::GetFinalPathNameByHandleW(handle, nullptr, 0, flags);
+    if (size == 0) {
+        return {};
+    }
+    std::wstring path(size, L'\0');
+    const DWORD length = ::GetFinalPathNameByHandleW(handle, path.data(), size, flags);
+    if (length == 0 || length >= size) {
+        return {};
+    }
+    path.resize(length);
+    return path;
+}
+
+// The final path of the directory at path. The open follows a junction or a
+// directory symbolic link anywhere in path. Returns an empty path when the
+// directory cannot be opened or its final path cannot be read.
+std::wstring FinalPathOfDirectory(const std::wstring& path) {
+    const HANDLE directory = ::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (directory == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    std::wstring finalPath = FinalPathNameOf(directory);
+    ::CloseHandle(directory);
+    return finalPath;
+}
+
+}
+
 LayerMount::LayerMount(LayerConfig config)
     : config_(std::move(config))
+    , upperFinalPath_(FinalPathOfDirectory(config_.upperPath))
     , capabilities_(config_.hostCapabilities)
     , securityPolicy_(capabilities_)
     , events_()
@@ -544,9 +581,81 @@ ResolvedSizes LayerMount::SizesOf(const ResolvedPath& resolved) const {
     return sizes;
 }
 
+namespace {
+
+// Whether path is root or below it. The compare ignores case, and below
+// means past a separator, so "C:\ab" is not below "C:\a".
+bool IsAtOrBelow(const std::wstring& path, const std::wstring& root) {
+    if (root.empty() || path.size() < root.size() ||
+        ::CompareStringOrdinal(path.c_str(), static_cast<int>(root.size()),
+                               root.c_str(), static_cast<int>(root.size()),
+                               TRUE) != CSTR_EQUAL) {
+        return false;
+    }
+    return path.size() == root.size() || root.back() == L'\\' || path[root.size()] == L'\\';
+}
+
+// The path of the entry that handle is on, in the form of upperPath, so the
+// sidecar lookup finds a record keyed by that path. A final path at or below
+// upperFinalPath, the final path of the upper root, goes onto upperPath, so
+// an 8.3 name, a substituted drive or a junction in upperPath still matches.
+// Any other final path only loses its extended-form prefix when upperPath
+// has none. Returns an empty path when the handle's path cannot be read.
+std::wstring FinalPathOf(HANDLE handle,
+                         const std::wstring& upperPath,
+                         const std::wstring& upperFinalPath) {
+    std::wstring path = FinalPathNameOf(handle);
+    if (path.empty()) {
+        return {};
+    }
+
+    if (IsAtOrBelow(path, upperFinalPath)) {
+        std::wstring_view below(path);
+        below.remove_prefix(upperFinalPath.size());
+        while (!below.empty() && below.front() == L'\\') {
+            below.remove_prefix(1);
+        }
+        return below.empty() ? upperPath : JoinDirPath(upperPath, std::wstring(below));
+    }
+
+    constexpr std::wstring_view kExtendedPrefix = L"\\\\?\\";
+    constexpr std::wstring_view kExtendedUncPrefix = L"\\\\?\\UNC\\";
+    if (upperPath.rfind(kExtendedPrefix, 0) == 0) {
+        return path;
+    }
+    if (path.rfind(kExtendedUncPrefix, 0) == 0) {
+        return L"\\\\" + path.substr(kExtendedUncPrefix.size());
+    }
+    if (path.rfind(kExtendedPrefix, 0) == 0) {
+        return path.substr(kExtendedPrefix.size());
+    }
+    return path;
+}
+
+// The path whose copy-up record gives the stable ID of a handle opened at
+// pathHint. A handle on the entry at pathHint, a link opened as a link
+// included, takes that entry's record. A handle without the reparse
+// attribute, opened at a reparse point, followed the link to its target and
+// takes the target's record. Returns an empty path when the target's path
+// cannot be read.
+std::wstring RecordPathOf(HANDLE handle,
+                          DWORD handleAttributes,
+                          const std::wstring& pathHint,
+                          bool pathHintIsReparsePoint,
+                          const std::wstring& upperPath,
+                          const std::wstring& upperFinalPath) {
+    if ((handleAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || !pathHintIsReparsePoint) {
+        return pathHint;
+    }
+    return FinalPathOf(handle, upperPath, upperFinalPath);
+}
+
+}
+
 NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
                                             InternalFileInfo* fileInfo,
-                                            const std::wstring* pathHint) {
+                                            const std::wstring* pathHint,
+                                            bool pathHintIsReparsePoint) const {
     memset(fileInfo, 0, sizeof(*fileInfo));
 
     BY_HANDLE_FILE_INFORMATION info;
@@ -572,9 +681,15 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
     fileInfo->IndexNumber    = MakeIndexNumber(info);
 
     if (pathHint && !pathHint->empty()) {
-        const LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(*pathHint, nullptr);
-        if (metadata.hasStableIndexNumber) {
-            fileInfo->IndexNumber = metadata.stableIndexNumber;
+        const std::wstring recordPath = RecordPathOf(handle, info.dwFileAttributes, *pathHint,
+                                                     pathHintIsReparsePoint, config_.upperPath,
+                                                     upperFinalPath_);
+        if (!recordPath.empty()) {
+            const LayerMountMetadata metadata =
+                MetadataStore::ReadLayerMountMetadata(recordPath, &config_);
+            if (metadata.hasStableIndexNumber) {
+                fileInfo->IndexNumber = metadata.stableIndexNumber;
+            }
         }
     }
 
@@ -1068,6 +1183,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     ctx->relativePath = hostNorm;
     ctx->streamSuffix = streamSuffix;
     ctx->isDirectory = hostIsDirectory;
+    ctx->entryIsReparsePoint = (resolved.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
     ctx->ownerPid = callerPid;
     ctx->grantedAccess = resolvedAccess;
     ctx->createOptions = createOptions;
@@ -1124,7 +1240,8 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         return NtStatusFromWin32(::GetLastError());
     }
 
-    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                             ctx->entryIsReparsePoint);
     if (!NT_SUCCESS(status)) {
         ::CloseHandle(ctx->handle);
         return status;
@@ -1160,7 +1277,8 @@ NTSTATUS LayerMount::OpenRoot(UINT32 grantedAccess,
         return resolveStatus;
     }
 
-    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                             ctx->entryIsReparsePoint);
     if (!NT_SUCCESS(status)) {
         ::CloseHandle(ctx->handle);
         return status;
@@ -1302,7 +1420,8 @@ NTSTATUS LayerMount::Create(const CreateRequest& request,
 
     cache_->InvalidateWithAncestors(create.path.hostNorm);
 
-    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                             ctx->entryIsReparsePoint);
     if (!NT_SUCCESS(status)) {
         ::CloseHandle(ctx->handle);
         return status;
@@ -1607,7 +1726,8 @@ NTSTATUS LayerMount::Write(FileContext* ctx,
         if (writeOffset.QuadPart >= static_cast<LONGLONG>(fileSize.QuadPart)) {
             *bytesTransferred = 0;
             if (outInfo != nullptr) {
-                return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+                return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                              ctx->entryIsReparsePoint);
             }
             return STATUS_SUCCESS;
         }
@@ -1629,7 +1749,8 @@ NTSTATUS LayerMount::Write(FileContext* ctx,
     stats_.bytesWritten.fetch_add(*bytesTransferred, std::memory_order_relaxed);
 
     if (outInfo != nullptr) {
-        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                      ctx->entryIsReparsePoint);
     }
     return STATUS_SUCCESS;
 }
@@ -1769,7 +1890,8 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
     cache_->InvalidateWithAncestors(ctx->relativePath);
 
     if (outInfo != nullptr) {
-        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                      ctx->entryIsReparsePoint);
     }
     return STATUS_SUCCESS;
 }
@@ -1791,7 +1913,8 @@ NTSTATUS LayerMount::Flush(FileContext* ctx,
     }
 
     if (outInfo != nullptr) {
-        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                      ctx->entryIsReparsePoint);
     }
     return STATUS_SUCCESS;
 }
@@ -1976,7 +2099,7 @@ NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
         if (isDirectory && whiteoutMgr_->IsOpaque(normalized)) {
             whiteoutMgr_->RemoveOpaque(normalized);
         }
-        const NTSTATUS removal = RemoveUpperEntry(upperPath);
+        const NTSTATUS removal = RemoveUpperEntry(upperPath, config_);
         if (!NT_SUCCESS(removal)) {
             cache_->InvalidateWithAncestors(normalized);
             return removal;
@@ -2046,7 +2169,7 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
             whiteoutMgr_->IsOpaque(normalized)) {
             whiteoutMgr_->RemoveOpaque(normalized);
         }
-        const NTSTATUS removal = RemoveUpperEntry(upperPath);
+        const NTSTATUS removal = RemoveUpperEntry(upperPath, config_);
         if (!NT_SUCCESS(removal)) {
             cache_->InvalidateWithAncestors(normalized);
             return removal;
@@ -2090,7 +2213,7 @@ NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
     status = MoveUpperEntry(
         oldUpperPath, newUpperPath,
         replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No,
-        CopyAcrossVolumes::No);
+        CopyAcrossVolumes::No, config_);
     if (!NT_SUCCESS(status)) return status;
 
     if (lowerHasSource) {
@@ -2110,7 +2233,7 @@ NTSTATUS LayerMount::WhiteOutRenameSource(const RenamePaths& paths,
     const DWORD whErr = ::GetLastError();
     const NTSTATUS moveBack = MoveUpperEntry(pathResolver_->GetStoredUpperPath(paths.newNorm),
                                              oldUpperPath, ReplaceExisting::No,
-                                             CopyAcrossVolumes::No);
+                                             CopyAcrossVolumes::No, config_);
     if (!NT_SUCCESS(moveBack) && destHadWhiteout) {
         whiteoutMgr_->RemoveWhiteout(paths.newNorm);
     }
@@ -2213,7 +2336,7 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
         if (!NT_SUCCESS(status)) return status;
     }
 
-    RenameDestinationAside destinationAside;
+    RenameDestinationAside destinationAside(config_, *whiteoutMgr_, *cache_);
     if (replaceIfExists && kinds.destination.has_value()) {
         status = copyUp_->SetRenameDestinationAside(newNorm, kinds.source,
                                                     *kinds.destination,
@@ -2778,7 +2901,8 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
     }
 
     if (outInfo != nullptr) {
-        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath);
+        return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                      ctx->entryIsReparsePoint);
     }
     return STATUS_SUCCESS;
 }

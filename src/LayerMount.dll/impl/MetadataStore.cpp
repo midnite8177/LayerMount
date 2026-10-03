@@ -1,8 +1,11 @@
 #include "MetadataStore.h"
+#include "LayerPath.h"
 #include "SidecarMetadata.h"
 #include "../abi/CapabilityGate.h"
 
 #include <nlohmann/json.hpp>
+
+#include <functional>
 
 namespace LayerMount {
 
@@ -92,6 +95,9 @@ inline bool IsDefaultMetadata(const LayerMountMetadata& m) {
 // FILE_FLAG_BACKUP_SEMANTICS honors SE_BACKUP_NAME so a DENY-READ
 // inherited ACE on the base file cannot hide overlay metadata the
 // engine itself wrote.
+// FILE_FLAG_OPEN_REPARSE_POINT keeps the stream on a link itself. Without
+// it, the open of a file symlink's stream reaches the target's stream, and
+// the open of a directory link's stream fails with ERROR_DIRECTORY.
 HANDLE OpenAdsForRead(const std::wstring& adsPath, DWORD desiredAccess) {
     return CreateFileW(
         adsPath.c_str(),
@@ -99,7 +105,7 @@ HANDLE OpenAdsForRead(const std::wstring& adsPath, DWORD desiredAccess) {
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
 }
 
@@ -194,13 +200,15 @@ bool WriteAdsOnly(const std::wstring& filePath, const LayerMountMetadata& metada
     // `:overlay` stream open even though the process holds the backup
     // privileges. The metadata write, and with it the copy-up of a file
     // under a restrictive DACL, would then fail.
+    // FILE_FLAG_OPEN_REPARSE_POINT writes the stream onto a link itself; see
+    // OpenAdsForRead.
     HANDLE h = CreateFileW(
         adsPath.c_str(),
         GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
 
     if (h == INVALID_HANDLE_VALUE) {
@@ -217,6 +225,8 @@ bool WriteAdsOnly(const std::wstring& filePath, const LayerMountMetadata& metada
     return ok && bytesWritten == static_cast<DWORD>(json.size());
 }
 
+// DeleteFileW opens its path with FILE_OPEN_REPARSE_POINT, so on a link it
+// removes the link's own stream and leaves the target's.
 bool RemoveAdsOnly(const std::wstring& filePath) {
     std::wstring adsPath = filePath + kLayerMountADSStream;
     if (DeleteFileW(adsPath.c_str())) {
@@ -225,6 +235,8 @@ bool RemoveAdsOnly(const std::wstring& filePath) {
     return GetLastError() == ERROR_FILE_NOT_FOUND;
 }
 
+// GetFileAttributesW does not follow a link, so on a link it finds the
+// link's own stream.
 bool HasOpaqueAdsOnly(const std::wstring& directoryPath) {
     std::wstring adsPath = directoryPath + kOpaqueADSStream;
     return GetFileAttributesW(adsPath.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -233,14 +245,15 @@ bool HasOpaqueAdsOnly(const std::wstring& directoryPath) {
 bool SetOpaqueAdsOnly(const std::wstring& directoryPath) {
     std::wstring adsPath = directoryPath + kOpaqueADSStream;
 
-    // Permissive share mode; see OpenAdsForRead for the reason.
+    // Permissive share mode and FILE_FLAG_OPEN_REPARSE_POINT; see
+    // OpenAdsForRead for the reasons.
     HANDLE h = CreateFileW(
         adsPath.c_str(),
         GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
 
     if (h == INVALID_HANDLE_VALUE) {
@@ -275,14 +288,10 @@ LayerMountMetadata MetadataStore::ReadLayerMountMetadata(const std::wstring& fil
     bool adsCorrupted = false;
     LayerMountMetadata fromAds = ReadAdsOnly(filePath, &adsCorrupted);
 
-    // A corrupted ADS must not fall back to the sidecar. ReadAdsOnly sets
-    // adsCorrupted when the stream exists, or seems to exist after a sharing
-    // violation, an ACL denial, a multi-GB size or malformed JSON, but does
-    // not parse into usable metadata. A fallback there can bring back older
-    // sidecar metadata from before an ADS write took over. The fallback is
-    // only for an absent ADS, and it runs even when LM_CAP_ADS is set, so a
-    // host that changed from the sidecar to the ADS keeps its earlier state.
-    if (adsCorrupted) {
+    // On an ADS host the sidecar can hold a record from before the ADS write,
+    // so a corrupt ADS returns the default record. A host without ADS writes
+    // the sidecar, so its record is current.
+    if (adsCorrupted && !UseSidecarFor(config)) {
         return fromAds;
     }
 
@@ -312,6 +321,93 @@ bool MetadataStore::RemoveLayerMountMetadata(const std::wstring& filePath,
     }
     bool sidecarOk = SidecarMetadata::Remove(filePath, config->upperPath);
     return adsOk && sidecarOk;
+}
+
+namespace {
+
+// Calls visit with the path of each entry below dirPath. Enters a
+// subdirectory, but not a junction or a directory symbolic link, whose
+// sidecar records are its own and not those of its target's entries. The
+// find data carries the reparse tag, so the walk reads no tag of its own.
+void ForEachEntryBelow(const std::wstring& dirPath,
+                       const std::function<void(const std::wstring&)>& visit) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = ::FindFirstFileW(JoinDirPath(dirPath, L"*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    do {
+        const std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        const std::wstring childPath = JoinDirPath(dirPath, name);
+        visit(childPath);
+        const bool isLink = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                            IsReparseTagNameSurrogate(fd.dwReserved0);
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && !isLink) {
+            ForEachEntryBelow(childPath, visit);
+        }
+    } while (::FindNextFileW(find, &fd));
+    ::FindClose(find);
+}
+
+// Whether the entry at path is a directory that is not a junction or a
+// directory symbolic link. An entry whose reparse tag cannot be read counts
+// as a link, so no walk goes into it.
+bool IsDirectoryButNotLink(const std::wstring& path) {
+    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return false;
+    }
+    bool isLink = false;
+    return NT_SUCCESS(IsDirectoryLink(path, attrs, &isLink)) && !isLink;
+}
+
+}
+
+void MetadataStore::MoveSidecarRecords(const std::wstring& from,
+                                       const std::wstring& to,
+                                       const LayerConfig& config) {
+    if (!UseSidecarFor(&config)) {
+        return;
+    }
+    SidecarMetadata::Move(from, to, config.upperPath);
+    if (!IsDirectoryButNotLink(to)) {
+        return;
+    }
+    ForEachEntryBelow(to, [&](const std::wstring& movedPath) {
+        SidecarMetadata::Move(from + movedPath.substr(to.size()), movedPath,
+                              config.upperPath);
+    });
+}
+
+std::vector<std::wstring> MetadataStore::ListSidecarKeyedEntries(const std::wstring& path,
+                                                                 const LayerConfig& config) {
+    std::vector<std::wstring> entries;
+    if (!UseSidecarFor(&config)) {
+        return entries;
+    }
+    entries.push_back(path);
+    if (IsDirectoryButNotLink(path)) {
+        ForEachEntryBelow(path, [&](const std::wstring& entryPath) {
+            entries.push_back(entryPath);
+        });
+    }
+    return entries;
+}
+
+void MetadataStore::RemoveSidecarRecordsOfGoneEntries(const std::vector<std::wstring>& entries,
+                                                      const LayerConfig& config) {
+    for (const std::wstring& entryPath : entries) {
+        if (::GetFileAttributesW(entryPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            continue;
+        }
+        const DWORD probeErr = ::GetLastError();
+        if (probeErr != ERROR_FILE_NOT_FOUND && probeErr != ERROR_PATH_NOT_FOUND) {
+            continue;
+        }
+        SidecarMetadata::Remove(entryPath, config.upperPath);
+        SidecarMetadata::RemoveOpaque(entryPath, config.upperPath);
+    }
 }
 
 bool MetadataStore::HasOpaqueMetadata(const std::wstring& directoryPath,

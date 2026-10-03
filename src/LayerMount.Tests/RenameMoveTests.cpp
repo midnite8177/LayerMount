@@ -615,8 +615,6 @@ void AssertListsOnlyTheLinkTarget(const ::LayerMount::LayerMount& mount, const s
 
 constexpr UINT32 kCapabilitiesWithoutReparsePoints =
     LM_CAP_ADS | LM_CAP_SPARSE_FILES | LM_CAP_MULTIPLE_STREAMS | LM_CAP_NTFS_ACLS;
-constexpr UINT32 kCapabilitiesWithReparsePoints =
-    kCapabilitiesWithoutReparsePoints | LM_CAP_REPARSE_POINTS;
 
 void AssertLowerLinkRenameCopiesTheLink(LinkCreator createLink, const std::wstring& oldName,
                                         const std::wstring& newName,
@@ -640,6 +638,27 @@ void AssertLowerLinkRenameCopiesTheLink(LinkCreator createLink, const std::wstri
     AssertNoOpaqueMarkerIn(target);
     targetBefore.AssertUnchanged(L"The rename must not change the link target's entries");
     AssertListedDirectoryWithChild(mount, newName, L"inside.txt");
+}
+
+void AssertRenamedLowerLinkKeepsItsId(LinkCreator createLink, LinkTarget targetKind,
+                                      const std::wstring& oldName, const std::wstring& newName,
+                                      UINT32 hostCapabilities) {
+    TempLayerEnvironment env(1);
+    const std::wstring lowerLink = env.Lower(0) + L"\\" + oldName;
+    if (!LinkToTargetCreatedOrSkipped(env, createLink, targetKind, lowerLink)) {
+        return;
+    }
+    const UINT64 lowerLinkId = NtfsFileIdOf(lowerLink, LinkOpen::Itself);
+    LayerConfig config = env.MakeConfig();
+    config.hostCapabilities = hostCapabilities;
+    ::LayerMount::LayerMount mount(config);
+
+    AssertStatus(STATUS_SUCCESS, mount.Rename(oldName, newName, kFailIfExists, kNoCallerPid),
+        (L"The rename of " + oldName + L" to " + newName + L" must succeed").c_str());
+
+    Assert::AreEqual(lowerLinkId,
+        IndexNumberThroughMount(mount, newName, FILE_OPEN_REPARSE_POINT),
+        (L"An open of " + newName + L" as a link must report the lower link's file ID").c_str());
 }
 
 // Denies FILE_ADD_FILE on the upper root and disables SE_BACKUP_NAME and
@@ -949,7 +968,130 @@ public:
 
     TEST_METHOD(CaseOnlyRename_LowerJunctionWithReparseSupport_CopiesTheLinkWithoutAnOpaqueMarker) {
         AssertLowerLinkRenameCopiesTheLink(
-            CreateDirectoryJunction, L"Link", L"LINK", kCapabilitiesWithReparsePoints);
+            CreateDirectoryJunction, L"Link", L"LINK", kDefaultHostCapabilities);
+    }
+
+    TEST_METHOD(Rename_LowerFileSymlink_KeepsTheLowerLinkId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            AssertRenamedLowerLinkKeepsItsId(
+                CreateFileSymlink, LinkTarget::File, L"link", L"moved", capabilities);
+        });
+    }
+
+    TEST_METHOD(Rename_LowerDirectorySymlink_KeepsTheLowerLinkId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            AssertRenamedLowerLinkKeepsItsId(
+                CreateDirectorySymlink, LinkTarget::Directory, L"link", L"moved", capabilities);
+        });
+    }
+
+    TEST_METHOD(Rename_LowerJunction_KeepsTheLowerLinkId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            AssertRenamedLowerLinkKeepsItsId(
+                CreateDirectoryJunction, LinkTarget::Directory, L"link", L"moved", capabilities);
+        });
+    }
+
+    TEST_METHOD(CaseOnlyRename_LowerJunction_KeepsTheLowerLinkId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            AssertRenamedLowerLinkKeepsItsId(
+                CreateDirectoryJunction, LinkTarget::Directory, L"Link", L"LINK", capabilities);
+        });
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryHoldingLinks_KeepsEachEntrysId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\f.txt", "lower");
+            const std::wstring lowerDir = env.Lower(0) + L"\\d";
+            if (!LinkToTargetCreatedOrSkipped(env, CreateFileSymlink, LinkTarget::File,
+                                              lowerDir + L"\\flink") ||
+                !LinkCreatedOrSkipped(CreateDirectoryJunction, lowerDir + L"\\jlink",
+                                      LinkTargetPath(env, LinkTarget::Directory))) {
+                return;
+            }
+            const UINT64 fileId = NtfsFileIdOf(lowerDir + L"\\f.txt", LinkOpen::Follow);
+            const UINT64 fileLinkId = NtfsFileIdOf(lowerDir + L"\\flink", LinkOpen::Itself);
+            const UINT64 junctionId = NtfsFileIdOf(lowerDir + L"\\jlink", LinkOpen::Itself);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the lower directory must succeed");
+
+            Assert::AreEqual(fileId, IndexNumberThroughMount(mount, L"e\\f.txt", kNoCreateOptions),
+                L"The copied file must report the lower file's ID");
+            Assert::AreEqual(fileLinkId,
+                IndexNumberThroughMount(mount, L"e\\flink", FILE_OPEN_REPARSE_POINT),
+                L"The copied file symlink must report the lower link's file ID");
+            Assert::AreEqual(junctionId,
+                IndexNumberThroughMount(mount, L"e\\jlink", FILE_OPEN_REPARSE_POINT),
+                L"The copied junction must report the lower link's file ID");
+        });
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryHoldingCopiedUpFile_KeepsTheFilesId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"x.txt", "lower");
+            env.CreateDir(env.Upper(), L"d");
+            const UINT64 lowerId = NtfsFileIdOf(env.Lower(0) + L"\\x.txt", LinkOpen::Follow);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"x.txt", L"d\\x.txt", kFailIfExists, kNoCallerPid),
+                L"The rename of the lower file into the upper directory must succeed");
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the upper directory must succeed");
+
+            Assert::AreEqual(lowerId, IndexNumberThroughMount(mount, L"e\\x.txt", kNoCreateOptions),
+                L"The file must keep the lower file's ID through both renames");
+        });
+    }
+
+    TEST_METHOD(ReplaceRename_UpperFileOntoCopiedUpFile_ReportsTheMovedFilesId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"a.txt", "lower");
+            env.WriteFile(env.Upper(), L"b.txt", "upper");
+            const UINT64 movedId = NtfsFileIdOf(env.Upper() + L"\\b.txt", LinkOpen::Follow);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            AssertStatus(STATUS_SUCCESS, mount.EnsureInUpperLayer(L"a.txt"),
+                L"The copy-up of the lower file must succeed");
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"b.txt", L"a.txt", kReplaceIfExists, kNoCallerPid),
+                L"The replacing rename must succeed");
+
+            Assert::AreEqual(movedId, IndexNumberThroughMount(mount, L"a.txt", kNoCreateOptions),
+                L"The moved file must report its own ID, not the replaced file's");
+        });
+    }
+
+    TEST_METHOD(Delete_CopiedUpFileThenCreateAtItsPath_ReportsTheNewFilesId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"a.txt", "lower");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            AssertStatus(STATUS_SUCCESS, mount.EnsureInUpperLayer(L"a.txt"),
+                L"The copy-up of the lower file must succeed");
+
+            AssertStatus(STATUS_SUCCESS, mount.Delete(L"a.txt", kNoCallerPid),
+                L"The delete of the copied-up file must succeed");
+            AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"a.txt", kNoCreateOptions),
+                L"The create at the deleted file's path must succeed");
+
+            Assert::AreEqual(NtfsFileIdOf(env.Upper() + L"\\a.txt", LinkOpen::Follow),
+                IndexNumberThroughMount(mount, L"a.txt", kNoCreateOptions),
+                L"The new file must report its own ID, not the deleted file's");
+        });
     }
 
     TEST_METHOD(Rename_LowerEntryToItsOwnName_LeavesTheUpperUntouched) {

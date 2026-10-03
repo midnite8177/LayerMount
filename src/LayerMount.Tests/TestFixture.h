@@ -9,6 +9,7 @@
 #include "WhiteoutManager.h"
 
 #include "AclTestHelpers.h"
+#include "FileIdTestHelpers.h"
 
 #include <exception>
 #include <functional>
@@ -130,6 +131,20 @@ inline void AssertTempIsNTFS() {
         L"Tests require %TEMP% to be on NTFS for Alternate Data Stream support");
 }
 
+using LayerMountTestShared::kDefaultHostCapabilities;
+using LayerMountTestShared::kHostCapabilitiesWithoutAds;
+using LayerMountTestShared::LinkOpen;
+using LayerMountTestShared::NtfsFileIdOf;
+
+// Runs body once with kDefaultHostCapabilities and once with
+// kHostCapabilitiesWithoutAds, so a test covers the ADS store and the
+// sidecar store.
+inline void ForEachMetadataStore(const std::function<void(UINT32 hostCapabilities)>& body) {
+    for (const UINT32 hostCapabilities : {kDefaultHostCapabilities, kHostCapabilitiesWithoutAds}) {
+        body(hostCapabilities);
+    }
+}
+
 // Creates upper, work and lowerN directories under a unique %TEMP%
 // subdirectory, and deletes the tree on destruction.
 class TempLayerEnvironment {
@@ -169,9 +184,7 @@ public:
         c.upperPath   = upper_;
         c.workDirPath = work_;
         c.lowerPaths  = lowers_;
-        c.hostCapabilities = LM_CAP_ADS | LM_CAP_REPARSE_POINTS |
-                             LM_CAP_SPARSE_FILES | LM_CAP_MULTIPLE_STREAMS |
-                             LM_CAP_NTFS_ACLS;
+        c.hostCapabilities = kDefaultHostCapabilities;
         return c;
     }
 
@@ -602,6 +615,42 @@ inline UINT64 FileSizeThroughMount(::LayerMount::LayerMount& mount,
         L"FileSizeThroughMount: the open must succeed");
     mount.Close(ctx.get());
     return info.FileSize;
+}
+
+enum class LinkTarget { File, Directory };
+
+// The target.txt file or the target directory under the environment root
+// that a link test points its link at.
+inline std::wstring LinkTargetPath(const TempLayerEnvironment& env, LinkTarget targetKind) {
+    return env.Root() + (targetKind == LinkTarget::File ? L"\\target.txt" : L"\\target");
+}
+
+// Writes target.txt and target\inside.txt under the environment root and
+// creates link to the one that targetKind names. Logs a skip and returns
+// false when the link cannot be created.
+inline bool LinkToTargetCreatedOrSkipped(const TempLayerEnvironment& env,
+                                         LinkCreator createLink,
+                                         LinkTarget targetKind,
+                                         const std::wstring& link) {
+    env.WriteFile(env.Root(), L"target.txt", "target");
+    env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+    return LinkCreatedOrSkipped(createLink, link, LinkTargetPath(env, targetKind));
+}
+
+// The IndexNumber that an open of path through the mount reports.
+// FILE_OPEN_REPARSE_POINT in createOptions opens a link itself. Fails the
+// test when the open fails.
+inline UINT64 IndexNumberThroughMount(::LayerMount::LayerMount& mount,
+                                      const std::wstring& path,
+                                      UINT32 createOptions) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    Assert::IsTrue(NT_SUCCESS(mount.Open(path, FILE_READ_ATTRIBUTES, createOptions,
+                                         kNoCallerPid, &ctx, &info)),
+        (L"The open of " + path + L" through the mount must succeed").c_str());
+    mount.Close(ctx.get());
+    return info.IndexNumber;
 }
 
 // A CopyUp and the objects it depends on, all built from a copy of

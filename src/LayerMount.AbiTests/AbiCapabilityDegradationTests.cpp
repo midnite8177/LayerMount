@@ -1,9 +1,14 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "FileIdTestHelpers.h"
 #include "StreamTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using LayerMountTestShared::HasOverlayStream;
+using LayerMountTestShared::kDefaultHostCapabilities;
+using LayerMountTestShared::kHostCapabilitiesWithoutAds;
+using LayerMountTestShared::LinkOpen;
+using LayerMountTestShared::NtfsFileIdOf;
 using LayerMountTestShared::HasStream;
 
 namespace LayerMountAbiTests {
@@ -84,6 +89,76 @@ void AssertUpperLink(const std::wstring& upperLink,
     { std::ifstream f(readPath); std::getline(f, payload); }
     Assert::AreEqual(expectedPayload, payload,
         (L"The upper " + upperLink + L" must point to the link target").c_str());
+}
+
+enum class LowerLinkKind { FileSymlink, DirectorySymlink, Junction };
+
+// Writes target.txt and target\\inside.txt under the environment root and
+// creates the lower link "link" of linkKind to one of them. Returns the
+// link's target, or an empty path after a logged skip when the link cannot
+// be created.
+std::wstring BuildLowerLinkToTarget(const TempLayerEnv& env, LowerLinkKind linkKind) {
+    const std::wstring fileTarget = env.Root() + L"\\target.txt";
+    const std::wstring directoryTarget = env.Root() + L"\\target";
+    { std::ofstream f(fileTarget); f << "target-payload"; }
+    std::filesystem::create_directories(directoryTarget);
+    { std::ofstream f(directoryTarget + L"\\inside.txt"); f << "inside-payload"; }
+
+    const std::wstring lowerLink = env.Lower(0) + L"\\link";
+    bool created = false;
+    std::wstring target;
+    switch (linkKind) {
+    case LowerLinkKind::FileSymlink:
+        target = fileTarget;
+        created = ::CreateSymbolicLinkW(lowerLink.c_str(), target.c_str(),
+                                        SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+        break;
+    case LowerLinkKind::DirectorySymlink:
+        target = directoryTarget;
+        created = ::CreateSymbolicLinkW(lowerLink.c_str(), target.c_str(),
+                                        SYMBOLIC_LINK_FLAG_DIRECTORY |
+                                        SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+        break;
+    case LowerLinkKind::Junction:
+        target = directoryTarget;
+        created = CreateDirectoryJunction(lowerLink, target);
+        break;
+    }
+    if (!created) {
+        Logger::WriteMessage((L"Skipping: could not create the lower link " + lowerLink).c_str());
+        return {};
+    }
+    return target;
+}
+
+void AssertCopiedUpLinkKeepsTheLowerLinkId(LowerLinkKind linkKind, UINT32 hostCapabilities) {
+    TempLayerEnv env(1);
+    const std::wstring target = BuildLowerLinkToTarget(env, linkKind);
+    if (target.empty()) {
+        return;
+    }
+    const UINT64 lowerLinkId = NtfsFileIdOf(env.Lower(0) + L"\\link", LinkOpen::Itself);
+    LayerMountHolder mount = CreateLayerMount(env, hostCapabilities);
+
+    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountEnsureInUpperLayer(mount.Get(), L"\\link"),
+        L"The copy-up of the lower link must succeed");
+
+    OpenedFile link;
+    Assert::AreEqual<HRESULT>(S_OK,
+        OpenOverlayFile(mount.Get(), L"\\link", FILE_READ_ATTRIBUTES,
+                        FILE_OPEN_REPARSE_POINT, link),
+        L"The open of the upper link as a link must succeed");
+    LM_FILE_INFO info{};
+    const HRESULT infoHr = ::LayerMountGetFileInfo(link.handle, &info);
+    (void)::LayerMountCloseFile(link.handle);
+
+    Assert::AreEqual(lowerLinkId, link.info.indexNumber,
+        L"The open of the upper link as a link must report the lower link's file ID");
+    Assert::AreEqual<HRESULT>(S_OK, infoHr, L"LayerMountGetFileInfo must succeed");
+    Assert::AreEqual(lowerLinkId, info.indexNumber,
+        L"LayerMountGetFileInfo on the upper link must report the lower link's file ID");
+    Assert::IsFalse(HasOverlayStream(target),
+        L"The copy-up must write no :overlay stream onto the link target");
 }
 
 } // namespace
@@ -174,6 +249,30 @@ public:
         AssertUpperLink(upperLink, upperLink, "target-payload");
         Assert::IsFalse(HasOverlayStream(target),
             L"The copy-up must write no :overlay stream onto the symlink target");
+    }
+
+    TEST_METHOD(DefaultAds_EnsureInUpperLayerOnLowerFileSymlink_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(LowerLinkKind::FileSymlink, kDefaultHostCapabilities);
+    }
+
+    TEST_METHOD(ClearAds_EnsureInUpperLayerOnLowerFileSymlink_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(LowerLinkKind::FileSymlink, kHostCapabilitiesWithoutAds);
+    }
+
+    TEST_METHOD(DefaultAds_EnsureInUpperLayerOnLowerDirectorySymlink_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(LowerLinkKind::DirectorySymlink, kDefaultHostCapabilities);
+    }
+
+    TEST_METHOD(ClearAds_EnsureInUpperLayerOnLowerDirectorySymlink_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(LowerLinkKind::DirectorySymlink, kHostCapabilitiesWithoutAds);
+    }
+
+    TEST_METHOD(DefaultAds_EnsureInUpperLayerOnLowerJunction_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(LowerLinkKind::Junction, kDefaultHostCapabilities);
+    }
+
+    TEST_METHOD(ClearAds_EnsureInUpperLayerOnLowerJunction_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(LowerLinkKind::Junction, kHostCapabilitiesWithoutAds);
     }
 
     TEST_METHOD(ClearReparsePoints_RenameLowerJunction_CopiesTheLinkAndWritesNoOpaqueMarkerIntoItsTarget) {

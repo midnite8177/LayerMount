@@ -11,6 +11,8 @@
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::AccessDenied;
+using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
 using LayerMountTestShared::HasOverlayStream;
 
 namespace LayerMountTests {
@@ -51,6 +53,41 @@ void AssertLowerDirectoryLinkCopiesUpAsALink(LinkCreator createLink) {
 
     AssertUpperLinkReadsThroughToTarget(env, L"link", L"link\\inside.txt", "inside", target);
     targetBefore.AssertUnchanged(L"The copy-up must not change the link target's entries");
+}
+
+void AssertCopiedUpLinkKeepsTheLowerLinkId(LinkCreator createLink, LinkTarget targetKind,
+                                           UINT32 hostCapabilities) {
+    TempLayerEnvironment env(1);
+    const std::wstring target = LinkTargetPath(env, targetKind);
+    const std::wstring lowerLink = env.Lower(0) + L"\\link";
+    if (!LinkToTargetCreatedOrSkipped(env, createLink, targetKind, lowerLink)) {
+        return;
+    }
+    const UINT64 lowerLinkId = NtfsFileIdOf(lowerLink, LinkOpen::Itself);
+    const UINT64 targetId = NtfsFileIdOf(target, LinkOpen::Follow);
+    LayerConfig config = env.MakeConfig();
+    config.hostCapabilities = hostCapabilities;
+    {
+        CopyUpRig rig(config);
+        AssertStatus(STATUS_SUCCESS,
+            targetKind == LinkTarget::File ? rig.copyUp.CopyUpFile(L"link")
+                                           : rig.copyUp.CopyUpDirectory(L"link"),
+            L"The copy-up of the lower link must succeed");
+    }
+    const std::wstring upperLink = env.Upper() + L"\\link";
+    Assert::IsTrue(HasAttribute(upperLink, FILE_ATTRIBUTE_REPARSE_POINT),
+        L"The upper must hold the link");
+    Assert::AreNotEqual(lowerLinkId, NtfsFileIdOf(upperLink, LinkOpen::Itself),
+        L"The upper link must be a new NTFS entry");
+    ::LayerMount::LayerMount mount(config);
+
+    Assert::AreEqual(lowerLinkId,
+        IndexNumberThroughMount(mount, L"link", FILE_OPEN_REPARSE_POINT),
+        L"An open of the upper link as a link must report the lower link's file ID");
+    Assert::AreEqual(targetId, IndexNumberThroughMount(mount, L"link", kNoCreateOptions),
+        L"An open that follows the upper link must report the target's file ID");
+    Assert::IsFalse(HasOverlayStream(target),
+        L"The copy-up must write no :overlay stream onto the link target");
 }
 
 }
@@ -453,6 +490,133 @@ public:
 
     TEST_METHOD(CopyUpDirectory_LowerDirectorySymlinkWithAds_CopiesTheLinkAndWritesNoStreamOntoItsTarget) {
         AssertLowerDirectoryLinkCopiesUpAsALink(CreateDirectorySymlink);
+    }
+
+    TEST_METHOD(CopyUpFile_LowerFileSymlink_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(
+            CreateFileSymlink, LinkTarget::File, kDefaultHostCapabilities);
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerDirectorySymlink_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(
+            CreateDirectorySymlink, LinkTarget::Directory, kDefaultHostCapabilities);
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerJunction_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(
+            CreateDirectoryJunction, LinkTarget::Directory, kDefaultHostCapabilities);
+    }
+
+    TEST_METHOD(CopyUpFile_LowerFileSymlinkWithoutAds_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(
+            CreateFileSymlink, LinkTarget::File, kHostCapabilitiesWithoutAds);
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerDirectorySymlinkWithoutAds_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(
+            CreateDirectorySymlink, LinkTarget::Directory, kHostCapabilitiesWithoutAds);
+    }
+
+    TEST_METHOD(CopyUpDirectory_LowerJunctionWithoutAds_ReportsTheLowerLinkIdThroughTheLink) {
+        AssertCopiedUpLinkKeepsTheLowerLinkId(
+            CreateDirectoryJunction, LinkTarget::Directory, kHostCapabilitiesWithoutAds);
+    }
+
+    TEST_METHOD(CopyUpFile_LowerFile_ReportsTheLowerFileId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"a.txt", "lower");
+            const UINT64 lowerId = NtfsFileIdOf(env.Lower(0) + L"\\a.txt", LinkOpen::Follow);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            {
+                CopyUpRig rig(config);
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"a.txt"),
+                    L"The copy-up of the lower file must succeed");
+            }
+            ::LayerMount::LayerMount mount(config);
+
+            Assert::AreEqual(lowerId, IndexNumberThroughMount(mount, L"a.txt", kNoCreateOptions),
+                L"An open of the copied-up file must report the lower file's ID");
+        });
+    }
+
+    TEST_METHOD(Open_FollowedUpperLinkToCopiedUpFile_ReportsTheTargetsStableId) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"a.txt", "lower");
+            const UINT64 lowerId = NtfsFileIdOf(env.Lower(0) + L"\\a.txt", LinkOpen::Follow);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            {
+                CopyUpRig rig(config);
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"a.txt"),
+                    L"The copy-up of the lower file must succeed");
+            }
+            if (!LinkCreatedOrSkipped(CreateFileSymlink, env.Upper() + L"\\link.txt",
+                                      env.Upper() + L"\\a.txt")) {
+                return;
+            }
+            ::LayerMount::LayerMount mount(config);
+
+            Assert::AreEqual(lowerId,
+                IndexNumberThroughMount(mount, L"link.txt", kNoCreateOptions),
+                L"An open that follows the link must report the copied-up target's stable ID");
+            Assert::AreEqual(NtfsFileIdOf(env.Upper() + L"\\link.txt", LinkOpen::Itself),
+                IndexNumberThroughMount(mount, L"link.txt", FILE_OPEN_REPARSE_POINT),
+                L"An open of a link with no record must report the link's own file ID");
+        });
+    }
+
+    TEST_METHOD(Open_FollowedUpperLinkWithTheUpperPathThroughAJunctionWithoutAds_ReportsTheTargetsStableId) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.txt", "lower");
+        const std::wstring upperThroughJunction = env.Root() + L"\\upper-junction";
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, upperThroughJunction, env.Upper())) {
+            return;
+        }
+        const UINT64 lowerId = NtfsFileIdOf(env.Lower(0) + L"\\a.txt", LinkOpen::Follow);
+        LayerConfig config = env.MakeConfig();
+        config.upperPath = upperThroughJunction;
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        {
+            CopyUpRig rig(config);
+            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"a.txt"),
+                L"The copy-up of the lower file must succeed");
+        }
+        if (!LinkCreatedOrSkipped(CreateFileSymlink, env.Upper() + L"\\link.txt",
+                                  env.Upper() + L"\\a.txt")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(config);
+
+        Assert::AreEqual(lowerId,
+            IndexNumberThroughMount(mount, L"link.txt", kNoCreateOptions),
+            L"An open that follows the link must report the copied-up target's stable ID");
+    }
+
+    TEST_METHOD(CopyUpFile_FailsAfterTheRecordWriteWithoutAds_LeavesNoRecordAtThePath) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.txt", "lower");
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        {
+            AccessDenied timesDenied(env.Lower(0) + L"\\a.txt", FILE_WRITE_ATTRIBUTES);
+            CopyUpRig rig(config);
+            BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            DisableRestorePrivilegeOnThread();
+
+            Assert::IsFalse(NT_SUCCESS(rig.copyUp.CopyUpFile(L"a.txt")),
+                L"The copy-up must fail when the upper copy refuses its times");
+        }
+        Assert::IsFalse(fs::exists(env.Upper() + L"\\a.txt"),
+            L"The failed copy-up must remove the upper copy");
+        env.WriteFile(env.Upper(), L"a.txt", "upper");
+        ::LayerMount::LayerMount mount(config);
+
+        Assert::AreEqual(NtfsFileIdOf(env.Upper() + L"\\a.txt", LinkOpen::Follow),
+            IndexNumberThroughMount(mount, L"a.txt", kNoCreateOptions),
+            L"A new file at the path must report its own ID, not the lower file's");
     }
 
     TEST_METHOD(RenameUpperDirectory_MovesDirectoryOnly) {

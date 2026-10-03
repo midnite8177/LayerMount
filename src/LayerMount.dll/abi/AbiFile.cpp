@@ -438,8 +438,9 @@ LM_API HRESULT LM_CALL LayerMountGetFileInfo(LM_FILE_HANDLE file,
     }
 
     ::LayerMount::InternalFileInfo internalInfo{};
-    NTSTATUS status = ::LayerMount::LayerMount::FillFileInfoFromHandle(
-        holder->ctx->handle, &internalInfo, &holder->ctx->actualPath);
+    NTSTATUS status = holder->mount->FillFileInfoFromHandle(
+        holder->ctx->handle, &internalInfo, &holder->ctx->actualPath,
+        holder->ctx->entryIsReparsePoint);
     if (!NT_SUCCESS(status)) {
         return HresultFromNtStatus(status);
     }

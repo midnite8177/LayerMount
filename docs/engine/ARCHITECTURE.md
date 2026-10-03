@@ -707,8 +707,9 @@ file ID, captured at copy-up time and replayed in `FillFileInfoFromHandle`
 so callers that rely on the index for identity tracking (e.g. open-by-id
 shims) see a consistent value before and after copy-up.
 A copied-up link (a junction, a directory symlink or a file symlink) gets
-no metadata record, because an ADS write on it goes through the link into
-its target. Its file ID changes at copy-up.
+a record on the link itself that holds the lower link's file ID. An open
+of the link as a link reports that ID. An open that follows the link
+reports the target's ID, from the target's own record when it has one.
 
 ### Two backends, one dispatcher
 

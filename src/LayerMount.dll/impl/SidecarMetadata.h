@@ -7,8 +7,8 @@
 //
 // Layout under the upper layer:
 //
-//     <upper>\.overlay\<sha1(relativePath)>.meta.json     (per-file metadata)
-//     <upper>\.overlay\<sha1(relativePath)>.opaque        (opaque dir marker)
+//     <upper>\.overlay\<sha1(lowercased path)>.meta.json     (per-file metadata)
+//     <upper>\.overlay\<sha1(lowercased path)>.opaque        (opaque dir marker)
 //
 // Path keying uses SHA-1 of the lowercased absolute upper path so the
 // scheme survives filenames containing characters NTFS would reject in a
@@ -40,6 +40,15 @@ public:
     // Delete the per-file sidecar. Returns true on success or absent.
     static bool Remove(const std::wstring& filePath,
                        const std::wstring& upperRoot);
+
+    // Moves the per-file sidecar and the opaque marker of fromPath to the
+    // names of toPath. For each kind that fromPath lacks, deletes toPath's,
+    // so an entry moved onto toPath never takes the record of the entry that
+    // was there. Two paths that differ only in case share a sidecar, which
+    // stays.
+    static void Move(const std::wstring& fromPath,
+                     const std::wstring& toPath,
+                     const std::wstring& upperRoot);
 
     // Opaque-marker variants. Marker is a separate zero-byte file
     // (`<sha1(dirPath)>.opaque`) so detection is a single GetFileAttributes.

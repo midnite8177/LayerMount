@@ -134,6 +134,9 @@ struct FileContext {
     bool isWhiteout = false;
     bool inWorkDir = false;         // True if file is being atomically created
     bool isMetacopyOnly = false;    // True if only metadata was copied up
+    bool entryIsReparsePoint = false; // The entry at actualPath is a reparse
+                                      // point, such as a link. The open sets
+                                      // it from the resolved entry.
     LARGE_INTEGER allocSize = {};
     DWORD ownerPid = 0;             // PID of process that opened this handle
     UINT32 grantedAccess = 0;
@@ -342,9 +345,18 @@ public:
 
     static NTSTATUS FillFileInfo(const std::wstring& path, InternalFileInfo* fileInfo);
 
-    static NTSTATUS FillFileInfoFromHandle(HANDLE handle,
+    // Fills fileInfo from the handle. pathHint, when not null or empty, is
+    // the path the handle was opened at, and pathHintIsReparsePoint tells
+    // whether the entry there is a reparse point, such as a link. The
+    // IndexNumber is the stable ID of the copy-up record of the entry the
+    // handle is on, or the NTFS file ID when that entry has none. A handle
+    // that followed a link at pathHint is on the link's target and takes the
+    // target's record, never the link's. Such a handle costs two
+    // GetFinalPathNameByHandleW calls on every fill.
+    NTSTATUS FillFileInfoFromHandle(HANDLE handle,
         InternalFileInfo* fileInfo,
-        const std::wstring* pathHint = nullptr);
+        const std::wstring* pathHint,
+        bool pathHintIsReparsePoint) const;
 
     // Merges the directory's entries across the layers. A layer that holds
     // the directory but cannot list it gives the status of that scan's
@@ -800,6 +812,10 @@ private:
                                   bool destHadWhiteout);
 
     LayerConfig config_;
+    // The final path of config_.upperPath, read once at mount, in the
+    // extended form that GetFinalPathNameByHandleW gives. Empty when the
+    // mount could not read it.
+    std::wstring upperFinalPath_;
     ::LayerMount::abi::CapabilityGate capabilities_;
     SecurityPolicy                    securityPolicy_;
     ::LayerMount::abi::EventEmitter   events_;

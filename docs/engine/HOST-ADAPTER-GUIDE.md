@@ -112,10 +112,10 @@ every bit its target actually supports and no more.
   declare the corresponding limitation. None of them gates an engine
   fallback; clearing one records the limitation for whatever
   reads `hostCapabilities` back, and nothing more. A copy-up or a
-  rename of a lower junction or symlink copies it up as a link with no
-  opaque marker and no metadata record, with or without
-  `LM_CAP_REPARSE_POINTS`. Overlayfs also copies up a symlink as a
-  symlink.
+  rename of a lower junction or symlink copies it up as a link, with or
+  without `LM_CAP_REPARSE_POINTS`. The link gets a copy-up record that
+  keeps the lower link's file ID, and no opaque marker. Overlayfs also
+  copies up a symlink as a symlink.
 
 NTFS compression has no capability bit. A copy-up of a compressed lower
 file sets compression on the upper copy and ignores a refusal, on every

@@ -864,37 +864,61 @@ static NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
     return STATUS_SUCCESS;
 }
 
-// A link gets no opaque marker, as overlayfs gives a symlink no opaque xattr.
-// It also gets no copy-up metadata in either metadata store, so the upper link
-// reports its own file ID. The marker file, and an ADS metadata stream, would
-// go through the link into its target.
-static NTSTATUS CopyLowerLinkWithoutOverlayMarkers(const ResolvedPath& source,
-                                                   const std::wstring& upperPath) {
-    const NTSTATUS status =
-        CopyUpReparsePointEntry(source.absolutePath, upperPath, source.attributes);
-    if (!NT_SUCCESS(status)) {
-        if ((source.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            ::RemoveDirectoryW(upperPath.c_str());
-        } else {
-            ::DeleteFileW(upperPath.c_str());
-        }
-    }
-    return status;
+// The remove call that a new upper entry needs. A file symbolic link is a
+// File, and a junction or a directory symbolic link is a Directory.
+enum class NewUpperEntryKind { File, Directory };
+
+static NewUpperEntryKind NewUpperEntryKindOf(DWORD attributes) {
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ? NewUpperEntryKind::Directory
+                                                        : NewUpperEntryKind::File;
 }
 
-NTSTATUS CopyUp::WriteCopyUpMetadataOrAbort(const std::wstring& upperPath,
-                                            const LayerMountMetadata& metadata) {
-    if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
-        const DWORD err = ::GetLastError();
+static void RemoveNewUpperEntry(const std::wstring& upperPath, NewUpperEntryKind kind) {
+    if (kind == NewUpperEntryKind::Directory) {
+        ::RemoveDirectoryW(upperPath.c_str());
+    } else {
         ::DeleteFileW(upperPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
     }
-    return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::CopyUpLinkAndRecord(const std::wstring& normalized,
-                                     const CopyUpTarget& target) {
-    const NTSTATUS status = CopyLowerLinkWithoutOverlayMarkers(target.source, target.upperPath);
+// Writes metadata as the copy-up record of the new entry at upperPath. When
+// the write fails, removes the entry and returns the write's error. A failed
+// write leaves no record, so the remove has no record to clean up.
+static NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
+                                               const LayerMountMetadata& metadata,
+                                               NewUpperEntryKind kind,
+                                               const LayerConfig& config) {
+    if (MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config)) {
+        return STATUS_SUCCESS;
+    }
+    const DWORD err = ::GetLastError();
+    RemoveNewUpperEntry(upperPath, kind);
+    return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+}
+
+// Copies the link at srcAbsolute to dstAbsolute as a link, with a copy-up
+// record that holds the source link's own file ID, as overlayfs keeps the
+// origin and inode number of a copied-up symlink. The record belongs to the
+// link, not to its target. A link gets no opaque marker, as overlayfs gives
+// a symlink no opaque xattr. A failure removes the new link.
+static NTSTATUS CopyLinkWithCopyUpRecord(const std::wstring& srcAbsolute,
+                                         DWORD srcAttrs,
+                                         const std::wstring& dstAbsolute,
+                                         const LayerConfig& config) {
+    const NewUpperEntryKind kind = NewUpperEntryKindOf(srcAttrs);
+    const NTSTATUS status = CopyUpReparsePointEntry(srcAbsolute, dstAbsolute, srcAttrs);
+    if (!NT_SUCCESS(status)) {
+        RemoveNewUpperEntry(dstAbsolute, kind);
+        return status;
+    }
+    return WriteCopyUpRecordOrRemoveEntry(dstAbsolute, MakeCopyUpMetadata(srcAbsolute), kind,
+                                          config);
+}
+
+NTSTATUS CopyUp::CopyUpLinkAndCount(const std::wstring& normalized,
+                                    const CopyUpTarget& target) {
+    const NTSTATUS status = CopyLinkWithCopyUpRecord(
+        target.source.absolutePath, target.source.attributes, target.upperPath, config_);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -984,14 +1008,15 @@ NTSTATUS CopyUp::FinishCommittedFile(const std::wstring& sourcePath,
     }
 
     LayerMountMetadata metadata = MakeCopyUpMetadata(sourcePath);
-    NTSTATUS metadataStatus = WriteCopyUpMetadataOrAbort(upperPath, metadata);
+    NTSTATUS metadataStatus = WriteCopyUpRecordOrRemoveEntry(
+        upperPath, metadata, NewUpperEntryKind::File, config_);
     if (!NT_SUCCESS(metadataStatus)) {
         return metadataStatus;
     }
 
     if (!basicInfo.Restore()) {
         const DWORD err = ::GetLastError();
-        ::DeleteFileW(upperPath.c_str());
+        RemoveUpperEntry(upperPath, config_);
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
@@ -1041,7 +1066,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     // A data copy would follow the link and put the target's data in a plain
     // upper file.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpLinkAndRecord(normalized, target);
+        return CopyUpLinkAndCount(normalized, target);
     }
 
     ScopedHandle srcHandle(CreateFileW(
@@ -1202,7 +1227,8 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
 
     LayerMountMetadata metacopyMetadata = MakeCopyUpMetadata(source.absolutePath);
     metacopyMetadata.metacopy = true;
-    NTSTATUS metacopyMetadataStatus = WriteCopyUpMetadataOrAbort(upperPath, metacopyMetadata);
+    NTSTATUS metacopyMetadataStatus = WriteCopyUpRecordOrRemoveEntry(
+        upperPath, metacopyMetadata, NewUpperEntryKind::File, config_);
     if (!NT_SUCCESS(metacopyMetadataStatus)) {
         return metacopyMetadataStatus;
     }
@@ -1377,7 +1403,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     // Without this branch a lower junction or directory symlink copies up as
     // a plain empty directory and loses its reparse tag.
     if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpLinkAndRecord(normalized, target);
+        return CopyUpLinkAndCount(normalized, target);
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
@@ -1430,17 +1456,11 @@ NTSTATUS CopyUp::SecureAndTagUpperDirectory(const std::wstring& sourcePath,
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
-    // Write ADS metadata. Fatal on failure: without origin/stable-id
+    // Write the copy-up record. Fatal on failure: without origin/stable-id
     // the upper directory looks like a foreign creation and later
     // resolution can misbehave. Tear down the staged upper directory.
-    LayerMountMetadata metadata = MakeCopyUpMetadata(sourcePath);
-    if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
-        const DWORD err = ::GetLastError();
-        ::RemoveDirectoryW(upperPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
-    }
-
-    return STATUS_SUCCESS;
+    return WriteCopyUpRecordOrRemoveEntry(upperPath, MakeCopyUpMetadata(sourcePath),
+                                          NewUpperEntryKind::Directory, config_);
 }
 
 bool CopyUp::DestinationExistsInMerged(const std::wstring& normalizedPath) const {
@@ -1486,12 +1506,12 @@ NTSTATUS CopyUp::OverlayUpperShadow(const std::wstring& oldUpperPath,
 
         if (name.size() > kWhPrefix.size() &&
             std::equal(kWhPrefix.begin(), kWhPrefix.end(), name.begin())) {
-            RemoveUpperEntry(newUpperPath + L"\\" + name.substr(kWhPrefix.size()));
+            RemoveUpperEntry(newUpperPath + L"\\" + name.substr(kWhPrefix.size()), config_);
             continue;
         }
 
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            RemoveUpperEntry(childDst);
+            RemoveUpperEntry(childDst, config_);
         }
         const NTSTATUS childStatus = CopyTreePreservingMetadata(childSrc, childDst);
         if (!NT_SUCCESS(childStatus)) {
@@ -1522,12 +1542,13 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
     }
 
     if (sourceKind == RenameEntryKind::Link) {
-        NTSTATUS rpStatus = CopyLowerLinkWithoutOverlayMarkers(source, newUpperPath);
+        NTSTATUS rpStatus = CopyLinkWithCopyUpRecord(
+            source.absolutePath, source.attributes, newUpperPath, config_);
         if (!NT_SUCCESS(rpStatus)) {
             return rpStatus;
         }
 
-        RemoveUpperEntry(pathResolver_.GetUpperPath(oldNorm));
+        RemoveUpperEntry(pathResolver_.GetUpperPath(oldNorm), config_);
 
         cache_.InvalidateWithAncestors(oldNorm);
         cache_.InvalidateWithAncestors(newNorm);
@@ -1537,8 +1558,7 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
     NTSTATUS copyStatus = CopyTreePreservingMetadata(
         source.absolutePath, newUpperPath);
     if (!NT_SUCCESS(copyStatus)) {
-        std::error_code ec;
-        std::filesystem::remove_all(newUpperPath, ec);
+        RemoveUpperEntry(newUpperPath, config_);
         return copyStatus;
     }
 
@@ -1548,16 +1568,14 @@ NTSTATUS CopyUp::RenameLowerDirectory(const CallerPath& oldCallerPath,
         (oldUpperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
         const NTSTATUS overlayStatus = OverlayUpperShadow(oldUpperPath, newUpperPath);
         if (!NT_SUCCESS(overlayStatus)) {
-            std::error_code ec;
-            std::filesystem::remove_all(newUpperPath, ec);
+            RemoveUpperEntry(newUpperPath, config_);
             return overlayStatus;
         }
     }
 
     whiteoutMgr_.SetOpaque(newNorm);
 
-    std::error_code ecRemove;
-    std::filesystem::remove_all(oldUpperPath, ecRemove);
+    RemoveUpperEntry(oldUpperPath, config_);
 
     cache_.InvalidateWithAncestors(oldNorm);
     cache_.InvalidateWithAncestors(newNorm);
@@ -1580,13 +1598,16 @@ NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
 
     std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
 
-    // The opaque marker calls on a link would reach its target.
+    // A link gets no opaque marker, as overlayfs gives a symlink no opaque
+    // xattr. The marker-file check would also go through the link into its
+    // target.
     const bool isLink = sourceKind == RenameEntryKind::Link;
     const bool wasOpaque = !isLink && whiteoutMgr_.IsOpaque(oldNorm);
 
-    DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
-    if (!MoveFileExW(oldUpperPath.c_str(), newUpperPath.c_str(), flags)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    const NTSTATUS moveStatus = MoveUpperEntry(oldUpperPath, newUpperPath, replace,
+                                               CopyAcrossVolumes::No, config_);
+    if (!NT_SUCCESS(moveStatus)) {
+        return moveStatus;
     }
 
     if (wasOpaque) {
@@ -1603,29 +1624,30 @@ NTSTATUS CopyUp::RenameUpperDirectory(const CallerPath& oldCallerPath,
     return STATUS_SUCCESS;
 }
 
+RenameDestinationAside::RenameDestinationAside(ConfigRef config,
+                                               WhiteoutManager& whiteoutMgr,
+                                               Cache& cache)
+    : config_(config.Get()), whiteoutMgr_(whiteoutMgr), cache_(cache) {}
+
 RenameDestinationAside::~RenameDestinationAside() {
     if (asidePath_.empty()) {
         return;
     }
     if (::GetFileAttributesW(upperPath_.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        RemoveUpperEntry(asidePath_);
+        RemoveUpperEntry(asidePath_, config_);
     } else if (NT_SUCCESS(MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No,
-                                         restoreCopy_)) &&
+                                         restoreCopy_, config_)) &&
                wasOpaque_) {
-        whiteoutMgr_->SetOpaque(normalizedPath_);
+        whiteoutMgr_.SetOpaque(normalizedPath_);
     }
-    cache_->InvalidateWithAncestors(normalizedPath_);
+    cache_.InvalidateWithAncestors(normalizedPath_);
 }
 
-void RenameDestinationAside::Hold(WhiteoutManager* whiteoutMgr,
-                                  Cache* cache,
-                                  std::wstring normalizedPath,
+void RenameDestinationAside::Hold(std::wstring normalizedPath,
                                   std::wstring upperPath,
                                   std::wstring asidePath,
                                   bool wasOpaque,
                                   CopyAcrossVolumes restoreCopy) {
-    whiteoutMgr_ = whiteoutMgr;
-    cache_ = cache;
     normalizedPath_ = std::move(normalizedPath);
     upperPath_ = std::move(upperPath);
     asidePath_ = std::move(asidePath);
@@ -1637,7 +1659,7 @@ void RenameDestinationAside::Commit() {
     if (asidePath_.empty()) {
         return;
     }
-    RemoveUpperEntry(asidePath_);
+    RemoveUpperEntry(asidePath_, config_);
     asidePath_.clear();
 }
 
@@ -1657,7 +1679,9 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
         return STATUS_SUCCESS;
     }
 
-    // The opaque marker calls on a link would reach its target.
+    // A link gets no opaque marker, as overlayfs gives a symlink no opaque
+    // xattr. The marker-file check would also go through the link into its
+    // target.
     const bool wasOpaque = destinationKind == RenameEntryKind::Directory &&
                            whiteoutMgr_.IsOpaque(newNorm);
     if (wasOpaque) {
@@ -1667,11 +1691,11 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
         ? CopyAcrossVolumes::Yes
         : CopyAcrossVolumes::No;
     const std::wstring asidePath = GenerateWorkPath();
-    NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No, copy);
+    NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No, copy, config_);
     if (moveStatus == ::LayerMount::NtStatusFromWin32(ERROR_NOT_SAME_DEVICE)) {
         // MoveFileExW cannot move a directory or a link to another volume.
         // The entry goes at once, so a failed rename cannot restore it.
-        moveStatus = RemoveUpperEntry(upperPath);
+        moveStatus = RemoveUpperEntry(upperPath, config_);
         cache_.InvalidateWithAncestors(newNorm);
         return moveStatus;
     }
@@ -1684,7 +1708,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
         return moveStatus;
     }
 
-    aside->Hold(&whiteoutMgr_, &cache_, newNorm, upperPath, asidePath, wasOpaque, copy);
+    aside->Hold(newNorm, upperPath, asidePath, wasOpaque, copy);
     return STATUS_SUCCESS;
 }
 
@@ -1701,7 +1725,8 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            status = CopyLowerLinkWithoutOverlayMarkers(source, newUpperPath);
+            status = CopyLinkWithCopyUpRecord(
+                source.absolutePath, source.attributes, newUpperPath, config_);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -1716,7 +1741,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
     }
 
     status = MoveUpperEntry(pathResolver_.GetStoredUpperPath(oldCallerPath.Text()),
-                            newUpperPath, ReplaceExisting::No, CopyAcrossVolumes::No);
+                            newUpperPath, ReplaceExisting::No, CopyAcrossVolumes::No, config_);
     cache_.InvalidateWithAncestors(normalized);
     return status;
 }
@@ -1891,12 +1916,11 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
     // dropping the metadata write. Fatal on failure: without the stable-id
     // metadata, post-rename IndexNumber reporting diverges from the source
     // and apps that key off it (build caches, git) see the file as a
-    // different object. Tear down the staged destination so the caller
-    // can retry from a clean state.
-    if (!MetadataStore::WriteLayerMountMetadata(dstAbs, MakeCopyUpMetadata(srcAbs), config)) {
-        const DWORD err = ::GetLastError();
-        ::DeleteFileW(dstAbs.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+    // different object.
+    const NTSTATUS recordStatus = WriteCopyUpRecordOrRemoveEntry(
+        dstAbs, MakeCopyUpMetadata(srcAbs), NewUpperEntryKind::File, *config);
+    if (!NT_SUCCESS(recordStatus)) {
+        return recordStatus;
     }
 
     // Re-apply attributes + timestamps last (both are perturbed by ADS writes
@@ -2013,12 +2037,11 @@ NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs,
     // copy-up metadata (origin layer, stable id) is silently dropped.
     // Fatal on failure: a directory shell without origin/stable-id looks
     // like a foreign creation to later resolution, which can misroute
-    // child lookups during subsequent rename fanout. Tear down the
-    // staged destination directory so the caller retries cleanly.
-    if (!MetadataStore::WriteLayerMountMetadata(dstAbs, MakeCopyUpMetadata(srcAbs), config)) {
-        const DWORD err = ::GetLastError();
-        ::RemoveDirectoryW(dstAbs.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_WRITE_FAULT);
+    // child lookups during subsequent rename fanout.
+    const NTSTATUS recordStatus = WriteCopyUpRecordOrRemoveEntry(
+        dstAbs, MakeCopyUpMetadata(srcAbs), NewUpperEntryKind::Directory, *config);
+    if (!NT_SUCCESS(recordStatus)) {
+        return recordStatus;
     }
 
     HANDLE srcH = ::CreateFileW(srcAbs.c_str(), GENERIC_READ,
@@ -2049,7 +2072,7 @@ NTSTATUS CopyUp::CopyTreePreservingMetadata(const std::wstring& srcAbs,
     DWORD topAttrs = ::GetFileAttributesW(srcAbs.c_str());
     if (topAttrs != INVALID_FILE_ATTRIBUTES &&
         (topAttrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return CopyUpReparsePointEntry(srcAbs, dstAbs, topAttrs);
+        return CopyLinkWithCopyUpRecord(srcAbs, topAttrs, dstAbs, config_);
     }
 
     // Top-level regular file: copy directly.
@@ -2085,8 +2108,8 @@ NTSTATUS CopyUp::CopyDirectoryTree(const std::wstring& srcAbs,
 
         NTSTATUS childStatus = STATUS_SUCCESS;
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            childStatus = CopyUpReparsePointEntry(childSrc, childDst,
-                                                    fd.dwFileAttributes);
+            childStatus = CopyLinkWithCopyUpRecord(childSrc, fd.dwFileAttributes, childDst,
+                                                   config_);
         } else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             childStatus = CopyTreePreservingMetadata(childSrc, childDst);
         } else {

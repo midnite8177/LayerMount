@@ -1,4 +1,5 @@
 #include "LayerPath.h"
+#include "MetadataStore.h"
 #include "NtStatusUtil.h"
 #include "WhiteoutManager.h"
 
@@ -109,10 +110,12 @@ NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind
     return STATUS_SUCCESS;
 }
 
-NTSTATUS MoveUpperEntry(const std::wstring& from,
-                        const std::wstring& to,
-                        ReplaceExisting replace,
-                        CopyAcrossVolumes copy) {
+namespace {
+
+NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
+                              const std::wstring& to,
+                              ReplaceExisting replace,
+                              CopyAcrossVolumes copy) {
     const DWORD flags =
         (replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0) |
         (copy == CopyAcrossVolumes::Yes ? MOVEFILE_COPY_ALLOWED : 0);
@@ -156,7 +159,7 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS RemoveUpperEntry(const std::wstring& path) {
+NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path) {
     const DWORD attrs = ::GetFileAttributesW(path.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
@@ -182,6 +185,28 @@ NTSTATUS RemoveUpperEntry(const std::wstring& path) {
         }
     }
     return STATUS_SUCCESS;
+}
+
+}
+
+NTSTATUS MoveUpperEntry(const std::wstring& from,
+                        const std::wstring& to,
+                        ReplaceExisting replace,
+                        CopyAcrossVolumes copy,
+                        const LayerConfig& config) {
+    const NTSTATUS status = MoveUpperEntryOnDisk(from, to, replace, copy);
+    if (NT_SUCCESS(status)) {
+        MetadataStore::MoveSidecarRecords(from, to, config);
+    }
+    return status;
+}
+
+NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config) {
+    const std::vector<std::wstring> entries =
+        MetadataStore::ListSidecarKeyedEntries(path, config);
+    const NTSTATUS status = RemoveUpperEntryOnDisk(path);
+    MetadataStore::RemoveSidecarRecordsOfGoneEntries(entries, config);
+    return status;
 }
 
 NTSTATUS CreateDirectoryOrUseExisting(const std::wstring& path) {

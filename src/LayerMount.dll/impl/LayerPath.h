@@ -84,16 +84,19 @@ enum class CopyAcrossVolumes { No, Yes };
 // directory, a junction or a directory symbolic link cannot move to
 // another volume. An inherited deny-write ACE on the upper parent fails
 // the rename with STATUS_ACCESS_DENIED unless the process holds
-// SE_RESTORE_NAME.
+// SE_RESTORE_NAME. The sidecar records of the moved entries follow them;
+// see MetadataStore::MoveSidecarRecords.
 NTSTATUS MoveUpperEntry(const std::wstring& from,
                         const std::wstring& to,
                         ReplaceExisting replace,
-                        CopyAcrossVolumes copy);
+                        CopyAcrossVolumes copy,
+                        const LayerConfig& config);
 
 // Removes the upper entry at path. A directory goes with its whole tree.
 // A junction or a symbolic link goes, and its target stays. A path that
-// does not exist is success.
-NTSTATUS RemoveUpperEntry(const std::wstring& path);
+// does not exist is success. The sidecar records of the removed entries
+// also go.
+NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config);
 
 // Creates a directory at path. A directory already there is success. Any
 // other entry there returns STATUS_OBJECT_NAME_COLLISION, so no caller

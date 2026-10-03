@@ -7,9 +7,11 @@
 
 #include "MetadataStore.h"
 #include "SidecarMetadata.h"
+#include "StreamTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
+using LayerMountTestShared::HasOverlayStream;
 
 namespace LayerMountTests {
 
@@ -20,6 +22,28 @@ static std::wstring CreateTestFile(const TempLayerEnvironment& env,
                                     const std::string& content = "x") {
     env.WriteFile(env.Upper(), name, content);
     return env.Upper() + L"\\" + name;
+}
+
+static void AssertAdsRecordStaysOnTheLink(LinkCreator createLink, LinkTarget targetKind) {
+    TempLayerEnvironment env(0);
+    const std::wstring targetPath = LinkTargetPath(env, targetKind);
+    const std::wstring link = env.Upper() + L"\\link";
+    if (!LinkToTargetCreatedOrSkipped(env, createLink, targetKind, link)) {
+        return;
+    }
+    LayerMountMetadata written;
+    written.hasStableIndexNumber = true;
+    written.stableIndexNumber = 0x0102030405060708ull;
+
+    Assert::IsTrue(MetadataStore::WriteLayerMountMetadata(link, written, nullptr),
+        L"The ADS write onto the link must succeed");
+
+    const LayerMountMetadata read = MetadataStore::ReadLayerMountMetadata(link, nullptr);
+    Assert::IsTrue(read.hasStableIndexNumber, L"The link must read back its own record");
+    Assert::AreEqual(written.stableIndexNumber, read.stableIndexNumber,
+        L"The link must read back the stable ID that the write stored");
+    Assert::IsFalse(HasOverlayStream(targetPath),
+        L"The write must put no :overlay stream on the link target");
 }
 
 TEST_CLASS(MetadataStoreTests) {
@@ -222,6 +246,40 @@ public:
 
         Assert::IsTrue(MetadataStore::SetOpaqueMetadata(dir, nullptr));
         Assert::IsTrue(MetadataStore::HasOpaqueMetadata(dir, nullptr));
+    }
+
+    TEST_METHOD(WriteLayerMountMetadata_OnFileSymlink_KeepsTheRecordOnTheLink) {
+        AssertAdsRecordStaysOnTheLink(CreateFileSymlink, LinkTarget::File);
+    }
+
+    TEST_METHOD(WriteLayerMountMetadata_OnDirectorySymlink_KeepsTheRecordOnTheLink) {
+        AssertAdsRecordStaysOnTheLink(CreateDirectorySymlink, LinkTarget::Directory);
+    }
+
+    TEST_METHOD(WriteLayerMountMetadata_OnJunction_KeepsTheRecordOnTheLink) {
+        AssertAdsRecordStaysOnTheLink(CreateDirectoryJunction, LinkTarget::Directory);
+    }
+
+    TEST_METHOD(SetOpaqueMetadata_OnJunction_MarksTheLinkAndNotItsTarget) {
+        TempLayerEnvironment env(0);
+        env.WriteFile(env.Root(), L"target\\inside.txt", "inside");
+        const std::wstring target = env.Root() + L"\\target";
+        const std::wstring link = env.Upper() + L"\\link";
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, link, target)) {
+            return;
+        }
+
+        Assert::IsTrue(MetadataStore::SetOpaqueMetadata(link, nullptr),
+            L"The opaque write onto the junction must succeed");
+        Assert::IsTrue(MetadataStore::HasOpaqueMetadata(link, nullptr),
+            L"The junction must read back its own opaque marker");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(target, nullptr),
+            L"The junction target must carry no opaque marker");
+
+        Assert::IsTrue(MetadataStore::RemoveOpaqueMetadata(link, nullptr),
+            L"The opaque remove on the junction must succeed");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(link, nullptr),
+            L"The junction must carry no opaque marker after the remove");
     }
 
     TEST_METHOD(RemoveOpaqueMetadata_ThenHasOpaqueMetadata_ReturnsFalse) {

@@ -239,6 +239,27 @@ bool SidecarMetadata::Remove(const std::wstring& filePath,
     return ::GetLastError() == ERROR_FILE_NOT_FOUND;
 }
 
+void SidecarMetadata::Move(const std::wstring& fromPath,
+                           const std::wstring& toPath,
+                           const std::wstring& upperRoot) {
+    const std::wstring fromBase = SidecarBase(fromPath, upperRoot);
+    const std::wstring toBase = SidecarBase(toPath, upperRoot);
+    if (fromBase.empty() || toBase.empty() || fromBase == toBase) return;
+
+    for (const wchar_t* suffix : {kMetaSuffix, kOpaqueSuffix}) {
+        const std::wstring from = fromBase + suffix;
+        const std::wstring to = toBase + suffix;
+        if (::MoveFileExW(from.c_str(), to.c_str(),
+                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            continue;
+        }
+        const DWORD moveErr = ::GetLastError();
+        if (moveErr == ERROR_FILE_NOT_FOUND || moveErr == ERROR_PATH_NOT_FOUND) {
+            ::DeleteFileW(to.c_str());
+        }
+    }
+}
+
 bool SidecarMetadata::HasOpaque(const std::wstring& dirPath,
                                 const std::wstring& upperRoot) {
     std::wstring base = SidecarBase(dirPath, upperRoot);
