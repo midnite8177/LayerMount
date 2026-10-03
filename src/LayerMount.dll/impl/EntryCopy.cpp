@@ -506,6 +506,13 @@ bool HasFileAttribute(DWORD attrs, DWORD flag) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & flag) != 0;
 }
 
+std::optional<DWORD> AttributesOrNone(DWORD attributes) {
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return std::nullopt;
+    }
+    return attributes;
+}
+
 bool SetSparse(HANDLE handle) {
     FILE_SET_SPARSE_BUFFER sparseBuf{TRUE};
     DWORD bytesReturned = 0;
@@ -523,14 +530,32 @@ void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs) {
     }
 }
 
-NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, DWORD srcAttrs) {
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
+NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, std::optional<DWORD> srcAttrs) {
+    if (!srcAttrs) {
+        return STATUS_SUCCESS;
+    }
+    if (HasFileAttribute(*srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
         SetCompressedDirectory(upperPath);
     }
-    if (!ApplyEncryptedStateIfNeeded(upperPath, srcAttrs)) {
+    if (!ApplyEncryptedStateIfNeeded(upperPath, *srcAttrs)) {
         return StatusOfFailedCall(ERROR_ACCESS_DENIED);
     }
     return STATUS_SUCCESS;
+}
+
+NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
+    const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
+    if (!NT_SUCCESS(dirStatus)) {
+        return dirStatus;
+    }
+
+    const NTSTATUS layoutStatus =
+        ApplyDirectoryLayout(dstAbs, AttributesOrNone(::GetFileAttributesW(srcAbs.c_str())));
+    if (!NT_SUCCESS(layoutStatus)) {
+        return layoutStatus;
+    }
+
+    return CopyUserAlternateDataStreams(srcAbs, dstAbs);
 }
 
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {

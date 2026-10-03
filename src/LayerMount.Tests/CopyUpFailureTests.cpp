@@ -408,16 +408,49 @@ public:
         Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, srcStream);
         ::CloseHandle(srcStream);
 
-        HANDLE heldDst = ::CreateFileW((dstPath + L":held").c_str(), GENERIC_WRITE, 0,
-                                       nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        Assert::AreNotEqual<HANDLE>(INVALID_HANDLE_VALUE, heldDst,
-            L"Opening the destination stream with no sharing must succeed");
+        ScopedHandle heldDst = HoldNewStreamExclusively(dstPath + L":held");
 
         const NTSTATUS status = CopyUserAlternateDataStreams(srcPath, dstPath);
-        ::CloseHandle(heldDst);
+        heldDst.Reset();
 
         Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
             L"The copy reports the status of the stream that failed");
+    }
+
+    TEST_METHOD(CopyUpDirectory_StreamCopyFails_ReturnsThatStreamsStatusAndLeavesNoUpperDirectory) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"dir");
+        ScopedHandle heldSrc = HoldNewStreamExclusively(env.Lower(0) + L"\\dir:held");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        const NTSTATUS status = rig.copyUp.CopyUpDirectory(L"dir");
+        heldSrc.Reset();
+
+        Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
+            L"Directory copy-up reports the status of the stream that failed");
+        Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW((env.Upper() + L"\\dir").c_str()),
+            L"A failed directory copy-up leaves no upper directory");
+    }
+
+    TEST_METHOD(DirectoryRename_StreamCopyFails_ReturnsThatStreamsStatusAndLeavesNoCopy) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        ScopedHandle heldSrc = HoldNewStreamExclusively(env.Lower(0) + L"\\tree:held");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No);
+        heldSrc.Reset();
+
+        Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
+            L"The rename reports the status of the stream that failed");
+        Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW((env.Upper() + L"\\moved").c_str()),
+            L"A failed rename leaves no copy at the new name");
     }
 };
 

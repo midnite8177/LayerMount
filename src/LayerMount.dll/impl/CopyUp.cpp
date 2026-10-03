@@ -60,14 +60,6 @@ private:
     std::wstring p_;
 };
 
-// The attribute bits from GetFileAttributesW, or none when that call failed.
-std::optional<DWORD> AttributesOrNone(DWORD attributes) {
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        return std::nullopt;
-    }
-    return attributes;
-}
-
 bool ClearSparseAndTrimAllocation(HANDLE handle) {
     FILE_SET_SPARSE_BUFFER sparseBuf{FALSE};
     DWORD bytesReturned = 0;
@@ -740,22 +732,13 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), upperPath);
     srcHandle.Reset();
 
-    // Create directory in upper layer (no work-dir atomic rename for dirs)
-    status = CreateDirectoryOrUseExisting(upperPath);
+    status = BuildUpperDirectory(source.absolutePath, upperPath);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    status = ApplyDirectoryLayout(upperPath, srcAttrs);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    status = SecureAndTagUpperDirectory(source.absolutePath, upperPath);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
+    // The attributes go on after the streams, because NTFS refuses a new
+    // stream on a read-only directory.
     basicInfo.Restore();
 
     cache_.InvalidateWithAncestors(normalized);
@@ -764,18 +747,20 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::SecureAndTagUpperDirectory(const std::wstring& sourcePath,
-                                            const std::wstring& upperPath) {
-    // Copy security descriptor. Fatal on failure: the directory's DACL
-    // is also the template for auto-inheritance onto children created
-    // inside it, so silently dropping the source's DACL would broaden
-    // or narrow access on every subsequently created child. Tear down
-    // the staged upper directory so the caller retries from a clean
-    // state.
-    if (!CopySecurityDescriptor(sourcePath, upperPath)) {
+NTSTATUS CopyUp::BuildUpperDirectory(const std::wstring& sourcePath,
+                                     const std::wstring& upperPath) {
+    // A failed security copy is fatal: the directory's DACL is also the
+    // template for auto-inheritance onto children created inside it, so
+    // dropping the source's DACL would broaden or narrow access on every
+    // child created later.
+    NTSTATUS status = CopyDirectoryShell(sourcePath, upperPath);
+    if (NT_SUCCESS(status) && !CopySecurityDescriptor(sourcePath, upperPath)) {
         const DWORD err = ::GetLastError();
+        status = ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+    }
+    if (!NT_SUCCESS(status)) {
         ::RemoveDirectoryW(upperPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
+        return status;
     }
 
     // Write the copy-up record. Fatal on failure: without origin/stable-id

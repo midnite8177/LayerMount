@@ -169,8 +169,8 @@ private:
     NTSTATUS FinishFilledShell(const std::wstring& upperPath,
                                LayerMountMetadata& metadata);
 
-    NTSTATUS SecureAndTagUpperDirectory(const std::wstring& sourcePath,
-                                        const std::wstring& upperPath);
+    NTSTATUS BuildUpperDirectory(const std::wstring& sourcePath,
+                                 const std::wstring& upperPath);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;

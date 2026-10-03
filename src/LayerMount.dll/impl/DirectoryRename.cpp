@@ -218,24 +218,6 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
     return STATUS_SUCCESS;
 }
 
-// Creates the directory at dstAbs with the attributes and layout of the
-// directory at srcAbs. Each entry created inside dstAbs moves its
-// last-write time, so the caller writes the times after the children are
-// in place.
-NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs) {
-    const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbs);
-    if (!NT_SUCCESS(dirStatus)) {
-        return dirStatus;
-    }
-
-    DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
-    if (srcAttrs != INVALID_FILE_ATTRIBUTES) {
-        ::SetFileAttributesW(dstAbs.c_str(), srcAttrs);
-    }
-
-    return ApplyDirectoryLayout(dstAbs, srcAttrs);
-}
-
 // Writes the copy-up record of the directory at srcAbs to the copy at
 // dstAbs. A failure leaves the copy in place for the caller to remove.
 NTSTATUS WriteDirectoryCopyUpRecord(const std::wstring& srcAbs,

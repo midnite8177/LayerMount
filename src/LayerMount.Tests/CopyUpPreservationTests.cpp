@@ -378,6 +378,76 @@ public:
             L"The tree copy keeps a user stream whose name starts with overlay");
     }
 
+    TEST_METHOD(CopyUpDirectory_PreservesUserStreamOfDirectory) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"dir");
+        WriteADS(env.Lower(0), L"dir", L"notes", "directory notes");
+        WriteADS(env.Lower(0), L"dir", L"overlay.extra", "reserved");
+        const FILETIME stamped = LayerMountTestShared::MakeFileTime(2001, 1, 1);
+        LayerMountTestShared::StampTimes(env.Lower(0) + L"\\dir", stamped, stamped, stamped);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpDirectory(L"dir")));
+
+        Assert::AreEqual(std::string("directory notes"),
+                         ReadADS(env.Upper(), L"dir", L"notes"),
+            L"The upper directory has the user stream of the lower directory");
+        Assert::IsFalse(ADSExists(env.Upper(), L"dir", L"overlay.extra"),
+            L"A reserved overlay.* stream does not copy up");
+        FILETIME upperWrite{};
+        LayerMountTestShared::GetTimes(env.Upper() + L"\\dir", nullptr, nullptr, &upperWrite);
+        Assert::IsTrue(::CompareFileTime(&stamped, &upperWrite) == 0,
+            L"The upper directory has the last-write time of the lower directory");
+    }
+
+    TEST_METHOD(DirectoryRename_CopiesUserStreamsOfRenamedDirectoryAndChildDirectory) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        env.CreateDir(env.Lower(0), L"tree\\sub");
+        WriteADS(env.Lower(0), L"tree", L"notes", "tree notes");
+        WriteADS(env.Lower(0), L"tree\\sub", L"notes", "sub notes");
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No)));
+
+        Assert::AreEqual(std::string("tree notes"),
+                         ReadADS(env.Upper(), L"moved", L"notes"),
+            L"The renamed directory keeps its user stream");
+        Assert::AreEqual(std::string("sub notes"),
+                         ReadADS(env.Upper(), L"moved\\sub", L"notes"),
+            L"A child directory of the renamed directory keeps its user stream");
+    }
+
+    TEST_METHOD(DirectoryRename_CopiesUserStreamOfReadOnlyDirectory) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"ro");
+        WriteADS(env.Lower(0), L"ro", L"notes", "read-only notes");
+        const std::wstring lowerDir = env.Lower(0) + L"\\ro";
+        ::SetFileAttributesW(lowerDir.c_str(), FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"ro"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No);
+        const std::wstring upperDir = env.Upper() + L"\\moved";
+        const DWORD upperAttrs = ::GetFileAttributesW(upperDir.c_str());
+        const std::string notes = ReadADS(env.Upper(), L"moved", L"notes");
+        ::SetFileAttributesW(lowerDir.c_str(), FILE_ATTRIBUTE_DIRECTORY);
+        ::SetFileAttributesW(upperDir.c_str(), FILE_ATTRIBUTE_DIRECTORY);
+
+        AssertStatus(STATUS_SUCCESS, status, L"The rename of a read-only directory succeeds");
+        Assert::AreEqual(std::string("read-only notes"), notes,
+            L"The renamed read-only directory keeps its user stream");
+        Assert::IsTrue(upperAttrs != INVALID_FILE_ATTRIBUTES &&
+                           (upperAttrs & FILE_ATTRIBUTE_READONLY) != 0,
+            L"The renamed directory keeps FILE_ATTRIBUTE_READONLY");
+    }
+
 
     TEST_METHOD(CopyUpFile_PreservesSystemAttribute) {
         TempLayerEnvironment env(1);

@@ -332,6 +332,16 @@ inline ::LayerMount::ScopedHandle HoldOpen(const std::wstring& path, DWORD share
     return held;
 }
 
+// Creates the stream at streamPath (L"file:name") and holds it open with no
+// sharing, so a copy that opens the stream fails with STATUS_SHARING_VIOLATION.
+inline ::LayerMount::ScopedHandle HoldNewStreamExclusively(const std::wstring& streamPath) {
+    ::LayerMount::ScopedHandle held(::CreateFileW(streamPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
+        held.IsValid(), (L"The test must hold " + streamPath + L" open with no sharing").c_str());
+    return held;
+}
+
 // The layer-relative path of the whiteout marker that hides relativePath:
 // L"a\\b\\c.txt" gives L"a\\b\\.wh.c.txt".
 inline std::wstring WhiteoutMarkerPath(const std::wstring& relativePath) {

@@ -34,13 +34,13 @@ LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
                                        CopiedEntryRecord record,
                                        const LayerConfig& config);
 
-// Copies each user alternate data stream of srcPath to the same stream of
-// dstPath. A user stream is one `IsUserAlternateStream` accepts. The main
-// `::$DATA` stream and the reserved streams are not copied, and the file-data
-// copy carries the main stream.
+// Copies each user alternate data stream of the file or directory at srcPath
+// to the same stream of dstPath. A user stream is one `IsUserAlternateStream`
+// accepts. The main `::$DATA` stream and the reserved streams are not copied;
+// for a file, the data copy carries the main stream.
 //
 // Stops at the first stream that fails and returns its status. A missing
-// source fails with the status of the open. A file with no named streams
+// source fails with the status of the open. An entry with no named streams
 // returns STATUS_SUCCESS.
 NTSTATUS CopyUserAlternateDataStreams(const std::wstring& srcPath,
                                       const std::wstring& dstPath);
@@ -58,6 +58,9 @@ bool ApplyEncryptedStateIfNeeded(const std::wstring& path, DWORD attrs);
 
 bool HasFileAttribute(DWORD attrs, DWORD flag);
 
+// The attribute bits from GetFileAttributesW, or none when that call failed.
+std::optional<DWORD> AttributesOrNone(DWORD attributes);
+
 bool SetSparse(HANDLE handle);
 
 // The status of a refused FSCTL_SET_SPARSE, read right after the call. A
@@ -71,7 +74,14 @@ void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs);
 // it on a directory. Without the FSCTL on the upper directory, a file
 // created inside it through the mount lands dense. A failed encrypted state
 // returns the failure status.
-NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, DWORD srcAttrs);
+NTSTATUS ApplyDirectoryLayout(const std::wstring& upperPath, std::optional<DWORD> srcAttrs);
+
+// Creates the directory at dstAbs with the layout and user streams of the
+// directory at srcAbs. Each entry created inside dstAbs moves its
+// last-write time, and NTFS refuses a new stream on a read-only directory,
+// so the caller writes the attributes and times last. A failure leaves the
+// directory in place for the caller to remove.
+NTSTATUS CopyDirectoryShell(const std::wstring& srcAbs, const std::wstring& dstAbs);
 
 // Copy the data of srcHandle to dstHandle. When both files are sparse, the
 // copy reads the allocated ranges of the source and writes only those, so a
