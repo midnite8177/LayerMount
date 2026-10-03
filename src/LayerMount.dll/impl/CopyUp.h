@@ -185,13 +185,10 @@ private:
 
     std::atomic<uint64_t> workCounter_{0};
 
-    // Serializes concurrent copy-ups to the same path. A caller that finds
-    // its target path already in inFlightCopyUps_ waits on copyUpCV_ until
-    // the winning thread clears the entry, then re-checks ExistsInUpper —
-    // the winner's committed upper file short-circuits the waiter with
-    // STATUS_SUCCESS. This prevents concurrent racers from all fighting at
-    // MoveFileExW commit time (where losers see ERROR_ACCESS_DENIED or
-    // sharing-violation from a just-placed target).
+    // Lets one copy-up of a path run at a time. A caller that finds its path
+    // in inFlightCopyUps_ waits on copyUpCV_ until the holder ends, then
+    // checks again whether the upper still needs the work.
+    class PathReservation;
     std::mutex copyUpMutex_;
     std::condition_variable copyUpCV_;
     std::unordered_set<std::wstring> inFlightCopyUps_;

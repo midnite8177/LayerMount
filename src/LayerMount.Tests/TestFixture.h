@@ -334,9 +334,15 @@ inline ::LayerMount::ScopedHandle HoldOpen(const std::wstring& path, DWORD share
 
 // Creates the stream at streamPath (L"file:name") and holds it open with no
 // sharing, so a copy that opens the stream fails with STATUS_SHARING_VIOLATION.
+// Does not assert, so an event callback can call it; the handle is invalid on
+// failure.
+inline ::LayerMount::ScopedHandle OpenNewStreamExclusively(const std::wstring& streamPath) {
+    return ::LayerMount::ScopedHandle(::CreateFileW(streamPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+}
+
 inline ::LayerMount::ScopedHandle HoldNewStreamExclusively(const std::wstring& streamPath) {
-    ::LayerMount::ScopedHandle held(::CreateFileW(streamPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+    ::LayerMount::ScopedHandle held = OpenNewStreamExclusively(streamPath);
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
         held.IsValid(), (L"The test must hold " + streamPath + L" open with no sharing").c_str());
     return held;

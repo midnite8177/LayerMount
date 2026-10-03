@@ -27,39 +27,6 @@ NTSTATUS RecordFillFailure(const std::wstring& relativePath, const wchar_t* stag
     return status;
 }
 
-// RAII reservation that serializes operations on a single relative path. Used
-// by CopyUpFile / CopyUpMetadataOnly / CompleteLazyCopyUp so that two threads
-// touching the same path can't both stage work and commit on top of each
-// other. Constructor blocks until no other thread holds the reservation for
-// `path`; destructor releases it and wakes waiters. The waiters then re-check
-// their fast-path predicate (ExistsInUpper, !metacopy) and short-circuit.
-class PathReservation {
-public:
-    PathReservation(std::mutex& m,
-                    std::condition_variable& cv,
-                    std::unordered_set<std::wstring>& s,
-                    std::wstring p)
-        : m_(m), cv_(cv), s_(s), p_(std::move(p)) {
-        std::unique_lock<std::mutex> lock(m_);
-        cv_.wait(lock, [&]() { return s_.find(p_) == s_.end(); });
-        s_.insert(p_);
-    }
-    ~PathReservation() {
-        {
-            std::lock_guard<std::mutex> lock(m_);
-            s_.erase(p_);
-        }
-        cv_.notify_all();
-    }
-    PathReservation(const PathReservation&) = delete;
-    PathReservation& operator=(const PathReservation&) = delete;
-private:
-    std::mutex& m_;
-    std::condition_variable& cv_;
-    std::unordered_set<std::wstring>& s_;
-    std::wstring p_;
-};
-
 bool ClearSparseAndTrimAllocation(HANDLE handle) {
     FILE_SET_SPARSE_BUFFER sparseBuf{FALSE};
     DWORD bytesReturned = 0;
@@ -83,6 +50,34 @@ bool ClearSparseAndTrimAllocation(HANDLE handle) {
 }
 
 namespace LayerMount {
+
+// Serializes copy-ups of one relative path. The constructor blocks until no
+// other thread holds `path`. The reservation is not reentrant: a thread that
+// reserves a path it already holds deadlocks. A nested reservation goes from a
+// child to its parent, never from a parent to a child.
+class CopyUp::PathReservation {
+public:
+    PathReservation(CopyUp& owner, std::wstring path)
+        : owner_(owner), path_(std::move(path)) {
+        std::unique_lock<std::mutex> lock(owner_.copyUpMutex_);
+        owner_.copyUpCV_.wait(lock, [&]() {
+            return owner_.inFlightCopyUps_.find(path_) == owner_.inFlightCopyUps_.end();
+        });
+        owner_.inFlightCopyUps_.insert(path_);
+    }
+    ~PathReservation() {
+        {
+            std::lock_guard<std::mutex> lock(owner_.copyUpMutex_);
+            owner_.inFlightCopyUps_.erase(path_);
+        }
+        owner_.copyUpCV_.notify_all();
+    }
+    PathReservation(const PathReservation&) = delete;
+    PathReservation& operator=(const PathReservation&) = delete;
+private:
+    CopyUp& owner_;
+    std::wstring path_;
+};
 
 // Captures the timestamps of a source, and attribute bits when the
 // caller gives them. Restore() writes them to the copy-up target. A data
@@ -370,8 +365,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     // because our commit has already landed. Without serialization, racers
     // would all fight at MoveFileExW commit time (losers see ACCESS_DENIED
     // or sharing violations from the just-placed target).
-    PathReservation reservation(copyUpMutex_, copyUpCV_, inFlightCopyUps_,
-                                normalized);
+    PathReservation reservation(*this, normalized);
 
     // Check if already in upper layer (could have been copied by concurrent thread)
     if (pathResolver_.ExistsInUpper(normalized)) {
@@ -509,8 +503,7 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
     // orphaned work file behind, while the winner's metacopy can later be
     // overwritten by an interleaved second commit. Same invariant CopyUpFile
     // enforces.
-    PathReservation reservation(copyUpMutex_, copyUpCV_, inFlightCopyUps_,
-                                normalized);
+    PathReservation reservation(*this, normalized);
 
     // Re-check after the reservation is held. A winner can have committed
     // while we waited, in which case there's nothing to do.
@@ -574,8 +567,7 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     // can clobber a user-write that landed between the two completions, or
     // simply duplicate writes onto the same handle range. Reservation makes
     // the second caller wait, then re-check `metacopy` and short-circuit.
-    PathReservation reservation(copyUpMutex_, copyUpCV_, inFlightCopyUps_,
-                                normalized);
+    PathReservation reservation(*this, normalized);
 
     // Read metadata AFTER acquiring the reservation. A winner that ran
     // before us has already cleared the metacopy flag and may have applied
@@ -701,6 +693,11 @@ NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
 
 NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     std::wstring normalized = NormalizePath(relativePath);
+
+    // Taken before the upper check and the link branch. Otherwise a racing
+    // copy-up adopts the directory that this call creates and removes it when
+    // the racer fails.
+    PathReservation reservation(*this, normalized);
 
     if (pathResolver_.ExistsInUpper(normalized)) {
         return STATUS_SUCCESS;

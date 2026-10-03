@@ -50,9 +50,7 @@ public:
     }
 
     // Fan an event out to the registered callback. Safe to call from any
-    // thread. No-op when no callback is installed (the common case during
-    // bring-up; until 4.7 wires LayerMountSetEventCallback the slot is
-    // always empty).
+    // thread. No-op when no callback is installed.
     void Emit(LM_EVENT_TYPE type,
               HRESULT        hr,
               PCWSTR         relativePath,
@@ -96,4 +94,4 @@ private:
     mutable std::atomic<std::uint32_t> inflight_{0};
 };
 
-} // namespace LayerMount::abi
+}

@@ -1,23 +1,3 @@
-// Copy-up failure-path coverage. Addresses the gap flagged by the audit:
-// AtomicOperationTests and the happy-path CopyUpTests only verify success
-// scenarios. This file drives deterministic failure modes and asserts the
-// atomicity + hygiene invariants the design promises:
-//
-//   - failed copy-up never produces a committed upper artifact
-//   - failed copy-up never leaves a work-dir orphan (#*.tmp)
-//   - a failed copy-up does not poison subsequent retries
-//
-// These tests call CopyUp directly (no mount) for determinism — a dispatcher
-// can't be induced into the narrow failure windows (disk full at byte N,
-// parent-path race) we need to probe here. As a pure unit test of the
-// CopyUp class they live in the unit-test project that links
-// LayerMount-static and keeps impl-header access.
-//
-// Short-write detection is not directly testable without an injection shim —
-// the copy checks in its write helper that
-// bytesWritten == bytesRead. The multi-buffer exact-fidelity regression
-// test in this file guards against a regression that reintroduces the bug.
-
 #include "pch.h"
 #include "TestFixture.h"
 
@@ -30,6 +10,8 @@
 
 #include <thread>
 #include <atomic>
+#include <chrono>
+#include <future>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
@@ -49,11 +31,48 @@ size_t CountWorkTempFiles(const std::wstring& workDir) {
     return count;
 }
 
-} // namespace
+struct DirectoryCopyUpRace {
+    DirectoryCopyUpRace(CopyUp& copyUp, std::wstring parent, std::wstring child,
+                        std::wstring heldStreamPath)
+        : copyUp(copyUp),
+          parent(std::move(parent)),
+          child(std::move(child)),
+          heldStreamPath(std::move(heldStreamPath)),
+          secondDone(secondStatus.get_future().share()) {}
 
-// ============================================================================
-// CopyUpFailureTests — atomicity + hygiene under forced failure.
-// ============================================================================
+    CopyUp& copyUp;
+    const std::wstring parent;
+    const std::wstring child;
+    const std::wstring heldStreamPath;
+    std::atomic<bool> started{false};
+    std::promise<NTSTATUS> secondStatus;
+    std::shared_future<NTSTATUS> secondDone;
+    std::thread second;
+    bool secondPendingAtHold = false;
+    ScopedHandle heldStream;
+};
+
+// Fires inside the first copy-up of the child, at the copy-up of its parent.
+// The first copy-up holds the child's reservation and has not yet created the
+// upper child.
+void LM_CALL RaceSecondCopyUpThenHoldLowerStream(const LM_EVENT* evt, void* context) {
+    auto* race = static_cast<DirectoryCopyUpRace*>(context);
+    if (evt->type != LM_EVT_COPY_UP || evt->relativePath == nullptr ||
+        race->parent != evt->relativePath || race->started.exchange(true)) {
+        return;
+    }
+    race->second = std::thread([race]() {
+        race->secondStatus.set_value(race->copyUp.CopyUpDirectory(race->child));
+    });
+    // A serialized second copy-up waits on the reservation, so this wait times
+    // out. Without serialization the second copy-up commits the child here.
+    race->secondPendingAtHold =
+        race->secondDone.wait_for(std::chrono::seconds(1)) == std::future_status::timeout;
+    race->heldStream = OpenNewStreamExclusively(race->heldStreamPath);
+}
+
+}
+
 
 TEST_CLASS(CopyUpFailureTests) {
 public:
@@ -434,6 +453,52 @@ public:
             L"A failed directory copy-up leaves no upper directory");
     }
 
+    TEST_METHOD(CopyUpDirectory_RacingCopyUpFails_KeepsTheDirectoryTheOtherCommitted) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"p\\d");
+        const std::wstring upperDir = env.Upper() + L"\\p\\d";
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        DirectoryCopyUpRace race(rig.copyUp, L"p", L"p\\d", env.Lower(0) + L"\\p\\d:held");
+        ::LayerMount::abi::EventEmitter events;
+        events.Set(&RaceSecondCopyUpThenHoldLowerStream, &race);
+        rig.copyUp.SetEventEmitter(&events);
+
+        const NTSTATUS firstStatus = rig.copyUp.CopyUpDirectory(race.child);
+        const bool streamHeld = race.heldStream.IsValid();
+        race.heldStream.Reset();
+        if (race.second.joinable()) {
+            race.second.join();
+        }
+        rig.copyUp.SetEventEmitter(nullptr);
+
+        Assert::IsTrue(race.started.load(), L"The copy-up of the parent p starts the second copy-up");
+        Assert::IsTrue(streamHeld, L"The test holds the lower stream open with no sharing");
+        Assert::IsTrue(race.secondPendingAtHold,
+            L"The second copy-up waits until the first copy-up ends");
+        Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, firstStatus,
+            L"The first copy-up fails at the held stream");
+
+        // The second copy-up can wake before the test releases the stream.
+        // Then it fails at the stream, as the first copy-up did.
+        const NTSTATUS secondStatus = race.secondDone.get();
+        if (secondStatus == STATUS_SHARING_VIOLATION) {
+            Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+                ::GetFileAttributesW(upperDir.c_str()),
+                L"A second copy-up that fails at the stream leaves no upper directory");
+        } else {
+            Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, secondStatus,
+                L"The second copy-up succeeds once the stream is free");
+            Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+                ::GetFileAttributesW(upperDir.c_str()),
+                L"The directory that the second copy-up committed stays in the upper");
+            const LayerMountMetadata md = MetadataStore::ReadLayerMountMetadata(upperDir, nullptr);
+            Assert::IsFalse(md.originLayer.empty(),
+                L"The committed directory keeps its copy-up record");
+        }
+    }
+
     TEST_METHOD(DirectoryRename_StreamCopyFails_ReturnsThatStreamsStatusAndLeavesNoCopy) {
         UNIT_SKIP_IF_NOT_NTFS();
         TempLayerEnvironment env(1);
@@ -454,4 +519,4 @@ public:
     }
 };
 
-} // namespace LayerMountTests
+}
