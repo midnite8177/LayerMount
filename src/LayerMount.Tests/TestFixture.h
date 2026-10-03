@@ -13,6 +13,8 @@
 #include "FileIdTestHelpers.h"
 #include "FileTimeTestHelpers.h"
 
+#include <cfapi.h>
+
 #include <exception>
 #include <functional>
 #include <rpc.h>
@@ -537,6 +539,162 @@ inline bool EncryptedOrSkipped(const std::wstring& path) {
          L"). EFS unavailable or user has no cert.").c_str());
     return false;
 }
+
+// Gives the empty directory at dir a reparse point with a tag that is not
+// a Microsoft tag and not a name surrogate, so the directory is not a
+// link. No filter handles the tag, so a listing of dir fails with
+// ERROR_CANT_ACCESS_FILE. Logs a skip and returns false when the tag
+// cannot be set.
+inline bool NonLinkReparseTagSetOrSkipped(const std::wstring& dir) {
+    ::LayerMount::ScopedHandle handle(::CreateFileW(
+        dir.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    constexpr DWORD kDataLength = 4;
+    std::vector<BYTE> buffer(REPARSE_GUID_DATA_BUFFER_HEADER_SIZE + kDataLength);
+    auto* reparse = reinterpret_cast<REPARSE_GUID_DATA_BUFFER*>(buffer.data());
+    reparse->ReparseTag = 0x00001234;
+    reparse->ReparseDataLength = kDataLength;
+    reparse->ReparseGuid = {0x6d1b5a8e, 0x2f4c, 0x4b7a, {0x9e, 0x31, 0x5c, 0x0d, 0x7a, 0x42, 0x18, 0x66}};
+    DWORD returned = 0;
+    const bool set = handle.IsValid() &&
+                     ::DeviceIoControl(handle.Get(), FSCTL_SET_REPARSE_POINT, buffer.data(),
+                                       static_cast<DWORD>(buffer.size()), nullptr, 0, &returned,
+                                       nullptr) != FALSE;
+    if (!set || !HasAttribute(dir, FILE_ATTRIBUTE_REPARSE_POINT)) {
+        Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+            (L"[SKIP] the test could not set a reparse tag on " + dir).c_str());
+        return false;
+    }
+    return true;
+}
+
+// Registers the directory at root as a Windows Cloud Files sync root and
+// shows cloud placeholders to the calling thread as reparse points. A
+// cloud tag is not a name surrogate, so a placeholder directory is not a
+// link. The sync root has full population, so a placeholder directory
+// lists without a sync provider. The destructor unregisters the sync root,
+// which turns each placeholder back into a plain directory, and restores
+// the thread's placeholder mode.
+class CloudSyncRoot {
+public:
+    explicit CloudSyncRoot(std::wstring root) : root_(std::move(root)) {
+        const auto setThreadMode = reinterpret_cast<SetPlaceholderMode>(::GetProcAddress(
+            ::GetModuleHandleW(L"ntdll.dll"), "RtlSetThreadPlaceholderCompatibilityMode"));
+        if (setThreadMode != nullptr) {
+            // A negative return is an error code, not the previous mode.
+            const CHAR previousMode = setThreadMode(kExposePlaceholders);
+            if (previousMode >= 0) {
+                restoreThreadMode_ = setThreadMode;
+                previousThreadMode_ = previousMode;
+            }
+        }
+
+        CF_SYNC_REGISTRATION registration{};
+        registration.StructSize = sizeof(registration);
+        registration.ProviderName = L"LayerMountTests";
+        registration.ProviderVersion = L"1.0";
+        registration.ProviderId =
+            {0x5c3f1e2a, 0x7b4d, 0x4e8f, {0x9a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71}};
+        CF_SYNC_POLICIES policies{};
+        policies.StructSize = sizeof(policies);
+        policies.Hydration.Primary = CF_HYDRATION_POLICY_FULL;
+        policies.Population.Primary = CF_POPULATION_POLICY_ALWAYS_FULL;
+        policies.InSync = CF_INSYNC_POLICY_NONE;
+        policies.HardLink = CF_HARDLINK_POLICY_NONE;
+        registerResult_ =
+            ::CfRegisterSyncRoot(root_.c_str(), &registration, &policies, CF_REGISTER_FLAG_NONE);
+    }
+
+    ~CloudSyncRoot() {
+        if (SUCCEEDED(registerResult_)) {
+            ::CfUnregisterSyncRoot(root_.c_str());
+        }
+        if (restoreThreadMode_ != nullptr) {
+            restoreThreadMode_(previousThreadMode_);
+        }
+    }
+
+    CloudSyncRoot(const CloudSyncRoot&) = delete;
+    CloudSyncRoot& operator=(const CloudSyncRoot&) = delete;
+
+    // Converts the directory at dir, under the sync root, to an in-sync
+    // placeholder. Logs a skip and returns false when the platform refuses
+    // the sync root or the conversion, or when dir then shows no reparse
+    // attribute.
+    bool PlaceholderMadeOrSkipped(const std::wstring& dir) const {
+        HRESULT result = registerResult_;
+        if (SUCCEEDED(result)) {
+            const ::LayerMount::ScopedHandle handle = OpenPlaceholder(dir);
+            constexpr char kIdentity[] = "placeholder";
+            result = handle.IsValid()
+                ? ::CfConvertToPlaceholder(handle.Get(), kIdentity, sizeof(kIdentity),
+                                           CF_CONVERT_FLAG_MARK_IN_SYNC, nullptr, nullptr)
+                : HRESULT_FROM_WIN32(::GetLastError());
+        }
+        if (FAILED(result) || !HasAttribute(dir, FILE_ATTRIBUTE_REPARSE_POINT)) {
+            LogSkip(L"the test could not make a cloud placeholder of " + dir, result);
+            return false;
+        }
+        return true;
+    }
+
+    // Pins the placeholder directory at dir, which gives it
+    // FILE_ATTRIBUTE_PINNED. Logs a skip and returns false when the
+    // platform refuses or dir then shows no pinned attribute.
+    bool PinnedOrSkipped(const std::wstring& dir) const {
+        const ::LayerMount::ScopedHandle handle = OpenPlaceholder(dir);
+        const HRESULT result = handle.IsValid()
+            ? ::CfSetPinState(handle.Get(), CF_PIN_STATE_PINNED, CF_SET_PIN_FLAG_NONE, nullptr)
+            : HRESULT_FROM_WIN32(::GetLastError());
+        if (FAILED(result) || !HasAttribute(dir, FILE_ATTRIBUTE_PINNED)) {
+            LogSkip(L"the test could not pin the cloud placeholder " + dir, result);
+            return false;
+        }
+        return true;
+    }
+
+private:
+    using SetPlaceholderMode = CHAR(NTAPI*)(CHAR);
+
+    static constexpr CHAR kExposePlaceholders = 2;
+
+    static ::LayerMount::ScopedHandle OpenPlaceholder(const std::wstring& dir) {
+        return ::LayerMount::ScopedHandle(::CreateFileW(
+            dir.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    }
+
+    static void LogSkip(const std::wstring& reason, HRESULT result) {
+        wchar_t code[16] = {};
+        swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(result));
+        Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+            (L"[SKIP] " + reason + L" (HRESULT " + code + L")").c_str());
+    }
+
+    std::wstring root_;
+    HRESULT registerResult_ = E_FAIL;
+    SetPlaceholderMode restoreThreadMode_ = nullptr;
+    CHAR previousThreadMode_ = 0;
+};
+
+// A one-lower layer environment whose lower is a cloud sync root. The
+// member order unregisters the sync root before the environment deletes
+// the tree.
+struct CloudPlaceholderLayers {
+    TempLayerEnvironment env{1};
+    CloudSyncRoot syncRoot{env.Lower(0)};
+
+    // Writes content to the lower file at file, then makes the lower
+    // directory at dir a placeholder. Both paths are relative to the
+    // lower. Logs a skip and returns false when the platform refuses.
+    bool PlaceholderWithFileOrSkipped(const std::wstring& dir,
+                                      const std::wstring& file,
+                                      const std::string& content) {
+        env.WriteFile(env.Lower(0), file, content);
+        return syncRoot.PlaceholderMadeOrSkipped(env.Lower(0) + L"\\" + dir);
+    }
+};
 
 // Returns up to length bytes at offset in the file at path, fewer when the
 // file ends inside the range.

@@ -1725,6 +1725,197 @@ public:
             L"The new name must be compressed like the upper d");
     }
 
+    TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_ShowsAPlainDirectoryHoldingBothLayers) {
+        ForEachMetadataStore([](UINT32 hostCapabilities) {
+            CloudPlaceholderLayers layers;
+            if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+                return;
+            }
+            TempLayerEnvironment& env = layers.env;
+            env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+            auto config = env.MakeConfig();
+            config.hostCapabilities = hostCapabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"The rename of the cloud placeholder directory must succeed");
+
+            Assert::AreEqual<UINT32>(0u,
+                FileAttributesThroughMount(mount, L"e") & FILE_ATTRIBUTE_REPARSE_POINT,
+                L"The new name must open as a plain directory");
+            Assert::AreEqual(std::string("lower"), ReadThroughMount(mount, L"e\\x.txt"),
+                L"The lower file must read through the new name");
+            Assert::AreEqual(std::string("upper"), ReadThroughMount(mount, L"e\\sub\\u.txt"),
+                L"The upper file must read through the new name");
+            Cache cache;
+            WhiteoutManager whiteouts(config, &cache);
+            Assert::IsTrue(whiteouts.IsOpaque(L"e"), L"The new name must be opaque");
+            Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\d").c_str(),
+                MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\e", &config)
+                    .originLayer.c_str()),
+                L"The copy-up record of the new name must name the lower d");
+            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+                L"The rename must leave nothing in the work directory");
+        });
+    }
+
+    TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_GivesTheNewNameTheUpperDirectorysLastWriteTime) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        const FILETIME upperWrite = MakeFileTime(2016, 4, 5);
+        StampTimes(env.Upper() + L"\\d", MakeFileTime(2016, 1, 2),
+                   MakeFileTime(2016, 3, 4), upperWrite);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the cloud placeholder directory must succeed");
+
+        Assert::AreEqual(ComposeUInt64(upperWrite.dwHighDateTime, upperWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"e"),
+            L"The new name must show the last-write time of the upper d");
+    }
+
+    TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_GivesTheNewNameTheUpperDirectorysDacl) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        AddDenyAce(env.Upper() + L"\\d", FILE_WRITE_EA, NO_INHERITANCE);
+        const std::wstring upperAces = ExplicitAcesOf(env.Upper() + L"\\d");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the cloud placeholder directory must succeed");
+
+        Assert::AreEqual(upperAces, ExplicitAcesOf(env.Upper() + L"\\e"),
+            L"The new name must carry the explicit ACEs of the upper d");
+    }
+
+    TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_KeepsTheCompressionOfAnUpperChild) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        if (!EnableCompression(env.Upper() + L"\\d\\sub\\u.txt")) {
+            Logger::WriteMessage(
+                L"[SKIP] The volume refused FSCTL_SET_COMPRESSION on the upper file");
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the cloud placeholder directory must succeed");
+
+        Assert::IsTrue(HasAttribute(env.Upper() + L"\\e\\sub\\u.txt", FILE_ATTRIBUTE_COMPRESSED),
+            L"The upper file must stay compressed under the new name");
+        Assert::AreEqual(std::string("upper"), ReadThroughMount(mount, L"e\\sub\\u.txt"),
+            L"The upper file must read through the new name");
+    }
+
+    TEST_METHOD(Rename_CloudPlaceholderLowerDirectory_ShowsAPlainDirectoryHoldingItsChild) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the cloud placeholder directory must succeed");
+
+        Assert::AreEqual<UINT32>(0u,
+            FileAttributesThroughMount(mount, L"e") & FILE_ATTRIBUTE_REPARSE_POINT,
+            L"The new name must open as a plain directory");
+        Assert::AreEqual(std::string("lower"), ReadThroughMount(mount, L"e\\x.txt"),
+            L"The lower file must read through the new name");
+    }
+
+    TEST_METHOD(Rename_CloudPlaceholderLowerDirectory_KeepsItsLastWriteTime) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        const FILETIME lowerWrite = MakeFileTime(2012, 8, 9);
+        StampTimes(env.Lower(0) + L"\\d", MakeFileTime(2012, 1, 2),
+                   MakeFileTime(2012, 3, 4), lowerWrite);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the cloud placeholder directory must succeed");
+
+        Assert::AreEqual(ComposeUInt64(lowerWrite.dwHighDateTime, lowerWrite.dwLowDateTime),
+            LastWriteTimeThroughMount(mount, L"e"),
+            L"The new name must keep the last-write time of the lower d");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWithCloudPlaceholderSubdirectory_ShowsAPlainSubdirectoryHoldingItsChild) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d\\p", L"d\\p\\y.txt", "nested")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory must succeed");
+
+        Assert::AreEqual<UINT32>(0u,
+            FileAttributesThroughMount(mount, L"e\\p") & FILE_ATTRIBUTE_REPARSE_POINT,
+            L"The subdirectory must open as a plain directory under the new name");
+        Assert::AreEqual(std::string("nested"), ReadThroughMount(mount, L"e\\p\\y.txt"),
+            L"The child of the subdirectory must read through the new name");
+    }
+
+    TEST_METHOD(Rename_PinnedCloudPlaceholderLowerDirectory_GivesTheNewNameNoPinnedAttribute) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower") ||
+            !layers.syncRoot.PinnedOrSkipped(layers.env.Lower(0) + L"\\d")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the pinned cloud placeholder directory must succeed");
+
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\e", FILE_ATTRIBUTE_PINNED),
+            L"The new name must not carry the pin state of the lower d");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWithUnhandledReparseTag_FailsAndLeavesBothNamesAsTheyWere) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"d");
+        if (!NonLinkReparseTagSetOrSkipped(env.Lower(0) + L"\\d")) {
+            return;
+        }
+        env.WriteFile(env.Upper(), L"d\\sub\\u.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_IO_REPARSE_TAG_NOT_HANDLED,
+            mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of a directory that cannot be listed must fail");
+
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e"),
+            L"Nothing must show at the new name");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"e"),
+            L"Nothing must be at the new name in the upper");
+        AssertStatus(STATUS_SUCCESS, OpenThroughMount(mount, L"d"),
+            L"The old name must still open");
+        Assert::AreEqual(std::string("upper"), ReadThroughMount(mount, L"d\\sub\\u.txt"),
+            L"The upper file must still read through the old name");
+    }
+
     TEST_METHOD(Rename_LowerDirectoryUnderParentDenyingWriteAttributes_KeepsTheFilesLastWriteTime) {
         UNIT_SKIP_IF_NOT_ADMIN();
         TempLayerEnvironment env(1);
@@ -2878,6 +3069,83 @@ TEST_CLASS(MountDirectoryCopyUpTests) {
 public:
     TEST_CLASS_INITIALIZE(ClassInit) {
         AssertTempIsNTFS();
+    }
+
+    TEST_METHOD(Create_FileInCloudPlaceholderLowerDirectory_CopiesTheDirectoryUpAsAPlainDirectory) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d\\new.txt", kNoCreateOptions),
+            L"A create of a file in the cloud placeholder directory must succeed");
+
+        const std::wstring upperD = env.Upper() + L"\\d";
+        Assert::IsTrue(HasAttribute(upperD, FILE_ATTRIBUTE_DIRECTORY),
+            L"The create must copy d up as a directory");
+        Assert::IsFalse(HasAttribute(upperD, FILE_ATTRIBUTE_REPARSE_POINT),
+            L"The copy of d must be a plain directory");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"d\\new.txt"),
+            L"The new file must be in the copy of d");
+    }
+
+    TEST_METHOD(Create_FileInCloudPlaceholderLowerDirectory_GivesTheCopyTheLowerDirectorysCreationTime) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        const FILETIME lowerCreation = MakeFileTime(2011, 6, 7);
+        StampTimes(env.Lower(0) + L"\\d", lowerCreation, MakeFileTime(2011, 8, 9),
+                   MakeFileTime(2011, 10, 11));
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d\\new.txt", kNoCreateOptions),
+            L"A create of a file in the cloud placeholder directory must succeed");
+
+        FILETIME creation{};
+        FILETIME access{};
+        FILETIME write{};
+        GetTimes(env.Upper() + L"\\d", &creation, &access, &write);
+        Assert::IsTrue(FileTimesEqual(lowerCreation, creation),
+            L"The copy of d must keep the creation time of the lower d");
+    }
+
+    TEST_METHOD(Create_FileInPinnedCloudPlaceholderLowerDirectory_GivesTheCopyNoPinnedAttribute) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower") ||
+            !layers.syncRoot.PinnedOrSkipped(layers.env.Lower(0) + L"\\d")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"d\\new.txt", kNoCreateOptions),
+            L"A create of a file in the pinned cloud placeholder directory must succeed");
+
+        Assert::IsFalse(HasAttribute(env.Upper() + L"\\d", FILE_ATTRIBUTE_PINNED),
+            L"The copy of d must not carry the pin state of the lower d");
+    }
+
+    TEST_METHOD(Create_FileInLowerDirectoryWithUnhandledReparseTag_FailsAndCopiesNothingUp) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"d");
+        if (!NonLinkReparseTagSetOrSkipped(env.Lower(0) + L"\\d")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_IO_REPARSE_TAG_NOT_HANDLED,
+            CreateThroughMount(mount, L"d\\new.txt", kNoCreateOptions),
+            L"A create in a directory whose reparse tag no filter handles must fail");
+
+        Assert::IsFalse(env.FileExists(env.Upper(), L"d"),
+            L"The failed copy-up must leave nothing at d in the upper");
+        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            L"The failed copy-up must leave nothing in the work directory");
     }
 
     TEST_METHOD(WriteOpen_UnderLowerDirectory_ListsTheDirectoryInTheLowersCase) {

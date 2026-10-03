@@ -560,13 +560,15 @@ NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
 
 namespace {
 
+// The pin and offline bits tell how a sync provider or a storage manager
+// keeps the source. The copy is a local entry outside that provider, so it
+// does not take them.
 DWORD AttributesFileBasicInfoCanSet(DWORD attributes) {
     constexpr DWORD settable = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN |
                                FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE |
-                               FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE |
+                               FILE_ATTRIBUTE_TEMPORARY |
                                FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
-                               FILE_ATTRIBUTE_NO_SCRUB_DATA | FILE_ATTRIBUTE_PINNED |
-                               FILE_ATTRIBUTE_UNPINNED;
+                               FILE_ATTRIBUTE_NO_SCRUB_DATA;
     const DWORD kept = attributes & settable;
     if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
         return kept | FILE_ATTRIBUTE_DIRECTORY;

@@ -358,32 +358,6 @@ void MakeHiddenLowerDirectoryWithStream(const TempLayerEnvironment& env,
         L"The test must make the lower directory hidden");
 }
 
-// Gives the empty directory at dir a reparse point with a tag that is not
-// a Microsoft tag and not a name surrogate, so the directory is not a
-// link. Logs a skip and returns false when the tag cannot be set.
-bool NonLinkReparseTagSetOrSkipped(const std::wstring& dir) {
-    ScopedHandle handle(::CreateFileW(dir.c_str(), GENERIC_WRITE,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                                      nullptr));
-    constexpr DWORD kDataLength = 4;
-    std::vector<BYTE> buffer(REPARSE_GUID_DATA_BUFFER_HEADER_SIZE + kDataLength);
-    auto* reparse = reinterpret_cast<REPARSE_GUID_DATA_BUFFER*>(buffer.data());
-    reparse->ReparseTag = 0x00001234;
-    reparse->ReparseDataLength = kDataLength;
-    reparse->ReparseGuid = {0x6d1b5a8e, 0x2f4c, 0x4b7a, {0x9e, 0x31, 0x5c, 0x0d, 0x7a, 0x42, 0x18, 0x66}};
-    DWORD returned = 0;
-    const bool set = handle.IsValid() &&
-                     ::DeviceIoControl(handle.Get(), FSCTL_SET_REPARSE_POINT, buffer.data(),
-                                       static_cast<DWORD>(buffer.size()), nullptr, 0, &returned,
-                                       nullptr) != FALSE;
-    if (!set || !HasAttribute(dir, FILE_ATTRIBUTE_REPARSE_POINT)) {
-        Logger::WriteMessage((L"[SKIP] the test could not set a reparse tag on " + dir).c_str());
-        return false;
-    }
-    return true;
-}
-
 }
 
 
@@ -1243,31 +1217,6 @@ public:
             Assert::IsTrue(EntriesUnder(env.Work()).empty(),
                 L"The rename leaves nothing in the work directory");
         });
-    }
-
-    TEST_METHOD(DirectoryRename_LowerDirectoryWithANonLinkReparseTag_ArrivesOpaqueWithItsRecord) {
-        UNIT_SKIP_IF_NOT_NTFS();
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Lower(0), L"d");
-        if (!NonLinkReparseTagSetOrSkipped(env.Lower(0) + L"\\d")) {
-            return;
-        }
-        CopyUpAndRenameRig rig(env.MakeConfig());
-
-        AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"d"), CallerPath(L"moved"),
-            RenameEntryKind::Directory, ReplaceExisting::No),
-            L"The rename of the reparse-point directory succeeds");
-
-        const std::wstring moved = env.Upper() + L"\\moved";
-        Assert::IsTrue(HasAttribute(moved, FILE_ATTRIBUTE_REPARSE_POINT),
-            L"The new name keeps the reparse point");
-        Assert::IsTrue(rig.whiteouts.IsOpaque(L"moved"), L"The new name is opaque");
-        Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\d").c_str(),
-            MetadataStore::ReadLayerMountMetadata(moved, &rig.config).originLayer.c_str()),
-            L"The copy-up record of the new name names the lower directory");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
-            L"The rename leaves nothing in the work directory");
     }
 
     TEST_METHOD(DirectoryRename_ChildStreamCopyFails_ShowsNothingAtTheNewName) {

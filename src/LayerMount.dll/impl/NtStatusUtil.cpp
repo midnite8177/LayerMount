@@ -141,6 +141,7 @@ NTSTATUS NtStatusFromWin32(DWORD win32Error) noexcept
     case ERROR_INVALID_REPARSE_DATA:        return STATUS_IO_REPARSE_DATA_INVALID;
     case ERROR_REPARSE_TAG_INVALID:         return STATUS_IO_REPARSE_TAG_INVALID;
     case ERROR_REPARSE_TAG_MISMATCH:        return STATUS_IO_REPARSE_TAG_MISMATCH;
+    case ERROR_CANT_ACCESS_FILE:            return STATUS_IO_REPARSE_TAG_NOT_HANDLED;
     default:                                return STATUS_UNSUCCESSFUL;
     }
 }

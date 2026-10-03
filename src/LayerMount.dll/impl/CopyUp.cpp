@@ -367,7 +367,12 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
 
     // A data copy would follow the link and put the target's data in a plain
     // upper file.
-    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    bool clonesReparsePoint = false;
+    status = ClonesReparsePoint(source.absolutePath, source.attributes, &clonesReparsePoint);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (clonesReparsePoint) {
         return CopyUpLinkAndCount(normalized, target);
     }
 
@@ -693,9 +698,12 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
     const ResolvedPath& source = target.source;
     const std::wstring& upperPath = target.upperPath;
 
-    // Without this branch a lower junction or directory symlink copies up as
-    // a plain empty directory and loses its reparse tag.
-    if ((source.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    bool clonesReparsePoint = false;
+    status = ClonesReparsePoint(source.absolutePath, source.attributes, &clonesReparsePoint);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (clonesReparsePoint) {
         return CopyUpLinkAndCount(normalized, target);
     }
 

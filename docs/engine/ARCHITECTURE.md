@@ -278,7 +278,8 @@ too.
 A junction or a directory symlink in a layer is a non-directory for what
 lies below it, as a symlink is in overlayfs. Such a link is a directory
 reparse point whose reparse tag is a name surrogate. Any other directory
-reparse point stays a directory.
+reparse point, such as a cloud placeholder, stays a directory. A copy-up or a rename copies it as a plain directory
+without its reparse point.
 
 Overlayfs looks up a path one name at a time, and the topmost layer that
 holds a name decides. It follows a symlink only when the symlink is that
@@ -620,7 +621,12 @@ A lower junction or directory symbolic link copies up as a link, and
 so does a lower file symbolic link in `CopyUpFile`. The engine creates
 the link in a container in the work directory, writes its copy-up
 record on the link, and one rename moves the link to its upper path.
-The link target stays as it was.
+The link target stays as it was. Any other lower directory reparse
+point copies up as a plain directory. When no filter handles its
+reparse tag, the engine cannot read its streams, and the copy-up fails
+with `STATUS_IO_REPARSE_TAG_NOT_HANDLED`. No copy takes the pin or
+offline attributes of its source, because the copy is outside the sync
+provider or storage manager that set them.
 
 A move does not recompute inherited ACEs. So an entry that the engine
 builds for a new upper path in the work directory goes into a
@@ -664,8 +670,12 @@ The engine handles ten cases. The last three also apply to a file source:
   Thus an entry that only a deeper lower holds also copies. The merge
   applies the whiteouts and opaque markers of every layer, so the copy
   holds no marker files. A directory the engine cannot list fails the
-  rename. A junction or directory symlink source copies up as a link,
-  as in a link copy-up, and gets no opaque marker. A case-only rename
+  rename. A directory reparse point that is not a link, at the source
+  or below it, copies as a plain directory with its merged children. A
+  reparse tag that no filter handles fails the listing, and the rename
+  fails with `STATUS_IO_REPARSE_TAG_NOT_HANDLED`. A junction or
+  directory symlink source copies up as a link, as in a link copy-up,
+  and gets no opaque marker. A case-only rename
   of a lower link does the same. Overlayfs without `redirect_dir`
   refuses this rename with `EXDEV`, and the caller then copies the same
   merged view.

@@ -108,8 +108,10 @@ public:
     // relativePath. Returns success when the upper already has an entry at
     // the path. Otherwise builds the directory, or the link for a lower
     // junction or directory symbolic link, in the work directory and moves
-    // it to the upper path once it is complete. When an entry appears at
-    // the upper path before that move, fails with
+    // it to the upper path once it is complete. Any other directory
+    // reparse point copies up as a plain directory. A failure to read the
+    // reparse tag fails the copy-up with that error. When an entry appears
+    // at the upper path before that move, fails with
     // STATUS_OBJECT_NAME_COLLISION and leaves that entry as it was. A
     // failure leaves no copy in the work directory.
     NTSTATUS CopyUpDirectory(const std::wstring& relativePath);

@@ -122,6 +122,20 @@ NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind
     return STATUS_SUCCESS;
 }
 
+NTSTATUS ClonesReparsePoint(const std::wstring& path, DWORD attributes, bool* clones) {
+    *clones = false;
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+        return STATUS_SUCCESS;
+    }
+    RenameEntryKind kind = RenameEntryKind::File;
+    const NTSTATUS status = EntryKindOf(path, attributes, &kind);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    *clones = kind != RenameEntryKind::Directory;
+    return STATUS_SUCCESS;
+}
+
 namespace {
 
 NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,

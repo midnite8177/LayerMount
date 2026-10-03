@@ -83,6 +83,14 @@ NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLin
 // unchanged.
 NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind* kind);
 
+// Sets *clones to whether a copy of the entry at path clones its reparse
+// point. A file reparse point and a link as IsDirectoryLink defines it do.
+// Any other entry, a non-link directory reparse point included, copies as
+// a plain file or directory. attributes are the entry's own, as
+// IsDirectoryLink takes them. When the reparse tag cannot be read, returns
+// that error and leaves *clones false.
+NTSTATUS ClonesReparsePoint(const std::wstring& path, DWORD attributes, bool* clones);
+
 enum class ReplaceExisting { No, Yes };
 
 // Renames an upper file or directory within its volume. A junction or a
