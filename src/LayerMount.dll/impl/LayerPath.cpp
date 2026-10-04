@@ -144,9 +144,9 @@ NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLin
     return STATUS_SUCCESS;
 }
 
-NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind* kind) {
+NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, EntryKind* kind) {
     if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        *kind = RenameEntryKind::File;
+        *kind = EntryKind::File;
         return STATUS_SUCCESS;
     }
     bool isLink = false;
@@ -154,7 +154,7 @@ NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    *kind = isLink ? RenameEntryKind::Link : RenameEntryKind::Directory;
+    *kind = isLink ? EntryKind::Link : EntryKind::Directory;
     return STATUS_SUCCESS;
 }
 
@@ -360,16 +360,16 @@ ComponentKind ComponentKindInLayer(const std::wstring& layerPath,
             ? ComponentKind::Missing
             : ComponentKind::Unreadable;
     }
-    RenameEntryKind kind = RenameEntryKind::Directory;
+    EntryKind kind = EntryKind::Directory;
     if (!NT_SUCCESS(EntryKindOf(componentPath, attrs, &kind))) {
         return ComponentKind::Unreadable;
     }
     switch (kind) {
-    case RenameEntryKind::File:
+    case EntryKind::File:
         return ComponentKind::File;
-    case RenameEntryKind::Link:
+    case EntryKind::Link:
         return ComponentKind::Link;
-    case RenameEntryKind::Directory:
+    case EntryKind::Directory:
         break;
     }
     return ComponentKind::Directory;

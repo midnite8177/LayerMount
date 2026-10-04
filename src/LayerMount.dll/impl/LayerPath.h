@@ -81,7 +81,7 @@ NTSTATUS IsDirectoryLink(const std::wstring& path, DWORD attributes, bool* isLin
 // directory. attributes are the entry's own, as IsDirectoryLink takes them.
 // When the reparse tag cannot be read, returns that error and leaves *kind
 // unchanged.
-NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, RenameEntryKind* kind);
+NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, EntryKind* kind);
 
 // Sets *clones to whether a copy of the entry at path clones its reparse
 // point. An entry whose reparse tag is a name surrogate clones, such as a

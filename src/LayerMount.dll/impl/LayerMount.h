@@ -92,14 +92,13 @@ struct ResolvedPath {
     }
 };
 
-// The kind of an entry, as a rename source or destination or as a component
-// of a layer walk. A Link is a directory reparse point whose reparse tag is a
-// name surrogate, such as a junction or a directory symbolic link. Any other
-// directory reparse point is a Directory. A rename does not follow a Link
-// and treats it as a non-directory, as overlayfs treats a symlink. The one
-// exception is that a Link source keeps the directory check that refuses a
-// destination inside its own tree.
-enum class RenameEntryKind {
+// The kind of an entry. A Link is a directory reparse point whose reparse
+// tag is a name surrogate, such as a junction or a directory symbolic link.
+// Any other directory reparse point is a Directory. A rename or a delete does
+// not follow a Link and treats it as a non-directory, as overlayfs treats a
+// symlink. The one exception is that a Link rename source keeps the
+// directory check that refuses a destination inside its own tree.
+enum class EntryKind {
     File,
     Directory,
     Link,
@@ -518,7 +517,7 @@ public:
     // STATUS_INVALID_PARAMETER, even when the destination is a non-empty
     // directory. A directory rename with replaceIfExists TRUE onto a
     // directory fails with STATUS_DIRECTORY_NOT_EMPTY when the merged view
-    // shows a child of the destination. A link, as RenameEntryKind defines
+    // shows a child of the destination. A link, as EntryKind defines
     // it, is a non-directory on either side of a rename. With
     // replaceIfExists TRUE, a file or a link replaces a link, and a link
     // replaces a file. The link moves as a link, and its target stays
@@ -749,6 +748,14 @@ private:
     // STATUS_SUCCESS otherwise.
     NTSTATUS DirectoryEmptinessStatus(const std::wstring& dirNorm) const;
 
+    // The delete check of both CanDelete overloads. An entry that
+    // EntryKindOf names a Directory must be empty in the merged view. A
+    // File or a Link passes, because what lies below a link is not its
+    // child. Returns the error of a reparse tag that cannot be read.
+    NTSTATUS CanDeleteEntry(const std::wstring& hostNorm,
+                            const std::wstring& streamSuffix,
+                            DWORD callerPid);
+
     // Deletes the alternate data stream streamSuffix of the upper file at
     // hostNorm. Returns STATUS_OBJECT_NAME_NOT_FOUND when the upper does
     // not hold the host file.
@@ -768,8 +775,8 @@ private:
     // The kinds of a rename's source and, when the merged view shows one,
     // its destination.
     struct RenameKinds {
-        RenameEntryKind source;
-        std::optional<RenameEntryKind> destination;
+        EntryKind source;
+        std::optional<EntryKind> destination;
     };
 
     // Runs the checks in the order that overlayfs uses, and sets
@@ -795,7 +802,7 @@ private:
     // When the reparse tag of the lower entry cannot be read, returns that
     // error and leaves *route unchanged.
     NTSTATUS DirectoryRenameRouteOf(const std::wstring& oldNorm,
-                                    RenameEntryKind sourceKind,
+                                    EntryKind sourceKind,
                                     DirectoryRenameRoute* route) const;
 
     // The part of a rename after its checks passed.
@@ -808,7 +815,7 @@ private:
     // the old name for the MergeLower and MoveUpperAndWhiteout routes.
     NTSTATUS RenameDirectoryEntry(const std::wstring& oldRelativePath,
                                   const std::wstring& newRelativePath,
-                                  RenameEntryKind sourceKind,
+                                  EntryKind sourceKind,
                                   DirectoryRenameRoute route,
                                   BOOLEAN replaceIfExists,
                                   bool destHadWhiteout);

@@ -290,7 +290,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             CallerPath(L"src-secured"), CallerPath(L"dst-secured"),
-            RenameEntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No)));
 
         const std::wstring newKid = env.Upper() + L"\\dst-secured\\kid.txt";
         const size_t countOnChild = CountDaclAcesForSid(newKid, everyone.sid);
@@ -445,7 +445,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"p\\moved"),
-            RenameEntryKind::Directory, ReplaceExisting::No),
+            EntryKind::Directory, ReplaceExisting::No),
             L"The rename of the lower directory succeeds");
 
         const std::wstring moved = env.Upper() + L"\\p\\moved";
@@ -468,7 +468,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"link"), CallerPath(L"p\\moved"),
-            RenameEntryKind::Link, ReplaceExisting::No),
+            EntryKind::Link, ReplaceExisting::No),
             L"The rename of the lower junction succeeds");
 
         AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\moved", setup);
@@ -501,7 +501,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS, rig.copyUp.RenameDirectoryCase(
-            CallerPath(L"p\\link"), CallerPath(L"p\\LINK"), RenameEntryKind::Link),
+            CallerPath(L"p\\link"), CallerPath(L"p\\LINK"), EntryKind::Link),
             L"The case-only rename of the lower junction succeeds");
 
         AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\LINK", setup);
@@ -536,7 +536,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"p\\moved"),
-            RenameEntryKind::Directory, ReplaceExisting::No),
+            EntryKind::Directory, ReplaceExisting::No),
             L"The rename of the lower tree succeeds");
 
         Assert::AreEqual(std::string("x"), env.ReadFile(env.Upper(), L"p\\moved\\sub\\x.txt"),

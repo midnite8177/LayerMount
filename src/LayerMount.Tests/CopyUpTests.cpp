@@ -813,7 +813,7 @@ public:
 
         NTSTATUS status = rig.directoryRename.RenameUpperDirectory(
             CallerPath(L"srcdir"), CallerPath(L"dstdir"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
 
         std::wstring src = env.Upper() + L"\\srcdir";
@@ -837,7 +837,7 @@ public:
 
         NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"ldir"), CallerPath(L"newdir"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\file.txt"));

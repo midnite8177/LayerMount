@@ -1866,7 +1866,7 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
     if (destResolved.Found() && !replaceIfExists) {
         return STATUS_OBJECT_NAME_COLLISION;
     }
-    if (kinds->source != RenameEntryKind::File &&
+    if (kinds->source != EntryKind::File &&
         IsInsideDirectory(paths.newNorm, paths.oldNorm)) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -1876,15 +1876,15 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
     if (IsInsideDirectory(paths.oldNorm, paths.newNorm)) {
         return STATUS_DIRECTORY_NOT_EMPTY;
     }
-    RenameEntryKind destinationKind = RenameEntryKind::File;
+    EntryKind destinationKind = EntryKind::File;
     const NTSTATUS kindStatus =
         EntryKindOf(destResolved.absolutePath, destResolved.attributes, &destinationKind);
     if (!NT_SUCCESS(kindStatus)) {
         return kindStatus;
     }
     kinds->destination = destinationKind;
-    const bool sourceIsDirectory = kinds->source == RenameEntryKind::Directory;
-    const bool destinationIsDirectory = destinationKind == RenameEntryKind::Directory;
+    const bool sourceIsDirectory = kinds->source == EntryKind::Directory;
+    const bool destinationIsDirectory = destinationKind == EntryKind::Directory;
     if (sourceIsDirectory != destinationIsDirectory) {
         return sourceIsDirectory ? STATUS_NOT_A_DIRECTORY : STATUS_FILE_IS_A_DIRECTORY;
     }
@@ -1902,25 +1902,36 @@ NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid
     if (!TryParseStreamPath(normalized, hostNorm, streamSuffix)) {
         return STATUS_OBJECT_NAME_INVALID;
     }
+    return CanDeleteEntry(hostNorm, streamSuffix, callerPid);
+}
 
+NTSTATUS LayerMount::CanDelete(FileContext* ctx) {
+    if (ctx == nullptr) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    return CanDeleteEntry(NormalizePath(ctx->relativePath), ctx->streamSuffix, ctx->ownerPid);
+}
+
+NTSTATUS LayerMount::CanDeleteEntry(const std::wstring& hostNorm,
+                                    const std::wstring& streamSuffix,
+                                    DWORD callerPid) {
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
         if (!tracker->CheckAccess(callerPid, hostNorm, OperationType::Delete)) {
             return STATUS_ACCESS_DENIED;
         }
     }
 
-    ResolvedPath resolved = pathResolver_->ResolvePath(hostNorm);
+    const ResolvedPath resolved = pathResolver_->ResolvePath(hostNorm);
     if (!resolved.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-    const bool isDirectory = (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
     if ((resolved.attributes & FILE_ATTRIBUTE_READONLY) != 0) {
         return STATUS_CANNOT_DELETE;
     }
 
     if (!streamSuffix.empty()) {
-        if (isDirectory) {
+        if ((resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             return STATUS_FILE_IS_A_DIRECTORY;
         }
         if (!pathResolver_->ExistsInUpper(hostNorm)) {
@@ -1929,50 +1940,14 @@ NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid
         return STATUS_SUCCESS;
     }
 
-    if (IsEnumerableDirectory(resolved.attributes)) {
+    EntryKind kind = EntryKind::File;
+    const NTSTATUS kindStatus = EntryKindOf(resolved.absolutePath, resolved.attributes, &kind);
+    if (!NT_SUCCESS(kindStatus)) {
+        return kindStatus;
+    }
+    if (kind == EntryKind::Directory) {
         return DirectoryEmptinessStatus(hostNorm);
     }
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS LayerMount::CanDelete(FileContext* ctx) {
-    if (ctx == nullptr) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    std::wstring normalized = NormalizePath(ctx->relativePath);
-
-    if (auto tracker = Tracker(); tracker && ctx->ownerPid != 0) {
-        if (!tracker->CheckAccess(ctx->ownerPid, normalized, OperationType::Delete)) {
-            return STATUS_ACCESS_DENIED;
-        }
-    }
-
-    ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
-    if (!resolved.Found()) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-
-    if ((resolved.attributes & FILE_ATTRIBUTE_READONLY) != 0) {
-        return STATUS_CANNOT_DELETE;
-    }
-
-    const bool isDirectory = (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    if (!ctx->streamSuffix.empty()) {
-        if (isDirectory) {
-            return STATUS_FILE_IS_A_DIRECTORY;
-        }
-        if (!pathResolver_->ExistsInUpper(normalized)) {
-            return STATUS_OBJECT_NAME_NOT_FOUND;
-        }
-        return STATUS_SUCCESS;
-    }
-
-    if (IsEnumerableDirectory(resolved.attributes)) {
-        return DirectoryEmptinessStatus(normalized);
-    }
-
     return STATUS_SUCCESS;
 }
 
@@ -2110,7 +2085,7 @@ NTSTATUS LayerMount::WhiteOutRenameSource(const RenamePaths& paths,
 }
 
 NTSTATUS LayerMount::DirectoryRenameRouteOf(const std::wstring& oldNorm,
-                                            RenameEntryKind sourceKind,
+                                            EntryKind sourceKind,
                                             DirectoryRenameRoute* route) const {
     const ResolvedPath lower = pathResolver_->ResolveLowerPath(oldNorm);
     if (!lower.Found()) {
@@ -2121,14 +2096,14 @@ NTSTATUS LayerMount::DirectoryRenameRouteOf(const std::wstring& oldNorm,
         *route = DirectoryRenameRoute::MergeLower;
         return STATUS_SUCCESS;
     }
-    if (sourceKind != RenameEntryKind::Directory || whiteoutMgr_->IsOpaque(oldNorm)) {
+    if (sourceKind != EntryKind::Directory || whiteoutMgr_->IsOpaque(oldNorm)) {
         *route = DirectoryRenameRoute::MoveUpperAndWhiteout;
         return STATUS_SUCCESS;
     }
-    RenameEntryKind lowerKind = RenameEntryKind::File;
+    EntryKind lowerKind = EntryKind::File;
     const NTSTATUS status = EntryKindOf(lower.absolutePath, lower.attributes, &lowerKind);
     if (!NT_SUCCESS(status)) return status;
-    *route = lowerKind == RenameEntryKind::Directory
+    *route = lowerKind == EntryKind::Directory
         ? DirectoryRenameRoute::MergeLower
         : DirectoryRenameRoute::MoveUpperAndWhiteout;
     return STATUS_SUCCESS;
@@ -2176,7 +2151,7 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
         NormalizePathPreserveCase(newRelativePath)) {
         return STATUS_SUCCESS;
     }
-    RenameKinds kinds{RenameEntryKind::File, std::nullopt};
+    RenameKinds kinds{EntryKind::File, std::nullopt};
     NTSTATUS status =
         EntryKindOf(sourceResolved.absolutePath, sourceResolved.attributes, &kinds.source);
     if (!NT_SUCCESS(status)) return status;
@@ -2194,7 +2169,7 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
     const bool isSameLogicalPath = oldNorm == newNorm;
-    const bool isDirectory = kinds.source != RenameEntryKind::File;
+    const bool isDirectory = kinds.source != EntryKind::File;
 
     NTSTATUS status = STATUS_SUCCESS;
     DirectoryRenameRoute route = DirectoryRenameRoute::MoveUpper;
@@ -2237,7 +2212,7 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
 
 NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
                                           const std::wstring& newRelativePath,
-                                          RenameEntryKind sourceKind,
+                                          EntryKind sourceKind,
                                           DirectoryRenameRoute route,
                                           BOOLEAN replaceIfExists,
                                           bool destHadWhiteout) {
@@ -2288,7 +2263,7 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
     if (!sourceResolved.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-    RenameKinds kinds{RenameEntryKind::File, std::nullopt};
+    RenameKinds kinds{EntryKind::File, std::nullopt};
     NTSTATUS status =
         EntryKindOf(sourceResolved.absolutePath, sourceResolved.attributes, &kinds.source);
     if (!NT_SUCCESS(status)) return status;

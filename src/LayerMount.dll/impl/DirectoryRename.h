@@ -44,7 +44,7 @@ public:
     // CopyUp::SetRenameDestinationAside.
     NTSTATUS RenameLowerDirectory(const CallerPath& oldCallerPath,
                                   const CallerPath& newCallerPath,
-                                  RenameEntryKind sourceKind,
+                                  EntryKind sourceKind,
                                   ReplaceExisting replace);
 
     // Fails with STATUS_OBJECT_PATH_NOT_FOUND and writes nothing when
@@ -60,7 +60,7 @@ public:
     // destination exists in the merged view.
     NTSTATUS RenameUpperDirectory(const CallerPath& oldCallerPath,
                                   const CallerPath& newCallerPath,
-                                  RenameEntryKind sourceKind,
+                                  EntryKind sourceKind,
                                   ReplaceExisting replace);
 
 private:

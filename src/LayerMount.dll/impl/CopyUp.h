@@ -136,7 +136,7 @@ public:
     // upper has no entry at newNorm. A read-only File destination fails
     // with STATUS_ACCESS_DENIED, and nothing moves. aside must be empty.
     NTSTATUS SetRenameDestinationAside(const std::wstring& newNorm,
-                                       RenameEntryKind destinationKind,
+                                       EntryKind destinationKind,
                                        RenameDestinationAside* aside);
 
     // Renames a directory whose old and new paths differ only in case.
@@ -147,7 +147,7 @@ public:
     // and emits no LM_EVT_COPY_UP.
     NTSTATUS RenameDirectoryCase(const CallerPath& oldCallerPath,
                                  const CallerPath& newCallerPath,
-                                 RenameEntryKind sourceKind);
+                                 EntryKind sourceKind);
 
 private:
     bool CopySecurityDescriptor(const std::wstring& srcPath, const std::wstring& dstPath);

@@ -78,7 +78,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st));
 
         Assert::IsFalse(env.FileExists(env.Upper(), L"src"));
@@ -104,7 +104,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            RenameEntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\inner.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\deep\\more.txt"));
@@ -131,7 +131,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            RenameEntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsFalse(wm.IsOpaque(L"src"),
             L"Opacity should no longer be reported for the vanished source path");
@@ -195,7 +195,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             CallerPath(L"ld"), CallerPath(L"newdir"),
-            RenameEntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\top.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\nested\\inner.txt"));
@@ -360,7 +360,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -389,7 +389,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameLowerDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st));
@@ -418,7 +418,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st),
             L"Whited-out destination is invisible in merged view — rename "
             L"without replace must succeed, not collision.");
@@ -443,7 +443,7 @@ public:
         // call reaches the move while dst is still in the upper.
         const NTSTATUS st = dirRename.RenameLowerDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            RenameEntryKind::Directory, ReplaceExisting::Yes);
+            EntryKind::Directory, ReplaceExisting::Yes);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),

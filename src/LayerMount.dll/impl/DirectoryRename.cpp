@@ -387,7 +387,7 @@ NTSTATUS DirectoryRename::CopyMergedEntry(const MergedDirectoryWithAncestry& old
 
 NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
                                                const CallerPath& newCallerPath,
-                                               RenameEntryKind sourceKind,
+                                               EntryKind sourceKind,
                                                ReplaceExisting replace) {
     const std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
     const std::wstring newNorm = NormalizePath(newCallerPath.Text());
@@ -404,7 +404,7 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
     }
 
     const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
-    const NTSTATUS status = sourceKind == RenameEntryKind::Link
+    const NTSTATUS status = sourceKind == EntryKind::Link
         ? CloneReparsePointThroughWorkDir({source.absolutePath, source.attributes},
                                           copyUp_.GenerateWorkPath(), newUpperPath,
                                           {CopiedEntryRecord::NewFromSource, config_, capabilities_})
@@ -426,7 +426,7 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
 
 NTSTATUS DirectoryRename::RenameUpperDirectory(const CallerPath& oldCallerPath,
                                                const CallerPath& newCallerPath,
-                                               RenameEntryKind sourceKind,
+                                               EntryKind sourceKind,
                                                ReplaceExisting replace) {
     std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
     std::wstring newNorm = NormalizePath(newCallerPath.Text());
@@ -439,7 +439,7 @@ NTSTATUS DirectoryRename::RenameUpperDirectory(const CallerPath& oldCallerPath,
 
     std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
 
-    const bool isLink = sourceKind == RenameEntryKind::Link;
+    const bool isLink = sourceKind == EntryKind::Link;
     const bool wasOpaque = !isLink && whiteoutMgr_.IsOpaque(oldNorm);
 
     const NTSTATUS moveStatus = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);

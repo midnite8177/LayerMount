@@ -805,7 +805,7 @@ void RenameDestinationAside::Commit() {
 }
 
 NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
-                                           RenameEntryKind destinationKind,
+                                           EntryKind destinationKind,
                                            RenameDestinationAside* aside) {
     const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
     const DWORD attributes = ::GetFileAttributesW(upperPath.c_str());
@@ -818,7 +818,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
     }
     // NTFS refuses a replace of a read-only file, but not a move of one into
     // the work directory.
-    if (destinationKind == RenameEntryKind::File &&
+    if (destinationKind == EntryKind::File &&
         (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
         return STATUS_ACCESS_DENIED;
     }
@@ -826,7 +826,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
     // A link gets no opaque marker, as overlayfs gives a symlink no opaque
     // xattr. The marker-file check would also go through the link into its
     // target.
-    const bool wasOpaque = destinationKind == RenameEntryKind::Directory &&
+    const bool wasOpaque = destinationKind == EntryKind::Directory &&
                            whiteoutMgr_.IsOpaque(newNorm);
     if (wasOpaque) {
         whiteoutMgr_.RemoveOpaque(newNorm);
@@ -849,11 +849,11 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
 
 NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
                                      const CallerPath& newCallerPath,
-                                     RenameEntryKind sourceKind) {
+                                     EntryKind sourceKind) {
     const std::wstring normalized = NormalizePath(oldCallerPath.Text());
     const std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(newCallerPath);
 
-    if (sourceKind == RenameEntryKind::Link && !pathResolver_.ExistsInUpper(normalized)) {
+    if (sourceKind == EntryKind::Link && !pathResolver_.ExistsInUpper(normalized)) {
         const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
         if (source.Found()) {
             NTSTATUS status = EnsureUpperParent(NormalizePath(newCallerPath.Text()));

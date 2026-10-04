@@ -1143,7 +1143,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"moved"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         heldSrc.Reset();
 
         Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
@@ -1168,7 +1168,7 @@ public:
             FILE_NOTIFY_CHANGE_SECURITY);
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"moved"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         const std::vector<DWORD> actions = watch.ActionsFor(L"moved");
 
         Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, status, L"The rename succeeds");
@@ -1201,7 +1201,7 @@ public:
 
             AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
                 CallerPath(L"tree"), CallerPath(L"moved"),
-                RenameEntryKind::Directory, ReplaceExisting::No),
+                EntryKind::Directory, ReplaceExisting::No),
                 L"The rename of the lower tree succeeds");
 
             const std::wstring moved = env.Upper() + L"\\moved";
@@ -1230,7 +1230,7 @@ public:
         DirectoryWatch watch(env.Upper(), FILE_NOTIFY_CHANGE_DIR_NAME);
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"moved"),
-            RenameEntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No);
         heldSrc.Reset();
         const std::vector<DWORD> actions = watch.ActionsFor(L"moved");
 
@@ -1257,7 +1257,7 @@ public:
             auto armed = ArmForeignDirectoryAt(rig, L"p", env.Upper() + L"\\p\\moved", L"");
             const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
                 CallerPath(L"p\\tree"), CallerPath(L"p\\moved"),
-                RenameEntryKind::Directory, ReplaceExisting::No);
+                EntryKind::Directory, ReplaceExisting::No);
 
             Assert::IsTrue(armed.foreign.made,
 
@@ -1288,7 +1288,7 @@ public:
             auto armed = ArmForeignDirectoryAt(rig, L"p", env.Upper() + L"\\p\\moved", L"");
             const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
                 CallerPath(L"p\\link"), CallerPath(L"p\\moved"),
-                RenameEntryKind::Link, ReplaceExisting::No);
+                EntryKind::Link, ReplaceExisting::No);
 
             Assert::IsTrue(armed.foreign.made,
 
@@ -1314,7 +1314,7 @@ public:
 
             auto armed = ArmForeignDirectoryAt(rig, L"p", env.Upper() + L"\\p\\LINK", L"");
             const NTSTATUS status = rig.copyUp.RenameDirectoryCase(
-                CallerPath(L"p\\link"), CallerPath(L"p\\LINK"), RenameEntryKind::Link);
+                CallerPath(L"p\\link"), CallerPath(L"p\\LINK"), EntryKind::Link);
 
             Assert::IsTrue(armed.foreign.made,
 
@@ -1340,7 +1340,7 @@ public:
             const uint64_t copyUpsBefore = rig.stats.copyUpCount.load();
 
             Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, rig.copyUp.RenameDirectoryCase(
-                CallerPath(L"p\\link"), CallerPath(L"p\\LINK"), RenameEntryKind::Link),
+                CallerPath(L"p\\link"), CallerPath(L"p\\LINK"), EntryKind::Link),
                 L"The case-only rename of the lower junction succeeds");
 
             const std::wstring upperLink = env.Upper() + L"\\p\\LINK";

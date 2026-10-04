@@ -489,6 +489,61 @@ public:
     TEST_METHOD(Delete_LowerDirectorySymlinkToTargetHoldingAFile_WritesAWhiteout) {
         AssertPathDeleteOfLowerLinkWhitesItOutAndKeepsTargetFile(CreateDirectorySymlink);
     }
+
+    TEST_METHOD(Delete_CloudPlaceholderLowerDirectoryWithAChild_FailsAndKeepsTheChild) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_DIRECTORY_NOT_EMPTY, mount.Delete(L"d", kNoCallerPid),
+            L"The delete of a cloud placeholder directory with a child must fail");
+
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
+            L"A failed delete must write no whiteout");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"d").entries.count(L"x.txt") == 1,
+            L"The child must stay in the listing");
+    }
+
+    TEST_METHOD(CanDeleteContext_CloudPlaceholderLowerDirectoryWithAChild_ReturnsDirectoryNotEmpty) {
+        CloudPlaceholderLayers layers;
+        if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"d", FILE_READ_ATTRIBUTES | DELETE,
+                                             FILE_DIRECTORY_FILE, kNoCallerPid, &ctx, &info)),
+            L"Preconditions: the cloud placeholder directory must open for delete");
+
+        const NTSTATUS status = mount.CanDelete(ctx.get());
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_DIRECTORY_NOT_EMPTY, status,
+            L"An open cloud placeholder directory with a child is not empty");
+    }
+
+    TEST_METHOD(Delete_LowerDirectoryWithUnhandledReparseTag_FailsWithTheListingStatus) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"d");
+        if (!NonLinkReparseTagSetOrSkipped(env.Lower(0) + L"\\d")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_IO_REPARSE_TAG_NOT_HANDLED, mount.Delete(L"d", kNoCallerPid),
+            L"The delete of a directory that cannot be listed must fail");
+
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
+            L"A failed delete must write no whiteout");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"").entries.count(L"d") == 1,
+            L"The directory must stay in the listing of its parent");
+    }
 };
 
 }
