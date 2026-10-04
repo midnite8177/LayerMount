@@ -337,6 +337,58 @@ public:
             L"The upper file must hold the data of the lower file");
     }
 
+    TEST_METHOD(CopyUpFile_DehydratedCloudPlaceholderFile_CopiesUpTheProvidersData) {
+        CloudPlaceholderLayers layers;
+        constexpr size_t kSize = 256 * 1024;
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{0, kSize})) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"x.bin"),
+            L"The copy-up of the dehydrated placeholder file must succeed");
+
+        Assert::IsTrue(CloudProviderData(0, kSize) == env.ReadFile(env.Upper(), L"x.bin"),
+            L"The upper file must hold the data the provider serves");
+        Assert::IsFalse(
+            HasAttribute(env.Lower(0) + L"\\x.bin", FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS),
+            L"The copy-up must hydrate the lower placeholder file");
+    }
+
+    TEST_METHOD(CopyUpFile_PartlyDehydratedCloudPlaceholderFile_CopiesUpTheProvidersData) {
+        CloudPlaceholderLayers layers;
+        constexpr size_t kSize = 256 * 1024;
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"x.bin"),
+            L"The copy-up of the partly dehydrated placeholder file must succeed");
+
+        Assert::IsTrue(CloudProviderData(0, kSize) == env.ReadFile(env.Upper(), L"x.bin"),
+            L"The upper file must hold the data the provider serves");
+    }
+
+    TEST_METHOD(CopyUpFile_PartlyDehydratedCloudPlaceholderFileWithoutProvider_FailsAndLeavesNoUpperFile) {
+        CloudPlaceholderLayers layers;
+        constexpr size_t kSize = 256 * 1024;
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
+            return;
+        }
+        layers.syncRoot.DisconnectProvider();
+        TempLayerEnvironment& env = layers.env;
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_UNSUCCESSFUL, rig.copyUp.CopyUpFile(L"x.bin"),
+            L"The copy-up must fail when no provider can serve the dehydrated range");
+
+        Assert::IsFalse(fs::exists(env.Upper() + L"\\x.bin"),
+            L"The failed copy-up must leave no upper file");
+    }
+
     TEST_METHOD(CopyUpFile_LowerWslSpecialFileOrAppExecutionAlias_CopiesUpWithItsReparseTag) {
         UNIT_SKIP_IF_NOT_NTFS();
         const struct {
@@ -853,6 +905,44 @@ public:
 
         Assert::IsTrue(content == env.ReadFile(env.Upper(), L"big.bin"),
             L"The upper file must hold the data of the lower file");
+    }
+
+    TEST_METHOD(CompleteLazyCopyUp_PartlyDehydratedCloudPlaceholderFile_FillsTheShellWithTheProvidersData) {
+        CloudPlaceholderLayers layers;
+        constexpr size_t kSize = 2 * 1024 * 1024;
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, ByteRange{512 * 1024, 1024 * 1024})) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin"),
+            L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CompleteLazyCopyUp(L"big.bin"),
+            L"The fill of the upper shell must succeed");
+
+        Assert::IsTrue(CloudProviderData(0, kSize) == env.ReadFile(env.Upper(), L"big.bin"),
+            L"The upper file must hold the data the provider serves");
+    }
+
+    TEST_METHOD(CompleteLazyCopyUp_PartlyDehydratedCloudPlaceholderFileWithoutProvider_FailsAndKeepsTheMetacopyShell) {
+        CloudPlaceholderLayers layers;
+        constexpr size_t kSize = 2 * 1024 * 1024;
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, ByteRange{512 * 1024, 1024 * 1024})) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin"),
+            L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");
+        layers.syncRoot.DisconnectProvider();
+
+        Assert::IsFalse(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"big.bin")),
+            L"The fill must fail when no provider can serve the dehydrated range");
+
+        Assert::IsTrue(
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\big.bin", nullptr).metacopy,
+            L"The upper file must stay a metacopy shell after the failed fill");
     }
 
     TEST_METHOD(CopyUpMetadataOnly_WritesMetacopyADS) {

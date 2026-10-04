@@ -92,7 +92,9 @@ NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring
 // clusters for written zeros, but not for a region the file pointer skips
 // (Windows file system documentation, "Sparse Files"). The destination end
 // of file becomes the source size, so a trailing hole keeps the logical
-// size.
+// size. The copy reads every byte of a source whose data a provider or a
+// storage manager can keep elsewhere. A read the provider cannot serve
+// fails the copy with the status of that read.
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle);
 
 struct EntryTimes {

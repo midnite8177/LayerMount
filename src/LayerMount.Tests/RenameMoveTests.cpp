@@ -1910,6 +1910,22 @@ public:
             L"The data of the placeholder file must read through the new name");
     }
 
+    TEST_METHOD(Rename_LowerDirectoryHoldingPartlyDehydratedCloudPlaceholderFile_CopiesTheProvidersData) {
+        CloudPlaceholderLayers layers;
+        constexpr size_t kSize = 256 * 1024;
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"d\\x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower directory must succeed");
+
+        Assert::IsTrue(CloudProviderData(0, kSize) == env.ReadFile(env.Upper(), L"e\\x.bin"),
+            L"The file under the new name must hold the data the provider serves");
+    }
+
     TEST_METHOD(Rename_LowerDirectoryHoldingUnixSocketFile_KeepsTheSocketTagUnderTheNewName) {
         UNIT_SKIP_IF_NOT_NTFS();
         TempLayerEnvironment env(1);

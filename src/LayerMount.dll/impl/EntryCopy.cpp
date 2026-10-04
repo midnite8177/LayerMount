@@ -345,6 +345,17 @@ bool IsSparseHandle(HANDLE handle) {
            HasFileAttribute(info.dwFileAttributes, FILE_ATTRIBUTE_SPARSE_FILE);
 }
 
+// A reparse point such as a cloud placeholder, or a file a storage manager
+// moved offline, can list only its local data as allocated, so its ranges
+// show a hole where the provider keeps data. A read fetches that data or
+// fails, so the copy of such a file reads every byte.
+bool MayHoldRemoteData(DWORD attributes) {
+    constexpr DWORD remote = FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_OFFLINE |
+                             FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS |
+                             FILE_ATTRIBUTE_RECALL_ON_OPEN;
+    return (attributes & remote) != 0;
+}
+
 // NTFS keeps at most 64 KB of extended attributes on an entry. The
 // FILE_FULL_EA_INFORMATION list of them is a little larger, because each
 // entry has a header and padding.
@@ -566,7 +577,10 @@ NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring
 }
 
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
-    if (!IsSparseHandle(srcHandle) || !IsSparseHandle(dstHandle)) {
+    BY_HANDLE_FILE_INFORMATION srcInfo{};
+    if (!GetFileInformationByHandle(srcHandle, &srcInfo) ||
+        !HasFileAttribute(srcInfo.dwFileAttributes, FILE_ATTRIBUTE_SPARSE_FILE) ||
+        MayHoldRemoteData(srcInfo.dwFileAttributes) || !IsSparseHandle(dstHandle)) {
         return CopyBytesToEnd(srcHandle, dstHandle);
     }
 

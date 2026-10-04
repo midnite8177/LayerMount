@@ -533,12 +533,19 @@ unavailable. Steps:
    copy-up fails with the volume's error. The copy reads only the
    allocated ranges of a sparse source, so its holes stay holes in the
    upper copy and the upper allocation matches the lower one. Without
-   the capability, the upper copy is dense. A compressed lower file
-   gives a compressed upper copy when the upper volume can compress.
-   The engine sets compression before the data copy and ignores a
-   refusal, so on a volume that cannot compress the upper copy is dense
-   and the copy-up succeeds. Compression has no capability bit. This
-   matches a Windows copy of a compressed file to such a volume.
+   the capability, the upper copy is dense. A source that is a reparse
+   point or has the offline or a recall attribute, such as a dehydrated
+   cloud placeholder, can list only its local data as allocated, so the
+   copy reads every byte of it. The read fetches the rest from the
+   provider that holds it. When no provider can serve it, the open or
+   the read of the lower fails, and the copy-up fails with that error
+   and writes no zeros. An overlayfs copy-up fails with the error of the
+   lower read in the same way. A compressed lower file gives a
+   compressed upper copy when the upper volume can compress. The engine
+   sets compression before the data copy and ignores a refusal, so on a
+   volume that cannot compress the upper copy is dense and the copy-up
+   succeeds. Compression has no capability bit. This matches a Windows
+   copy of a compressed file to such a volume.
 6. Copy the extended attributes, the security descriptor
    (DACL/SACL/owner/group) and every alternate data stream except the
    reserved ones, `:overlay` and every `:overlay.*` stream. The copy
@@ -600,16 +607,17 @@ The shell fills at the first open that asks for data: read data, write
 data, append data, or execute. `Open` calls `CompleteLazyCopyUp` before
 it opens the handle. The call streams the data from the recorded origin
 into the upper sparse skeleton and clears the metacopy flag. The fill
-works on the upper file in place, as overlayfs fills a metacopy file.
-The fill takes the read-only attribute off a read-only shell for the
-writes and puts it back at the end. The fill takes the sparse attribute
-off unless the lower file is sparse, so a filled file has the allocation
-of a normal copy. An open for
-attributes, security, or delete keeps the shell sparse. A failed fill
-fails the open with the fill's status and returns no handle. `Read`
-never copies a file up and never reopens the handle for a fill. The one
-reopen a read can do is the retarget after a rename. `Write` keeps a
-fill as a guard for a handle opened without data access. See
+reads every byte of a source that can keep data elsewhere, as step 5
+does. The fill works on the upper file in place, as overlayfs fills a
+metacopy file. The fill takes the read-only attribute off a read-only
+shell for the writes and puts it back at the end. The fill takes the
+sparse attribute off unless the lower file is sparse, so a filled file
+has the allocation of a normal copy. An open for attributes, security,
+or delete keeps the shell sparse. A failed fill fails the open with the
+fill's status and returns no handle. `Read` never copies a file up and
+never reopens the handle for a fill. The one reopen a read can do is the
+retarget after a rename. `Write` keeps a fill as a guard for a handle
+opened without data access. See
 [ADR 0006](../adr/0006-metacopy-shell-fills-at-open-for-data-access.md).
 Without the sparse capability the engine forces a full copy-up at open
 time, because a non-sparse metacopy would be a dense zero-filled stub

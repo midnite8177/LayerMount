@@ -604,14 +604,123 @@ inline DWORD ReparseTagOf(const std::wstring& path) {
     return info.ReparseTag;
 }
 
+// The data the test sync provider serves for a cloud placeholder file,
+// length bytes from offset. The byte at offset i is 1 + i % 251, so no byte
+// is zero and each 4 KB block differs from the one before it.
+inline std::string CloudProviderData(LONGLONG offset, size_t length) {
+    std::string data(length, '\0');
+    for (size_t i = 0; i < length; ++i) {
+        data[i] = static_cast<char>(1 + (offset + static_cast<LONGLONG>(i)) % 251);
+    }
+    return data;
+}
+
+// A range of bytes in a file, length bytes from offset.
+struct ByteRange {
+    LONGLONG offset;
+    LONGLONG length;
+};
+
+inline std::wstring HresultText(HRESULT result) {
+    wchar_t code[16] = {};
+    swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(result));
+    return code;
+}
+
+// A test sync provider connected to a Windows Cloud Files sync root. It
+// answers each data fetch with CloudProviderData for the fetched range. The
+// destructor disconnects it.
+class CloudProviderConnection {
+public:
+    // Takes ownership of key, a connection that CfConnectSyncRoot made.
+    explicit CloudProviderConnection(CF_CONNECTION_KEY key) : key_(key) {}
+
+    ~CloudProviderConnection() {
+        ::CfDisconnectSyncRoot(key_);
+    }
+
+    CloudProviderConnection(const CloudProviderConnection&) = delete;
+    CloudProviderConnection& operator=(const CloudProviderConnection&) = delete;
+
+    // Connects a provider to the sync root at root and puts it in
+    // connection. Returns the HRESULT of the connect and logs nothing.
+    static HRESULT Connect(const std::wstring& root,
+                           std::optional<CloudProviderConnection>& connection) {
+        static const CF_CALLBACK_REGISTRATION callbacks[] = {
+            {CF_CALLBACK_TYPE_FETCH_DATA, &CloudProviderConnection::ServeFetchData},
+            CF_CALLBACK_REGISTRATION_END,
+        };
+        CF_CONNECTION_KEY key{};
+        const HRESULT result = ::CfConnectSyncRoot(root.c_str(), callbacks, nullptr,
+                                                   CF_CONNECT_FLAG_NONE, &key);
+        if (SUCCEEDED(result)) {
+            connection.emplace(key);
+        }
+        return result;
+    }
+
+private:
+    static void CALLBACK ServeFetchData(const CF_CALLBACK_INFO* info,
+                                        const CF_CALLBACK_PARAMETERS* parameters) {
+        constexpr LONGLONG kChunk = 1024 * 1024;
+        const LONGLONG fileSize = info->FileSize.QuadPart;
+        LONGLONG offset = parameters->FetchData.RequiredFileOffset.QuadPart;
+        const LONGLONG required = parameters->FetchData.RequiredLength.QuadPart;
+        // CF_CALLBACK_PARAMETERS documents a fetch length of CF_EOF as "to end of file".
+        const LONGLONG end =
+            required == CF_EOF ? fileSize : (std::min)(fileSize, offset + required);
+        while (offset < end) {
+            const LONGLONG length = (std::min)(kChunk, end - offset);
+            const std::string data = CloudProviderData(offset, static_cast<size_t>(length));
+            const HRESULT result =
+                TransferData(*info, STATUS_SUCCESS, data.data(), ByteRange{offset, length});
+            if (FAILED(result)) {
+                Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+                    (L"The test provider could not transfer the data at offset " +
+                     std::to_wstring(offset) + L" (HRESULT " + HresultText(result) +
+                     L"), so it fails the rest of the fetch").c_str());
+                TransferData(*info, STATUS_CLOUD_FILE_UNSUCCESSFUL, nullptr,
+                             ByteRange{offset, end - offset});
+                return;
+            }
+            offset += length;
+        }
+    }
+
+    // A transfer with a failure status fails each pending read of its
+    // range with that status and ignores buffer. The status must be a
+    // STATUS_CLOUD_FILE_* status (CF_OPERATION_PARAMETERS).
+    static HRESULT TransferData(const CF_CALLBACK_INFO& info, NTSTATUS status,
+                                const void* buffer, ByteRange range) {
+        CF_OPERATION_INFO operation{};
+        operation.StructSize = sizeof(operation);
+        operation.Type = CF_OPERATION_TYPE_TRANSFER_DATA;
+        operation.ConnectionKey = info.ConnectionKey;
+        operation.TransferKey = info.TransferKey;
+        CF_OPERATION_PARAMETERS transfer{};
+        transfer.ParamSize = static_cast<ULONG>(
+            FIELD_OFFSET(CF_OPERATION_PARAMETERS, TransferData) +
+            sizeof(transfer.TransferData));
+        transfer.TransferData.CompletionStatus = status;
+        transfer.TransferData.Buffer = buffer;
+        transfer.TransferData.Offset.QuadPart = range.offset;
+        transfer.TransferData.Length.QuadPart = range.length;
+        return ::CfExecute(&operation, &transfer);
+    }
+
+    CF_CONNECTION_KEY key_;
+};
+
 // Registers the directory at root as a Windows Cloud Files sync root and
 // shows cloud placeholders to the calling thread as reparse points. A
 // placeholder is a file or a directory. A cloud tag is not a name
 // surrogate, so a placeholder is not a link. The sync root has full
 // population, so a placeholder directory lists without a sync provider.
-// The destructor unregisters the sync root, which turns each placeholder
-// directory back into a plain directory, and restores the thread's
-// placeholder mode.
+// The destructor disconnects the test provider, unregisters the sync root
+// and restores the thread's placeholder mode. The unregister turns each
+// placeholder directory back into a plain directory and removes each
+// placeholder file that is still dehydrated in full or in part, so the
+// tree deletes with no provider connected.
 class CloudSyncRoot {
 public:
     explicit CloudSyncRoot(std::wstring root) : root_(std::move(root)) {
@@ -643,6 +752,7 @@ public:
     }
 
     ~CloudSyncRoot() {
+        DisconnectProvider();
         if (SUCCEEDED(registerResult_)) {
             ::CfUnregisterSyncRoot(root_.c_str());
         }
@@ -661,7 +771,8 @@ public:
     bool PlaceholderMadeOrSkipped(const std::wstring& path) const {
         HRESULT result = registerResult_;
         if (SUCCEEDED(result)) {
-            const ::LayerMount::ScopedHandle handle = OpenPlaceholder(path);
+            const ::LayerMount::ScopedHandle handle =
+                OpenPlaceholder(path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES);
             constexpr char kIdentity[] = "placeholder";
             result = handle.IsValid()
                 ? ::CfConvertToPlaceholder(handle.Get(), kIdentity, sizeof(kIdentity),
@@ -679,7 +790,8 @@ public:
     // FILE_ATTRIBUTE_PINNED. Logs a skip and returns false when the
     // platform refuses or path then shows no pinned attribute.
     bool PinnedOrSkipped(const std::wstring& path) const {
-        const ::LayerMount::ScopedHandle handle = OpenPlaceholder(path);
+        const ::LayerMount::ScopedHandle handle =
+            OpenPlaceholder(path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES);
         const HRESULT result = handle.IsValid()
             ? ::CfSetPinState(handle.Get(), CF_PIN_STATE_PINNED, CF_SET_PIN_FLAG_NONE, nullptr)
             : HRESULT_FROM_WIN32(::GetLastError());
@@ -690,27 +802,90 @@ public:
         return true;
     }
 
+    // Connects a CloudProviderConnection to the sync root. Logs a skip and
+    // returns false when the platform refuses the sync root or the
+    // connection.
+    bool ProviderConnectedOrSkipped() {
+        const HRESULT result = SUCCEEDED(registerResult_)
+            ? CloudProviderConnection::Connect(root_, provider_)
+            : registerResult_;
+        if (FAILED(result)) {
+            LogSkip(L"the test could not connect a sync provider to " + root_, result);
+            return false;
+        }
+        return true;
+    }
+
+    void DisconnectProvider() {
+        provider_.reset();
+    }
+
+    // Drops the local data of the in-sync placeholder file at path in
+    // range, whose offset and length are multiples of 4 KB. Logs a skip
+    // and returns false when the platform refuses the open or the
+    // dehydration. Then asserts that the file is sparse, shows
+    // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS and keeps no dropped byte
+    // allocated. No check reads the file, which would fetch its data.
+    bool DehydratedOrSkipped(const std::wstring& path, ByteRange range) {
+        using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+        const ::LayerMount::ScopedHandle handle = OpenPlaceholder(
+            path, FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES);
+        if (!handle.IsValid()) {
+            LogSkip(L"the test could not open the cloud placeholder " + path,
+                    HRESULT_FROM_WIN32(::GetLastError()));
+            return false;
+        }
+        LARGE_INTEGER size{};
+        Assert::IsTrue(::GetFileSizeEx(handle.Get(), &size) != FALSE,
+            L"The test must read the size of the placeholder file");
+        LARGE_INTEGER start{};
+        start.QuadPart = range.offset;
+        LARGE_INTEGER count{};
+        count.QuadPart = range.length;
+        const HRESULT result =
+            ::CfDehydratePlaceholder(handle.Get(), start, count, CF_DEHYDRATE_FLAG_NONE, nullptr);
+        if (FAILED(result)) {
+            LogSkip(L"the test could not dehydrate the cloud placeholder " + path, result);
+            return false;
+        }
+        Assert::IsTrue(HasAttribute(path, FILE_ATTRIBUTE_SPARSE_FILE),
+            L"The dehydrated placeholder file must be sparse");
+        Assert::IsTrue(HasAttribute(path, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS),
+            L"The dehydrated placeholder file must have FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS");
+        Assert::IsTrue(AllocatedBytesWithoutFetch(path) <= size.QuadPart - range.length,
+            L"The dehydrated placeholder file must keep no dropped byte allocated");
+        return true;
+    }
+
 private:
     using SetPlaceholderMode = CHAR(NTAPI*)(CHAR);
 
+    static LONGLONG AllocatedBytesWithoutFetch(const std::wstring& path) {
+        DWORD high = 0;
+        const DWORD low = ::GetCompressedFileSizeW(path.c_str(), &high);
+        if (low == INVALID_FILE_SIZE && ::GetLastError() != NO_ERROR) {
+            return LLONG_MAX;
+        }
+        return (static_cast<LONGLONG>(high) << 32) | low;
+    }
+
     static constexpr CHAR kExposePlaceholders = 2;
 
-    static ::LayerMount::ScopedHandle OpenPlaceholder(const std::wstring& path) {
+    static ::LayerMount::ScopedHandle OpenPlaceholder(const std::wstring& path, DWORD access) {
         return ::LayerMount::ScopedHandle(::CreateFileW(
-            path.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+            path.c_str(), access,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     }
 
     static void LogSkip(const std::wstring& reason, HRESULT result) {
-        wchar_t code[16] = {};
-        swprintf_s(code, L"0x%08lX", static_cast<unsigned long>(result));
         Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
-            (L"[SKIP] " + reason + L" (HRESULT " + code + L")").c_str());
+            (L"[SKIP] " + reason + L" (HRESULT " + HresultText(result) + L")").c_str());
     }
 
     std::wstring root_;
     HRESULT registerResult_ = E_FAIL;
+    std::optional<CloudProviderConnection> provider_;
     SetPlaceholderMode restoreThreadMode_ = nullptr;
     CHAR previousThreadMode_ = 0;
 };
@@ -738,6 +913,17 @@ struct CloudPlaceholderLayers {
     bool PlaceholderFileOrSkipped(const std::wstring& file, const std::string& content) {
         env.WriteFile(env.Lower(0), file, content);
         return syncRoot.PlaceholderMadeOrSkipped(env.Lower(0) + L"\\" + file);
+    }
+
+    // Writes size bytes of CloudProviderData to the lower file at file,
+    // relative to the lower, makes that file an in-sync placeholder,
+    // connects the test provider and drops the local data in dropped. Logs
+    // a skip and returns false when the platform refuses.
+    bool DehydratedPlaceholderFileOrSkipped(const std::wstring& file, size_t size,
+                                            ByteRange dropped) {
+        return PlaceholderFileOrSkipped(file, CloudProviderData(0, size)) &&
+               syncRoot.ProviderConnectedOrSkipped() &&
+               syncRoot.DehydratedOrSkipped(env.Lower(0) + L"\\" + file, dropped);
     }
 };
 
