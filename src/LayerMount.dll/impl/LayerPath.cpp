@@ -74,11 +74,6 @@ std::wstring WithStoredLeafName(const std::wstring& targetPath,
     return targetPath.substr(0, targetPath.find_last_of(L'\\') + 1) + fd.cFileName;
 }
 
-bool IsEnumerableDirectory(DWORD attributes) {
-    return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-}
-
 namespace {
 
 // Reads the tag of the entry at path, not of its target. Opens a file or a
@@ -222,25 +217,15 @@ NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path) {
-    const DWORD attrs = ::GetFileAttributesW(path.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
-        const DWORD probeErr = ::GetLastError();
-        if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
-            return STATUS_SUCCESS;
-        }
-        return NtStatusFromWin32(probeErr);
-    }
-
-    if (IsEnumerableDirectory(attrs)) {
+NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path, EntryKind kind) {
+    if (kind == EntryKind::Directory) {
         std::error_code ec;
         fs::remove_all(path, ec);
         return ec ? NtStatusFromWin32(static_cast<DWORD>(ec.value())) : STATUS_SUCCESS;
     }
 
-    const bool isDirectory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    const BOOL removed = isDirectory ? ::RemoveDirectoryW(path.c_str())
-                                     : ::DeleteFileW(path.c_str());
+    const BOOL removed = kind == EntryKind::Link ? ::RemoveDirectoryW(path.c_str())
+                                                 : ::DeleteFileW(path.c_str());
     if (!removed) {
         const DWORD removeErr = ::GetLastError();
         if (removeErr != ERROR_FILE_NOT_FOUND && removeErr != ERROR_PATH_NOT_FOUND) {
@@ -263,12 +248,45 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
     return status;
 }
 
-NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config) {
+NTSTATUS ProbeUpperEntry(const std::wstring& path, bool* exists, EntryKind* kind) {
+    *exists = false;
+    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        const DWORD probeErr = ::GetLastError();
+        if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
+            return STATUS_SUCCESS;
+        }
+        return NtStatusFromWin32(probeErr);
+    }
+    const NTSTATUS kindStatus = EntryKindOf(path, attrs, kind);
+    if (kindStatus == STATUS_OBJECT_NAME_NOT_FOUND || kindStatus == STATUS_OBJECT_PATH_NOT_FOUND) {
+        return STATUS_SUCCESS;
+    }
+    if (!NT_SUCCESS(kindStatus)) {
+        return kindStatus;
+    }
+    *exists = true;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS RemoveUpperEntryOfKind(const std::wstring& path,
+                                EntryKind kind,
+                                const LayerConfig& config) {
     const std::vector<std::wstring> entries =
         MetadataStore::ListSidecarKeyedEntries(path, config);
-    const NTSTATUS status = RemoveUpperEntryOnDisk(path);
+    const NTSTATUS status = RemoveUpperEntryOnDisk(path, kind);
     MetadataStore::RemoveSidecarRecordsOfGoneEntries(entries, config);
     return status;
+}
+
+NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config) {
+    bool exists = false;
+    EntryKind kind = EntryKind::File;
+    const NTSTATUS probe = ProbeUpperEntry(path, &exists, &kind);
+    if (!NT_SUCCESS(probe) || !exists) {
+        return probe;
+    }
+    return RemoveUpperEntryOfKind(path, kind, config);
 }
 
 NTSTATUS CreateDirectoryOrUseExisting(const std::wstring& path) {

@@ -23,10 +23,18 @@ NTSTATUS UpperEntryRemover::Remove(const std::wstring& normalized) {
     const bool lowerHasIt = pathResolver_.ResolveLowerPath(normalized).Found();
 
     const std::wstring upperPath = pathResolver_.GetUpperPath(normalized);
-    const DWORD upperAttrs = ::GetFileAttributesW(upperPath.c_str());
-    if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        RemoveOpaqueUnlessReparsePoint(normalized, upperAttrs);
-        const NTSTATUS removal = RemoveUpperEntry(upperPath, config_);
+    bool upperExists = false;
+    EntryKind kind = EntryKind::File;
+    const NTSTATUS probe = ProbeUpperEntry(upperPath, &upperExists, &kind);
+    if (!NT_SUCCESS(probe)) {
+        return probe;
+    }
+    if (upperExists) {
+        // A marker check through a link reads the markers of its target.
+        if (kind == EntryKind::Directory && whiteoutMgr_.IsOpaque(normalized)) {
+            whiteoutMgr_.RemoveOpaque(normalized);
+        }
+        const NTSTATUS removal = RemoveUpperEntryOfKind(upperPath, kind, config_);
         if (!NT_SUCCESS(removal)) {
             cache_.InvalidateWithAncestors(normalized);
             return removal;
@@ -44,13 +52,6 @@ NTSTATUS UpperEntryRemover::Remove(const std::wstring& normalized) {
 
     cache_.InvalidateWithAncestors(normalized);
     return STATUS_SUCCESS;
-}
-
-void UpperEntryRemover::RemoveOpaqueUnlessReparsePoint(const std::wstring& normalized,
-                                                       DWORD upperAttrs) {
-    if (IsEnumerableDirectory(upperAttrs) && whiteoutMgr_.IsOpaque(normalized)) {
-        whiteoutMgr_.RemoveOpaque(normalized);
-    }
 }
 
 }

@@ -19,18 +19,13 @@ public:
                       WhiteoutManager& whiteoutMgr,
                       Cache& cache);
 
-    // Removes the upper entry at normalized, with its opaque marker, and
-    // writes a whiteout when a lower holds the name. A junction or a
-    // directory symbolic link goes, and its target stays. Returns the
-    // status of a failed removal or whiteout write.
+    // Removes the upper entry at normalized as RemoveUpperEntryOfKind does,
+    // with its opaque marker unless the entry is a link, and writes a
+    // whiteout when a lower holds the name. Returns the status of a failed
+    // probe, removal or whiteout write.
     NTSTATUS Remove(const std::wstring& normalized);
 
 private:
-    // Overlayfs gives a link no opaque marker. The marker check goes
-    // through a link into its target, so a reparse point is never checked
-    // or cleared as opaque.
-    void RemoveOpaqueUnlessReparsePoint(const std::wstring& normalized, DWORD upperAttrs);
-
     const LayerConfig& config_;
     PathResolver& pathResolver_;
     WhiteoutManager& whiteoutMgr_;

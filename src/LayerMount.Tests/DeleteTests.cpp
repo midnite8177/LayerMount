@@ -491,7 +491,7 @@ public:
     }
 
     TEST_METHOD(Delete_CloudPlaceholderLowerDirectoryWithAChild_FailsAndKeepsTheChild) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -508,7 +508,7 @@ public:
     }
 
     TEST_METHOD(CanDeleteContext_CloudPlaceholderLowerDirectoryWithAChild_ReturnsDirectoryNotEmpty) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -525,6 +525,108 @@ public:
 
         AssertStatus(STATUS_DIRECTORY_NOT_EMPTY, status,
             L"An open cloud placeholder directory with a child is not empty");
+    }
+
+    using UpperPlaceholderSetUp = bool (*)(CloudPlaceholderLayers&);
+
+    static bool UpperPlaceholderHoldingOnlyWhiteoutsOrSkipped(CloudPlaceholderLayers& layers) {
+        TempLayerEnvironment& env = layers.env;
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "a");
+        env.WriteFile(env.Lower(0), L"d\\b.txt", "b");
+        env.CreateDir(env.Upper(), L"d");
+        auto config = env.MakeConfig();
+        WhiteoutManager wm(config, nullptr);
+        AssertStatus(STATUS_SUCCESS, wm.CreateWhiteout(L"d\\a.txt", WhiteoutType::File),
+                     L"CreateWhiteout must succeed");
+        AssertStatus(STATUS_SUCCESS, wm.CreateWhiteout(L"d\\b.txt", WhiteoutType::File),
+                     L"CreateWhiteout must succeed");
+        if (!layers.PlaceholderOrSkipped(L"d")) {
+            return false;
+        }
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d\\a.txt")) &&
+                       env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d\\b.txt")),
+            L"Preconditions: the upper placeholder directory must still hold both whiteouts");
+        return true;
+    }
+
+    static bool UpperPlaceholderHoldingOnlyAnOpaqueMarkerOrSkipped(CloudPlaceholderLayers& layers) {
+        TempLayerEnvironment& env = layers.env;
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "a");
+        env.CreateDir(env.Upper(), L"d");
+        auto config = env.MakeConfig();
+        AssertStatus(STATUS_SUCCESS, WhiteoutManager(config, nullptr).SetOpaque(L"d"),
+            L"SetOpaque must mark the upper directory");
+        if (!layers.PlaceholderOrSkipped(L"d")) {
+            return false;
+        }
+        Assert::IsTrue(env.FileExists(env.Upper(), OpaqueMarkerPath(L"d")),
+            L"Preconditions: the upper placeholder directory must still hold the opaque marker file");
+        return true;
+    }
+
+    static NTSTATUS DeleteOpenDirectory(::LayerMount::LayerMount& mount, const std::wstring& path) {
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(path, FILE_READ_ATTRIBUTES | DELETE,
+                                             FILE_DIRECTORY_FILE, kNoCallerPid, &ctx, &info)),
+            L"Preconditions: the directory must open for delete");
+        const NTSTATUS status = mount.Delete(ctx.get());
+        mount.Close(ctx.get());
+        return status;
+    }
+
+    static void AssertUpperDirectoryGoneAndWhitedOut(TempLayerEnvironment& env,
+                                                     ::LayerMount::LayerMount& mount) {
+        Assert::IsFalse(env.FileExists(env.Upper(), L"d"),
+            L"The delete must remove the upper directory");
+        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
+            L"The delete must write a whiteout for the name of the lower directory");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"").entries.count(L"d") == 0,
+            L"The root listing must not show the deleted directory");
+    }
+
+    static void AssertPathDeleteRemovesUpperPlaceholder(UpperPlaceholderSetUp setUp) {
+        CloudPlaceholderLayers layers{SyncRootLayer::Upper};
+        if (!setUp(layers)) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Delete(L"d", kNoCallerPid),
+            L"The delete of the upper placeholder directory by path must succeed");
+
+        AssertUpperDirectoryGoneAndWhitedOut(env, mount);
+    }
+
+    static void AssertContextDeleteRemovesUpperPlaceholder(UpperPlaceholderSetUp setUp) {
+        CloudPlaceholderLayers layers{SyncRootLayer::Upper};
+        if (!setUp(layers)) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, DeleteOpenDirectory(mount, L"d"),
+            L"The delete of the open upper placeholder directory must succeed");
+
+        AssertUpperDirectoryGoneAndWhitedOut(env, mount);
+    }
+
+    TEST_METHOD(Delete_CloudPlaceholderUpperDirectoryHoldingOnlyWhiteouts_RemovesItAndWritesAWhiteout) {
+        AssertPathDeleteRemovesUpperPlaceholder(UpperPlaceholderHoldingOnlyWhiteoutsOrSkipped);
+    }
+
+    TEST_METHOD(DeleteContext_CloudPlaceholderUpperDirectoryHoldingOnlyWhiteouts_RemovesItAndWritesAWhiteout) {
+        AssertContextDeleteRemovesUpperPlaceholder(UpperPlaceholderHoldingOnlyWhiteoutsOrSkipped);
+    }
+
+    TEST_METHOD(Delete_CloudPlaceholderUpperDirectoryHoldingOnlyAnOpaqueMarker_RemovesItAndWritesAWhiteout) {
+        AssertPathDeleteRemovesUpperPlaceholder(UpperPlaceholderHoldingOnlyAnOpaqueMarkerOrSkipped);
+    }
+
+    TEST_METHOD(DeleteContext_CloudPlaceholderUpperDirectoryHoldingOnlyAnOpaqueMarker_RemovesItAndWritesAWhiteout) {
+        AssertContextDeleteRemovesUpperPlaceholder(UpperPlaceholderHoldingOnlyAnOpaqueMarkerOrSkipped);
     }
 
     TEST_METHOD(Delete_LowerDirectoryWithUnhandledReparseTag_FailsWithTheListingStatus) {

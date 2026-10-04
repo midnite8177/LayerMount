@@ -890,40 +890,55 @@ private:
     CHAR previousThreadMode_ = 0;
 };
 
-// A one-lower layer environment whose lower is a cloud sync root. The
-// member order unregisters the sync root before the environment deletes
-// the tree.
-struct CloudPlaceholderLayers {
-    TempLayerEnvironment env{1};
-    CloudSyncRoot syncRoot{env.Lower(0)};
+// The layer of a CloudPlaceholderLayers that is the cloud sync root.
+enum class SyncRootLayer { Lower, Upper };
 
-    // Writes content to the lower file at file, then makes the lower
-    // directory at dir a placeholder. Both paths are relative to the
-    // lower. Logs a skip and returns false when the platform refuses.
+// A one-lower layer environment whose lower or upper is a cloud sync root.
+// syncRoot is built from a path of env, so env comes first, and the
+// destruction in reverse order unregisters the sync root before the
+// environment deletes the tree.
+struct CloudPlaceholderLayers {
+    explicit CloudPlaceholderLayers(SyncRootLayer layer)
+        : syncRootPath(layer == SyncRootLayer::Upper ? env.Upper() : env.Lower(0))
+        , syncRoot{syncRootPath} {}
+
+    TempLayerEnvironment env{1};
+    const std::wstring syncRootPath;
+    CloudSyncRoot syncRoot;
+
+    // Makes the existing directory at dir, relative to the sync root layer,
+    // a placeholder. Logs a skip and returns false when the platform refuses.
+    bool PlaceholderOrSkipped(const std::wstring& dir) {
+        return syncRoot.PlaceholderMadeOrSkipped(syncRootPath + L"\\" + dir);
+    }
+
+    // Writes content to the file at file, then makes the directory at dir a
+    // placeholder. Both paths are relative to the sync root layer. Logs a
+    // skip and returns false when the platform refuses.
     bool PlaceholderWithFileOrSkipped(const std::wstring& dir,
                                       const std::wstring& file,
                                       const std::string& content) {
-        env.WriteFile(env.Lower(0), file, content);
-        return syncRoot.PlaceholderMadeOrSkipped(env.Lower(0) + L"\\" + dir);
+        env.WriteFile(syncRootPath, file, content);
+        return PlaceholderOrSkipped(dir);
     }
 
-    // Writes content to the lower file at file, relative to the lower, then
-    // makes that file an in-sync placeholder that keeps the content. Logs a
-    // skip and returns false when the platform refuses.
+    // Writes content to the file at file, relative to the sync root layer,
+    // then makes that file an in-sync placeholder that keeps the content.
+    // Logs a skip and returns false when the platform refuses.
     bool PlaceholderFileOrSkipped(const std::wstring& file, const std::string& content) {
-        env.WriteFile(env.Lower(0), file, content);
-        return syncRoot.PlaceholderMadeOrSkipped(env.Lower(0) + L"\\" + file);
+        env.WriteFile(syncRootPath, file, content);
+        return syncRoot.PlaceholderMadeOrSkipped(syncRootPath + L"\\" + file);
     }
 
-    // Writes size bytes of CloudProviderData to the lower file at file,
-    // relative to the lower, makes that file an in-sync placeholder,
+    // Writes size bytes of CloudProviderData to the file at file, relative
+    // to the sync root layer, makes that file an in-sync placeholder,
     // connects the test provider and drops the local data in dropped. Logs
     // a skip and returns false when the platform refuses.
     bool DehydratedPlaceholderFileOrSkipped(const std::wstring& file, size_t size,
                                             ByteRange dropped) {
         return PlaceholderFileOrSkipped(file, CloudProviderData(0, size)) &&
                syncRoot.ProviderConnectedOrSkipped() &&
-               syncRoot.DehydratedOrSkipped(env.Lower(0) + L"\\" + file, dropped);
+               syncRoot.DehydratedOrSkipped(syncRootPath + L"\\" + file, dropped);
     }
 };
 

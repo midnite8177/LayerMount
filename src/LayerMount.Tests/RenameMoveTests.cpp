@@ -1727,7 +1727,7 @@ public:
 
     TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_ShowsAPlainDirectoryHoldingBothLayers) {
         ForEachMetadataStore([](UINT32 hostCapabilities) {
-            CloudPlaceholderLayers layers;
+            CloudPlaceholderLayers layers{SyncRootLayer::Lower};
             if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
                 return;
             }
@@ -1760,7 +1760,7 @@ public:
     }
 
     TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_GivesTheNewNameTheUpperDirectorysLastWriteTime) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -1781,7 +1781,7 @@ public:
 
     TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_GivesTheNewNameTheUpperDirectorysDacl) {
         UNIT_SKIP_IF_NOT_ADMIN();
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -1799,7 +1799,7 @@ public:
     }
 
     TEST_METHOD(Rename_CloudPlaceholderLowerDirectoryWithUpperShadow_KeepsTheCompressionOfAnUpperChild) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -1822,7 +1822,7 @@ public:
     }
 
     TEST_METHOD(Rename_CloudPlaceholderLowerDirectory_ShowsAPlainDirectoryHoldingItsChild) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -1840,7 +1840,7 @@ public:
     }
 
     TEST_METHOD(Rename_CloudPlaceholderLowerDirectory_KeepsItsLastWriteTime) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -1859,7 +1859,7 @@ public:
     }
 
     TEST_METHOD(Rename_LowerDirectoryWithCloudPlaceholderSubdirectory_ShowsAPlainSubdirectoryHoldingItsChild) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d\\p", L"d\\p\\y.txt", "nested")) {
             return;
         }
@@ -1877,7 +1877,7 @@ public:
     }
 
     TEST_METHOD(Rename_PinnedCloudPlaceholderLowerDirectory_GivesTheNewNameNoPinnedAttribute) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower") ||
             !layers.syncRoot.PinnedOrSkipped(layers.env.Lower(0) + L"\\d")) {
             return;
@@ -1893,7 +1893,7 @@ public:
     }
 
     TEST_METHOD(Rename_LowerDirectoryHoldingCloudPlaceholderFile_ShowsAPlainFileWithTheLowersData) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderFileOrSkipped(L"d\\x.txt", "lower")) {
             return;
         }
@@ -1911,7 +1911,7 @@ public:
     }
 
     TEST_METHOD(Rename_LowerDirectoryHoldingPartlyDehydratedCloudPlaceholderFile_CopiesTheProvidersData) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
         if (!layers.DehydratedPlaceholderFileOrSkipped(L"d\\x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
             return;
@@ -3124,7 +3124,7 @@ public:
     }
 
     TEST_METHOD(Create_FileInCloudPlaceholderLowerDirectory_CopiesTheDirectoryUpAsAPlainDirectory) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -3144,7 +3144,7 @@ public:
     }
 
     TEST_METHOD(Create_FileInCloudPlaceholderLowerDirectory_GivesTheCopyTheLowerDirectorysCreationTime) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower")) {
             return;
         }
@@ -3166,7 +3166,7 @@ public:
     }
 
     TEST_METHOD(Create_FileInPinnedCloudPlaceholderLowerDirectory_GivesTheCopyNoPinnedAttribute) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderWithFileOrSkipped(L"d", L"d\\x.txt", "lower") ||
             !layers.syncRoot.PinnedOrSkipped(layers.env.Lower(0) + L"\\d")) {
             return;

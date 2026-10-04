@@ -321,7 +321,7 @@ public:
     }
 
     TEST_METHOD(CopyUpFile_LowerCloudPlaceholderFile_CopiesUpAPlainFileWithTheLowersData) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         if (!layers.PlaceholderFileOrSkipped(L"x.txt", "lower")) {
             return;
         }
@@ -338,7 +338,7 @@ public:
     }
 
     TEST_METHOD(CopyUpFile_DehydratedCloudPlaceholderFile_CopiesUpTheProvidersData) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
         if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{0, kSize})) {
             return;
@@ -357,7 +357,7 @@ public:
     }
 
     TEST_METHOD(CopyUpFile_PartlyDehydratedCloudPlaceholderFile_CopiesUpTheProvidersData) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
         if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
             return;
@@ -373,7 +373,7 @@ public:
     }
 
     TEST_METHOD(CopyUpFile_PartlyDehydratedCloudPlaceholderFileWithoutProvider_FailsAndLeavesNoUpperFile) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
         if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
             return;
@@ -887,7 +887,7 @@ public:
     }
 
     TEST_METHOD(CopyUpMetadataOnly_PinnedCloudPlaceholderFile_GivesTheShellNoPinnedAttributeAndFillsTheLowersData) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         const std::string content(2 * 1024 * 1024, 'P');
         if (!layers.PlaceholderFileOrSkipped(L"big.bin", content) ||
             !layers.syncRoot.PinnedOrSkipped(layers.env.Lower(0) + L"\\big.bin")) {
@@ -908,7 +908,7 @@ public:
     }
 
     TEST_METHOD(CompleteLazyCopyUp_PartlyDehydratedCloudPlaceholderFile_FillsTheShellWithTheProvidersData) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 2 * 1024 * 1024;
         if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, ByteRange{512 * 1024, 1024 * 1024})) {
             return;
@@ -926,7 +926,7 @@ public:
     }
 
     TEST_METHOD(CompleteLazyCopyUp_PartlyDehydratedCloudPlaceholderFileWithoutProvider_FailsAndKeepsTheMetacopyShell) {
-        CloudPlaceholderLayers layers;
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 2 * 1024 * 1024;
         if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, ByteRange{512 * 1024, 1024 * 1024})) {
             return;

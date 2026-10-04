@@ -63,10 +63,6 @@ std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
 std::wstring WithStoredLeafName(const std::wstring& targetPath,
                                 const std::wstring& entryPath);
 
-// Returns true for a directory that is not a reparse point. A scan of a
-// junction or a directory symbolic link lists the entries of its target.
-bool IsEnumerableDirectory(DWORD attributes);
-
 // Sets *isLink to whether the entry at path is a junction or a directory
 // symbolic link. Such a link is a directory reparse point whose reparse
 // tag is a name surrogate. Any other directory reparse point is not a
@@ -109,10 +105,25 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
                         ReplaceExisting replace,
                         const LayerConfig& config);
 
-// Removes the upper entry at path. A directory goes with its whole tree.
-// A junction or a symbolic link goes, and its target stays. A path that
-// does not exist is success. The sidecar records of the removed entries
-// also go.
+// Sets *kind to the kind of the upper entry at path, as EntryKindOf reads
+// it, and sets *exists to true. When no entry is at path, also when the
+// entry goes between the attribute read and the tag read, sets *exists to
+// false and returns success. Returns the error of a failed attribute or
+// tag read.
+NTSTATUS ProbeUpperEntry(const std::wstring& path, bool* exists, EntryKind* kind);
+
+// Removes the upper entry at path, whose kind ProbeUpperEntry read. A
+// directory goes with its whole tree, also when it is a reparse point that
+// is not a link, such as a cloud placeholder. A junction or a symbolic link
+// goes, and its target stays. An entry that is already gone is success.
+// The sidecar records of the removed entries also go.
+NTSTATUS RemoveUpperEntryOfKind(const std::wstring& path,
+                                EntryKind kind,
+                                const LayerConfig& config);
+
+// Probes the upper entry at path with ProbeUpperEntry, then removes it with
+// RemoveUpperEntryOfKind. A path with no entry is success. A failed probe
+// returns its error and removes nothing.
 NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config);
 
 // Creates a container directory at containerPath, a new path in the work
