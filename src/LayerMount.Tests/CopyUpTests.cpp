@@ -382,8 +382,8 @@ public:
         TempLayerEnvironment& env = layers.env;
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        AssertStatus(STATUS_UNSUCCESSFUL, rig.copyUp.CopyUpFile(L"x.bin"),
-            L"The copy-up must fail when no provider can serve the dehydrated range");
+        AssertStatus(STATUS_CLOUD_FILE_ACCESS_DENIED, rig.copyUp.CopyUpFile(L"x.bin"),
+            L"The copy-up must fail with the status of the lower read when no provider can serve the dehydrated range");
 
         Assert::IsFalse(fs::exists(env.Upper() + L"\\x.bin"),
             L"The failed copy-up must leave no upper file");
@@ -937,8 +937,8 @@ public:
             L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");
         layers.syncRoot.DisconnectProvider();
 
-        Assert::IsFalse(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"big.bin")),
-            L"The fill must fail when no provider can serve the dehydrated range");
+        AssertStatus(STATUS_CLOUD_FILE_ACCESS_DENIED, rig.copyUp.CompleteLazyCopyUp(L"big.bin"),
+            L"The fill must fail with the status of the lower read when no provider can serve the dehydrated range");
 
         Assert::IsTrue(
             MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\big.bin", nullptr).metacopy,
