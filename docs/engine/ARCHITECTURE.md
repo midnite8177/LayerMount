@@ -539,15 +539,21 @@ unavailable. Steps:
    refusal, so on a volume that cannot compress the upper copy is dense
    and the copy-up succeeds. Compression has no capability bit. This
    matches a Windows copy of a compressed file to such a volume.
-6. Copy the security descriptor (DACL/SACL/owner/group) and every
-   alternate data stream except the reserved ones, `:overlay` and every
-   `:overlay.*` stream. A stream that fails to copy fails the copy-up
-   with its status.
+6. Copy the extended attributes, the security descriptor
+   (DACL/SACL/owner/group) and every alternate data stream except the
+   reserved ones, `:overlay` and every `:overlay.*` stream. The copy
+   skips an extended attribute whose name starts with `$KERNEL.`,
+   because only kernel mode can set one, as overlayfs skips an xattr
+   that a security module refuses to copy. Any other extended attribute
+   or stream that fails to copy fails the copy-up with its status. On
+   an upper volume that has no extended attributes, the copy gets none
+   and the copy-up succeeds.
 7. Write the copy-up record (origin layer, copy-up timestamp, captured
    stable index number). In the sidecar store the record moves with the
    file in step 9.
 8. Set the file attributes and all three timestamps last, because NTFS
-   refuses a new stream on a read-only file. The staged file also gets
+   refuses a new stream on a read-only file, and the stream and
+   extended attribute writes move the times. The staged file also gets
    `FILE_ATTRIBUTE_ARCHIVE`, because the rename in step 9 sets it on a
    file. So the move changes no attribute at the upper path.
 9. `MoveUpperEntry(work, upper, ReplaceExisting::No)`, one
@@ -576,8 +582,11 @@ the upper layer:
    the same rule as the eager copy-up. A refused `FSCTL_SET_COMPRESSION`
    leaves the shell dense and never fails the metacopy, so a small file
    and a large file give the same result.
-2. Copy the security descriptor. The lower's streams arrive with the
-   fill, together with the data.
+2. Copy the extended attributes, under the same rules as the full
+   copy-up, and the security descriptor. As in overlayfs, the shell has
+   the extended attributes from the start, and the fill does not copy
+   them again. The lower's streams arrive with the fill, together with
+   the data.
 3. Write the copy-up record with `metacopy = true` and the origin
    layer, as overlayfs sets the metacopy xattr on its temporary file.
 4. Set the read-only attribute and the timestamps last, as in the full
@@ -610,7 +619,8 @@ with no benefit.
 
 Builds the directory in the work directory, as overlayfs does. The
 engine creates it there and copies the lower directory's compression,
-encryption and user streams. Then it writes the security descriptor
+encryption, user streams and extended attributes, under the same rules
+as a file copy-up. Then it writes the security descriptor
 and the copy-up record, and last the attributes and timestamps. Then
 one rename moves the directory to its upper path. No reader of the
 upper sees a directory that lacks its streams, security or record. The
@@ -625,9 +635,9 @@ The link target stays as it was. A lower file with the reparse tag of
 a WSL special file (a Unix socket, FIFO, character device or block
 device) or of an app execution alias also copies up as a clone of its
 reparse point. Overlayfs copies up a special file as a special file.
-Each clone also gets the extended attributes of its source, because
-WSL keeps the mode and device number of a special file in them, and
-overlayfs copies xattrs. Any other lower file reparse point, such as
+A clone gets the extended attributes of its source, as every copy
+does. WSL keeps the mode and device number of a special file in them.
+Any other lower file reparse point, such as
 a cloud placeholder or a deduplicated file, copies up as a plain file
 with its data, as overlayfs copies the data of a regular file. Any
 other lower directory reparse point copies up as a plain directory.
@@ -673,8 +683,11 @@ The engine handles ten cases. The last three also apply to a file source:
   entry as it was. A failed rename removes the container. At each
   depth, the copy takes the entries that `MergeDirectoryAcrossLayers`
   lists, each from the layer that gives it, with that layer's name
-  case. A file copies with its data, sparse state and ADS, a link
-  copies as a link, and a directory copies with its merged children.
+  case. A file copies with its data, sparse state, ADS and extended
+  attributes, a link copies as a link, and a directory copies with its
+  merged children and the extended attributes of the directory it
+  takes its view from. The extended attributes follow the rules of a
+  file copy-up.
   A file reparse point copies as in a file copy-up. A WSL special file
   or an app execution alias copies as a clone of its reparse point,
   and any other file, such as a cloud placeholder, copies with its

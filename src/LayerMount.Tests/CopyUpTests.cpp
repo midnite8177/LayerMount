@@ -3,13 +3,12 @@
 
 #include "CopyUp.h"
 #include "MetadataStore.h"
-#include "NtdllExport.h"
 #include "NtStatusUtil.h"
 
 #include <winioctl.h>
-#include <cstring>
 #include <set>
 
+#include "ExtendedAttributeTestHelpers.h"
 #include "StreamTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -30,75 +29,6 @@ namespace {
 constexpr DWORD kReparseTagLxFifo = 0x80000024;
 constexpr DWORD kReparseTagLxChr = 0x80000025;
 constexpr DWORD kReparseTagLxBlk = 0x80000026;
-
-// The header of FILE_FULL_EA_INFORMATION, which the user-mode SDK headers
-// do not define. The name, a NUL and the value follow it.
-struct FullEaHeader {
-    ULONG nextEntryOffset;
-    UCHAR flags;
-    UCHAR nameLength;
-    USHORT valueLength;
-};
-
-using NtSetEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG);
-using NtQueryEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG, BOOLEAN,
-                                         PVOID, ULONG, PULONG, BOOLEAN);
-
-// Writes the extended attribute name with value on the entry at path, not
-// on its target. Returns the status of NtSetEaFile, or of the open.
-NTSTATUS SetExtendedAttribute(const std::wstring& path, const std::string& name,
-                              const std::string& value) {
-    ScopedHandle handle(::CreateFileW(
-        path.c_str(), FILE_WRITE_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        nullptr));
-    if (!handle.IsValid()) {
-        return NtStatusFromWin32(::GetLastError());
-    }
-    std::vector<BYTE> buffer(sizeof(FullEaHeader) + name.size() + 1 + value.size());
-    auto* header = reinterpret_cast<FullEaHeader*>(buffer.data());
-    header->nameLength = static_cast<UCHAR>(name.size());
-    header->valueLength = static_cast<USHORT>(value.size());
-    std::memcpy(buffer.data() + sizeof(FullEaHeader), name.data(), name.size());
-    std::memcpy(buffer.data() + sizeof(FullEaHeader) + name.size() + 1, value.data(),
-                value.size());
-    const auto setEa = LoadNtdllExport<NtSetEaFileFn>("NtSetEaFile");
-    IO_STATUS_BLOCK io{};
-    return setEa(handle.Get(), &io, buffer.data(), static_cast<ULONG>(buffer.size()));
-}
-
-// Returns the value of the extended attribute name on the entry at path,
-// not on its target, or none when the entry has no such attribute or the
-// read fails.
-std::optional<std::string> ExtendedAttributeOf(const std::wstring& path,
-                                               const std::string& name) {
-    ScopedHandle handle(::CreateFileW(
-        path.c_str(), FILE_READ_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        nullptr));
-    if (!handle.IsValid()) {
-        return std::nullopt;
-    }
-    // A FILE_GET_EA_INFORMATION entry: the offset of the next entry in a
-    // ULONG, the name length in one byte, the name and a NUL.
-    constexpr size_t kNameOffset = sizeof(ULONG) + 1;
-    std::vector<BYTE> query(kNameOffset + name.size() + 1);
-    query[sizeof(ULONG)] = static_cast<BYTE>(name.size());
-    std::memcpy(query.data() + kNameOffset, name.data(), name.size());
-    std::vector<BYTE> result(64 * 1024);
-    const auto queryEa = LoadNtdllExport<NtQueryEaFileFn>("NtQueryEaFile");
-    IO_STATUS_BLOCK io{};
-    const NTSTATUS status = queryEa(handle.Get(), &io, result.data(),
-                                    static_cast<ULONG>(result.size()), TRUE, query.data(),
-                                    static_cast<ULONG>(query.size()), nullptr, TRUE);
-    const auto* header = reinterpret_cast<const FullEaHeader*>(result.data());
-    if (!NT_SUCCESS(status) || header->valueLength == 0) {
-        return std::nullopt;
-    }
-    const auto* value = reinterpret_cast<const char*>(result.data()) + sizeof(FullEaHeader) +
-                        header->nameLength + 1;
-    return std::string(value, header->valueLength);
-}
 
 void AssertUpperLinkReadsThroughToTarget(const TempLayerEnvironment& env,
                                          const std::wstring& linkName,
@@ -445,8 +375,8 @@ public:
         if (!MicrosoftReparseTagSetOrSkipped(lowerPath, kReparseTagLxChr)) {
             return;
         }
-        const std::string mode("\xA4\x21\x00\x00", 4);
-        const std::string device("\x05\x00\x00\x00\x01\x00\x00\x00", 8);
+        const std::string mode = LittleEndianUlong(kWslCharacterDevice | 0644);
+        const std::string device = LittleEndianUlong(5) + LittleEndianUlong(1);
         AssertStatus(STATUS_SUCCESS, SetExtendedAttribute(lowerPath, "$LXMOD", mode),
             L"The test must set $LXMOD on the lower file");
         AssertStatus(STATUS_SUCCESS, SetExtendedAttribute(lowerPath, "$LXDEV", device),

@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace LayerMount {
 
@@ -70,18 +71,20 @@ NTSTATUS SparseRefusalStatus();
 
 void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs);
 
-// Gives the directory at dstAbs the compression, encryption and user
-// streams of the directory at srcAbs. NTFS compresses or encrypts an entry
-// only when it creates it, so a call after the children are in place leaves
-// each child with its own state; a dstAbs that was already compressed or
-// encrypted gave that state to them. SetFileAttributes ignores
-// FILE_ATTRIBUTE_COMPRESSED, so compression goes through the FSCTL, and a
-// refusal of it is ignored. Without it, a file created in the directory
-// through the mount lands dense. A refused encryption or stream copy
+// Gives the directory at dstAbs the compression, encryption, user streams
+// and extended attributes of the directory at srcAbs. NTFS compresses or
+// encrypts an entry only when it creates it, so a call after the children
+// are in place leaves each child with its own state; a dstAbs that was
+// already compressed or encrypted gave that state to them.
+// SetFileAttributes ignores FILE_ATTRIBUTE_COMPRESSED, so compression goes
+// through the FSCTL, and the call ignores a refusal of it. Without the
+// compression state, a file created in the directory through the mount
+// lands dense. A refused encryption, stream copy or extended attribute copy
 // returns its status. Unreadable source attributes skip the compression and
-// encryption. NTFS refuses a new stream on a read-only directory, so the
-// caller writes the attributes and times last.
-NTSTATUS CopyDirectoryLayoutAndStreams(const std::wstring& srcAbs, const std::wstring& dstAbs);
+// encryption. NTFS refuses a new stream on a read-only directory, and an
+// extended attribute write moves the times, so the caller writes the
+// attributes and times last.
+NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring& dstAbs);
 
 // Copy the data of srcHandle to dstHandle. When both files are sparse, the
 // copy reads the allocated ranges of the source and writes only those, so a
@@ -122,11 +125,35 @@ NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
                                         NewUpperEntryKind kind,
                                         const LayerConfig& config);
 
+// The header of FILE_FULL_EA_INFORMATION, which the user-mode SDK headers
+// do not define. The name, a NUL and the value follow it.
+struct FullEaHeader {
+    ULONG nextEntryOffset;
+    UCHAR flags;
+    UCHAR nameLength;
+    USHORT valueLength;
+};
+
+using NtQueryEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG, BOOLEAN, PVOID,
+                                         ULONG, PULONG, BOOLEAN);
+using NtSetEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG);
+
+// The entries of list, a FILE_FULL_EA_INFORMATION list of length bytes,
+// that a user-mode NtSetEaFile can write, as a new list with each entry at
+// a ULONG boundary. Leaves out each entry whose name starts with $KERNEL.,
+// in upper or lower case: Windows lets only kernel mode set such an
+// attribute (FsRtlSetKernelEaFile, "Kernel Extended Attributes" in the
+// Windows driver documentation). Stops at the first entry that runs past
+// length. Empty when no entry is left.
+std::vector<BYTE> ExtendedAttributesUserModeCanSet(const BYTE* list, ULONG length);
+
 // Copies each extended attribute of the entry at srcPath to the entry at
-// dstPath. Opens the entries themselves, not the targets of links. When the
-// source has no extended attributes, or either volume has no support for
-// them, copies nothing and returns STATUS_SUCCESS. A failed read or write
-// returns its status.
+// dstPath, except the ones ExtendedAttributesUserModeCanSet leaves out.
+// Opens the entries themselves, not the targets of links. When the source
+// has no extended attributes to copy, or either volume refuses them as not
+// supported, copies nothing and returns STATUS_SUCCESS. A failed read or write
+// returns its status. An extended attribute write moves the times of
+// dstPath.
 NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring& dstPath);
 
 // An entry to copy. attributes are the entry's own, as GetFileAttributesW

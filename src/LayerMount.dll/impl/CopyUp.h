@@ -175,6 +175,14 @@ private:
                                 DWORD srcAttrs,
                                 const std::wstring& workPath);
 
+    // Gives the staged file at workPath the encryption, extended attributes
+    // and security descriptor of the file at sourcePath, in that order. Each
+    // step opens workPath by path, so no handle to it may be open. On
+    // failure the caller removes the staged file.
+    NTSTATUS CopyStagedFileMetadata(const std::wstring& sourcePath,
+                                    DWORD srcAttrs,
+                                    const std::wstring& workPath);
+
     NTSTATUS FinishStagedFile(const std::wstring& sourcePath,
                               const std::wstring& workPath,
                               FileBasicInfoGuard& basicInfo);

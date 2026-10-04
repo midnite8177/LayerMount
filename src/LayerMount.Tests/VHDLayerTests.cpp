@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "TestFixture.h"
 
+#include "ExtendedAttributeTestHelpers.h"
+
 #include "LayerMount.h"
 #include "Manifest.h"
 #include "VHDLayerManager.h"
@@ -30,12 +32,13 @@ void CleanupWorkspace(const std::wstring& root) {
     std::filesystem::remove_all(root, ec);
 }
 
-// Runs format.com /FS:FAT32 on the volume and returns its exit code, or the
-// Win32 error when format.com does not start or does not finish in a minute.
-DWORD FormatFat32(const std::wstring& volumeGuid) {
+// Runs format.com with /FS:fileSystem on the volume and returns its exit
+// code, or the Win32 error when format.com does not start or does not
+// finish in a minute.
+DWORD FormatVolume(const std::wstring& volumeGuid, const std::wstring& fileSystem) {
     std::wstring volume = volumeGuid;
     if (!volume.empty() && volume.back() == L'\\') volume.pop_back();
-    std::wstring cmdLine = L"format.com " + volume + L" /FS:FAT32 /Q /Y /X /V:LMFAT";
+    std::wstring cmdLine = L"format.com " + volume + L" /FS:" + fileSystem + L" /Q /Y /X /V:LMFAT";
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -57,12 +60,13 @@ DWORD FormatFat32(const std::wstring& volumeGuid) {
 }
 
 // Creates a VHD at vhdPath, attaches it read-write, and gives its one volume
-// a FAT32 file system. volumeGuid receives the volume's \\?\Volume{GUID}\
-// path. The attach ends when the handle closes.
-void MakeFat32Volume(LayerMount::VHD::VHDLayerManager& mgr,
-                     const std::wstring& vhdPath,
-                     LayerMount::VHD::VhdHandle& handle,
-                     std::wstring& volumeGuid) {
+// the file system fileSystem, as format.com names it. volumeGuid receives the
+// volume's \\?\Volume{GUID}\ path. The attach ends when the handle closes.
+void MakeVolume(LayerMount::VHD::VHDLayerManager& mgr,
+                const std::wstring& vhdPath,
+                const std::wstring& fileSystem,
+                LayerMount::VHD::VhdHandle& handle,
+                std::wstring& volumeGuid) {
     LayerMount::VHD::VhdHandle createHandle;
     Assert::AreEqual<DWORD>(ERROR_SUCCESS,
         mgr.CreateVHD(vhdPath, 100ULL * 1024 * 1024, /*dynamic*/ true, createHandle));
@@ -77,15 +81,15 @@ void MakeFat32Volume(LayerMount::VHD::VHDLayerManager& mgr,
     Assert::AreEqual<DWORD>(ERROR_SUCCESS,
         LayerMount::VHD::GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid));
     volumeGuid = LayerMount::VHD::EnsureTrailingBackslash(volumeGuid);
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS, FormatFat32(volumeGuid),
-        L"format.com must give the volume a FAT32 file system");
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, FormatVolume(volumeGuid, fileSystem),
+        (L"format.com must give the volume a " + fileSystem + L" file system").c_str());
 
     wchar_t fsName[MAX_PATH] = {};
     Assert::IsTrue(::GetVolumeInformationW(volumeGuid.c_str(), nullptr, 0, nullptr, nullptr,
                                            nullptr, fsName, MAX_PATH) != FALSE,
         L"GetVolumeInformationW must read the formatted volume");
-    Assert::AreEqual(std::wstring(L"FAT32"), std::wstring(fsName),
-        L"The test volume must be FAT32");
+    Assert::IsTrue(::_wcsicmp(fileSystem.c_str(), fsName) == 0,
+        (L"The test volume must be " + fileSystem).c_str());
 }
 
 }
@@ -408,7 +412,7 @@ public:
         LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
-        MakeFat32Volume(mgr, vhd, handle, volumeGuid);
+        MakeVolume(mgr, vhd, L"FAT32", handle, volumeGuid);
 
         TempLayerEnvironment env(1);
         const std::wstring fatLayer = volumeGuid + L"layer";
@@ -439,7 +443,7 @@ public:
         LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
-        MakeFat32Volume(mgr, vhd, handle, volumeGuid);
+        MakeVolume(mgr, vhd, L"FAT32", handle, volumeGuid);
 
         TempLayerEnvironment env(0);
         const std::wstring fatLayer = volumeGuid + L"layer";
@@ -463,6 +467,48 @@ public:
             L"The upper file must hide the children of the FAT32 lower's directory");
     }
 
+    TEST_METHOD(CopyUpFile_UpperOnExFatVolume_CopiesUpLowerFileWithExtendedAttributes) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+
+        const std::wstring root = MakeVhdWorkspace();
+        const std::wstring vhd = root + L"\\vhd\\exfat.vhdx";
+        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VhdHandle handle;
+        std::wstring volumeGuid;
+        MakeVolume(mgr, vhd, L"exFAT", handle, volumeGuid);
+
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"wsl.txt", "content");
+        const NTSTATUS eaStatus =
+            SetExtendedAttribute(env.Lower(0) + L"\\wsl.txt", "$LXUID", LittleEndianUlong(1000));
+        LayerMount::LayerConfig config = env.MakeConfig();
+        config.upperPath = volumeGuid + L"upper";
+        config.workDirPath = volumeGuid + L"work";
+        config.hostCapabilities &= ~LM_CAP_ADS;
+        ::CreateDirectoryW(config.upperPath.c_str(), nullptr);
+        ::CreateDirectoryW(config.workDirPath.c_str(), nullptr);
+        NTSTATUS copyUpStatus = STATUS_UNSUCCESSFUL;
+        std::string upperContent;
+        {
+            CopyUpAndRenameRig rig(config);
+            copyUpStatus = rig.copyUp.CopyUpFile(L"wsl.txt");
+            std::ifstream upperFile(config.upperPath + L"\\wsl.txt", std::ios::binary);
+            upperContent.assign(std::istreambuf_iterator<char>(upperFile),
+                                std::istreambuf_iterator<char>());
+        }
+
+        mgr.DetachVHD(vhd);
+        handle.Close();
+        CleanupWorkspace(root);
+
+        AssertStatus(STATUS_SUCCESS, eaStatus,
+            L"The test must set an extended attribute on the lower file");
+        AssertStatus(STATUS_SUCCESS, copyUpStatus,
+            L"A copy-up to an upper without extended attribute support must succeed");
+        Assert::AreEqual(std::string("content"), upperContent,
+            L"The upper copy must have the data of the lower file");
+    }
+
     TEST_METHOD(Prepare_WorkDirectoryOnAnotherVolume_FailsWithInvalidArg) {
         UNIT_SKIP_IF_NOT_ADMIN();
 
@@ -471,7 +517,7 @@ public:
         LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
-        MakeFat32Volume(mgr, vhd, handle, volumeGuid);
+        MakeVolume(mgr, vhd, L"FAT32", handle, volumeGuid);
 
         TempLayerEnvironment env(0);
         LayerMount::LayerConfig config = env.MakeConfig();

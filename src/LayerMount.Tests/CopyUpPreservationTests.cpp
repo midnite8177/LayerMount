@@ -9,6 +9,7 @@
 #include "Cache.h"
 #include "MetadataStore.h"
 #include "EntryCopy.h"
+#include "ExtendedAttributeTestHelpers.h"
 
 #include <winioctl.h>
 #include <cstddef>
@@ -117,6 +118,42 @@ std::wstring LongStreamName(int index) {
     std::wstring name = L"s" + std::to_wstring(index) + L"-";
     name.resize(kLongStreamNameLength, L'x');
     return name;
+}
+
+// Each entry starts at a ULONG boundary, as NtQueryEaFile returns it.
+std::vector<BYTE> FullEaList(const std::vector<NamedExtendedAttribute>& attributes) {
+    std::vector<BYTE> list;
+    size_t previous = 0;
+    for (size_t i = 0; i < attributes.size(); ++i) {
+        if (i != 0) {
+            list.resize((list.size() + 3) & ~size_t{3});
+            reinterpret_cast<FullEaHeader*>(list.data() + previous)->nextEntryOffset =
+                static_cast<ULONG>(list.size() - previous);
+        }
+        previous = list.size();
+        const std::vector<BYTE> entry = FullEaEntry(attributes[i].name, attributes[i].value);
+        list.insert(list.end(), entry.begin(), entry.end());
+    }
+    return list;
+}
+
+// Fails the test when an entry does not start at a ULONG boundary.
+std::vector<NamedExtendedAttribute> AttributesInFullEaList(const std::vector<BYTE>& list) {
+    std::vector<NamedExtendedAttribute> attributes;
+    size_t offset = 0;
+    while (offset < list.size()) {
+        Assert::AreEqual(size_t{0}, offset % sizeof(ULONG),
+            L"Each entry of the list must start at a ULONG boundary");
+        const auto* header = reinterpret_cast<const FullEaHeader*>(list.data() + offset);
+        const auto* name = reinterpret_cast<const char*>(header + 1);
+        attributes.push_back({std::string(name, header->nameLength),
+                              std::string(name + header->nameLength + 1, header->valueLength)});
+        if (header->nextEntryOffset == 0) {
+            break;
+        }
+        offset += header->nextEntryOffset;
+    }
+    return attributes;
 }
 
 }
@@ -355,6 +392,61 @@ public:
     }
 
 
+    TEST_METHOD(CopyUpFile_CopiesExtendedAttributesOfLowerFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"wsl.txt", "content");
+        const auto attributes = WslAndUserExtendedAttributes(kWslFileMode);
+        SetExtendedAttributes(env.Lower(0) + L"\\wsl.txt", attributes);
+        const FILETIME stamped = LayerMountTestShared::MakeFileTime(2001, 1, 1);
+        LayerMountTestShared::StampTimes(env.Lower(0) + L"\\wsl.txt", stamped, stamped, stamped);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"wsl.txt"),
+            L"The copy-up of a file with extended attributes must succeed");
+
+        AssertHasExtendedAttributes(env.Upper() + L"\\wsl.txt", attributes);
+        FILETIME upperWrite{};
+        LayerMountTestShared::GetTimes(env.Upper() + L"\\wsl.txt", nullptr, nullptr, &upperWrite);
+        Assert::IsTrue(::CompareFileTime(&stamped, &upperWrite) == 0,
+            L"The upper file must have the last-write time of the lower file");
+    }
+
+    TEST_METHOD(ExtendedAttributesUserModeCanSet_LeavesOutKernelAttributesInAnyCase) {
+        const std::string id1000 = LittleEndianUlong(1000);
+        const std::vector<BYTE> list = FullEaList({{"$KERNEL.PURGE.ESBCACHE", "kernel"},
+                                                   {"$LXUID", id1000},
+                                                   {"$kernel.lower", "kernel"},
+                                                   {"USER.NOTE", "lower note"},
+                                                   {"$KERNEL.LAST", "kernel"}});
+
+        const std::vector<BYTE> settable =
+            ExtendedAttributesUserModeCanSet(list.data(), static_cast<ULONG>(list.size()));
+
+        const std::vector<NamedExtendedAttribute> kept = AttributesInFullEaList(settable);
+        Assert::AreEqual(size_t{2}, kept.size(),
+            L"Only the two attributes outside $KERNEL. must be left");
+        Assert::AreEqual(std::string("$LXUID"), kept[0].name);
+        Assert::IsTrue(id1000 == kept[0].value, L"$LXUID must keep its value");
+        Assert::AreEqual(std::string("USER.NOTE"), kept[1].name);
+        Assert::AreEqual(std::string("lower note"), kept[1].value);
+        const ULONG secondOffset =
+            reinterpret_cast<const FullEaHeader*>(settable.data())->nextEntryOffset;
+        const auto* last = reinterpret_cast<const FullEaHeader*>(settable.data() + secondOffset);
+        Assert::AreEqual(ULONG{0}, last->nextEntryOffset,
+            L"The last entry of the list must have a NextEntryOffset of 0");
+    }
+
+    TEST_METHOD(ExtendedAttributesUserModeCanSet_ListOfOnlyKernelAttributes_IsEmpty) {
+        const std::vector<BYTE> list = FullEaList({{"$KERNEL.ONE", "kernel"},
+                                                   {"$KERNEL.TWO", "kernel"}});
+
+        const std::vector<BYTE> settable =
+            ExtendedAttributesUserModeCanSet(list.data(), static_cast<ULONG>(list.size()));
+
+        Assert::IsTrue(settable.empty(), L"No attribute of the list may be left");
+    }
+
     TEST_METHOD(CopyUpFile_PreservesUserAlternateDataStreams) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"doc.txt", "main-content");
@@ -456,6 +548,20 @@ public:
             L"The tree copy keeps a user stream whose name starts with overlay");
     }
 
+    TEST_METHOD(CopyUpDirectory_CopiesExtendedAttributesOfLowerDirectory) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"dir");
+        const auto attributes = WslAndUserExtendedAttributes(kWslDirectoryMode);
+        SetExtendedAttributes(env.Lower(0) + L"\\dir", attributes);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpDirectory(L"dir"),
+            L"The copy-up of a directory with extended attributes must succeed");
+
+        AssertHasExtendedAttributes(env.Upper() + L"\\dir", attributes);
+    }
+
     TEST_METHOD(CopyUpDirectory_PreservesUserStreamOfDirectory) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"dir");
@@ -498,6 +604,68 @@ public:
         Assert::AreEqual(std::string("sub notes"),
                          ReadADS(env.Upper(), L"moved\\sub", L"notes"),
             L"A child directory of the renamed directory keeps its user stream");
+    }
+
+    TEST_METHOD(DirectoryRename_CopiesExtendedAttributesOfTheTree) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"tree");
+        env.CreateDir(env.Lower(0), L"tree\\sub");
+        env.WriteFile(env.Lower(0), L"tree\\sub\\file.txt", "content");
+        const auto directoryAttributes = WslAndUserExtendedAttributes(kWslDirectoryMode);
+        const auto fileAttributes = WslAndUserExtendedAttributes(kWslFileMode);
+        SetExtendedAttributes(env.Lower(0) + L"\\tree", directoryAttributes);
+        SetExtendedAttributes(env.Lower(0) + L"\\tree\\sub", directoryAttributes);
+        SetExtendedAttributes(env.Lower(0) + L"\\tree\\sub\\file.txt", fileAttributes);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"tree"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No),
+            L"The rename of a tree with extended attributes must succeed");
+
+        AssertHasExtendedAttributes(env.Upper() + L"\\moved", directoryAttributes);
+        AssertHasExtendedAttributes(env.Upper() + L"\\moved\\sub", directoryAttributes);
+        AssertHasExtendedAttributes(env.Upper() + L"\\moved\\sub\\file.txt", fileAttributes);
+    }
+
+    TEST_METHOD(DirectoryRename_CopiesExtendedAttributesOfReadOnlyDirectoryAndReadOnlyFile) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Lower(0), L"ro");
+        env.WriteFile(env.Lower(0), L"ro\\file.txt", "content");
+        const auto directoryAttributes = WslAndUserExtendedAttributes(kWslDirectoryMode);
+        const auto fileAttributes = WslAndUserExtendedAttributes(kWslFileMode);
+        const std::wstring lowerDir = env.Lower(0) + L"\\ro";
+        const std::wstring lowerFile = lowerDir + L"\\file.txt";
+        SetExtendedAttributes(lowerDir, directoryAttributes);
+        SetExtendedAttributes(lowerFile, fileAttributes);
+        ::SetFileAttributesW(lowerFile.c_str(), FILE_ATTRIBUTE_READONLY);
+        ::SetFileAttributesW(lowerDir.c_str(), FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
+            CallerPath(L"ro"), CallerPath(L"moved"),
+            RenameEntryKind::Directory, ReplaceExisting::No);
+        const std::wstring upperDir = env.Upper() + L"\\moved";
+        const std::wstring upperFile = upperDir + L"\\file.txt";
+        const DWORD upperDirAttrs = ::GetFileAttributesW(upperDir.c_str());
+        const DWORD upperFileAttrs = ::GetFileAttributesW(upperFile.c_str());
+        ::SetFileAttributesW(lowerDir.c_str(), FILE_ATTRIBUTE_DIRECTORY);
+        ::SetFileAttributesW(lowerFile.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::SetFileAttributesW(upperDir.c_str(), FILE_ATTRIBUTE_DIRECTORY);
+        ::SetFileAttributesW(upperFile.c_str(), FILE_ATTRIBUTE_NORMAL);
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The rename of a read-only directory with extended attributes must succeed");
+        AssertHasExtendedAttributes(upperDir, directoryAttributes);
+        AssertHasExtendedAttributes(upperFile, fileAttributes);
+        Assert::IsTrue(upperDirAttrs != INVALID_FILE_ATTRIBUTES &&
+                           (upperDirAttrs & FILE_ATTRIBUTE_READONLY) != 0,
+            L"The renamed directory keeps FILE_ATTRIBUTE_READONLY");
+        Assert::IsTrue(upperFileAttrs != INVALID_FILE_ATTRIBUTES &&
+                           (upperFileAttrs & FILE_ATTRIBUTE_READONLY) != 0,
+            L"The copied file keeps FILE_ATTRIBUTE_READONLY");
     }
 
     TEST_METHOD(DirectoryRename_CopiesUserStreamOfReadOnlyDirectory) {

@@ -9,9 +9,11 @@
 #include <aclapi.h>
 #include <winioctl.h>
 #include <climits>
+#include <cstring>
 #include <iterator>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -343,14 +345,27 @@ bool IsSparseHandle(HANDLE handle) {
            HasFileAttribute(info.dwFileAttributes, FILE_ATTRIBUTE_SPARSE_FILE);
 }
 
-using NtQueryEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG, BOOLEAN, PVOID,
-                                         ULONG, PULONG, BOOLEAN);
-using NtSetEaFileFn = NTSTATUS(NTAPI*)(HANDLE, IO_STATUS_BLOCK*, PVOID, ULONG);
-
 // NTFS keeps at most 64 KB of extended attributes on an entry. The
 // FILE_FULL_EA_INFORMATION list of them is a little larger, because each
 // entry has a header and padding.
 constexpr size_t kExtendedAttributeBufferSize = 128 * 1024;
+
+// A volume without extended attribute support answers with one of these,
+// as a Linux file system without xattrs answers EOPNOTSUPP.
+bool RefusesExtendedAttributes(NTSTATUS status) {
+    return status == STATUS_EAS_NOT_SUPPORTED || status == STATUS_NOT_SUPPORTED ||
+           status == STATUS_INVALID_DEVICE_REQUEST;
+}
+
+bool IsKernelExtendedAttributeName(std::string_view name) {
+    constexpr std::string_view prefix = "$KERNEL.";
+    return name.size() >= prefix.size() &&
+           ::_strnicmp(name.data(), prefix.data(), prefix.size()) == 0;
+}
+
+size_t AlignedToUlong(size_t offset) {
+    return (offset + sizeof(ULONG) - 1) & ~(sizeof(ULONG) - 1);
+}
 
 NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
                                  const std::wstring& dstAbsolute,
@@ -533,7 +548,7 @@ void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs) {
     }
 }
 
-NTSTATUS CopyDirectoryLayoutAndStreams(const std::wstring& srcAbs, const std::wstring& dstAbs) {
+NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring& dstAbs) {
     const DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
     if (srcAttrs != INVALID_FILE_ATTRIBUTES) {
         if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
@@ -543,7 +558,11 @@ NTSTATUS CopyDirectoryLayoutAndStreams(const std::wstring& srcAbs, const std::ws
             return StatusOfFailedCall(ERROR_ACCESS_DENIED);
         }
     }
-    return CopyUserAlternateDataStreams(srcAbs, dstAbs);
+    const NTSTATUS streamStatus = CopyUserAlternateDataStreams(srcAbs, dstAbs);
+    if (!NT_SUCCESS(streamStatus)) {
+        return streamStatus;
+    }
+    return CopyExtendedAttributes(srcAbs, dstAbs);
 }
 
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
@@ -648,6 +667,37 @@ NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
     return StatusFromWin32Error(err, ERROR_WRITE_FAULT);
 }
 
+std::vector<BYTE> ExtendedAttributesUserModeCanSet(const BYTE* list, ULONG length) {
+    std::vector<BYTE> settable;
+    size_t lastKept = 0;
+    size_t offset = 0;
+    while (offset + sizeof(FullEaHeader) <= length) {
+        const auto* header = reinterpret_cast<const FullEaHeader*>(list + offset);
+        const size_t entrySize =
+            sizeof(FullEaHeader) + header->nameLength + 1 + header->valueLength;
+        if (offset + entrySize > length) {
+            break;
+        }
+        const std::string_view name(reinterpret_cast<const char*>(header + 1),
+                                    header->nameLength);
+        if (!IsKernelExtendedAttributeName(name)) {
+            if (!settable.empty()) {
+                settable.resize(AlignedToUlong(settable.size()));
+                reinterpret_cast<FullEaHeader*>(settable.data() + lastKept)->nextEntryOffset =
+                    static_cast<ULONG>(settable.size() - lastKept);
+            }
+            lastKept = settable.size();
+            settable.insert(settable.end(), list + offset, list + offset + entrySize);
+            reinterpret_cast<FullEaHeader*>(settable.data() + lastKept)->nextEntryOffset = 0;
+        }
+        if (header->nextEntryOffset == 0) {
+            break;
+        }
+        offset += header->nextEntryOffset;
+    }
+    return settable;
+}
+
 NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring& dstPath) {
     const auto queryEa = LoadNtdllExport<NtQueryEaFileFn>("NtQueryEaFile");
     const auto setEa = LoadNtdllExport<NtSetEaFileFn>("NtSetEaFile");
@@ -671,13 +721,21 @@ NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring&
                     FALSE, nullptr, 0, nullptr, restartScan);
         restartScan = FALSE;
         if (readStatus == STATUS_NO_EAS_ON_FILE || readStatus == STATUS_NO_MORE_EAS ||
-            readStatus == STATUS_EAS_NOT_SUPPORTED) {
+            RefusesExtendedAttributes(readStatus)) {
             return STATUS_SUCCESS;
         }
         // STATUS_BUFFER_OVERFLOW returns the entries that fit. The next
         // read continues after them.
         if (!NT_SUCCESS(readStatus) && readStatus != STATUS_BUFFER_OVERFLOW) {
             return readStatus;
+        }
+        if (readIo.Information == 0) {
+            return STATUS_SUCCESS;
+        }
+        std::vector<BYTE> settable = ExtendedAttributesUserModeCanSet(
+            buffer.data(), static_cast<ULONG>(readIo.Information));
+        if (settable.empty()) {
+            continue;
         }
         if (!dstHandle.IsValid()) {
             dstHandle.Reset(::CreateFileW(
@@ -689,10 +747,10 @@ NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring&
             }
         }
         IO_STATUS_BLOCK writeIo{};
-        const NTSTATUS writeStatus = setEa(dstHandle.Get(), &writeIo, buffer.data(),
-                                           static_cast<ULONG>(readIo.Information));
+        const NTSTATUS writeStatus = setEa(dstHandle.Get(), &writeIo, settable.data(),
+                                           static_cast<ULONG>(settable.size()));
         // Overlayfs skips the xattr copy when the upper has no xattrs.
-        if (writeStatus == STATUS_EAS_NOT_SUPPORTED) {
+        if (RefusesExtendedAttributes(writeStatus)) {
             return STATUS_SUCCESS;
         }
         if (!NT_SUCCESS(writeStatus)) {

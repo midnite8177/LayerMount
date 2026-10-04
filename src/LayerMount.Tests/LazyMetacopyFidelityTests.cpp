@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "TestFixture.h"
 
+#include "ExtendedAttributeTestHelpers.h"
 #include "MetadataStore.h"
 #include "LayerMount.h"
 
@@ -210,6 +211,30 @@ public:
         Assert::IsTrue(FileTimesEqual(c, shellCreation),
             L"Upper creation time must keep the time set on the shell after "
             L"a failed fill");
+    }
+
+    TEST_METHOD(CopyUpMetadataOnly_ShellCarriesExtendedAttributesBeforeAndAfterTheFill) {
+        UNIT_SKIP_IF_NOT_NTFS();
+
+        LayerMountTests::TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"wsl.bin", std::string(2 * 1024 * 1024, 'W'));
+        const std::wstring srcPath = env.Lower(0) + L"\\wsl.bin";
+        const auto attributes = WslAndUserExtendedAttributes(kWslFileMode);
+        SetExtendedAttributes(srcPath, attributes);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+        const std::wstring upperPath = env.Upper() + L"\\wsl.bin";
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"wsl.bin"),
+            L"The metacopy of a file with extended attributes must succeed");
+        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(upperPath, nullptr).metacopy,
+            L"The upper file must be a metacopy shell before the fill");
+        AssertHasExtendedAttributes(upperPath, attributes);
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CompleteLazyCopyUp(L"wsl.bin"),
+            L"The fill of the metacopy shell must succeed");
+
+        AssertHasExtendedAttributes(upperPath, attributes);
     }
 
     TEST_METHOD(LazyCompletion_PreservesUserADS) {

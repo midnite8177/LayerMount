@@ -105,6 +105,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ClInclude Include="ExtendedAttributeTestHelpers.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="TestFixture.h" />
   </ItemGroup>

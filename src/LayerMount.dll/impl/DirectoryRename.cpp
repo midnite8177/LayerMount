@@ -8,6 +8,7 @@
 #include "MetadataStore.h"
 #include "NtStatusUtil.h"
 #include "ElevationUtil.h"
+#include "ScopedHandle.h"
 
 #include <aclapi.h>
 #include <vector>
@@ -99,88 +100,91 @@ DWORD CopySecurityKeepingInheritance(const std::wstring& srcAbs, const std::wstr
     return firstError;
 }
 
-// Copies a regular file with its ADS, its sparse state when the host
-// adapter has the sparse capability, and the copy-up record
-// `policy.record` selects. Does not commit through the work directory. On
-// failure the caller removes the whole new subtree.
-NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
-                                     const std::wstring& dstAbs,
-                                     const EntryCopyPolicy& policy) {
-    HANDLE srcH = ::CreateFileW(srcAbs.c_str(), GENERIC_READ,
-                                  FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                  FILE_FLAG_SEQUENTIAL_SCAN |
-                                      FILE_FLAG_BACKUP_SEMANTICS,
-                                  nullptr);
-    if (srcH == INVALID_HANDLE_VALUE) {
-        return ::LayerMount::NtStatusFromWin32(::GetLastError());
-    }
-
-    DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
-    if (srcAttrs == INVALID_FILE_ATTRIBUTES) {
-        DWORD err = ::GetLastError();
-        ::CloseHandle(srcH);
-        return ::LayerMount::NtStatusFromWin32(err);
-    }
-    EntryTimes srcTimes{};
-    ::GetFileTime(srcH, &srcTimes.creation, &srcTimes.access, &srcTimes.write);
-
-    HANDLE dstH = ::CreateFileW(dstAbs.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                  0, nullptr, CREATE_ALWAYS,
-                                  FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (dstH == INVALID_HANDLE_VALUE) {
-        DWORD err = ::GetLastError();
-        ::CloseHandle(srcH);
-        return ::LayerMount::NtStatusFromWin32(err);
-    }
-
-    // SetFileAttributes cannot set FILE_ATTRIBUTE_SPARSE_FILE. Only FSCTL_SET_SPARSE can.
-    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
-        policy.capabilities.HasSparseFiles() &&
-        !SetSparse(dstH)) {
-        const NTSTATUS status = SparseRefusalStatus();
-        ::CloseHandle(srcH);
-        ::CloseHandle(dstH);
-        return status;
-    }
-
-    SetCompressedIfSource(dstH, srcAttrs);
-
-    const NTSTATUS dataStatus = CopyFileDataKeepingHoles(srcH, dstH);
-    if (!NT_SUCCESS(dataStatus)) {
-        ::CloseHandle(srcH);
-        ::CloseHandle(dstH);
-        return dataStatus;
-    }
-
-    ::CloseHandle(srcH);
-    ::CloseHandle(dstH);
-
+// Gives the copied file at dstAbs the encryption, user streams, extended
+// attributes, security and copy-up record of the file at srcAbs. Runs after
+// every handle to dstAbs is closed, because each step opens it by path.
+NTSTATUS CopyFileMetadataAfterData(const std::wstring& srcAbs,
+                                   DWORD srcAttrs,
+                                   const std::wstring& dstAbs,
+                                   const EntryCopyPolicy& policy) {
     if (!ApplyEncryptedStateIfNeeded(dstAbs, srcAttrs)) {
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
 
     const NTSTATUS streamStatus = CopyUserAlternateDataStreams(srcAbs, dstAbs);
     if (!NT_SUCCESS(streamStatus)) {
-        ::DeleteFileW(dstAbs.c_str());
         return streamStatus;
+    }
+
+    const NTSTATUS eaStatus = CopyExtendedAttributes(srcAbs, dstAbs);
+    if (!NT_SUCCESS(eaStatus)) {
+        return eaStatus;
     }
 
     const DWORD securityError = CopySecurityKeepingInheritance(srcAbs, dstAbs);
     if (securityError != ERROR_SUCCESS) {
-        ::DeleteFileW(dstAbs.c_str());
         return ::LayerMount::NtStatusFromWin32(securityError);
     }
 
-    const NTSTATUS recordStatus = WriteCopyUpRecordOrRemoveEntry(
+    return WriteCopyUpRecordOrRemoveEntry(
         dstAbs, CopiedEntryMetadata(srcAbs, policy.record, policy.config),
         NewUpperEntryKind::File, policy.config);
-    if (!NT_SUCCESS(recordStatus)) {
-        return recordStatus;
+}
+
+// Copies a regular file with its ADS, its extended attributes, its sparse
+// state when the host adapter has the sparse capability, and the copy-up
+// record `policy.record` selects. Does not commit through the work
+// directory. On failure the caller removes the whole new subtree.
+NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
+                                     const std::wstring& dstAbs,
+                                     const EntryCopyPolicy& policy) {
+    ScopedHandle srcHandle(::CreateFileW(srcAbs.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                         OPEN_EXISTING,
+                                         FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
+                                         nullptr));
+    if (!srcHandle.IsValid()) {
+        return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
 
-    // The data and stream writes move the last-write time, and the copy was
-    // created with FILE_ATTRIBUTE_NORMAL, so the attributes and times go on
-    // last.
+    const DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
+    if (srcAttrs == INVALID_FILE_ATTRIBUTES) {
+        return ::LayerMount::NtStatusFromWin32(::GetLastError());
+    }
+    EntryTimes srcTimes{};
+    ::GetFileTime(srcHandle.Get(), &srcTimes.creation, &srcTimes.access, &srcTimes.write);
+
+    ScopedHandle dstHandle(::CreateFileW(dstAbs.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                                         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                         nullptr));
+    if (!dstHandle.IsValid()) {
+        return ::LayerMount::NtStatusFromWin32(::GetLastError());
+    }
+
+    // SetFileAttributes cannot set FILE_ATTRIBUTE_SPARSE_FILE. Only FSCTL_SET_SPARSE can.
+    if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
+        policy.capabilities.HasSparseFiles() &&
+        !SetSparse(dstHandle.Get())) {
+        return SparseRefusalStatus();
+    }
+
+    SetCompressedIfSource(dstHandle.Get(), srcAttrs);
+
+    const NTSTATUS dataStatus = CopyFileDataKeepingHoles(srcHandle.Get(), dstHandle.Get());
+    if (!NT_SUCCESS(dataStatus)) {
+        return dataStatus;
+    }
+
+    srcHandle.Reset();
+    dstHandle.Reset();
+
+    const NTSTATUS metadataStatus = CopyFileMetadataAfterData(srcAbs, srcAttrs, dstAbs, policy);
+    if (!NT_SUCCESS(metadataStatus)) {
+        return metadataStatus;
+    }
+
+    // The data, stream and extended attribute writes move the last-write
+    // time, and CreateFileW made the copy with FILE_ATTRIBUTE_NORMAL, so
+    // the attributes and times go on last.
     WriteEntryTimes(dstAbs, srcTimes, srcAttrs);
 
     return STATUS_SUCCESS;
@@ -220,18 +224,19 @@ NTSTATUS ApplyDirectoryBasicInfoAndSecurity(const std::wstring& srcAbs,
 }
 
 // Runs once the children of the copied directory at dstAbs are in place.
-// The copy takes its layout, streams, attributes, times and security from
-// viewSrcAbs and its copy-up record from recordSrcAbs. markCopy writes any
-// marker the copy needs after the record.
+// The copy takes its layout, streams, extended attributes, attributes,
+// times and security from viewSrcAbs and its copy-up record from
+// recordSrcAbs. markCopy writes any marker the copy needs after the
+// record.
 template <typename MarkCopy>
 NTSTATUS FinishCopiedDirectory(const std::wstring& viewSrcAbs,
                                const std::wstring& recordSrcAbs,
                                const std::wstring& dstAbs,
                                const EntryCopyPolicy& policy,
                                const MarkCopy& markCopy) {
-    const NTSTATUS layoutStatus = CopyDirectoryLayoutAndStreams(viewSrcAbs, dstAbs);
-    if (!NT_SUCCESS(layoutStatus)) {
-        return layoutStatus;
+    const NTSTATUS ownMetadataStatus = CopyDirectoryOwnMetadata(viewSrcAbs, dstAbs);
+    if (!NT_SUCCESS(ownMetadataStatus)) {
+        return ownMetadataStatus;
     }
     const NTSTATUS recordStatus = WriteDirectoryCopyUpRecord(recordSrcAbs, dstAbs, policy);
     if (!NT_SUCCESS(recordStatus)) {

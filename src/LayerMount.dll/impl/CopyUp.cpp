@@ -284,38 +284,39 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
     if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
         capabilities_.HasSparseFiles() &&
         !SetSparse(dstHandle.Get())) {
-        const NTSTATUS status = SparseRefusalStatus();
-        dstHandle.Reset();
-        ::DeleteFileW(workPath.c_str());
-        return status;
+        return SparseRefusalStatus();
     }
 
     SetCompressedIfSource(dstHandle.Get(), srcAttrs);
 
-    NTSTATUS status = CopyFileDataKeepingHoles(srcHandle.Get(), dstHandle.Get());
+    const NTSTATUS status = CopyFileDataKeepingHoles(srcHandle.Get(), dstHandle.Get());
     if (!NT_SUCCESS(status)) {
-        dstHandle.Reset();
-        DeleteFileW(workPath.c_str());
         return status;
     }
 
     srcHandle.Reset();
     dstHandle.Reset();
 
+    return CopyStagedFileMetadata(sourcePath, srcAttrs, workPath);
+}
+
+NTSTATUS CopyUp::CopyStagedFileMetadata(const std::wstring& sourcePath,
+                                        DWORD srcAttrs,
+                                        const std::wstring& workPath) {
     if (!ApplyEncryptedStateIfNeeded(workPath, srcAttrs)) {
-        DWORD err = ::GetLastError();
-        ::DeleteFileW(workPath.c_str());
+        const DWORD err = ::GetLastError();
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
-    // Copy security descriptor (path-based, handles already closed).
-    // Security-descriptor failures are fatal: committing with inherited or
-    // default DACL can broaden access relative to the source, silently
-    // changing access-control semantics after the first write. Tear down
-    // the staged work-dir copy so the caller retries from a clean state.
+    const NTSTATUS eaStatus = CopyExtendedAttributes(sourcePath, workPath);
+    if (!NT_SUCCESS(eaStatus)) {
+        return eaStatus;
+    }
+
+    // A failed security copy fails the copy-up, because a commit with an
+    // inherited or default DACL can give more access than the source does.
     if (!CopySecurityDescriptor(sourcePath, workPath)) {
         const DWORD err = ::GetLastError();
-        ::DeleteFileW(workPath.c_str());
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
@@ -340,7 +341,8 @@ NTSTATUS CopyUp::RecordStagedFile(const std::wstring& workPath,
     }
 
     // The attributes go on after the streams and the record, because NTFS
-    // refuses a new stream on a read-only file.
+    // refuses a new stream on a read-only file, and the stream and extended
+    // attribute writes move the times.
     if (!basicInfo.Restore()) {
         return StatusOfFailedCall(ERROR_ACCESS_DENIED);
     }
@@ -481,21 +483,7 @@ NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
 
     dstHandle.Reset();
 
-    if (!ApplyEncryptedStateIfNeeded(workPath, srcAttrs.dwFileAttributes)) {
-        DWORD err = ::GetLastError();
-        ::DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-    }
-
-    // Copy security descriptor. Fatal on failure -- see StageFileInWorkDir
-    // for the reasoning. Tear down the staged work-dir copy on failure.
-    if (!CopySecurityDescriptor(sourcePath, workPath)) {
-        const DWORD err = ::GetLastError();
-        ::DeleteFileW(workPath.c_str());
-        return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
-    }
-
-    return STATUS_SUCCESS;
+    return CopyStagedFileMetadata(sourcePath, srcAttrs.dwFileAttributes, workPath);
 }
 
 NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
@@ -759,7 +747,7 @@ NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
     }
     // The staged directory has no children yet, so its layout goes on now
     // and passes to the entries created in it later.
-    const NTSTATUS status = CopyDirectoryLayoutAndStreams(sourcePath, stagedPath);
+    const NTSTATUS status = CopyDirectoryOwnMetadata(sourcePath, stagedPath);
     if (!NT_SUCCESS(status)) {
         return status;
     }
