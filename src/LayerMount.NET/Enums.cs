@@ -33,9 +33,10 @@ public enum HostCapabilities : uint
     ReparsePoints    = 0x00000002u,
 
     /// <summary>
-    /// Sparse files on the upper layer. Without it, metacopy for a file
-    /// above the metacopy size threshold copies its data in full at
-    /// copy-up time instead of deferring the data to first read.
+    /// Sparse files on the upper layer. Without it, the write open of a
+    /// file above the metacopy size threshold and the rename of a file
+    /// that only a lower holds copy the data in full at copy-up time
+    /// instead of deferring the data to the first open with data access.
     /// </summary>
     SparseFiles      = 0x00000004u,
 

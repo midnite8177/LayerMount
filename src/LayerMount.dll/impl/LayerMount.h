@@ -172,6 +172,8 @@ class MetadataStore;
 class Cache;
 class CopyUp;
 class DirectoryRename;
+class FileRename;
+enum class RenameCopyUp;
 class UpperEntryRemover;
 namespace VHD { class VHDLayerManager; }
 namespace VSS { class VSSManager; }
@@ -397,8 +399,9 @@ public:
     //
     // A metacopy shell fills before its handle opens when grantedAccess
     // asks for data: read, write, append, or execute. An open for
-    // attributes, security, or delete keeps the shell sparse. A failed
-    // fill returns its status, leaves *outCtx null, and opens no handle.
+    // attributes, security, or delete, and an open of one of the shell's
+    // streams, keep the shell sparse. A failed fill returns its status,
+    // leaves *outCtx null, and opens no handle.
     NTSTATUS Open(const std::wstring& relativePath,
                   UINT32 grantedAccess,
                   UINT32 createOptions,
@@ -424,8 +427,8 @@ public:
     // directory of the same name. Returns
     // STATUS_OBJECT_NAME_COLLISION when the overlay already holds a path
     // without a stream suffix, and for a stream create when the host file
-    // that the overlay holds already has that stream. A stream that the
-    // origin of a metacopy shell has counts, and the shell does not fill.
+    // that the overlay holds already has that stream. A stream create on
+    // a metacopy shell keeps the shell sparse.
     NTSTATUS Create(const CreateRequest& request,
                     std::unique_ptr<FileContext>* outCtx,
                     InternalFileInfo* outInfo);
@@ -664,11 +667,6 @@ public:
 private:
     std::shared_ptr<ProcessTracker> TryMakeProcessTracker();
 
-    NTSTATUS RenameFileInUpper(const std::wstring& oldRelativePath,
-                               const std::wstring& newRelativePath,
-                               BOOLEAN replaceIfExists,
-                               bool destHadWhiteout);
-
     NTSTATUS OpenRoot(UINT32 grantedAccess,
                       UINT32 createOptions,
                       DWORD callerPid,
@@ -719,20 +717,16 @@ private:
     // deletes it again.
     NTSTATUS CreateFileInUpper(const UpperCreate& create, FileContext* ctx);
 
-    // Makes the host file of a stream create a full file in the upper: a
-    // host that the overlay shows from a lower copies up, and a
-    // metacopy shell fills. A host that a whiteout or an opaque ancestor
-    // hides stays absent, and the stream create then makes an empty host.
-    // Runs before the stream create, so a copy-up or a fill cannot bring
-    // the lower's streams in over the new one.
-    NTSTATUS PrepareStreamHost(const UpperCreate& create, FileContext* ctx);
+    // Copies the host file of a stream create up with its data and streams
+    // when the overlay shows it from a lower. A host that a whiteout or an
+    // opaque ancestor hides stays absent, and the stream create then makes
+    // an empty host. An upper host, a metacopy shell included, stays as it
+    // is. Runs before the stream create, so the copy-up cannot bring the
+    // lower's streams in over the new one.
+    NTSTATUS PrepareStreamHost(const UpperCreate& create);
 
-    // Copies a lower file or directory up for a write-capable open and
-    // chooses between a full copy and a metacopy shell. Sets
-    // ctx->isMetacopyOnly when it stages a shell.
-    NTSTATUS CopyUpForWriteOpen(const std::wstring& hostNorm,
-                                const ResolvedPath& resolved,
-                                FileContext* ctx);
+    // Sets ctx->isMetacopyOnly when it stages a shell.
+    NTSTATUS CopyUpForWriteOpen(const std::wstring& hostNorm, FileContext* ctx);
 
     // Fill a metacopy shell from its recorded origin. Returns the fill's
     // status on failure and clears ctx->isMetacopyOnly on success.
@@ -805,11 +799,28 @@ private:
                                     EntryKind sourceKind,
                                     DirectoryRenameRoute* route) const;
 
-    // The part of a rename after its checks passed.
-    NTSTATUS RenameCheckedEntry(const std::wstring& oldRelativePath,
-                                const std::wstring& newRelativePath,
-                                BOOLEAN replaceIfExists,
-                                const RenameKinds& kinds);
+    // The status of a rename, and whether it left a metacopy shell at the
+    // new name.
+    struct RenameResult {
+        NTSTATUS status;
+        bool stagedShell;
+    };
+
+    // The part of a rename after its checks passed. copyUpMode chooses how
+    // a file that only a lower holds copies up.
+    RenameResult RenameCheckedEntry(const std::wstring& oldRelativePath,
+                                    const std::wstring& newRelativePath,
+                                    BOOLEAN replaceIfExists,
+                                    const RenameKinds& kinds,
+                                    RenameCopyUp copyUpMode);
+
+    // Moves a file to newRelativePath in the upper. When a lower holds the
+    // source, a whiteout then hides it at the old name.
+    RenameResult RenameFileEntry(const std::wstring& oldRelativePath,
+                                 const std::wstring& newRelativePath,
+                                 BOOLEAN replaceIfExists,
+                                 bool destHadWhiteout,
+                                 RenameCopyUp copyUpMode);
 
     // Moves a directory or a link along route, then writes the whiteout at
     // the old name for the MergeLower and MoveUpperAndWhiteout routes.
@@ -844,6 +855,7 @@ private:
     LayerMountStats stats_;
     std::unique_ptr<CopyUp> copyUp_;
     std::unique_ptr<DirectoryRename> directoryRename_;
+    std::unique_ptr<FileRename> fileRename_;
     std::unique_ptr<UpperEntryRemover> upperEntryRemover_;
     std::shared_ptr<ProcessTracker> processTracker_;
 

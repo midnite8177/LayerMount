@@ -576,6 +576,62 @@ std::wstring ExplicitAcesOf(const std::wstring& path) {
     return aces;
 }
 
+// The size is past what NTFS keeps in the file record, so a full copy
+// allocates clusters and a metacopy shell has none.
+std::string LowerFileData() {
+    return "lower file data" + std::string(64 * 1024, 'R');
+}
+
+std::string LowerFileDataStart() {
+    return LowerFileData().substr(0, kReadThroughMountBytes);
+}
+
+void AssertMetacopyShell(const std::wstring& upperPath, const LayerConfig& config) {
+    Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(upperPath, &config).metacopy,
+        (L"The copy-up record of " + upperPath + L" must have the metacopy flag").c_str());
+    Assert::AreEqual(0LL, AllocatedBytes(upperPath),
+        (L"The volume must allocate no data for " + upperPath).c_str());
+}
+
+void AssertFullCopy(const TempLayerEnvironment& env, const std::wstring& name,
+                    const LayerConfig& config) {
+    const std::wstring upperPath = env.Upper() + L"\\" + name;
+    Assert::IsFalse(MetadataStore::ReadLayerMountMetadata(upperPath, &config).metacopy,
+        (L"The copy-up record of " + upperPath + L" must not have the metacopy flag").c_str());
+    Assert::IsTrue(LowerFileData() == env.ReadFile(env.Upper(), name),
+        (upperPath + L" must hold the lower file's data").c_str());
+}
+
+void OpenForWriteThroughMount(::LayerMount::LayerMount& mount, const std::wstring& path) {
+    std::unique_ptr<FileContext> ctx;
+    InternalFileInfo info{};
+    AssertStatus(STATUS_SUCCESS,
+        mount.Open(path, FILE_WRITE_DATA, kNoCreateOptions, kNoCallerPid, &ctx, &info),
+        (L"The open of " + path + L" for write must succeed").c_str());
+    mount.Close(ctx.get());
+}
+
+const std::wstring kZoneStream = L"Zone.Identifier";
+const std::string kZoneStreamData = "[ZoneTransfer]\r\nZoneId=3\r\n";
+
+void WriteLowerFileWithZoneStream(const TempLayerEnvironment& env, const std::wstring& name,
+                                  const std::string& data) {
+    env.WriteFile(env.Lower(0), name, data);
+    env.WriteFile(env.Lower(0), name + L":" + kZoneStream, kZoneStreamData);
+}
+
+void AssertZoneStreamShown(::LayerMount::LayerMount& mount, const std::wstring& name) {
+    Assert::AreEqual(kZoneStreamData, ReadThroughMount(mount, name + L":" + kZoneStream),
+        (L"A read of the stream of " + name + L" must return the stream's data").c_str());
+    std::vector<InternalStreamInfo> streams;
+    AssertStatus(STATUS_SUCCESS, mount.EnumerateStreams(name, streams),
+        (L"The stream listing of " + name + L" must succeed").c_str());
+    Assert::AreEqual(size_t{1}, streams.size(),
+        (L"The stream listing of " + name + L" must hold one stream").c_str());
+    Assert::AreEqual(L":" + kZoneStream + L":$DATA", streams[0].name,
+        (L"The stream listing of " + name + L" must show the lower file's stream").c_str());
+}
+
 }
 
 TEST_CLASS(MountDirectoryRenameTests) {
@@ -2250,11 +2306,13 @@ public:
             mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid),
             L"A replace rename of a file onto a directory junction must succeed");
         AssertRootShowsOnlyFileNamed(mount, L"link");
-        Assert::AreEqual(std::string("f"), env.ReadFile(env.Upper(), L"link"),
-            L"The upper link must be the moved file");
+        Assert::AreEqual(static_cast<DWORD>(0), ReparseTagOf(env.Upper() + L"\\link"),
+            L"The upper link must be the moved file, not the junction");
         targetBefore.AssertUnchanged(L"The rename must leave the junction target's entries");
         Assert::AreEqual(std::string("inside"), env.ReadFile(env.Root(), L"target\\inside.txt"),
             L"The rename must leave the junction target's file");
+        Assert::AreEqual(std::string("f"), ReadThroughMount(mount, L"link"),
+            L"The new name must show the moved file's data");
     }
 
     TEST_METHOD(ReplaceRename_UpperDirectoryThatCannotMove_KeepsTheDestination) {
@@ -2758,15 +2816,17 @@ public:
     TEST_METHOD(Rename_LowerOnlyFile_CopiesItUpAndWhitesOutTheOldName) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"source.txt", "payload");
-        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
         const LayerSnapshot lowerBefore(env.Lower(0));
         AssertOnlyEntryShownAs(mount, L"", L"source.txt");
 
         AssertStatus(STATUS_SUCCESS,
             mount.Rename(L"source.txt", L"target.txt", kFailIfExists, kNoCallerPid),
             L"A rename of a lower-only file must succeed");
-        Assert::AreEqual(std::string("payload"), env.ReadFile(env.Upper(), L"target.txt"),
-            L"The upper target.txt must hold the lower file's data");
+        Assert::IsTrue(
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\target.txt", &config).metacopy,
+            L"The upper target.txt must be a metacopy shell of the lower file");
         Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"target.txt")),
             L"The rename must write no whiteout at the new name");
         AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"source.txt", L"target.txt");
@@ -2802,7 +2862,8 @@ public:
         env.WriteFile(env.Lower(0), L"src.txt", "src-payload");
         env.WriteFile(env.Lower(0), L"target.txt", "target-lower");
         env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"target.txt"), "");
-        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
         const LayerSnapshot lowerBefore(env.Lower(0));
 
         AssertStatus(STATUS_SUCCESS,
@@ -2810,8 +2871,9 @@ public:
             L"A rename onto a whited-out name must succeed");
         Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"target.txt")),
             L"The rename must remove the whiteout at the new name");
-        Assert::AreEqual(std::string("src-payload"), env.ReadFile(env.Upper(), L"target.txt"),
-            L"The upper target.txt must hold the renamed file's data");
+        Assert::IsTrue(
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\target.txt", &config).metacopy,
+            L"The upper target.txt must be a metacopy shell of the renamed file");
         AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"src.txt", L"target.txt");
         Assert::AreEqual(std::string("src-payload"), ReadThroughMount(mount, L"target.txt"),
             L"The new name must show the renamed file's data");
@@ -2864,6 +2926,140 @@ public:
             Assert::AreEqual(std::string("lazy lower data"), ReadThroughMount(mount, L"renamed.bin"),
                 L"The new name must show the lower file's data");
         });
+    }
+
+    TEST_METHOD(Rename_LowerFile_LeavesAMetacopyShellThatAWriteOpenFills) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS, mount.Rename(L"a.bin", L"b.bin", kFailIfExists, kNoCallerPid),
+                L"The rename of the lower file must succeed");
+
+            AssertMetacopyShell(env.Upper() + L"\\b.bin", config);
+            AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"a.bin", L"b.bin");
+            OpenForWriteThroughMount(mount, L"b.bin");
+            AssertFullCopy(env, L"b.bin", config);
+            Assert::AreEqual(LowerFileDataStart(), ReadThroughMount(mount, L"b.bin"),
+                L"The new name must show the lower file's data");
+        });
+    }
+
+    TEST_METHOD(Rename_LowerFileWithoutSparseSupport_CopiesTheData) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities &= ~LM_CAP_SPARSE_FILES;
+        ::LayerMount::LayerMount mount(config);
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"a.bin", L"b.bin", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower file must succeed");
+
+        AssertFullCopy(env, L"b.bin", config);
+    }
+
+    TEST_METHOD(Rename_LowerFileSymlink_MovesTheLinkItself) {
+        TempLayerEnvironment env(1);
+        if (!LinkToTargetCreatedOrSkipped(env, CreateFileSymlink, LinkTarget::File,
+                                          env.Lower(0) + L"\\link")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"link", L"moved", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower file symlink must succeed");
+
+        Assert::AreEqual(static_cast<DWORD>(IO_REPARSE_TAG_SYMLINK),
+            ReparseTagOf(env.Upper() + L"\\moved"),
+            L"The upper entry at moved must be a symbolic link");
+    }
+
+    TEST_METHOD(RenameOpenFile_LowerFileByAHandleWithDataAccess_CopiesTheData) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"a.bin", FILE_READ_DATA | DELETE,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The lower file must open");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(ctx.get(), L"b.bin", kFailIfExists, kNoCallerPid),
+            L"The rename of the open file must succeed");
+        char buffer[kReadThroughMountBytes] = {};
+        ULONG read = 0;
+        const NTSTATUS readStatus = mount.Read(ctx.get(), buffer, 0, sizeof(buffer), &read);
+        mount.Close(ctx.get());
+
+        AssertFullCopy(env, L"b.bin", config);
+        AssertStatus(STATUS_SUCCESS, readStatus, L"A read through the renamed handle must succeed");
+        Assert::AreEqual(LowerFileDataStart(), std::string(buffer, read),
+            L"A read through the renamed handle must return the lower file's data");
+    }
+
+    TEST_METHOD(RenameOpenFile_LowerFileByAHandleWithoutDataAccess_LeavesAMetacopyShell) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"a.bin", FILE_READ_ATTRIBUTES | DELETE,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The lower file must open");
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(ctx.get(), L"b.bin", kFailIfExists, kNoCallerPid),
+            L"The rename of the open file must succeed");
+        mount.Close(ctx.get());
+
+        AssertMetacopyShell(env.Upper() + L"\\b.bin", config);
+        OpenForWriteThroughMount(mount, L"b.bin");
+        AssertFullCopy(env, L"b.bin", config);
+    }
+
+    TEST_METHOD(Rename_LowerFileWithAStream_ShowsTheStreamAtTheNewName) {
+        TempLayerEnvironment env(1);
+        WriteLowerFileWithZoneStream(env, L"a.bin", LowerFileData());
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"a.bin", L"b.bin", kFailIfExists, kNoCallerPid),
+            L"The rename of the lower file must succeed");
+
+        AssertZoneStreamShown(mount, L"b.bin");
+    }
+
+    TEST_METHOD(WriteOpen_LargeLowerFileWithAStreamWithoutDataAccess_ShowsTheStream) {
+        TempLayerEnvironment env(1);
+        WriteLowerFileWithZoneStream(env, L"big.bin", std::string(2 * 1024 * 1024, 'B'));
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"big.bin", FILE_WRITE_ATTRIBUTES,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The open of the lower file for its attributes must succeed");
+        mount.Close(ctx.get());
+
+        AssertZoneStreamShown(mount, L"big.bin");
+    }
+
+    TEST_METHOD(CaseOnlyRename_LowerFile_LeavesAMetacopyShellListedInTheNewCase) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+
+        AssertStatus(STATUS_SUCCESS, mount.Rename(L"a.bin", L"A.bin", kFailIfExists, kNoCallerPid),
+            L"The case-only rename of the lower file must succeed");
+
+        AssertMetacopyShell(env.Upper() + L"\\A.bin", config);
+        Assert::AreEqual(LowerFileDataStart(), ReadThroughMount(mount, L"A.bin"),
+            L"The new name must show the lower file's data");
+        AssertOnlyEntryShownAs(mount, L"", L"A.bin");
     }
 
     TEST_METHOD(Rename_UpperDirectoryOntoNameWhoseLowerEntryAnOpaqueParentHides_Succeeds) {

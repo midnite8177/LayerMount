@@ -503,6 +503,19 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
+    const ResolvedPath lowerSource = pathResolver_.ResolveLowerPath(normalized);
+    if (lowerSource.Found()) {
+        bool hasUserStream = false;
+        const NTSTATUS streamStatus =
+            HasUserAlternateDataStream(lowerSource.absolutePath, &hasUserStream);
+        if (!NT_SUCCESS(streamStatus)) {
+            return streamStatus;
+        }
+        if (hasUserStream) {
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
     CopyUpTarget target;
     NTSTATUS status = PrepareCopyUpTarget(normalized, &target);
     if (!NT_SUCCESS(status)) {
@@ -534,6 +547,53 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
     }
 
     return CommitStagedFile(normalized, workPath, upperPath);
+}
+
+FileCopyUpResult CopyUp::CopyUpFileOrShell(const std::wstring& relativePath,
+                                           std::optional<LONGLONG> shellOnlyAboveBytes) {
+    const auto copyInFull = [&] { return FileCopyUpResult{CopyUpFile(relativePath), false}; };
+
+    // Without sparse files on the upper, a shell is a dense file of zeros.
+    if (!config_.Capabilities().HasSparseFiles()) {
+        return copyInFull();
+    }
+    const ResolvedPath source = pathResolver_.ResolveLowerPath(NormalizePath(relativePath));
+    if (!source.Found()) {
+        return copyInFull();
+    }
+    if (shellOnlyAboveBytes.has_value()) {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!::GetFileAttributesExW(source.absolutePath.c_str(), GetFileExInfoStandard, &data)) {
+            return copyInFull();
+        }
+        LARGE_INTEGER size{};
+        size.LowPart = data.nFileSizeLow;
+        size.HighPart = static_cast<LONG>(data.nFileSizeHigh);
+        if (size.QuadPart <= *shellOnlyAboveBytes) {
+            return copyInFull();
+        }
+    }
+
+    bool clonesReparsePoint = false;
+    NTSTATUS status =
+        ClonesReparsePoint(source.absolutePath, source.attributes, &clonesReparsePoint);
+    if (!NT_SUCCESS(status)) {
+        return {status, false};
+    }
+    if (clonesReparsePoint) {
+        return copyInFull();
+    }
+    bool hasUserStream = false;
+    status = HasUserAlternateDataStream(source.absolutePath, &hasUserStream);
+    if (!NT_SUCCESS(status)) {
+        return {status, false};
+    }
+    if (hasUserStream) {
+        return copyInFull();
+    }
+
+    status = CopyUpMetadataOnly(relativePath);
+    return {status, NT_SUCCESS(status)};
 }
 
 NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
@@ -581,7 +641,7 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
     // The close of a written handle is the last write of LastWriteTime.
     FileBasicInfoGuard basicInfo(shellInfo, shellAttributes, upperPath);
 
-    // A read-only shell refuses the data write and a new stream.
+    // A read-only shell refuses the data write.
     if (shellAttributes.has_value() && !ClearReadOnly(upperPath, *shellAttributes)) {
         return RecordFillFailure(normalized, L"clear the read-only attribute of the shell",
                                  StatusOfFailedCall(ERROR_ACCESS_DENIED));
@@ -657,23 +717,10 @@ NTSTATUS CopyUp::FillMetacopyShell(ScopedHandle& srcHandle,
 
 NTSTATUS CopyUp::FinishFilledShell(const std::wstring& upperPath,
                                    LayerMountMetadata& metadata) {
-    // A stream failure returns before the code clears the metacopy flag, so
-    // the next open tries the fill again.
-    const NTSTATUS streamStatus =
-        CopyUserAlternateDataStreams(metadata.originLayer, upperPath);
-    if (!NT_SUCCESS(streamStatus)) {
-        return streamStatus;
-    }
-
-    // Clear metacopy flag. Metadata persistence is the atomic commit point
-    // for the completion: if it fails, the upper file's data is in place
-    // but the metacopy flag is still set (we haven't re-entered ADS yet),
-    // so subsequent resolutions will attempt the completion again. That
-    // is the correct retry shape. Do NOT delete upperPath here -- the
-    // data has been copied, and another handle may already be holding it
-    // open; tearing it down would clobber user writes that may have
-    // landed between the data copy and here. Surface the failure so the
-    // caller sees the completion did not commit.
+    // The record write without the metacopy flag commits the fill. When it
+    // fails, the data is in place but the flag stays set, so the next open
+    // fills again. The file stays: another handle may hold it open, and a
+    // user write may have landed after the data copy.
     metadata.metacopy = false;
     if (!MetadataStore::WriteLayerMountMetadata(upperPath, metadata, &config_)) {
         const DWORD err = ::GetLastError();

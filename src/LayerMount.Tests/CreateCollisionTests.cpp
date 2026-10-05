@@ -235,27 +235,7 @@ public:
             L"The new directory must hide the children of the hidden lower directory");
     }
 
-    TEST_METHOD(CreateStream_ExistingStreamOnMetacopyShellOrigin_CollidesAndLeavesShellUnfilled) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"f.txt", "lower");
-        env.WriteFile(env.Lower(0), L"f.txt:extra", "stream");
-        {
-            CopyUpAndRenameRig rig(env.MakeConfig());
-            Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"f.txt")),
-                L"Preconditions: the copy-up must stage a metacopy shell");
-        }
-        const std::wstring shellPath = env.Upper() + L"\\f.txt";
-        ::LayerMount::LayerMount mount(env.MakeConfig());
-
-        AssertStatus(STATUS_OBJECT_NAME_COLLISION, CreateThroughMount(mount, L"f.txt:extra", kNoCreateOptions),
-            L"A create-new of a stream that the shell's origin has must collide");
-        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
-            L"A colliding stream create must not fill the shell");
-        Assert::IsFalse(env.FileExists(env.Upper(), L"f.txt:extra"),
-            L"A colliding stream create must not bring the origin's stream into the upper");
-    }
-
-    TEST_METHOD(CreateStream_NewStreamOnMetacopyShell_FillsShellAndSucceeds) {
+    TEST_METHOD(CreateStream_NewStreamOnMetacopyShell_KeepsTheShellUntilADataOpenFillsIt) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"f.txt", "lower");
         {
@@ -268,10 +248,12 @@ public:
 
         AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"f.txt:extra", kNoCreateOptions),
             L"A create-new of a new stream on a metacopy shell must succeed");
-        Assert::IsFalse(MetadataStore::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
-            L"The stream create must fill the shell");
-        Assert::AreEqual(std::string("lower"), env.ReadFile(env.Upper(), L"f.txt"),
-            L"The filled shell must hold the origin's data");
+        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
+            L"The stream create must leave the shell unfilled");
+        Assert::AreEqual(std::string("lower"), ReadThroughMount(mount, L"f.txt"),
+            L"A data open must fill the shell with the origin's data");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"f.txt:extra"),
+            L"The fill must keep the stream the create made");
     }
 };
 

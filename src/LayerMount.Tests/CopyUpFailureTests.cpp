@@ -315,8 +315,28 @@ FILETIME StampedLowerFileTime() {
     return MakeFileTime(1999, 5, 6);
 }
 
-// Makes the lower file at relativePath read-only and hidden, with a stream
-// named s and the times of StampedLowerFileTime.
+// Stamps the lower file at relativePath with the times of
+// StampedLowerFileTime and makes it read-only and hidden.
+void MakeLowerFileReadOnlyAndHidden(const TempLayerEnvironment& env,
+                                    const std::wstring& relativePath) {
+    const std::wstring lowerFile = env.Lower(0) + L"\\" + relativePath;
+    const FILETIME stamped = StampedLowerFileTime();
+    StampTimes(lowerFile, stamped, stamped, stamped);
+    Assert::IsTrue(::SetFileAttributesW(lowerFile.c_str(),
+                                        FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN) != FALSE,
+        L"The test must make the lower file read-only and hidden");
+}
+
+// Makes a read-only, hidden lower file at relativePath with the times of
+// StampedLowerFileTime.
+void MakeReadOnlyHiddenLowerFile(const TempLayerEnvironment& env,
+                                 const std::wstring& relativePath) {
+    env.WriteFile(env.Lower(0), relativePath, "lower");
+    MakeLowerFileReadOnlyAndHidden(env, relativePath);
+}
+
+// Makes a read-only, hidden lower file at relativePath with a stream named
+// s and the times of StampedLowerFileTime.
 void MakeReadOnlyHiddenLowerFileWithStream(const TempLayerEnvironment& env,
                                            const std::wstring& relativePath) {
     env.WriteFile(env.Lower(0), relativePath, "lower");
@@ -325,11 +345,7 @@ void MakeReadOnlyHiddenLowerFileWithStream(const TempLayerEnvironment& env,
                                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
     Assert::IsTrue(stream.IsValid(), L"The test must write the lower file's stream");
     stream.Reset();
-    const FILETIME stamped = StampedLowerFileTime();
-    StampTimes(lowerFile, stamped, stamped, stamped);
-    Assert::IsTrue(::SetFileAttributesW(lowerFile.c_str(),
-                                        FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN) != FALSE,
-        L"The test must make the lower file read-only and hidden");
+    MakeLowerFileReadOnlyAndHidden(env, relativePath);
 }
 
 void AssertTimesOfLowerFile(const std::wstring& upperFile) {
@@ -803,7 +819,7 @@ public:
         UNIT_SKIP_IF_NOT_NTFS();
         ForEachMetadataStore([](UINT32 hostCapabilities) {
             TempLayerEnvironment env(1);
-            MakeReadOnlyHiddenLowerFileWithStream(env, L"f.txt");
+            MakeReadOnlyHiddenLowerFile(env, L"f.txt");
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = hostCapabilities;
             CopyUpAndRenameRig rig(config);
@@ -838,7 +854,7 @@ public:
         UNIT_SKIP_IF_NOT_NTFS();
         ForEachMetadataStore([](UINT32 hostCapabilities) {
             TempLayerEnvironment env(1);
-            MakeReadOnlyHiddenLowerFileWithStream(env, L"f.txt");
+            MakeReadOnlyHiddenLowerFile(env, L"f.txt");
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = hostCapabilities;
             CopyUpAndRenameRig rig(config);
@@ -851,9 +867,6 @@ public:
             const std::wstring upperFile = env.Upper() + L"\\f.txt";
             Assert::AreEqual(std::string("lower"), env.ReadFile(env.Upper(), L"f.txt"),
                 L"The filled file has the lower file's data");
-            Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
-                ::GetFileAttributesW((upperFile + L":s").c_str()),
-                L"The filled file has the lower file's stream");
             Assert::IsFalse(MetadataStore::ReadLayerMountMetadata(upperFile, &rig.config).metacopy,
                 L"The fill clears the metacopy flag");
             Assert::AreEqual<DWORD>(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
@@ -868,7 +881,7 @@ public:
         UNIT_SKIP_IF_NOT_NTFS();
         ForEachMetadataStore([](UINT32 hostCapabilities) {
             TempLayerEnvironment env(1);
-            MakeReadOnlyHiddenLowerFileWithStream(env, L"p\\f.txt");
+            MakeReadOnlyHiddenLowerFile(env, L"p\\f.txt");
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = hostCapabilities;
             CopyUpAndRenameRig rig(config);

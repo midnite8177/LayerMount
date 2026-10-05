@@ -8,6 +8,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <unordered_set>
 
 namespace LayerMount {
@@ -50,6 +51,17 @@ private:
     std::wstring asidePath_;
     bool wasOpaque_ = false;
 };
+
+// The result of CopyUp::CopyUpFileOrShell.
+struct FileCopyUpResult {
+    NTSTATUS status;
+    // True when the copy-up left a metacopy shell in the upper.
+    bool stagedShell;
+};
+
+// The shellOnlyAboveBytes of CopyUp::CopyUpFileOrShell that lets a file of
+// any size get a shell.
+inline constexpr std::optional<LONGLONG> kShellAtAnySize = std::nullopt;
 
 class CopyUp {
 public:
@@ -94,8 +106,23 @@ public:
     // Builds a sparse shell of the lower file's size in the work directory,
     // with security, a copy-up record with the metacopy flag, and last the
     // attributes and times. Then one rename moves it to the upper path, as
-    // in CopyUpFile. CompleteLazyCopyUp copies the data later.
+    // in CopyUpFile. CompleteLazyCopyUp copies the data later. A shell
+    // never carries the lower file's user streams, so a lower file with a
+    // stream that IsUserAlternateStream accepts fails with
+    // STATUS_INVALID_PARAMETER and writes nothing. Returns the error of a
+    // stream list that cannot be read.
     NTSTATUS CopyUpMetadataOnly(const std::wstring& relativePath);
+
+    // Copies the lower file at relativePath up as a metacopy shell or with
+    // its data. The data copies in full without sparse-file support on the
+    // upper, for a reparse point that a copy-up clones, such as a file
+    // symbolic link, for a file with a user alternate data stream, and for
+    // a file no larger than shellOnlyAboveBytes or whose size cannot be
+    // read. Fails with STATUS_OBJECT_NAME_NOT_FOUND when neither a lower
+    // nor the upper holds relativePath. Returns the error of a reparse tag
+    // or a stream list that cannot be read.
+    FileCopyUpResult CopyUpFileOrShell(const std::wstring& relativePath,
+                                       std::optional<LONGLONG> shellOnlyAboveBytes);
 
     // Complete a metacopy by copying actual file data from the lower layer.
     // Keeps the shell's timestamps, so a set-times on the sparse shell

@@ -769,8 +769,9 @@ LM_API HRESULT LM_CALL LayerMountEnsureInUpperLayer(
  * When the file is a metacopy shell and `grantedAccess` asks for data
  * (read, write, append, or execute), the engine fills the shell before
  * it returns. *outInfo then reports the filled file. An open for
- * attributes, security, or delete keeps the shell sparse. A failed fill
- * fails the open with the fill's status and returns no handle, and
+ * attributes, security, or delete, and an open of a named stream of the
+ * shell, keep the shell sparse. A failed fill fails the open with the
+ * fill's status and returns no handle, and
  * LayerMountGetLastFailureWasFill then reports TRUE.
  */
 LM_API HRESULT LM_CALL LayerMountOpenFile(
@@ -811,9 +812,7 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(
  * stream the create made and fails the create with the resolution's
  * status.
  *
- * A create of a named stream on a metacopy shell fills the shell first.
- * A failed fill fails the create with the fill's status, and
- * LayerMountGetLastFailureWasFill then reports TRUE.
+ * A create of a named stream on a metacopy shell keeps the shell sparse.
  *
  * Returns E_INVALIDARG if `securityDescriptor` is non-NULL but is not a
  * structurally valid self-relative descriptor fitting within
@@ -962,6 +961,10 @@ LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(
 
 /* Renames `oldRelativePath` to `newRelativePath`, copying the entry into
  * the upper layer first if it currently resolves only to a lower layer.
+ * A lower file copies up as a metacopy shell, whose data comes up at the
+ * first open with data access. A link or another reparse point that a
+ * copy-up clones, a file with an alternate data stream, and any file on a
+ * host without LM_CAP_SPARSE_FILES copy their data at the rename.
  * `replaceIfExists` controls whether an existing entry at the
  * destination is replaced or the call fails. */
 LM_API HRESULT LM_CALL LayerMountRenameFile(
@@ -971,7 +974,9 @@ LM_API HRESULT LM_CALL LayerMountRenameFile(
     BOOL       replaceIfExists);
 
 /* Renames the open `file` to `newRelativePath`, with the same copy-up
- * and replace semantics as LayerMountRenameFile. */
+ * and replace semantics as LayerMountRenameFile, except that a `file`
+ * with data access copies a lower file's data at the rename, so a read
+ * through `file` after the rename returns the file's data. */
 LM_API HRESULT LM_CALL LayerMountRenameOpenFile(
     LM_FILE_HANDLE file,
     PCWSTR          newRelativePath,

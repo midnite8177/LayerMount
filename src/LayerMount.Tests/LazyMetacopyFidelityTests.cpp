@@ -237,55 +237,94 @@ public:
         AssertHasExtendedAttributes(upperPath, attributes);
     }
 
-    TEST_METHOD(LazyCompletion_PreservesUserADS) {
+    TEST_METHOD(CopyUpMetadataOnly_LowerFileWithUserStream_RefusesAndStagesNoShell) {
+        UNIT_SKIP_IF_NOT_NTFS();
+
+        LayerMountTests::TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"ads.bin", std::string(2 * 1024 * 1024, 'L'));
+        WriteADS(env.Lower(0) + L"\\ads.bin", L"Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_INVALID_PARAMETER, rig.copyUp.CopyUpMetadataOnly(L"ads.bin"),
+            L"A metacopy of a lower file with a user stream must be refused");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"ads.bin"),
+            L"A refused metacopy must stage no shell in the upper");
+    }
+
+    TEST_METHOD(CopyUpFileOrShell_LowerFileWithUserStreams_CopiesTheDataAndTheStreams) {
         UNIT_SKIP_IF_NOT_NTFS();
 
         LayerMountTests::TempLayerEnvironment env(1);
         const std::string payload(2 * 1024 * 1024, 'L');
         env.WriteFile(env.Lower(0), L"ads.bin", payload);
-
         const std::wstring srcPath = env.Lower(0) + L"\\ads.bin";
         WriteADS(srcPath, L"Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
         WriteADS(srcPath, L"custom",          "user-metadata-payload");
-
-        Assert::IsTrue(ADSExists(srcPath, L"Zone.Identifier"),
-            L"Preconditions: source ADS must be present");
-
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"ads.bin")));
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"ads.bin")));
+        const FileCopyUpResult copied = rig.copyUp.CopyUpFileOrShell(L"ads.bin", kShellAtAnySize);
 
+        AssertStatus(STATUS_SUCCESS, copied.status,
+            L"The copy-up of a lower file with user streams must succeed");
+        Assert::IsFalse(copied.stagedShell,
+            L"A lower file with user streams must not get a metacopy shell");
         const std::wstring upperPath = env.Upper() + L"\\ads.bin";
-
-        // The overlay's own :overlay stream should exist (metacopy cleared).
-        LayerMountMetadata md = MetadataStore::ReadLayerMountMetadata(upperPath, nullptr);
-        Assert::IsFalse(md.metacopy,
-            L"metacopy flag must clear after successful lazy completion");
-
-        // User ADS carried through the lazy path.
+        Assert::IsFalse(MetadataStore::ReadLayerMountMetadata(upperPath, nullptr).metacopy,
+            L"The upper file must carry no metacopy flag");
+        Assert::IsTrue(payload == env.ReadFile(env.Upper(), L"ads.bin"),
+            L"The upper file must hold the lower file's data");
         Assert::IsTrue(ADSExists(upperPath, L"Zone.Identifier"),
-            L"Zone.Identifier must survive lazy metacopy + completion");
+            L"The copy-up must bring Zone.Identifier up");
         Assert::IsTrue(ADSExists(upperPath, L"custom"),
-            L"Custom user ADS must survive lazy metacopy + completion");
+            L"The copy-up must bring the custom stream up");
     }
 
-    TEST_METHOD(LazyCompletion_CopiesUserStreamNamedOverlayNotes) {
+    TEST_METHOD(CopyUpFileOrShell_LowerFileWithStreamNamedOverlayNotes_CopiesTheStream) {
         UNIT_SKIP_IF_NOT_NTFS();
 
         LayerMountTests::TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"notes.bin", std::string(2 * 1024 * 1024, 'N'));
-        const std::wstring srcPath = env.Lower(0) + L"\\notes.bin";
-        WriteADS(srcPath, L"overlayNotes", "user notes");
-
+        WriteADS(env.Lower(0) + L"\\notes.bin", L"overlayNotes", "user notes");
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"notes.bin")));
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"notes.bin")));
+        const FileCopyUpResult copied = rig.copyUp.CopyUpFileOrShell(L"notes.bin", kShellAtAnySize);
 
+        AssertStatus(STATUS_SUCCESS, copied.status,
+            L"The copy-up of a lower file with a stream named overlayNotes must succeed");
+        Assert::IsFalse(copied.stagedShell,
+            L"A stream whose name only starts with overlay is user data, so the file "
+            L"must not get a metacopy shell");
         Assert::IsTrue(ADSExists(env.Upper() + L"\\notes.bin", L"overlayNotes"),
-            L"A stream whose name only starts with overlay is user data and "
-            L"must survive the fill");
+            L"The copy-up must bring the overlayNotes stream up");
+    }
+
+    TEST_METHOD(StreamWriteOpen_OnMetacopyShell_KeepsTheShellAndTheFillKeepsTheStream) {
+        UNIT_SKIP_IF_NOT_NTFS();
+
+        LayerMountTests::TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"shell.bin", "lower");
+        {
+            CopyUpAndRenameRig rig(env.MakeConfig());
+            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"shell.bin"),
+                L"Preconditions: the copy-up must stage a metacopy shell");
+        }
+        const std::wstring shellPath = env.Upper() + L"\\shell.bin";
+        WriteADS(shellPath, L"extra", "user");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"shell.bin:extra", FILE_WRITE_DATA,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The write open of the shell's stream must succeed");
+        mount.Close(ctx.get());
+
+        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(shellPath, nullptr).metacopy,
+            L"A write open of a stream must leave the shell unfilled");
+        Assert::AreEqual(std::string("lower"), ReadThroughMount(mount, L"shell.bin"),
+            L"A data open must fill the shell with the origin's data");
+        Assert::AreEqual(std::string("user"), ReadThroughMount(mount, L"shell.bin:extra"),
+            L"The fill must keep the shell's stream");
     }
 
     TEST_METHOD(LazyCompletion_PreservesCompression) {

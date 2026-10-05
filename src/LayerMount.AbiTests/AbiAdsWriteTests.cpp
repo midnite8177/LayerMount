@@ -285,11 +285,7 @@ public:
             L"a write copies up a user stream whose name starts with overlay");
     }
 
-    TEST_METHOD(CreateFile_AdsOnMetacopyShell_SurvivesLaterDataOpen) {
-        // A stream Create on a metacopy shell fills the shell first, so the
-        // lower's streams cannot land over the user's stream later. A
-        // colliding user stream gets a CREATE_NEW collision instead of a
-        // silent overwrite.
+    TEST_METHOD(CreateFile_AdsOnLargeLowerFileWithAStream_SurvivesLaterDataOpen) {
         TempLayerEnv env(1);
         const std::string bigContent(
             static_cast<size_t>(kAboveMetacopyThresholdBytes), 'L');
@@ -305,13 +301,9 @@ public:
                 kAttributeOnlyAccess, kNoCreateOptions, host));
 
         const std::wstring upperHost = env.Upper() + L"\\big.bin";
-        Assert::IsTrue(std::filesystem::exists(upperHost),
-            L"attribute-only Open of a > 1 MB lower file must stage a "
-            L"metacopy shell on upper");
-        // Sanity: pre-stream-Create, the lower-only :keep-me should NOT
-        // have been carried up yet (still a metacopy shell).
-        Assert::IsFalse(HasStream(upperHost + L":keep-me"),
-            L":keep-me must not be on upper yet -- metacopy shell only");
+        Assert::IsTrue(HasStream(upperHost + L":keep-me"),
+            L"an attribute-only Open of a lower file with a stream must copy "
+            L"the stream up with the file");
         ::LayerMountCloseFile(host.handle);
 
         OpenedFile userStream;
@@ -326,8 +318,7 @@ public:
         ::LayerMountCloseFile(userStream.handle);
 
         Assert::IsTrue(HasStream(upperHost + L":keep-me"),
-            L"the stream Create carries the lower ADS up; a later "
-            L"main-stream open is too late");
+            L"the lower stream must stay on the upper host after the stream Create");
         Assert::IsTrue(HasStream(upperHost + L":user-stream"),
             L"newly created user stream must be on the upper host");
         Assert::AreEqual<std::string>("USER-DATA",

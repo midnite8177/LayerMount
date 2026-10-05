@@ -42,6 +42,7 @@ src/LayerMount.dll/
                   WhiteoutManager.{h,cpp} `.wh.` markers + opaque dirs
                   CopyUp.{h,cpp}       Full + metacopy copy-up
                   DirectoryRename.{h,cpp} Cross-layer directory rename
+                  FileRename.{h,cpp}   File rename into the upper
                   DirectoryMerge.{h,cpp} Directory listing merged across layers
                   EntryCopy.{h,cpp}    Per-entry copy helpers for both
                   Cache.{h,cpp}        LRU resolved-path cache
@@ -510,11 +511,15 @@ implements the first three flavors below. `DirectoryRename` (in
 `impl/DirectoryRename.cpp`) implements the fourth, cross-layer directory
 rename, and calls `CopyUp` to copy up the parent of the destination.
 Helpers that both use to copy one entry live in `impl/EntryCopy.cpp`.
+`FileRename` (in `impl/FileRename.cpp`) moves a file to its new upper
+name and calls `CopyUp` to copy a lower source up first.
 
 ### Full copy-up (`CopyUpFile`)
 
-The default for small files and the fallback when sparse files are
-unavailable. Steps:
+The default for a write open of a file up to 1 MiB, for a rename by an
+open handle with data access, for a reparse point that the copy-up
+clones, and for a file with a user alternate data stream. It is also
+the fallback when sparse files are unavailable. Steps:
 
 1. Acquire the in-flight lock for `relativePath`. If another thread is
    already copying up the same path, wait on the condition variable
@@ -578,10 +583,31 @@ unavailable. Steps:
 
 ### Metacopy (`CopyUpMetadataOnly`)
 
-For files larger than 1 MiB on host adapters that support sparse files
-(`LM_CAP_SPARSE_FILES`), the engine builds a *metacopy shell* in the
-work directory instead of a full data copy, and one rename moves it to
-the upper layer:
+On host adapters that support sparse files (`LM_CAP_SPARSE_FILES`),
+the engine builds a *metacopy shell* in the work directory instead of a
+full data copy in two cases:
+
+- An open for write of a lower file larger than 1 MiB.
+- A rename of a file that only a lower holds, at any size. Overlayfs
+  with `metacopy=on` copies only the metadata up for a rename and has
+  no size threshold. A cloud placeholder or another reparse point that
+  the full copy-up copies as a plain file also gets a shell.
+
+`CopyUp::CopyUpFileOrShell` makes the choice for both, and copies the
+data in full for:
+
+- A link or another reparse point that the full copy-up clones, such
+  as a file symbolic link.
+- A file with a user alternate data stream. A shell never carries the
+  lower file's streams, so `CopyUpMetadataOnly` refuses such a file
+  with `STATUS_INVALID_PARAMETER`.
+- Any file without the sparse capability.
+
+A rename by an open handle with data access also copies the data in
+full, because a read through the reopened handle never fills a shell.
+
+The steps build the shell in the work directory, and one move takes it
+to the upper layer:
 
 1. Create the file in the work directory as a sparse file
    (`FSCTL_SET_SPARSE`) of the correct logical size, with no allocated
@@ -592,8 +618,7 @@ the upper layer:
 2. Copy the extended attributes, under the same rules as the full
    copy-up, and the security descriptor. As in overlayfs, the shell has
    the extended attributes from the start, and the fill does not copy
-   them again. The lower's streams arrive with the fill, together with
-   the data.
+   them again.
 3. Write the copy-up record with `metacopy = true` and the origin
    layer, as overlayfs sets the metacopy xattr on its temporary file.
 4. Set the read-only attribute and the timestamps last, as in the full
@@ -601,7 +626,11 @@ the upper layer:
 5. Move the shell to the upper path with `ReplaceExisting::No`, under
    the same rules as step 9 of the full copy-up.
 6. Ownership flips to the upper layer; the file context is marked
-   `isMetacopyOnly = true`.
+   `isMetacopyOnly = true`. A rename moves the shell from its lower
+   name to the new name together with its copy-up record, which keeps
+   the absolute path of the origin. A handle rename by a handle without
+   data access marks that handle's context too, so a later write path
+   fills the shell.
 
 The shell fills at the first open that asks for data: read data, write
 data, append data, or execute. `Open` calls `CompleteLazyCopyUp` before
@@ -609,19 +638,22 @@ it opens the handle. The call streams the data from the recorded origin
 into the upper sparse skeleton and clears the metacopy flag. The fill
 reads every byte of a source that can keep data elsewhere, as step 5
 does. The fill works on the upper file in place, as overlayfs fills a
-metacopy file. The fill takes the read-only attribute off a read-only
-shell for the writes and puts it back at the end. The fill takes the
-sparse attribute off unless the lower file is sparse, so a filled file
-has the allocation of a normal copy. An open for attributes, security,
-or delete keeps the shell sparse. A failed fill fails the open with the
-fill's status and returns no handle. `Read` never copies a file up and
-never reopens the handle for a fill. The one reopen a read can do is the
+metacopy file, and it copies only the data, so a stream that a create
+made on the shell stays. The fill takes the read-only attribute off a
+read-only shell for the writes and puts it back at the end. The fill
+takes the sparse attribute off unless the lower file is sparse, so a
+filled file has the allocation of a normal copy. An open for
+attributes, security, or delete keeps the shell sparse, and so do the
+create and the open of a named stream on the shell. A failed fill fails
+the open with the fill's status and returns no handle. `Read` never
+copies a file up and never reopens the handle for a fill. The one reopen
+a read can do is the
 retarget after a rename. `Write` keeps a fill as a guard for a handle
 opened without data access. See
 [ADR 0006](../adr/0006-metacopy-shell-fills-at-open-for-data-access.md).
 Without the sparse capability the engine forces a full copy-up at open
-time, because a non-sparse metacopy would be a dense zero-filled stub
-with no benefit.
+time and at a rename, because a non-sparse metacopy would be a dense
+zero-filled stub with no benefit.
 
 ### Directory copy-up (`CopyUpDirectory`)
 

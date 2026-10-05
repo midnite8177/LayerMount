@@ -94,14 +94,15 @@ every bit its target actually supports and no more.
   `.overlay` directory instead of NTFS alternate data streams. See
   [docs/metadata-dispatcher.md](../metadata-dispatcher.md) for how the
   dispatcher picks between the two backends and reads across them.
-- `LM_CAP_SPARSE_FILES`. Without it, metacopy for a file above the
-  metacopy size threshold copies its data in full at copy-up time
-  (`CopyUpFile`), because `FSCTL_SET_SPARSE` is not available on the
-  upper. With it, the engine copies the metadata only and fills the data
-  at the first open that asks for data access. The bit also applies to
-  a copy-up of a sparse lower file. With it, the upper copy is sparse,
-  or the copy-up fails with the volume's error. Without it, the upper
-  copy is dense.
+- `LM_CAP_SPARSE_FILES`. Without it, `FSCTL_SET_SPARSE` is not
+  available on the upper, so two copy-ups that would make a metacopy
+  shell copy the data in full with `CopyUpFile`: the write open of a
+  file above the metacopy size threshold, and the rename of a file that
+  only a lower holds. With it, the engine copies the metadata only
+  and fills the data at the first open that asks for data access. The
+  bit also applies to a copy-up of a sparse lower file. With it, the
+  upper copy is sparse, or the copy-up fails with the volume's error.
+  Without it, the upper copy is dense.
 - `LM_CAP_NTFS_ACLS`. Without it, a security read returns a synthetic
   security descriptor instead of one read from the upper, and a
   security write silently no-ops and returns success instead of

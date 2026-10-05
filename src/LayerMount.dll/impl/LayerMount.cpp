@@ -7,6 +7,7 @@
 #include "CopyUp.h"
 #include "DirectoryMerge.h"
 #include "DirectoryRename.h"
+#include "FileRename.h"
 #include "UpperEntryRemover.h"
 #include "ElevationUtil.h"
 #include "ProcessTracker.h"
@@ -457,6 +458,7 @@ LayerMount::LayerMount(LayerConfig config)
     , copyUp_(std::make_unique<CopyUp>(config_, *pathResolver_, *whiteoutMgr_, *cache_, stats_))
     , directoryRename_(std::make_unique<DirectoryRename>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_))
+    , fileRename_(std::make_unique<FileRename>(config_, *pathResolver_, *copyUp_))
     , upperEntryRemover_(std::make_unique<UpperEntryRemover>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_)) {
     copyUp_->SetEventEmitter(&events_);
@@ -1128,26 +1130,11 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     ctx->createOptions = createOptions;
 
     if (resolved.source == LayerSource::Lower && HasWriteAccess(resolvedAccess)) {
-        NTSTATUS status = CopyUpForWriteOpen(hostNorm, resolved, ctx.get());
+        NTSTATUS status = CopyUpForWriteOpen(hostNorm, ctx.get());
         if (!NT_SUCCESS(status)) {
             return status;
         }
         ctx->actualPath = pathResolver_->GetUpperPath(hostNorm) + streamSuffix;
-        ctx->writable = true;
-    } else if (resolved.source == LayerSource::Upper &&
-               HasWriteAccess(resolvedAccess) &&
-               !streamSuffix.empty()) {
-        const std::wstring upperHostPath = pathResolver_->GetUpperPath(hostNorm);
-        const LayerMountMetadata metadata =
-            MetadataStore::ReadLayerMountMetadata(upperHostPath, &config_);
-        // A later fill copies the lower's streams over the stream this open writes.
-        if (metadata.metacopy) {
-            NTSTATUS cpStatus = FillShell(hostNorm, ctx.get());
-            if (!NT_SUCCESS(cpStatus)) {
-                return cpStatus;
-            }
-        }
-        ctx->actualPath = upperHostPath + streamSuffix;
         ctx->writable = true;
     } else {
         ctx->actualPath = resolved.absolutePath + streamSuffix;
@@ -1228,9 +1215,7 @@ NTSTATUS LayerMount::OpenRoot(UINT32 grantedAccess,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm,
-                                       const ResolvedPath& resolved,
-                                       FileContext* ctx) {
+NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm, FileContext* ctx) {
     if (ctx->isDirectory) {
         return copyUp_->CopyUpDirectory(hostNorm);
     }
@@ -1238,28 +1223,12 @@ NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm,
         return copyUp_->CopyUpFile(hostNorm);
     }
 
-    constexpr LONGLONG kMetacopyThresholdBytes = 1LL * 1024 * 1024;
-    LARGE_INTEGER srcSize{};
-    if (resolved.attributes != INVALID_FILE_ATTRIBUTES &&
-        (resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        WIN32_FILE_ATTRIBUTE_DATA fad{};
-        if (::GetFileAttributesExW(resolved.absolutePath.c_str(),
-                                    GetFileExInfoStandard, &fad)) {
-            srcSize.LowPart = fad.nFileSizeLow;
-            srcSize.HighPart = static_cast<LONG>(fad.nFileSizeHigh);
-        }
+    constexpr LONGLONG kShellOnlyAboveBytes = 1LL * 1024 * 1024;
+    const FileCopyUpResult copied = copyUp_->CopyUpFileOrShell(hostNorm, kShellOnlyAboveBytes);
+    if (copied.stagedShell) {
+        ctx->isMetacopyOnly = true;
     }
-    // A metacopy shell needs a sparse upper file. When the upper layer has
-    // no sparse support, the shell becomes a dense file of zeros, so the
-    // copy-up copies the data instead.
-    if (srcSize.QuadPart > kMetacopyThresholdBytes && config_.Capabilities().HasSparseFiles()) {
-        NTSTATUS status = copyUp_->CopyUpMetadataOnly(hostNorm);
-        if (NT_SUCCESS(status)) {
-            ctx->isMetacopyOnly = true;
-        }
-        return status;
-    }
-    return copyUp_->CopyUpFile(hostNorm);
+    return copied.status;
 }
 
 namespace {
@@ -1275,25 +1244,6 @@ bool IsDirectoryCreate(const LayerMount::CreateRequest& request) {
 bool StreamExists(const std::wstring& hostPath, const std::wstring& streamSuffix) {
     const std::wstring streamPath = hostPath + streamSuffix;
     return ::GetFileAttributesW(streamPath.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
-bool MetacopyOriginHasStream(const ResolvedPath& host,
-                             const std::wstring& streamSuffix,
-                             const LayerConfig& config) {
-    if (host.source != LayerSource::Upper) {
-        return false;
-    }
-    const LayerMountMetadata metadata =
-        MetadataStore::ReadLayerMountMetadata(host.absolutePath, &config);
-    return metadata.metacopy && !metadata.originLayer.empty() &&
-        StreamExists(metadata.originLayer, streamSuffix);
-}
-
-bool HostFileHasStream(const ResolvedPath& host,
-                       const std::wstring& streamSuffix,
-                       const LayerConfig& config) {
-    return StreamExists(host.absolutePath, streamSuffix) ||
-        MetacopyOriginHasStream(host, streamSuffix, config);
 }
 
 }
@@ -1419,7 +1369,7 @@ NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
         return STATUS_FILE_IS_A_DIRECTORY;
     }
     if (resolution->overlayHit.Found() &&
-        HostFileHasStream(resolution->overlayHit, create.path.streamSuffix, config_)) {
+        StreamExists(resolution->overlayHit.absolutePath, create.path.streamSuffix)) {
         return STATUS_OBJECT_NAME_COLLISION;
     }
     return STATUS_SUCCESS;
@@ -1464,7 +1414,7 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
 NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
                                        FileContext* ctx) {
     if (!create.path.streamSuffix.empty()) {
-        NTSTATUS hostStatus = PrepareStreamHost(create, ctx);
+        NTSTATUS hostStatus = PrepareStreamHost(create);
         if (!NT_SUCCESS(hostStatus)) {
             return hostStatus;
         }
@@ -1506,17 +1456,9 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::PrepareStreamHost(const UpperCreate& create, FileContext* ctx) {
-    if (!pathResolver_->ExistsInUpper(create.path.hostNorm)) {
-        if (create.lowerIsVisible) {
-            return copyUp_->CopyUpFile(create.path.hostNorm);
-        }
-        return STATUS_SUCCESS;
-    }
-    const LayerMountMetadata metadata =
-        MetadataStore::ReadLayerMountMetadata(create.upperPath, &config_);
-    if (metadata.metacopy) {
-        return FillShell(create.path.hostNorm, ctx);
+NTSTATUS LayerMount::PrepareStreamHost(const UpperCreate& create) {
+    if (create.lowerIsVisible && !pathResolver_->ExistsInUpper(create.path.hostNorm)) {
+        return copyUp_->CopyUpFile(create.path.hostNorm);
     }
     return STATUS_SUCCESS;
 }
@@ -2031,37 +1973,25 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
     return upperEntryRemover_->Remove(NormalizePath(ctx->relativePath));
 }
 
-NTSTATUS LayerMount::RenameFileInUpper(const std::wstring& oldRelativePath,
-                                       const std::wstring& newRelativePath,
-                                       BOOLEAN replaceIfExists,
-                                       bool destHadWhiteout) {
+LayerMount::RenameResult LayerMount::RenameFileEntry(const std::wstring& oldRelativePath,
+                                                     const std::wstring& newRelativePath,
+                                                     BOOLEAN replaceIfExists,
+                                                     bool destHadWhiteout,
+                                                     RenameCopyUp copyUpMode) {
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
-    const bool lowerHasSource = pathResolver_->ResolveLowerPath(oldNorm).Found();
+    const bool lowerHoldsSource = pathResolver_->ResolveLowerPath(oldNorm).Found();
 
-    // Before CopyUpFile, so a refused parent leaves the upper unchanged.
-    NTSTATUS status = copyUp_->EnsureUpperParent(newNorm);
-    if (!NT_SUCCESS(status)) return status;
-
-    if (!pathResolver_->ExistsInUpper(oldNorm)) {
-        status = copyUp_->CopyUpFile(oldNorm);
-        if (!NT_SUCCESS(status)) return status;
+    const MovedFile moved = fileRename_->MoveToUpper(
+        oldRelativePath, newRelativePath,
+        replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No, copyUpMode);
+    if (!NT_SUCCESS(moved.status) || !lowerHoldsSource) {
+        return {moved.status, moved.stagedShell};
     }
-
-    const std::wstring oldUpperPath = pathResolver_->GetStoredUpperPath(oldRelativePath);
-    const std::wstring newUpperPath =
-        pathResolver_->GetUpperPathForNewEntry(CallerPath(newRelativePath));
-
-    status = MoveUpperEntry(
-        oldUpperPath, newUpperPath,
-        replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No, config_);
-    if (!NT_SUCCESS(status)) return status;
-
-    if (lowerHasSource) {
-        return WhiteOutRenameSource(RenamePaths{oldNorm, newNorm}, WhiteoutType::File,
-                                    oldUpperPath, destHadWhiteout);
-    }
-    return STATUS_SUCCESS;
+    const NTSTATUS status = WhiteOutRenameSource(RenamePaths{oldNorm, newNorm},
+                                                 WhiteoutType::File, moved.oldUpperPath,
+                                                 destHadWhiteout);
+    return {status, moved.stagedShell};
 }
 
 NTSTATUS LayerMount::WhiteOutRenameSource(const RenamePaths& paths,
@@ -2157,13 +2087,15 @@ NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
         status = CheckRenameDestination(paths, replaceIfExists, &kinds);
         if (!NT_SUCCESS(status)) return status;
     }
-    return RenameCheckedEntry(oldRelativePath, newRelativePath, replaceIfExists, kinds);
+    return RenameCheckedEntry(oldRelativePath, newRelativePath, replaceIfExists, kinds,
+                              RenameCopyUp::ShellWhenPossible).status;
 }
 
-NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
-                                        const std::wstring& newRelativePath,
-                                        BOOLEAN replaceIfExists,
-                                        const RenameKinds& kinds) {
+LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
+                                                        const std::wstring& newRelativePath,
+                                                        BOOLEAN replaceIfExists,
+                                                        const RenameKinds& kinds,
+                                                        RenameCopyUp copyUpMode) {
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
     const bool isSameLogicalPath = oldNorm == newNorm;
@@ -2173,19 +2105,20 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
     DirectoryRenameRoute route = DirectoryRenameRoute::MoveUpper;
     if (isDirectory && !isSameLogicalPath) {
         status = DirectoryRenameRouteOf(oldNorm, kinds.source, &route);
-        if (!NT_SUCCESS(status)) return status;
+        if (!NT_SUCCESS(status)) return {status, false};
     }
 
     RenameDestinationAside destinationAside(config_, *whiteoutMgr_, *cache_);
     if (replaceIfExists && kinds.destination.has_value()) {
         status = copyUp_->SetRenameDestinationAside(newNorm, *kinds.destination,
                                                     &destinationAside);
-        if (!NT_SUCCESS(status)) return status;
+        if (!NT_SUCCESS(status)) return {status, false};
     }
 
     const bool destHadWhiteout =
         whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath);
 
+    bool stagedShell = false;
     if (isDirectory && isSameLogicalPath) {
         status = copyUp_->RenameDirectoryCase(CallerPath(oldRelativePath),
                                               CallerPath(newRelativePath), kinds.source);
@@ -2193,10 +2126,12 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
         status = RenameDirectoryEntry(oldRelativePath, newRelativePath, kinds.source, route,
                                       replaceIfExists, destHadWhiteout);
     } else {
-        status = RenameFileInUpper(oldRelativePath, newRelativePath, replaceIfExists,
-                                   destHadWhiteout);
+        const RenameResult moved = RenameFileEntry(oldRelativePath, newRelativePath,
+                                                   replaceIfExists, destHadWhiteout, copyUpMode);
+        status = moved.status;
+        stagedShell = moved.stagedShell;
     }
-    if (!NT_SUCCESS(status)) return status;
+    if (!NT_SUCCESS(status)) return {status, false};
     destinationAside.Commit();
 
     if (destHadWhiteout) {
@@ -2205,7 +2140,7 @@ NTSTATUS LayerMount::RenameCheckedEntry(const std::wstring& oldRelativePath,
 
     cache_->InvalidateWithAncestors(oldNorm);
     cache_->InvalidateWithAncestors(newNorm);
-    return STATUS_SUCCESS;
+    return {STATUS_SUCCESS, stagedShell};
 }
 
 NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
@@ -2277,18 +2212,23 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
         ctx->handle = INVALID_HANDLE_VALUE;
     }
 
-    status = RenameCheckedEntry(oldRelativePath, newRelativePath, replaceIfExists, kinds);
-    if (!NT_SUCCESS(status)) {
+    // A read never fills a shell, so a handle that can read needs the data in the upper.
+    const RenameCopyUp copyUpMode = HasFileDataAccess(ctx->grantedAccess)
+        ? RenameCopyUp::FullCopy
+        : RenameCopyUp::ShellWhenPossible;
+    const RenameResult renamed = RenameCheckedEntry(oldRelativePath, newRelativePath,
+                                                    replaceIfExists, kinds, copyUpMode);
+    if (!NT_SUCCESS(renamed.status)) {
         ctx->actualPath = oldActualPath;
         ctx->handleNeedsReopen = true;
-        return status;
+        return renamed.status;
     }
 
     ctx->relativePath = newNorm;
     ctx->actualPath = pathResolver_->GetUpperPathForNewEntry(CallerPath(newRelativePath));
     ctx->writable = true;
     if (!sourceWasInUpper) {
-        ctx->isMetacopyOnly = false;
+        ctx->isMetacopyOnly = renamed.stagedShell;
     }
     ctx->handleNeedsReopen = true;
     return STATUS_SUCCESS;

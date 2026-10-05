@@ -237,6 +237,47 @@ NTSTATUS ReadStreamList(HANDLE handle, std::vector<BYTE>& list) {
     }
 }
 
+// Reads the FILE_STREAM_INFO list of the file or directory at path. The
+// open uses FILE_FLAG_BACKUP_SEMANTICS, so it reads the stream list of a
+// file whose DACL denies this process.
+NTSTATUS ReadStreamListOfPath(const std::wstring& path, std::vector<BYTE>& list) {
+    ScopedHandle handle(::CreateFileW(
+        path.c_str(), FILE_GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!handle.IsValid()) {
+        return StatusOfFailedCall(ERROR_READ_FAULT);
+    }
+    return ReadStreamList(handle.Get(), list);
+}
+
+// Calls visit with the name of each stream in list that
+// IsUserAlternateStream accepts. Stops at the first visit that fails and
+// returns its status.
+template <typename Visit>
+NTSTATUS ForEachUserStream(const std::vector<BYTE>& list, Visit visit) {
+    if (list.empty()) {
+        return STATUS_SUCCESS;
+    }
+    const BYTE* entry = list.data();
+    for (;;) {
+        const auto* info = reinterpret_cast<const FILE_STREAM_INFO*>(entry);
+        // StreamName is not null-terminated, and its length is in bytes.
+        const std::wstring_view name(info->StreamName,
+                                     info->StreamNameLength / sizeof(wchar_t));
+        if (IsUserAlternateStream(name)) {
+            const NTSTATUS status = visit(name);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+        }
+        if (info->NextEntryOffset == 0) {
+            return STATUS_SUCCESS;
+        }
+        entry += info->NextEntryOffset;
+    }
+}
+
 // A range copied before the call is written again at the same offset.
 NTSTATUS CopyBytesFromStart(HANDLE srcHandle, HANDLE dstHandle) {
     LARGE_INTEGER zero{};
@@ -472,45 +513,33 @@ LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
     return MakeCopyUpMetadata(sourcePath);
 }
 
-// The source open uses FILE_FLAG_BACKUP_SEMANTICS, so the copy reads the
-// stream list of a file whose DACL denies this process.
 NTSTATUS CopyUserAlternateDataStreams(const std::wstring& srcPath,
                                       const std::wstring& dstPath) {
     std::vector<BYTE> list;
-    {
-        ScopedHandle srcHandle(::CreateFileW(
-            srcPath.c_str(), FILE_GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-        if (!srcHandle.IsValid()) {
-            return StatusOfFailedCall(ERROR_READ_FAULT);
-        }
-        const NTSTATUS listStatus = ReadStreamList(srcHandle.Get(), list);
-        if (!NT_SUCCESS(listStatus)) {
-            return listStatus;
-        }
+    const NTSTATUS listStatus = ReadStreamListOfPath(srcPath, list);
+    if (!NT_SUCCESS(listStatus)) {
+        return listStatus;
     }
-    if (list.empty()) {
-        return STATUS_SUCCESS;
-    }
+    return ForEachUserStream(list, [&](std::wstring_view name) {
+        return CopyAlternateStream(srcPath, dstPath, name);
+    });
+}
 
-    const BYTE* entry = list.data();
-    for (;;) {
-        const auto* info = reinterpret_cast<const FILE_STREAM_INFO*>(entry);
-        // StreamName is not null-terminated, and its length is in bytes.
-        const std::wstring_view name(info->StreamName,
-                                     info->StreamNameLength / sizeof(wchar_t));
-        if (IsUserAlternateStream(name)) {
-            const NTSTATUS status = CopyAlternateStream(srcPath, dstPath, name);
-            if (!NT_SUCCESS(status)) {
-                return status;
-            }
-        }
-        if (info->NextEntryOffset == 0) {
-            return STATUS_SUCCESS;
-        }
-        entry += info->NextEntryOffset;
+NTSTATUS HasUserAlternateDataStream(const std::wstring& path, bool* has) {
+    std::vector<BYTE> list;
+    const NTSTATUS listStatus = ReadStreamListOfPath(path, list);
+    if (!NT_SUCCESS(listStatus)) {
+        return listStatus;
     }
+    bool found = false;
+    const NTSTATUS status = ForEachUserStream(list, [&](std::wstring_view) {
+        found = true;
+        return STATUS_SUCCESS;
+    });
+    if (NT_SUCCESS(status)) {
+        *has = found;
+    }
+    return status;
 }
 
 bool ApplyEncryptedStateIfNeeded(const std::wstring& path, DWORD attrs) {

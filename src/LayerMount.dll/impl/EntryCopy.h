@@ -44,6 +44,11 @@ LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
 NTSTATUS CopyUserAlternateDataStreams(const std::wstring& srcPath,
                                       const std::wstring& dstPath);
 
+// Sets *has to whether the file or directory at path has a stream that
+// `IsUserAlternateStream` accepts. A failed read of the stream list
+// returns its status and leaves *has as it was.
+NTSTATUS HasUserAlternateDataStream(const std::wstring& path, bool* has);
+
 // The size of the first buffer for the stream list of a file. A longer list
 // doubles the buffer until the list fits.
 inline constexpr size_t kInitialStreamListSize = 64 * 1024;

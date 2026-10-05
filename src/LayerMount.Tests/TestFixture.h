@@ -1004,8 +1004,10 @@ inline NTSTATUS CreateThroughMount(::LayerMount::LayerMount& mount,
     return status;
 }
 
-// Opens path through the mount and returns its first 64 bytes from the
-// engine's Read. Fails the test when the open or the read fails.
+inline constexpr ULONG kReadThroughMountBytes = 64;
+
+// Opens path through the mount and returns its first kReadThroughMountBytes
+// bytes from the engine's Read. Fails the test when the open or the read fails.
 inline std::string ReadThroughMount(::LayerMount::LayerMount& mount,
                                     const std::wstring& path) {
     using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
@@ -1015,7 +1017,7 @@ inline std::string ReadThroughMount(::LayerMount::LayerMount& mount,
     Assert::IsTrue(NT_SUCCESS(mount.Open(path, FILE_READ_DATA, kNoCreateOptions,
                                          kNoCallerPid, &ctx, &info)),
         L"ReadThroughMount: the open must succeed");
-    char buffer[64] = {};
+    char buffer[kReadThroughMountBytes] = {};
     ULONG transferred = 0;
     const NTSTATUS readStatus = mount.Read(ctx.get(), buffer, fromStart,
                                            sizeof(buffer), &transferred);
