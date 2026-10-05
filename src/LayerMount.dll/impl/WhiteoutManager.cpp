@@ -177,28 +177,31 @@ NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
     return STATUS_SUCCESS;
 }
 
-bool WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
+NTSTATUS WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
     switch (FindLinkOnPath(config_.upperPath, MarkerDirectoryOf(relativePath))) {
     case LinkOnPath::Self:
     case LinkOnPath::Ancestor:
-        return true;
+        return STATUS_SUCCESS;
     case LinkOnPath::Unreadable:
-        return false;
+        return STATUS_ACCESS_DENIED;
     case LinkOnPath::None:
         break;
     }
 
     std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
 
-    if (!DeleteMarkerFile(whPath)) {
-        return false;
+    if (!DeleteFileW(whPath.c_str())) {
+        const DWORD deleteErr = GetLastError();
+        if (deleteErr != ERROR_FILE_NOT_FOUND) {
+            return StatusFromWin32Error(deleteErr, ERROR_WRITE_FAULT);
+        }
     }
 
     if (cache_) {
         cache_->InvalidateWithAncestors(NormalizePath(relativePath));
     }
 
-    return true;
+    return STATUS_SUCCESS;
 }
 
 bool WhiteoutManager::HoldsOpaqueMarker(const std::wstring& dirFullPath) const {

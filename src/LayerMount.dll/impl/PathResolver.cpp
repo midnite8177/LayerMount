@@ -372,6 +372,13 @@ std::wstring PathResolver::GetStoredUpperPath(const std::wstring& relativePath) 
     return WithStoredLeafName(upperPath, upperPath);
 }
 
+std::wstring PathResolver::GetUpperPathForRenameSource(const std::wstring& relativePath) const {
+    const std::wstring normalized = NormalizePath(relativePath);
+    return ExistsInUpper(normalized)
+        ? GetStoredUpperPath(relativePath)
+        : GetUpperPathForCopyUp(normalized, ResolveLowerPath(normalized));
+}
+
 bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
 

@@ -19,12 +19,13 @@ class Cache;
 class FileBasicInfoGuard;
 
 // An upper destination entry that CopyUp::SetRenameDestinationAside moved
-// into the work directory, with its opaque marker. Until Commit runs, the
-// destructor acts on a failed rename. When the destination path is free,
-// it moves the entry back, and the marker moves back with it. When the
-// rename placed an entry at the path, it removes the copy in the work
-// directory. Commit removes that copy. An object that holds no entry does
-// nothing.
+// into the work directory, with its opaque marker. Until Commit or Release
+// runs, the destructor acts on a failed rename. When the destination path
+// is free, it moves the entry back, and the marker moves back with it.
+// When the rename placed an entry at the path, it removes the copy in the
+// work directory. Commit removes that copy. Release leaves the copy in the
+// work directory, for a failed rename that could not be undone. An object
+// that holds no entry does nothing.
 class RenameDestinationAside {
 public:
     RenameDestinationAside(ConfigRef config, Cache& cache);
@@ -39,6 +40,7 @@ public:
               std::wstring asidePath);
 
     void Commit();
+    void Release();
 
 private:
     const LayerConfig& config_;

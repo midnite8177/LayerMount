@@ -191,7 +191,10 @@ constexpr const wchar_t* kOpaqueMarkerFile  = L".wh..wh..opq";
 - `CreateWhiteout(rel, type)` — drops the marker in the upper layer
   (always; a delete that needs a whiteout owns the whiteout in upper).
 - `RemoveWhiteout(rel)` — used by `Create`/`Rename` when a new file
-  resurrects a previously-deleted name.
+  resurrects a previously-deleted name. Overlayfs replaces the whiteout
+  with the renamed entry in one step. When the whiteout at the new name
+  cannot go, the rename fails with that error, and the engine moves the
+  entry back to the old name.
 
 `FILE_FLAG_BACKUP_SEMANTICS` on the marker open is intentional: a
 parent directory that inherited a `DENY-WRITE` ACE from the lower layer
@@ -377,10 +380,11 @@ is not empty, and a delete of it fails with
 `STATUS_NOT_A_DIRECTORY` when the marker's directory is a link or under
 one, as for `SetOpaque`, and with `STATUS_ACCESS_DENIED` when the walk
 cannot read a component of that path. It writes nothing in either case.
-`RemoveWhiteout` under an upper link removes nothing and returns true, so
-a create of `link\foo` or a rename onto it keeps the target's `.wh.foo`.
-When the walk cannot read a component of that path, `RemoveWhiteout`
-removes nothing and returns false. A caller can
+`RemoveWhiteout` under an upper link removes nothing and returns
+`STATUS_SUCCESS`, so a create of `link\foo` or a rename onto it keeps
+the target's `.wh.foo`. When the walk cannot read a component of that
+path, `RemoveWhiteout` removes nothing and returns
+`STATUS_ACCESS_DENIED`. A caller can
 open, create, rename and delete a `.wh.` name there, as "Path safety
 guards" describes.
 

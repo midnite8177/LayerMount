@@ -8,6 +8,7 @@
 #include "DirectoryMerge.h"
 #include "DirectoryRename.h"
 #include "FileRename.h"
+#include "RenameRollback.h"
 #include "RenameLinkBoundary.h"
 #include "UpperEntryRemover.h"
 #include "ElevationUtil.h"
@@ -456,6 +457,8 @@ LayerMount::LayerMount(LayerConfig config)
     , directoryRename_(std::make_unique<DirectoryRename>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_))
     , fileRename_(std::make_unique<FileRename>(config_, *pathResolver_, *copyUp_))
+    , renameRollback_(std::make_unique<RenameRollback>(
+          config_, *pathResolver_, *whiteoutMgr_, *cache_))
     , upperEntryRemover_(std::make_unique<UpperEntryRemover>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_)) {
     copyUp_->SetEventEmitter(&events_);
@@ -2018,7 +2021,6 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
 MovedFile LayerMount::RenameFileEntry(const std::wstring& oldRelativePath,
                                       const std::wstring& newRelativePath,
                                       BOOLEAN replaceIfExists,
-                                      bool destHadWhiteout,
                                       RenameCopyUp copyUpMode) {
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
@@ -2030,27 +2032,10 @@ MovedFile LayerMount::RenameFileEntry(const std::wstring& oldRelativePath,
     if (!NT_SUCCESS(moved.status) || !lowerHoldsSource) {
         return moved;
     }
-    moved.status = WhiteOutRenameSource(RenamePaths{oldNorm, newNorm}, WhiteoutType::File,
-                                        moved.oldUpperPath, destHadWhiteout);
+    moved.status = renameRollback_->WhiteOutSource(
+        UpperRename{oldNorm, newNorm, moved.oldUpperPath, UndoOpaqueMarker::Keep},
+        WhiteoutType::File);
     return moved;
-}
-
-NTSTATUS LayerMount::WhiteOutRenameSource(const RenamePaths& paths,
-                                          WhiteoutType type,
-                                          const std::wstring& oldUpperPath,
-                                          bool destHadWhiteout) {
-    const NTSTATUS whiteout = whiteoutMgr_->CreateWhiteout(paths.oldNorm, type);
-    if (NT_SUCCESS(whiteout)) {
-        return STATUS_SUCCESS;
-    }
-    const NTSTATUS moveBack = MoveUpperEntry(pathResolver_->GetStoredUpperPath(paths.newNorm),
-                                             oldUpperPath, ReplaceExisting::No, config_);
-    if (!NT_SUCCESS(moveBack) && destHadWhiteout) {
-        whiteoutMgr_->RemoveWhiteout(paths.newNorm);
-    }
-    cache_->InvalidateWithAncestors(paths.oldNorm);
-    cache_->InvalidateWithAncestors(paths.newNorm);
-    return whiteout;
 }
 
 NTSTATUS LayerMount::DirectoryRenameRouteOf(const std::wstring& oldNorm,
@@ -2197,29 +2182,54 @@ LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldR
     const bool destHadWhiteout =
         whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath);
 
-    bool stagedShell = false;
-    if (isDirectory && isSameLogicalPath) {
-        status = copyUp_->RenameDirectoryCase(CallerPath(oldRelativePath),
-                                              CallerPath(newRelativePath), kinds.source);
-    } else if (isDirectory) {
-        status = RenameDirectoryEntry(oldRelativePath, newRelativePath, kinds.source, route,
-                                      replaceIfExists, destHadWhiteout);
-    } else {
-        const MovedFile moved = RenameFileEntry(oldRelativePath, newRelativePath,
-                                                replaceIfExists, destHadWhiteout, copyUpMode);
-        status = moved.status;
-        stagedShell = moved.stagedShell;
-    }
-    if (!NT_SUCCESS(status)) return failure(status);
-    destinationAside.Commit();
+    const MovedSource moved = MoveRenameSource(oldRelativePath, newRelativePath,
+                                               replaceIfExists, kinds.source, route,
+                                               copyUpMode);
+    if (!NT_SUCCESS(moved.status)) return failure(moved.status);
 
     if (destHadWhiteout) {
-        whiteoutMgr_->RemoveWhiteout(newNorm);
+        status = renameRollback_->RemoveDestinationWhiteoutOrUndo(moved.rename,
+                                                                  &destinationAside);
+        if (!NT_SUCCESS(status)) return failure(status);
     }
+    // Commit runs after the whiteout step: once it runs, an undone rename
+    // can no longer bring back the replaced destination.
+    destinationAside.Commit();
 
     cache_->InvalidateWithAncestors(oldNorm);
     cache_->InvalidateWithAncestors(newNorm);
-    return {STATUS_SUCCESS, stagedShell, checked.links.sourceInLinkTarget};
+    return {STATUS_SUCCESS, moved.stagedShell, checked.links.sourceInLinkTarget};
+}
+
+MovedSource LayerMount::MoveRenameSource(const std::wstring& oldRelativePath,
+                                         const std::wstring& newRelativePath,
+                                         BOOLEAN replaceIfExists,
+                                         EntryKind sourceKind,
+                                         DirectoryRenameRoute route,
+                                         RenameCopyUp copyUpMode) {
+    std::wstring oldNorm = NormalizePath(oldRelativePath);
+    std::wstring newNorm = NormalizePath(newRelativePath);
+    if (sourceKind == EntryKind::File) {
+        MovedFile moved = RenameFileEntry(oldRelativePath, newRelativePath, replaceIfExists,
+                                          copyUpMode);
+        return {moved.status, moved.stagedShell,
+                UpperRename{std::move(oldNorm), std::move(newNorm),
+                            std::move(moved.oldUpperPath), UndoOpaqueMarker::Keep}};
+    }
+
+    const bool isCaseRename = oldNorm == newNorm;
+    const bool mayMarkSource = !isCaseRename && sourceKind == EntryKind::Directory &&
+                               route != DirectoryRenameRoute::MergeLower &&
+                               !whiteoutMgr_->IsOpaque(oldNorm);
+    UpperRename rename{std::move(oldNorm), std::move(newNorm),
+                       pathResolver_->GetUpperPathForRenameSource(oldRelativePath),
+                       mayMarkSource ? UndoOpaqueMarker::Remove : UndoOpaqueMarker::Keep};
+    const NTSTATUS status = isCaseRename
+        ? copyUp_->RenameDirectoryCase(CallerPath(oldRelativePath),
+                                       CallerPath(newRelativePath), sourceKind)
+        : RenameDirectoryEntry(oldRelativePath, newRelativePath, sourceKind, route,
+                               replaceIfExists, rename);
+    return {status, false, std::move(rename)};
 }
 
 NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
@@ -2227,9 +2237,7 @@ NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
                                           EntryKind sourceKind,
                                           DirectoryRenameRoute route,
                                           BOOLEAN replaceIfExists,
-                                          bool destHadWhiteout) {
-    const std::wstring oldNorm = NormalizePath(oldRelativePath);
-    const std::wstring newNorm = NormalizePath(newRelativePath);
+                                          const UpperRename& rename) {
     const CallerPath oldCallerPath(oldRelativePath);
     const CallerPath newCallerPath(newRelativePath);
     const DirectoryRename::RenameCallerPaths callerPaths{oldCallerPath, newCallerPath};
@@ -2239,16 +2247,11 @@ NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
         return directoryRename_->RenameUpperDirectory(callerPaths, sourceKind, replace);
     }
 
-    // The name that the move back in WhiteOutRenameSource gives the entry.
-    const std::wstring oldUpperPath = pathResolver_->ExistsInUpper(oldNorm)
-        ? pathResolver_->GetStoredUpperPath(oldRelativePath)
-        : pathResolver_->GetUpperPathForCopyUp(oldNorm, pathResolver_->ResolveLowerPath(oldNorm));
     const NTSTATUS status = route == DirectoryRenameRoute::MergeLower
         ? directoryRename_->RenameLowerDirectory(callerPaths, sourceKind, replace)
         : directoryRename_->RenameUpperDirectory(callerPaths, sourceKind, replace);
     if (!NT_SUCCESS(status)) return status;
-    return WhiteOutRenameSource(RenamePaths{oldNorm, newNorm}, WhiteoutType::Directory,
-                                oldUpperPath, destHadWhiteout);
+    return renameRollback_->WhiteOutSource(rename, WhiteoutType::Directory);
 }
 
 NTSTATUS LayerMount::Rename(FileContext* ctx,

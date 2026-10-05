@@ -221,6 +221,9 @@ class Cache;
 class CopyUp;
 class DirectoryRename;
 class FileRename;
+class RenameRollback;
+struct UpperRename;
+struct MovedSource;
 enum class RenameCopyUp;
 struct MovedFile;
 class UpperEntryRemover;
@@ -927,12 +930,26 @@ private:
 
     // The part of a rename after its checks passed. Copies up the lower link
     // that checked names first. copyUpMode chooses how a file that only a
-    // lower holds copies up.
+    // lower holds copies up. When the upper has a whiteout at the new name
+    // that cannot go, the rename moves its entry back and fails with the
+    // error of that removal.
     RenameResult RenameCheckedEntry(const std::wstring& oldRelativePath,
                                     const std::wstring& newRelativePath,
                                     BOOLEAN replaceIfExists,
                                     const CheckedRename& checked,
                                     RenameCopyUp copyUpMode);
+
+    // Moves the source to newRelativePath with RenameFileEntry,
+    // RenameDirectoryEntry or, when the paths differ only in case,
+    // CopyUp::RenameDirectoryCase. route applies to a Directory or a Link
+    // sourceKind. The result's rename names the source's upper path before
+    // the move.
+    MovedSource MoveRenameSource(const std::wstring& oldRelativePath,
+                                 const std::wstring& newRelativePath,
+                                 BOOLEAN replaceIfExists,
+                                 EntryKind sourceKind,
+                                 DirectoryRenameRoute route,
+                                 RenameCopyUp copyUpMode);
 
     // Moves a file to newRelativePath in the upper. When a lower holds the
     // source, a whiteout then hides it at the old name. The result's status
@@ -940,28 +957,18 @@ private:
     MovedFile RenameFileEntry(const std::wstring& oldRelativePath,
                               const std::wstring& newRelativePath,
                               BOOLEAN replaceIfExists,
-                              bool destHadWhiteout,
                               RenameCopyUp copyUpMode);
 
     // Moves a directory or a link along route, then writes the whiteout at
-    // the old name for the MergeLower and MoveUpperAndWhiteout routes.
+    // the old name for the MergeLower and MoveUpperAndWhiteout routes. When
+    // that write fails, RenameRollback::WhiteOutSource moves the entry back
+    // as rename describes.
     NTSTATUS RenameDirectoryEntry(const std::wstring& oldRelativePath,
                                   const std::wstring& newRelativePath,
                                   EntryKind sourceKind,
                                   DirectoryRenameRoute route,
                                   BOOLEAN replaceIfExists,
-                                  bool destHadWhiteout);
-
-    // Writes a whiteout of the given type at paths.oldNorm after a rename
-    // moved the upper entry from oldUpperPath to paths.newNorm. When the
-    // write fails, moves the entry back to oldUpperPath, so the merged view
-    // is as before the rename, and returns the write error. When the entry
-    // cannot move back and destHadWhiteout is true, removes the whiteout at
-    // paths.newNorm, so the moved entry stays visible.
-    NTSTATUS WhiteOutRenameSource(const RenamePaths& paths,
-                                  WhiteoutType type,
-                                  const std::wstring& oldUpperPath,
-                                  bool destHadWhiteout);
+                                  const UpperRename& rename);
 
     LayerConfig config_;
     // The final path of config_.upperPath, read once at mount, in the
@@ -977,6 +984,7 @@ private:
     std::unique_ptr<CopyUp> copyUp_;
     std::unique_ptr<DirectoryRename> directoryRename_;
     std::unique_ptr<FileRename> fileRename_;
+    std::unique_ptr<RenameRollback> renameRollback_;
     std::unique_ptr<UpperEntryRemover> upperEntryRemover_;
     std::shared_ptr<ProcessTracker> processTracker_;
 

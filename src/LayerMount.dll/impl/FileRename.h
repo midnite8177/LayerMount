@@ -23,8 +23,8 @@ struct MovedFile {
     NTSTATUS status;
     // True when the rename copied the source up as a metacopy shell.
     bool stagedShell;
-    // The upper path of the source before the move. A caller whose
-    // whiteout write fails moves the file back there.
+    // The upper path of the source before the move, where a failed
+    // rename moves the file back.
     std::wstring oldUpperPath;
 };
 

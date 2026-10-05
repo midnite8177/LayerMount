@@ -69,11 +69,13 @@ public:
     // component of that path in the merged view, CreateWhiteout returns
     // STATUS_ACCESS_DENIED. RemoveWhiteout walks the path in the upper only,
     // as FindLinkOnPath does. Under an upper link, it removes nothing and
-    // returns true, because a .wh.<name> file there is an ordinary file.
-    // When that walk of the upper cannot read a component, RemoveWhiteout
-    // removes nothing and returns false.
+    // returns STATUS_SUCCESS, because a .wh.<name> file there is an
+    // ordinary file. When that walk of the upper cannot read a component,
+    // RemoveWhiteout removes nothing and returns STATUS_ACCESS_DENIED. A
+    // missing marker is success, and a failed delete returns its error as
+    // an NTSTATUS.
     NTSTATUS CreateWhiteout(const std::wstring& relativePath, WhiteoutType type);
-    bool RemoveWhiteout(const std::wstring& relativePath);
+    NTSTATUS RemoveWhiteout(const std::wstring& relativePath);
 
     // IsOpaqueInLayer for the upper layer.
     bool IsOpaque(const std::wstring& dirRelativePath) const;

@@ -3663,6 +3663,122 @@ public:
         });
     }
 
+    TEST_METHOD(Rename_FileOntoWhitedOutNameWhenTheWhiteoutCannotGo_KeepsTheOldName) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Upper, DirectoryLayer::Lower}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"a.txt", "source");
+            env.WriteFile(env.Lower(0), L"b.txt", "lower");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"b.txt"), "");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const ScopedHandle heldMarker =
+                    HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"b.txt"),
+                             FILE_SHARE_READ | FILE_SHARE_WRITE);
+                status = mount.Rename(L"a.txt", L"b.txt", kFailIfExists, kNoCallerPid);
+            }
+
+            AssertStatus(STATUS_SHARING_VIOLATION, status,
+                L"The rename must fail when the whiteout at the new name cannot go");
+            Assert::IsFalse(env.FileExists(env.Upper(), L"b.txt"),
+                L"The failed rename must leave no upper entry at the new name");
+            Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"a.txt")),
+                L"The failed rename must leave no whiteout at the old name");
+            AssertOnlyEntryShownAs(mount, L"", L"a.txt");
+            Assert::AreEqual(std::string("source"), ReadThroughMount(mount, L"a.txt"),
+                L"a.txt must still show the source file");
+        }
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryOntoWhitedOutNameWhenTheWhiteoutCannotGo_LeavesTheSourceNotOpaque) {
+        for (const bool lowerFileAtSource : {false, true}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+            if (lowerFileAtSource) {
+                env.WriteFile(env.Lower(0), L"src", "lower file");
+            }
+            env.WriteFile(env.Lower(0), L"dst\\old.txt", "old");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst"), "");
+            const LayerConfig config = env.MakeConfig();
+            ::LayerMount::LayerMount mount(config);
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const ScopedHandle heldMarker =
+                    HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"dst"),
+                             FILE_SHARE_READ | FILE_SHARE_WRITE);
+                status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+            }
+
+            AssertStatus(STATUS_SHARING_VIOLATION, status,
+                L"The rename must fail when the whiteout at the new name cannot go");
+            AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+            const WhiteoutManager markers(config, nullptr);
+            Assert::IsFalse(markers.IsOpaque(L"src"),
+                L"The undone rename must take off the opaque marker it gave src");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_WhenTheWhiteoutCannotGoAndTheFileCannotMoveBack_KeepsTheReplacedFileInTheWorkDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"d\\a.txt", "source");
+        env.WriteFile(env.Upper(), L"b.txt", "keep");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"b.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const DirectoryRefusesNewEntries sourceParentRefusesNewFiles(env.Upper() + L"\\d",
+                                                                         FILE_ADD_FILE);
+            const ScopedHandle heldMarker =
+                HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"b.txt"),
+                         FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"d\\a.txt", L"b.txt", kReplaceIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_SHARING_VIOLATION, status,
+            L"The rename must fail when the whiteout at the new name cannot go");
+        bool workHoldsReplacedFile = false;
+        for (const auto& entry : fs::recursive_directory_iterator(env.Work())) {
+            workHoldsReplacedFile = workHoldsReplacedFile ||
+                (entry.is_regular_file() &&
+                 env.ReadFile(env.Work(), fs::relative(entry.path(), env.Work()).wstring()) ==
+                     "keep");
+        }
+        Assert::IsTrue(workHoldsReplacedFile,
+            L"The work directory must keep the replaced b.txt");
+    }
+
+    TEST_METHOD(Rename_DirectoryOntoWhitedOutNameWhenTheWhiteoutCannotGo_KeepsTheOldName) {
+        for (const DirectoryLayer sourceLayer : {DirectoryLayer::Upper, DirectoryLayer::Lower}) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(LayerRoot(env, sourceLayer), L"src\\a.txt", "a");
+            env.WriteFile(env.Lower(0), L"dst\\old.txt", "old");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst"), "");
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const ScopedHandle heldMarker =
+                    HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"dst"),
+                             FILE_SHARE_READ | FILE_SHARE_WRITE);
+                status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+            }
+
+            AssertStatus(STATUS_SHARING_VIOLATION, status,
+                L"The rename must fail when the whiteout at the new name cannot go");
+            Assert::IsFalse(env.FileExists(env.Upper(), L"dst"),
+                L"The failed rename must leave no upper entry at the new name");
+            Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"src")),
+                L"The failed rename must leave no whiteout at the old name");
+            AssertOnlyEntryShownAs(mount, L"", L"src");
+            AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"dst"),
+                L"An open of dst after the failed rename must find nothing");
+        }
+    }
+
     TEST_METHOD(Rename_MergedDirectoryWhoseUpperCannotGo_KeepsEveryChildAtTheOldName) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Upper(), L"src\\a.txt", "upper only");

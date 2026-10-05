@@ -866,6 +866,10 @@ void RenameDestinationAside::Commit() {
     asidePath_.clear();
 }
 
+void RenameDestinationAside::Release() {
+    asidePath_.clear();
+}
+
 NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
                                            EntryKind destinationKind,
                                            RenameDestinationAside* aside) {

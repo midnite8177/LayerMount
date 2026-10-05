@@ -65,6 +65,11 @@ public:
     // component as the file system stores it.
     std::wstring GetStoredUpperPath(const std::wstring& relativePath) const;
 
+    // The upper path of the rename source at relativePath: GetStoredUpperPath
+    // when the upper holds the source, and GetUpperPathForCopyUp of the
+    // lower source otherwise.
+    std::wstring GetUpperPathForRenameSource(const std::wstring& relativePath) const;
+
     bool HasTypeConflict(const std::wstring& relativePath) const;
 
     // IsReservedOverlayPath with this resolver's layers. normalized must be

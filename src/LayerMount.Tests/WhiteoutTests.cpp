@@ -233,7 +233,7 @@ public:
         Assert::IsTrue(wm.HasWhiteoutInAnyLayer(L"foo.txt"));
     }
 
-    TEST_METHOD(RemoveWhiteout_ExistingMarker_DeletesAndReturnsTrue) {
+    TEST_METHOD(RemoveWhiteout_ExistingMarker_DeletesAndSucceeds) {
         TempLayerEnvironment env(1);
         auto config = env.MakeConfig();
         Cache cache;
@@ -242,17 +242,18 @@ public:
         wm.CreateWhiteout(L"foo.txt", WhiteoutType::File);
         Assert::IsTrue(wm.HasWhiteout(L"foo.txt", env.Upper()));
 
-        Assert::IsTrue(wm.RemoveWhiteout(L"foo.txt"));
+        AssertStatus(STATUS_SUCCESS, wm.RemoveWhiteout(L"foo.txt"),
+            L"RemoveWhiteout must delete the marker");
         Assert::IsFalse(wm.HasWhiteout(L"foo.txt", env.Upper()));
     }
 
-    TEST_METHOD(RemoveWhiteout_NoMarker_ReturnsTrue) {
+    TEST_METHOD(RemoveWhiteout_NoMarker_Succeeds) {
         TempLayerEnvironment env(1);
         auto config = env.MakeConfig();
         Cache cache;
         WhiteoutManager wm(config, &cache);
 
-        Assert::IsTrue(wm.RemoveWhiteout(L"nonexistent.txt"),
+        AssertStatus(STATUS_SUCCESS, wm.RemoveWhiteout(L"nonexistent.txt"),
             L"RemoveWhiteout should be idempotent when marker doesn't exist");
     }
 
@@ -2118,7 +2119,7 @@ public:
         }
     }
 
-    TEST_METHOD(RemoveWhiteout_UnderUpperJunctionWithUnreadableReparseTag_ReturnsFalseAndKeepsTheTargetFile) {
+    TEST_METHOD(RemoveWhiteout_UnderUpperJunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndKeepsTheTargetFile) {
         TempLayerEnvironment env(1);
         if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper,
                                                      CreateDirectoryJunction)) {
@@ -2134,7 +2135,7 @@ public:
         Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
             L"The deny ACE must make the junction's reparse tag unreadable");
 
-        Assert::IsFalse(wm.RemoveWhiteout(L"link\\foo"),
+        AssertStatus(STATUS_ACCESS_DENIED, wm.RemoveWhiteout(L"link\\foo"),
             L"RemoveWhiteout under a component whose reparse tag the walk cannot read must fail");
 
         Assert::IsTrue(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
@@ -2151,7 +2152,8 @@ public:
             Cache cache;
             WhiteoutManager wm(config, &cache);
 
-            Assert::IsTrue(wm.RemoveWhiteout(L"link\\foo"), L"RemoveWhiteout under a link must succeed");
+            AssertStatus(STATUS_SUCCESS, wm.RemoveWhiteout(L"link\\foo"),
+                L"RemoveWhiteout under a link must succeed");
 
             Assert::IsTrue(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
                 L"RemoveWhiteout under a link must keep the .wh.foo file in the target");
