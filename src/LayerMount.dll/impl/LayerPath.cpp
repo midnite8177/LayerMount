@@ -311,6 +311,26 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
     return status;
 }
 
+NTSTATUS MoveUpperEntryToWork(const std::wstring& path,
+                              const std::function<std::wstring()>& newWorkPath,
+                              const LayerConfig& config,
+                              std::wstring* workPath) {
+    workPath->clear();
+    if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const DWORD probeErr = ::GetLastError();
+        if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
+            return STATUS_SUCCESS;
+        }
+        return NtStatusFromWin32(probeErr);
+    }
+    std::wstring target = newWorkPath();
+    const NTSTATUS moveStatus = MoveUpperEntry(path, target, ReplaceExisting::No, config);
+    if (NT_SUCCESS(moveStatus)) {
+        *workPath = std::move(target);
+    }
+    return moveStatus;
+}
+
 NTSTATUS ProbeUpperEntry(const std::wstring& path, bool* exists, EntryKind* kind) {
     *exists = false;
     const DWORD attrs = ::GetFileAttributesW(path.c_str());

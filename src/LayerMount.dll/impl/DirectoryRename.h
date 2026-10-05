@@ -41,8 +41,12 @@ public:
     // destination exists in the merged view. The move fails with
     // STATUS_OBJECT_NAME_COLLISION when an entry holds the new upper path,
     // and that entry stays as it was. The new upper entry gets its name in
-    // the case of paths.newPath. A failure leaves the old tree as it was and
-    // tries to remove the copy in the work directory.
+    // the case of paths.newPath. After the move, the old upper entry moves
+    // into the work directory in one step, and the call removes it there.
+    // When it cannot be probed or moved, the call returns that error, tries
+    // to remove the new upper entry, and leaves the old upper entry whole.
+    // Any other failure leaves the old tree as it was and tries to remove
+    // the copy in the work directory.
     // Warning: this call never replaces an entry. With ReplaceExisting::Yes,
     // the caller must first move the destination aside with
     // CopyUp::SetRenameDestinationAside.

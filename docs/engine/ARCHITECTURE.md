@@ -891,8 +891,13 @@ The engine handles ten cases. The last three also apply to a file source:
   by the rules of the listing merge. It takes none when it is opaque,
   when an upper whiteout has its name, or when the first lower that
   holds its name holds a file or a link there. The copy holds no marker
-  file, and the engine marks the new name opaque. A directory the engine cannot
-  list fails the rename, and the old tree stays as it was. When the engine cannot read the reparse tag of
+  file, and the engine marks the new name opaque. After the copy
+  reaches the new name, the engine moves the upper source into the
+  work directory in one step and removes it there. When the upper
+  source cannot move, the engine removes the copy, the rename fails
+  with that error, and the old directory stays whole. A directory the
+  engine cannot list fails the rename, and the old tree stays as it
+  was. When the engine cannot read the reparse tag of
   the lower entry, the rename fails with that error before any side
   effects.
 - **replace=true, dest is a directory with visible children**: a child

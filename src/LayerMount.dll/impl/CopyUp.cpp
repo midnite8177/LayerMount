@@ -870,25 +870,19 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
                                            EntryKind destinationKind,
                                            RenameDestinationAside* aside) {
     const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
-    const DWORD attributes = ::GetFileAttributesW(upperPath.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        const DWORD probeErr = ::GetLastError();
-        if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
-            return STATUS_SUCCESS;
-        }
-        return ::LayerMount::NtStatusFromWin32(probeErr);
-    }
     // NTFS refuses a replace of a read-only file, but not a move of one into
     // the work directory.
-    if (destinationKind == EntryKind::File &&
-        (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
-        return STATUS_ACCESS_DENIED;
+    if (destinationKind == EntryKind::File) {
+        const DWORD attributes = ::GetFileAttributesW(upperPath.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
+            return STATUS_ACCESS_DENIED;
+        }
     }
 
-    const std::wstring asidePath = GenerateWorkPath();
-    const NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No,
-                                               config_);
-    if (!NT_SUCCESS(moveStatus)) {
+    std::wstring asidePath;
+    const NTSTATUS moveStatus = MoveUpperEntryToWork(
+        upperPath, [this]() { return GenerateWorkPath(); }, config_, &asidePath);
+    if (!NT_SUCCESS(moveStatus) || asidePath.empty()) {
         return moveStatus;
     }
     cache_.InvalidateWithAncestors(newNorm);

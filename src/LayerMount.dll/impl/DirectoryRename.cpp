@@ -416,11 +416,18 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
         return status;
     }
 
-    RemoveUpperEntry(oldUpperPath, config_);
+    std::wstring asidePath;
+    const NTSTATUS asideStatus = MoveUpperEntryToWork(
+        oldUpperPath, [this]() { return copyUp_.GenerateWorkPath(); }, config_, &asidePath);
+    if (!NT_SUCCESS(asideStatus)) {
+        RemoveUpperEntry(newUpperPath, config_);
+    } else if (!asidePath.empty()) {
+        RemoveUpperEntry(asidePath, config_);
+    }
 
     cache_.InvalidateWithAncestors(oldNorm);
     cache_.InvalidateWithAncestors(newNorm);
-    return STATUS_SUCCESS;
+    return asideStatus;
 }
 
 NTSTATUS DirectoryRename::RenameUpperDirectory(const RenameCallerPaths& paths,

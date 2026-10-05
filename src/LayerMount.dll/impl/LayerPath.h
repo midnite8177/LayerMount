@@ -120,6 +120,16 @@ NTSTATUS MoveUpperEntry(const std::wstring& from,
                         ReplaceExisting replace,
                         const LayerConfig& config);
 
+// Moves the upper entry at path, as MoveUpperEntry does, to the new path
+// in the work directory that newWorkPath gives, and sets *workPath to that
+// path. When no entry is at path, does not call newWorkPath, sets
+// *workPath empty and returns STATUS_SUCCESS. A failed probe or move
+// returns its error, leaves the entry at path, and sets *workPath empty.
+NTSTATUS MoveUpperEntryToWork(const std::wstring& path,
+                              const std::function<std::wstring()>& newWorkPath,
+                              const LayerConfig& config,
+                              std::wstring* workPath);
+
 // Sets *kind to the kind of the upper entry at path, as EntryKindOf reads
 // it, and sets *exists to true. When no entry is at path, also when the
 // entry goes between the attribute read and the tag read, sets *exists to

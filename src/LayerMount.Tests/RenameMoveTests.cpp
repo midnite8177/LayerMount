@@ -3663,6 +3663,36 @@ public:
         });
     }
 
+    TEST_METHOD(Rename_MergedDirectoryWhoseUpperCannotGo_KeepsEveryChildAtTheOldName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"src\\a.txt", "upper only");
+        env.WriteFile(env.Upper(), L"src\\x.txt", "held");
+        env.WriteFile(env.Lower(0), L"src\\b.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            // An open child without FILE_SHARE_DELETE lets the copy read it
+            // but keeps the upper src from going. NTFS lists a.txt first, so a
+            // delete of the upper src removes a.txt before it fails on x.txt.
+            const ScopedHandle heldChild =
+                HoldOpen(env.Upper() + L"\\src\\x.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+        }
+
+        Assert::IsFalse(NT_SUCCESS(status), L"The rename must fail when the upper src cannot go");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"dst"),
+            L"The failed rename must remove the copy at the new name");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"src")),
+            L"The failed rename must leave no whiteout at the old name");
+        AssertOnlyEntryShownAs(mount, L"", L"src");
+        AssertEntryShownAs(mount, L"src", L"a.txt", L"a.txt");
+        AssertEntryShownAs(mount, L"src", L"b.txt", L"b.txt");
+        AssertEntryShownAs(mount, L"src", L"x.txt", L"x.txt");
+        Assert::AreEqual(std::string("upper only"), ReadThroughMount(mount, L"src\\a.txt"),
+            L"src\\a.txt must still show the upper file");
+    }
+
     TEST_METHOD(ReplaceRename_FileOntoReadOnlyUpperFile_FailsAndChangesNothing) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"a.txt", "lower");
