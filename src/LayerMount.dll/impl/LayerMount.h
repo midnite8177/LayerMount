@@ -174,6 +174,7 @@ class CopyUp;
 class DirectoryRename;
 class FileRename;
 enum class RenameCopyUp;
+struct MovedFile;
 class UpperEntryRemover;
 namespace VHD { class VHDLayerManager; }
 namespace VSS { class VSSManager; }
@@ -517,7 +518,9 @@ public:
     NTSTATUS CanDelete(FileContext* ctx);
 
     // Calls CanDelete first. Removes the entry from the upper, and writes a
-    // whiteout when a lower holds it.
+    // whiteout when a lower holds it. Under a lower link that no higher
+    // layer holds, copies the link up as a link first, so the delete
+    // removes the entry from the link target and writes no whiteout.
     NTSTATUS Delete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS Delete(FileContext* ctx);
 
@@ -526,9 +529,9 @@ public:
     NTSTATUS DeleteStreamOnContext(FileContext* ctx);
 
     // Path-based rename: moves the entry within the overlay namespace.
-    // Source is copied up if it lives only in lower. Rename drops a
-    // whiteout at the old path when a lower still holds it. A rename to
-    // the identical name succeeds and changes nothing.
+    // Outside a link target, Rename copies up a source that lives only in a
+    // lower, and drops a whiteout at the old path when a lower still holds
+    // it. A rename to the identical name succeeds and changes nothing.
     // replaceIfExists FALSE fails with STATUS_OBJECT_NAME_COLLISION when
     // the destination already exists. Otherwise the rename of a directory
     // or a link to a path inside its own tree fails with
@@ -546,7 +549,13 @@ public:
     // read the reparse tag of a source or destination fails the rename with
     // that status before any change. The FileContext overload makes these
     // checks before it closes ctx->handle, so a refused rename leaves the
-    // handle open.
+    // handle open. CheckRenameLinkBoundary refuses a rename whose source
+    // and destination are not under the same link with
+    // STATUS_NOT_SAME_DEVICE, and one with a component on either path that
+    // it cannot read with STATUS_ACCESS_DENIED, before any change. A rename
+    // within one lower link target, into a destination parent that the
+    // merged view shows as a directory, copies the link up as a link
+    // first, then renames the entry in the target and writes no whiteout.
     NTSTATUS Rename(const std::wstring& oldRelativePath,
                     const std::wstring& newRelativePath,
                     BOOLEAN replaceIfExists,
@@ -768,6 +777,8 @@ private:
     NTSTATUS DeleteStreamByPath(const std::wstring& hostNorm,
                                 const std::wstring& streamSuffix);
 
+    NTSTATUS RemoveEntry(const std::wstring& hostNorm);
+
     // The source and destination paths of a rename, in NormalizePath form.
     struct RenamePaths {
         const std::wstring& oldNorm;
@@ -791,6 +802,18 @@ private:
                                     BOOLEAN replaceIfExists,
                                     RenameKinds* kinds) const;
 
+    // The kinds and the links of a rename that passed CheckRename.
+    struct CheckedRename;
+
+    // The checks of both Rename overloads, in order: CheckRenameRequest, the
+    // lookup of the source, CheckRenameLinkBoundary, the kind of the source
+    // and, for a new path, CheckRenameDestination. Fills *checked and
+    // changes nothing.
+    NTSTATUS CheckRename(const RenamePaths& paths,
+                         BOOLEAN replaceIfExists,
+                         DWORD callerPid,
+                         CheckedRename* checked);
+
     // How a rename moves a directory or a link.
     enum class DirectoryRenameRoute {
         // Copies the lower up and merges the upper entry into the copy.
@@ -811,28 +834,32 @@ private:
                                     EntryKind sourceKind,
                                     DirectoryRenameRoute* route) const;
 
-    // The status of a rename, and whether it left a metacopy shell at the
-    // new name.
+    // The status of a rename, whether it left a metacopy shell at the new
+    // name, and whether its source was under a link, where the rename moved
+    // the entry within the link target and copied nothing up.
     struct RenameResult {
         NTSTATUS status;
         bool stagedShell;
+        bool sourceInLinkTarget;
     };
 
-    // The part of a rename after its checks passed. copyUpMode chooses how
-    // a file that only a lower holds copies up.
+    // The part of a rename after its checks passed. Copies up the lower link
+    // that checked names first. copyUpMode chooses how a file that only a
+    // lower holds copies up.
     RenameResult RenameCheckedEntry(const std::wstring& oldRelativePath,
                                     const std::wstring& newRelativePath,
                                     BOOLEAN replaceIfExists,
-                                    const RenameKinds& kinds,
+                                    const CheckedRename& checked,
                                     RenameCopyUp copyUpMode);
 
     // Moves a file to newRelativePath in the upper. When a lower holds the
-    // source, a whiteout then hides it at the old name.
-    RenameResult RenameFileEntry(const std::wstring& oldRelativePath,
-                                 const std::wstring& newRelativePath,
-                                 BOOLEAN replaceIfExists,
-                                 bool destHadWhiteout,
-                                 RenameCopyUp copyUpMode);
+    // source, a whiteout then hides it at the old name. The result's status
+    // is that of the whiteout write when the move succeeded.
+    MovedFile RenameFileEntry(const std::wstring& oldRelativePath,
+                              const std::wstring& newRelativePath,
+                              BOOLEAN replaceIfExists,
+                              bool destHadWhiteout,
+                              RenameCopyUp copyUpMode);
 
     // Moves a directory or a link along route, then writes the whiteout at
     // the old name for the MergeLower and MoveUpperAndWhiteout routes.

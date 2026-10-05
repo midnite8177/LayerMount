@@ -879,7 +879,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"lazy.bin"),
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"lazy.bin").status,
             L"The metadata-only copy-up must succeed");
 
         Assert::AreEqual(std::wstring(L"Lazy.BIN"), StoredLeafName(env.Upper() + L"\\lazy.bin"),
@@ -896,7 +896,7 @@ public:
         TempLayerEnvironment& env = layers.env;
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin"),
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin").status,
             L"The metadata-only copy-up of the pinned placeholder file must succeed");
         Assert::IsFalse(HasAttribute(env.Upper() + L"\\big.bin", FILE_ATTRIBUTE_PINNED),
             L"The upper shell must not carry the pin state of the lower file");
@@ -916,7 +916,7 @@ public:
         TempLayerEnvironment& env = layers.env;
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin"),
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin").status,
             L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");
         AssertStatus(STATUS_SUCCESS, rig.copyUp.CompleteLazyCopyUp(L"big.bin"),
             L"The fill of the upper shell must succeed");
@@ -933,7 +933,7 @@ public:
         }
         TempLayerEnvironment& env = layers.env;
         CopyUpAndRenameRig rig(env.MakeConfig());
-        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin"),
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin").status,
             L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");
         layers.syncRoot.DisconnectProvider();
 

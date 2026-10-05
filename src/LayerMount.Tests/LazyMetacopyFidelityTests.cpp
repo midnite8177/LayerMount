@@ -115,7 +115,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"ts.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"ts.bin").status));
 
         const std::wstring upperPath = env.Upper() + L"\\ts.bin";
 
@@ -157,7 +157,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"shell-ts.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"shell-ts.bin").status));
 
         const std::wstring upperPath = env.Upper() + L"\\shell-ts.bin";
         const FILETIME shellCreation = MakeFileTime(2020, 1, 10);
@@ -186,7 +186,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"fail-ts.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"fail-ts.bin").status));
 
         const std::wstring upperPath = env.Upper() + L"\\fail-ts.bin";
         const FILETIME shellCreation = MakeFileTime(2020, 1, 10);
@@ -225,7 +225,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
         const std::wstring upperPath = env.Upper() + L"\\wsl.bin";
 
-        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"wsl.bin"),
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"wsl.bin").status,
             L"The metacopy of a file with extended attributes must succeed");
         Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(upperPath, nullptr).metacopy,
             L"The upper file must be a metacopy shell before the fill");
@@ -245,7 +245,7 @@ public:
         WriteADS(env.Lower(0) + L"\\ads.bin", L"Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3\r\n");
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        AssertStatus(STATUS_INVALID_PARAMETER, rig.copyUp.CopyUpMetadataOnly(L"ads.bin"),
+        AssertStatus(STATUS_INVALID_PARAMETER, rig.copyUp.CopyUpMetadataOnly(L"ads.bin").status,
             L"A metacopy of a lower file with a user stream must be refused");
         Assert::IsFalse(env.FileExists(env.Upper(), L"ads.bin"),
             L"A refused metacopy must stage no shell in the upper");
@@ -305,7 +305,7 @@ public:
         env.WriteFile(env.Lower(0), L"shell.bin", "lower");
         {
             CopyUpAndRenameRig rig(env.MakeConfig());
-            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"shell.bin"),
+            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"shell.bin").status,
                 L"Preconditions: the copy-up must stage a metacopy shell");
         }
         const std::wstring shellPath = env.Upper() + L"\\shell.bin";
@@ -346,7 +346,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"cmp.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"cmp.bin").status));
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"cmp.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\cmp.bin";
@@ -374,7 +374,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin").status));
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"sparse.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\sparse.bin";
@@ -403,7 +403,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin")));
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"sparse.bin").status));
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CompleteLazyCopyUp(L"sparse.bin")));
 
         const std::wstring upperPath = env.Upper() + L"\\sparse.bin";

@@ -482,22 +482,75 @@ public:
             L"The delete of the link must leave the file in the link target");
     }
 
-    TEST_METHOD(Delete_WhiteoutNamedFileUnderUpperLink_RemovesTheTargetFile) {
+    TEST_METHOD(Delete_WhiteoutNamedFileUnderLink_RemovesTheTargetFile) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\kept.txt", "kept");
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                AssertStatus(STATUS_SUCCESS, mount.Delete(L"link\\.wh.foo", kNoCallerPid),
+                    L"The delete of a .wh. file under a link must succeed");
+
+                Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                    L"The delete must remove the .wh.foo file from the link target");
+                Assert::IsFalse(mount.MergeDirectoryEntries(L"link").entries.count(L".wh.foo") == 1,
+                    L"The listing of the link must not show the deleted file");
+                AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+            }
+        }
+    }
+
+    TEST_METHOD(Delete_FileUnderLowerLink_RemovesTheTargetFileAndKeepsTheLink) {
         for (const LinkCreator createLink : kDirectoryLinkCreators) {
             TempLayerEnvironment env(1);
-            if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper, createLink)) {
+            env.WriteFile(env.Root(), L"target\\foo", "foo");
+            env.WriteFile(env.Root(), L"target\\sub\\bar", "bar");
+            if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
                 continue;
             }
             ::LayerMount::LayerMount mount(env.MakeConfig());
 
-            AssertStatus(STATUS_SUCCESS, mount.Delete(L"link\\.wh.foo", kNoCallerPid),
-                L"The delete of a .wh. file under a link must succeed");
+            AssertStatus(STATUS_SUCCESS, mount.Delete(L"link\\foo", kNoCallerPid),
+                L"The delete of a file under a lower link must succeed");
+            AssertStatus(STATUS_SUCCESS, mount.Delete(L"link\\sub\\bar", kNoCallerPid),
+                L"The delete of a file two levels under a lower link must succeed");
 
-            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
-                L"The delete must remove the .wh.foo file from the link target");
-            Assert::IsTrue(mount.MergeDirectoryEntries(L"link").entries.empty(),
-                L"The listing of the link must not show the deleted file");
+            Assert::IsFalse(env.FileExists(env.Root(), L"target\\foo"),
+                L"The delete must remove foo from the link target");
+            Assert::IsFalse(env.FileExists(env.Root(), L"target\\sub\\bar"),
+                L"The delete must remove sub\\bar from the link target");
+            Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"link\\foo")),
+                L"The delete must write no whiteout through the link");
+            AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
         }
+    }
+
+    TEST_METHOD(DeleteContext_FileUnderLowerJunction_RemovesTheTargetFileAndKeepsTheLink) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\foo", "foo");
+        env.WriteFile(env.Root(), L"target\\kept.txt", "kept");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"link\\foo", FILE_READ_ATTRIBUTES | DELETE,
+                                             kNoCreateOptions, kNoCallerPid, &ctx, &info)),
+            L"Preconditions: the file under the lower junction must open for delete");
+
+        const NTSTATUS status = mount.Delete(ctx.get());
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, status, L"The delete of the open file under the junction must succeed");
+        Assert::IsFalse(env.FileExists(env.Root(), L"target\\foo"),
+            L"The delete must remove foo from the junction target");
+        AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
     }
 
     TEST_METHOD(Delete_DirectoryUnderLinkHoldingOnlyAWhiteoutNamedFile_FailsWithDirectoryNotEmpty) {

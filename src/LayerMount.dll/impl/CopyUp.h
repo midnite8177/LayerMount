@@ -52,10 +52,13 @@ private:
     bool wasOpaque_ = false;
 };
 
-// The result of CopyUp::CopyUpFileOrShell.
+// The result of CopyUp::CopyUpMetadataOnly and CopyUp::CopyUpFileOrShell.
 struct FileCopyUpResult {
     NTSTATUS status;
-    // True when the copy-up left a metacopy shell in the upper.
+    // True when CopyUpMetadataOnly left a metacopy shell in the upper, and
+    // when it found an entry already at the path in the upper, whatever
+    // that entry holds. False after a copy of the data, and when the upper
+    // reaches the entry through a link.
     bool stagedShell;
 };
 
@@ -100,7 +103,10 @@ public:
     // data. A failure to read the reparse tag fails the copy-up with that
     // error. If an entry appears at the upper path before that move, the
     // copy-up fails with STATUS_OBJECT_NAME_COLLISION and leaves that entry
-    // as it was. A failure leaves no copy in the work directory.
+    // as it was. A failure leaves no copy in the work directory. When the
+    // upper reaches the entry through a link, such as a lower link above it
+    // that EnsureUpperParent copies up, copies nothing and returns
+    // STATUS_SUCCESS.
     NTSTATUS CopyUpFile(const std::wstring& relativePath);
 
     // Builds a sparse shell of the lower file's size in the work directory,
@@ -110,8 +116,10 @@ public:
     // never carries the lower file's user streams, so a lower file with a
     // stream that IsUserAlternateStream accepts fails with
     // STATUS_INVALID_PARAMETER and writes nothing. Returns the error of a
-    // stream list that cannot be read.
-    NTSTATUS CopyUpMetadataOnly(const std::wstring& relativePath);
+    // stream list that cannot be read. When the upper reaches the entry
+    // through a link, copies nothing and returns STATUS_SUCCESS with
+    // stagedShell false.
+    FileCopyUpResult CopyUpMetadataOnly(const std::wstring& relativePath);
 
     // Copies the lower file at relativePath up as a metacopy shell or with
     // its data. The data copies in full without sparse-file support on the
@@ -120,7 +128,9 @@ public:
     // a file no larger than shellOnlyAboveBytes or whose size cannot be
     // read. Fails with STATUS_OBJECT_NAME_NOT_FOUND when neither a lower
     // nor the upper holds relativePath. Returns the error of a reparse tag
-    // or a stream list that cannot be read.
+    // or a stream list that cannot be read. When the upper reaches the
+    // entry through a link, copies nothing and returns STATUS_SUCCESS with
+    // stagedShell false.
     FileCopyUpResult CopyUpFileOrShell(const std::wstring& relativePath,
                                        std::optional<LONGLONG> shellOnlyAboveBytes);
 
@@ -135,9 +145,11 @@ public:
     // Copy a directory entry (not contents) from a lower layer to the upper layer.
     // The upper entry takes the lower entry's name, whatever the case of
     // relativePath. Returns success when the upper already has an entry at
-    // the path. Otherwise builds the directory, or the link for a lower
-    // junction or directory symbolic link, in the work directory and moves
-    // it to the upper path once it is complete. Any other directory
+    // the path. Also returns success and copies nothing when the copy-up of
+    // the parent brings a lower link up and the upper then reaches the
+    // entry through that link. Otherwise builds the directory, or the link
+    // for a lower junction or directory symbolic link, in the work directory
+    // and moves it to the upper path once it is complete. Any other directory
     // reparse point copies up as a plain directory. A failure to read the
     // reparse tag fails the copy-up with that error. When an entry appears
     // at the upper path before that move, fails with
@@ -150,8 +162,18 @@ public:
     // so the upper entry takes the lower's name. Returns
     // STATUS_OBJECT_PATH_NOT_FOUND and writes nothing for every other
     // parent. Overlayfs fails with ENOTDIR when the parent or an ancestor
-    // is a file, and with ENOENT when the overlay shows no parent.
+    // is a file, and with ENOENT when the overlay shows no parent. A lower
+    // link on the parent's path copies up as a link, so the upper parent is
+    // then in the link target.
     NTSTATUS EnsureUpperParent(const std::wstring& normalizedPath);
+
+    // When FindLinkAbove finds a lower link above normalizedPath, copies
+    // that link up as a link, with its ancestors as EnsureUpperParent does.
+    // A write at normalizedPath then goes through the upper link into the
+    // link target, as a write through a lower symlink does in overlayfs. For
+    // any other path, including one with a component that FindLinkAbove
+    // cannot read, returns STATUS_SUCCESS and writes nothing.
+    NTSTATUS CopyUpLowerLinkAbove(const std::wstring& normalizedPath);
 
     // Moves the upper entry at newNorm into the work directory, so a
     // replace-rename can put its source at the path. destinationKind is
@@ -189,9 +211,26 @@ private:
     };
 
     // Finds the first visible lower that holds normalized, makes the upper
-    // parent exist, and names the upper path after the lower entry. Returns
-    // STATUS_OBJECT_NAME_NOT_FOUND when no visible lower holds normalized.
-    NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target);
+    // parent exist, and sets *target to that lower entry and to an upper
+    // path named after it. Returns STATUS_OBJECT_NAME_NOT_FOUND when no
+    // visible lower holds normalized. When the upper then reaches the entry
+    // through a link on the parent's path, because the upper held the link
+    // or EnsureUpperParent copied a lower link up, the entry is already in
+    // the link target. Then returns STATUS_SUCCESS and leaves *target
+    // empty, and the caller copies nothing.
+    NTSTATUS PrepareCopyUpTarget(const std::wstring& normalized,
+                                 std::optional<CopyUpTarget>* target);
+
+    // Returns STATUS_INVALID_PARAMETER when the first visible lower that
+    // holds normalized has a stream that IsUserAlternateStream accepts, and
+    // the error of a stream list that cannot be read. Returns
+    // STATUS_SUCCESS otherwise, also when no lower holds normalized.
+    NTSTATUS LowerUserStreamStatus(const std::wstring& normalized);
+
+    // Builds a metacopy shell of the file at sourcePath at workPath, with
+    // its security and a copy-up record with the metacopy flag, and last
+    // the attributes and times. A failure removes the staged file.
+    NTSTATUS BuildMetacopyShell(const std::wstring& sourcePath, const std::wstring& workPath);
 
     NTSTATUS CopyUpReparseCloneAndCount(const std::wstring& normalized, const CopyUpTarget& target);
 

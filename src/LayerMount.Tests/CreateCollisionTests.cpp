@@ -240,7 +240,7 @@ public:
         env.WriteFile(env.Lower(0), L"f.txt", "lower");
         {
             CopyUpAndRenameRig rig(env.MakeConfig());
-            Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"f.txt")),
+            Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpMetadataOnly(L"f.txt").status),
                 L"Preconditions: the copy-up must stage a metacopy shell");
         }
         const std::wstring shellPath = env.Upper() + L"\\f.txt";

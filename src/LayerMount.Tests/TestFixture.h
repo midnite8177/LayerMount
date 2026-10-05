@@ -626,6 +626,27 @@ inline DWORD ReparseTagOf(const std::wstring& path) {
     return info.ReparseTag;
 }
 
+inline void AssertUpperLinkListsWholeTarget(const TempLayerEnvironment& env,
+                                            const ::LayerMount::LayerMount& mount,
+                                            const std::wstring& linkPath,
+                                            const std::wstring& targetPath) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    Assert::IsTrue(IsReparseTagNameSurrogate(ReparseTagOf(env.Upper() + L"\\" + linkPath)),
+        (L"The upper must hold " + linkPath + L" as a link, not as a plain directory").c_str());
+    const ::LayerMount::MergedDirectory listed = mount.MergeDirectoryEntries(linkPath);
+    AssertStatus(STATUS_SUCCESS, listed.status, (L"The listing of " + linkPath + L" must succeed").c_str());
+    size_t targetEntries = 0;
+    for (const auto& entry : fs::directory_iterator(targetPath)) {
+        std::wstring key = entry.path().filename().wstring();
+        ::CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
+        Assert::IsTrue(listed.entries.count(key) == 1,
+            (L"The listing of " + linkPath + L" must hold the target's entry " + key).c_str());
+        ++targetEntries;
+    }
+    Assert::AreEqual(targetEntries, listed.entries.size(),
+        (L"The listing of " + linkPath + L" must hold only the target's entries").c_str());
+}
+
 // The data the test sync provider serves for a cloud placeholder file,
 // length bytes from offset. The byte at offset i is 1 + i % 251, so no byte
 // is zero and each 4 KB block differs from the one before it.

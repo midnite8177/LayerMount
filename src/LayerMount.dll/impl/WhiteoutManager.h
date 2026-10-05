@@ -61,14 +61,17 @@ public:
 
     // Both functions change the upper layer only. CreateWhiteout returns
     // the error of the marker write that failed as an NTSTATUS. When the
-    // upper holds a link at the marker's directory or at an ancestor,
-    // CreateWhiteout returns STATUS_NOT_A_DIRECTORY and writes nothing, so
-    // no marker or directory goes through the link into its target. When
-    // the walk cannot read a component of that path, CreateWhiteout returns
-    // STATUS_ACCESS_DENIED. Under a link, RemoveWhiteout removes nothing and
+    // merged view meets a link at the marker's directory or at an ancestor,
+    // as FindLinkInView reads it, CreateWhiteout returns
+    // STATUS_NOT_A_DIRECTORY and writes nothing. So no marker or directory
+    // goes through an upper link into its target, and no plain upper
+    // directory hides a lower link. When FindLinkInView cannot read a
+    // component of that path in the merged view, CreateWhiteout returns
+    // STATUS_ACCESS_DENIED. RemoveWhiteout walks the path in the upper only,
+    // as FindLinkOnPath does. Under an upper link, it removes nothing and
     // returns true, because a .wh.<name> file there is an ordinary file.
-    // When the walk cannot read a component, RemoveWhiteout removes nothing
-    // and returns false.
+    // When that walk of the upper cannot read a component, RemoveWhiteout
+    // removes nothing and returns false.
     NTSTATUS CreateWhiteout(const std::wstring& relativePath, WhiteoutType type);
     bool RemoveWhiteout(const std::wstring& relativePath);
 
@@ -95,11 +98,12 @@ public:
     // write does. When both fail, returns the error of the marker file
     // create as an NTSTATUS. The directory keeps its times; SetOpaque
     // ignores a failure to restore them. Overlayfs keeps opacity in an
-    // extended attribute, which does not change mtime. When the upper holds
-    // a link at the directory or at an ancestor, SetOpaque returns
-    // STATUS_NOT_A_DIRECTORY and writes nothing, so no marker, directory or
-    // time write goes through the link into its target. When the walk
-    // cannot read a component of the path, SetOpaque returns
+    // extended attribute, which does not change mtime. When the merged view
+    // meets a link at the directory or at an ancestor, as FindLinkInView
+    // reads it, SetOpaque returns STATUS_NOT_A_DIRECTORY and writes nothing.
+    // So no marker, directory or time write goes through an upper link into
+    // its target, and no plain upper directory hides a lower link. When the
+    // walk cannot read a component of the path, SetOpaque returns
     // STATUS_ACCESS_DENIED, as overlayfs fails a path it cannot search.
     NTSTATUS SetOpaque(const std::wstring& dirRelativePath);
 

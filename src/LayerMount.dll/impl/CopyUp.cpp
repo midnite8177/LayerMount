@@ -62,7 +62,7 @@ DWORD WithoutReadOnly(DWORD attributes) {
 // source attribute such as FILE_ATTRIBUTE_PINNED uses such a bit. Thus
 // only attributes that CreateFileW sets go through. Read-only does not go
 // through, because NTFS refuses the stream of the copy-up record on a
-// read-only file. The guard in CopyUpMetadataOnly sets read-only after the
+// read-only file. The guard in BuildMetacopyShell sets read-only after the
 // record. Offline does not go through, because the shell is outside the
 // sync root or the storage manager of the source. Last, the guard writes
 // the source times and each source attribute that a FileBasicInfo write
@@ -350,9 +350,11 @@ NTSTATUS CopyUp::RecordStagedFile(const std::wstring& workPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarget* target) {
-    target->source = pathResolver_.ResolveLowerPath(normalized);
-    if (!target->source.Found()) {
+NTSTATUS CopyUp::PrepareCopyUpTarget(const std::wstring& normalized,
+                                     std::optional<CopyUpTarget>* target) {
+    target->reset();
+    const ResolvedPath source = pathResolver_.ResolveLowerPath(normalized);
+    if (!source.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
@@ -361,7 +363,17 @@ NTSTATUS CopyUp::PrepareCopyUpTarget(const std::wstring& normalized, CopyUpTarge
         return status;
     }
 
-    target->upperPath = pathResolver_.GetUpperPathForCopyUp(normalized, target->source);
+    // The check reads only the upper, because EnsureUpperParent has just
+    // copied any lower link on the path up as a link.
+    const std::wstring parent = std::filesystem::path(normalized).parent_path().wstring();
+    const LinkOnPath link = FindLinkOnPath(config_.upperPath, parent);
+    const bool reachedThroughUpperLink =
+        (link == LinkOnPath::Self || link == LinkOnPath::Ancestor) &&
+        pathResolver_.ExistsInUpper(normalized);
+    if (!reachedThroughUpperLink) {
+        target->emplace(
+            CopyUpTarget{source, pathResolver_.GetUpperPathForCopyUp(normalized, source)});
+    }
     return STATUS_SUCCESS;
 }
 
@@ -377,13 +389,13 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
-    CopyUpTarget target;
+    std::optional<CopyUpTarget> target;
     NTSTATUS status = PrepareCopyUpTarget(normalized, &target);
-    if (!NT_SUCCESS(status)) {
+    if (!NT_SUCCESS(status) || !target.has_value()) {
         return status;
     }
-    const ResolvedPath& source = target.source;
-    const std::wstring& upperPath = target.upperPath;
+    const ResolvedPath& source = target->source;
+    const std::wstring& upperPath = target->upperPath;
 
     bool clonesReparsePoint = false;
     status = ClonesReparsePoint(source.absolutePath, source.attributes, &clonesReparsePoint);
@@ -391,7 +403,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return status;
     }
     if (clonesReparsePoint) {
-        return CopyUpReparseCloneAndCount(normalized, target);
+        return CopyUpReparseCloneAndCount(normalized, *target);
     }
 
     ScopedHandle srcHandle(CreateFileW(
@@ -486,12 +498,47 @@ NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
     return CopyStagedFileMetadata(sourcePath, srcAttrs.dwFileAttributes, workPath);
 }
 
-NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
-    std::wstring normalized = NormalizePath(relativePath);
-
-    // Fast-path: already committed before we even check the reservation.
-    if (pathResolver_.ExistsInUpper(normalized)) {
+NTSTATUS CopyUp::LowerUserStreamStatus(const std::wstring& normalized) {
+    const ResolvedPath lowerSource = pathResolver_.ResolveLowerPath(normalized);
+    if (!lowerSource.Found()) {
         return STATUS_SUCCESS;
+    }
+    bool hasUserStream = false;
+    const NTSTATUS streamStatus =
+        HasUserAlternateDataStream(lowerSource.absolutePath, &hasUserStream);
+    if (!NT_SUCCESS(streamStatus)) {
+        return streamStatus;
+    }
+    return hasUserStream ? STATUS_INVALID_PARAMETER : STATUS_SUCCESS;
+}
+
+NTSTATUS CopyUp::BuildMetacopyShell(const std::wstring& sourcePath, const std::wstring& workPath) {
+    WIN32_FILE_ATTRIBUTE_DATA srcAttrs;
+    if (!GetFileAttributesExW(sourcePath.c_str(), GetFileExInfoStandard, &srcAttrs)) {
+        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    }
+
+    FileBasicInfoGuard basicInfo(srcAttrs, StagedFileAttributes(srcAttrs.dwFileAttributes),
+                                 workPath);
+    NTSTATUS status = StageMetacopyShellInWorkDir(sourcePath, srcAttrs, workPath);
+    if (NT_SUCCESS(status)) {
+        LayerMountMetadata metacopyMetadata = MakeCopyUpMetadata(sourcePath);
+        metacopyMetadata.metacopy = true;
+        status = RecordStagedFile(workPath, metacopyMetadata, basicInfo);
+    }
+    if (!NT_SUCCESS(status)) {
+        basicInfo.Cancel();
+        RemoveStagedFile(workPath, config_);
+    }
+    return status;
+}
+
+FileCopyUpResult CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
+    std::wstring normalized = NormalizePath(relativePath);
+    const FileCopyUpResult entryInUpper{STATUS_SUCCESS, true};
+
+    if (pathResolver_.ExistsInUpper(normalized)) {
+        return entryInUpper;
     }
 
     PathReservation reservation(*this, normalized);
@@ -500,53 +547,28 @@ NTSTATUS CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
     // before it here. Without this check, its move fails with
     // STATUS_OBJECT_NAME_COLLISION.
     if (pathResolver_.ExistsInUpper(normalized)) {
-        return STATUS_SUCCESS;
+        return entryInUpper;
     }
 
-    const ResolvedPath lowerSource = pathResolver_.ResolveLowerPath(normalized);
-    if (lowerSource.Found()) {
-        bool hasUserStream = false;
-        const NTSTATUS streamStatus =
-            HasUserAlternateDataStream(lowerSource.absolutePath, &hasUserStream);
-        if (!NT_SUCCESS(streamStatus)) {
-            return streamStatus;
-        }
-        if (hasUserStream) {
-            return STATUS_INVALID_PARAMETER;
-        }
-    }
-
-    CopyUpTarget target;
-    NTSTATUS status = PrepareCopyUpTarget(normalized, &target);
+    NTSTATUS status = LowerUserStreamStatus(normalized);
     if (!NT_SUCCESS(status)) {
-        return status;
+        return {status, false};
     }
-    const ResolvedPath& source = target.source;
-    const std::wstring& upperPath = target.upperPath;
 
-    // Get source file info for size and timestamps
-    WIN32_FILE_ATTRIBUTE_DATA srcAttrs;
-    if (!GetFileAttributesExW(source.absolutePath.c_str(), GetFileExInfoStandard, &srcAttrs)) {
-        return ::LayerMount::NtStatusFromWin32(GetLastError());
+    std::optional<CopyUpTarget> target;
+    status = PrepareCopyUpTarget(normalized, &target);
+    if (!NT_SUCCESS(status) || !target.has_value()) {
+        return {status, false};
     }
 
     const std::wstring workPath = GenerateWorkPath();
-    FileBasicInfoGuard basicInfo(srcAttrs, StagedFileAttributes(srcAttrs.dwFileAttributes),
-                                 workPath);
-
-    status = StageMetacopyShellInWorkDir(source.absolutePath, srcAttrs, workPath);
-    if (NT_SUCCESS(status)) {
-        LayerMountMetadata metacopyMetadata = MakeCopyUpMetadata(source.absolutePath);
-        metacopyMetadata.metacopy = true;
-        status = RecordStagedFile(workPath, metacopyMetadata, basicInfo);
-    }
+    status = BuildMetacopyShell(target->source.absolutePath, workPath);
     if (!NT_SUCCESS(status)) {
-        basicInfo.Cancel();
-        RemoveStagedFile(workPath, config_);
-        return status;
+        return {status, false};
     }
 
-    return CommitStagedFile(normalized, workPath, upperPath);
+    status = CommitStagedFile(normalized, workPath, target->upperPath);
+    return {status, NT_SUCCESS(status)};
 }
 
 FileCopyUpResult CopyUp::CopyUpFileOrShell(const std::wstring& relativePath,
@@ -592,8 +614,7 @@ FileCopyUpResult CopyUp::CopyUpFileOrShell(const std::wstring& relativePath,
         return copyInFull();
     }
 
-    status = CopyUpMetadataOnly(relativePath);
-    return {status, NT_SUCCESS(status)};
+    return CopyUpMetadataOnly(relativePath);
 }
 
 NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
@@ -739,13 +760,13 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
-    CopyUpTarget target;
+    std::optional<CopyUpTarget> target;
     NTSTATUS status = PrepareCopyUpTarget(normalized, &target);
-    if (!NT_SUCCESS(status)) {
+    if (!NT_SUCCESS(status) || !target.has_value()) {
         return status;
     }
-    const ResolvedPath& source = target.source;
-    const std::wstring& upperPath = target.upperPath;
+    const ResolvedPath& source = target->source;
+    const std::wstring& upperPath = target->upperPath;
 
     bool clonesReparsePoint = false;
     status = ClonesReparsePoint(source.absolutePath, source.attributes, &clonesReparsePoint);
@@ -753,7 +774,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return status;
     }
     if (clonesReparsePoint) {
-        return CopyUpReparseCloneAndCount(normalized, target);
+        return CopyUpReparseCloneAndCount(normalized, *target);
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
@@ -941,6 +962,21 @@ NTSTATUS CopyUp::EnsureUpperParent(const std::wstring& normalizedPath) {
         return STATUS_OBJECT_PATH_NOT_FOUND;
     }
     return CopyUpDirectory(parent);
+}
+
+NTSTATUS CopyUp::CopyUpLowerLinkAbove(const std::wstring& normalizedPath) {
+    const LinkInView link = FindLinkAbove(config_, whiteoutMgr_, normalizedPath);
+    switch (link.stop) {
+    case LinkStop::Link:
+        return link.source == LayerSource::Lower ? CopyUpDirectory(link.path) : STATUS_SUCCESS;
+    case LinkStop::Unreadable:
+        // A component that the walk cannot read copies nothing up, and
+        // CreateWhiteout refuses a marker under it.
+        return STATUS_SUCCESS;
+    case LinkStop::None:
+        break;
+    }
+    return STATUS_SUCCESS;
 }
 
 bool CopyUp::CopySecurityDescriptor(const std::wstring& srcPath,

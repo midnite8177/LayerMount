@@ -307,10 +307,14 @@ marker, so a directory without a marker costs no walk.
 `StepLayerAncestry` already knows that no ancestor is a link, so it
 reads the marker without that walk. `SetOpaque` on a link, or on a
 directory under one, fails with `STATUS_NOT_A_DIRECTORY` and writes
-nothing into the target. When the walk cannot read a component of the
-path, `SetOpaque` fails with `STATUS_ACCESS_DENIED`, because that
-component can be a link. `RemoveOpaque` on a link removes the link's own
-opaque metadata and keeps the marker file in the target. Under a link it
+nothing. That holds for an upper link and for a lower link that no
+higher layer holds, as `FindLinkInView` finds them. A write under an
+upper link would go into the target, and a write under such a lower
+link would make a plain upper directory that hides the link. When the
+walk cannot read a component of the path, `SetOpaque` fails with
+`STATUS_ACCESS_DENIED`, because that component can be a link.
+`RemoveOpaque` on a link removes the link's own opaque metadata and
+keeps the marker file in the target. Under a link it
 removes nothing and returns true. When the walk cannot read a component
 of the path, it removes nothing and returns false. The link hides the
 lowers below it through `LowersBelow`, which walks the directory's path
@@ -332,15 +336,46 @@ link, or of a directory under it, shows the `.wh.` names as entries, and
 they hide nothing. Thus a directory there that holds only `.wh.` files
 is not empty, and a delete of it fails with
 `STATUS_DIRECTORY_NOT_EMPTY`. `CreateWhiteout` fails with
-`STATUS_NOT_A_DIRECTORY` when the marker's directory is an upper link or
-under one, and with `STATUS_ACCESS_DENIED` when the walk cannot read a
-component of that path. It writes nothing in either case.
+`STATUS_NOT_A_DIRECTORY` when the marker's directory is a link or under
+one, as for `SetOpaque`, and with `STATUS_ACCESS_DENIED` when the walk
+cannot read a component of that path. It writes nothing in either case.
 `RemoveWhiteout` under an upper link removes nothing and returns true, so
 a create of `link\foo` or a rename onto it keeps the target's `.wh.foo`.
 When the walk cannot read a component of that path, `RemoveWhiteout`
 removes nothing and returns false. A caller can
 open, create, rename and delete a `.wh.` name there, as "Path safety
 guards" describes.
+
+In overlayfs a write through a lower symlink acts on the target
+directly, outside the overlay. The engine matches that. A write under a
+lower link that no higher layer holds first copies the link up as a
+link. A create, a write open and a set-information call do it through
+`CopyUp::EnsureUpperParent`, a delete through
+`CopyUp::CopyUpLowerLinkAbove`, and a rename through
+`CopyUpRenameLink`. From then on the upper link reaches the entry in the
+target, so a copy-up of the entry finds it in the upper and copies
+nothing. The write acts on the target, and no whiteout or plain upper
+directory hides the link. A write that fails after the link's copy-up
+leaves the link in the upper. A lower link that points into a lower root
+gets no guard, so the write goes where the link points.
+
+`CheckRenameLinkBoundary` in `RenameLinkBoundary.cpp` holds the rename
+rules for links. `FindLinkAbove`, which is `FindLinkInView` on the
+parent of a path, names the link above the source and above the
+destination, upper or lower. A rename whose source and destination are
+not under the same link fails with `STATUS_NOT_SAME_DEVICE` before any
+change, as overlayfs fails it with EXDEV. So a rename between the
+overlay and a link target, or between two link targets, fails.
+Overlayfs looks up both parents before that check, so a destination
+parent that the view does not show fails the rename with its own status
+instead. When either lookup cannot read a component of the path, the
+rename fails with `STATUS_ACCESS_DENIED` before any change, because
+that component can be a link. A rename within one link target, and a
+rename of the link entry itself, go through. A rename within a lower
+link target copies the link up only when the view shows the
+destination's parent as a directory. A rename into a missing directory
+there fails with `STATUS_OBJECT_PATH_NOT_FOUND` and leaves no link copy
+in the upper.
 
 ### Resurrection windows and ordering
 
@@ -527,13 +562,13 @@ The gates that take a path from a caller call `IsReservedOverlayPath`
 `IsReservedOverlayPath` makes one exception to the second kind. When the
 merged view reads the directory that holds the first `.wh.` segment in a
 link, or under one, the path is not reserved, because a `.wh.` name
-there is an ordinary name. `IsInLinkTarget` makes that check with the
-layer rules of the listing, so every name that a listing shows
-resolves. The string check runs first, and only a path with a `.wh.`
-segment walks the layers. Outside a link the marker names stay
-reserved. `LayerMountCreateWhiteout` and `LayerMountSetOpaque` use
-`IsReservedRelativePath` alone and reject every `.wh.` segment, because
-a marker never goes into a link target.
+there is an ordinary name. `IsInLinkTarget` makes that check through
+`FindLinkInView`, which hides layers by the rules of the listing, so
+every name that a listing shows resolves. The string check runs first,
+and only a path with a `.wh.` segment walks the layers. Outside a link
+the marker names stay reserved. `LayerMountCreateWhiteout` and
+`LayerMountSetOpaque` use `IsReservedRelativePath` alone and reject
+every `.wh.` segment, because a marker never goes into a link target.
 
 The resolver treats a reserved path as not found in the upper and in
 every lower. `Create` returns `STATUS_ACCESS_DENIED`, and so does
@@ -726,10 +761,13 @@ A lower junction or directory symbolic link copies up as a link, and
 so does a lower file symbolic link in `CopyUpFile`. The engine creates
 the link in a container in the work directory, writes its copy-up
 record on the link, and one rename moves the link to its upper path.
-The link target stays as it was. A lower file with the reparse tag of
-a WSL special file (a Unix socket, FIFO, character device or block
-device) or of an app execution alias also copies up as a clone of its
-reparse point. Overlayfs copies up a special file as a special file.
+The link target stays as it was. When `EnsureUpperParent` copies up
+such a link above the entry, the upper reaches the entry through the
+link, and the copy-up of the entry copies nothing. A lower file with
+the reparse tag of a WSL special file (a Unix socket, FIFO, character
+device or block device) or of an app execution alias also copies up as
+a clone of its reparse point. Overlayfs copies up a special file as a
+special file.
 A clone gets the extended attributes of its source, as every copy
 does. WSL keeps the mode and device number of a special file in them.
 Any other lower file reparse point, such as

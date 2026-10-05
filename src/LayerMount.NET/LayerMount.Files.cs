@@ -111,7 +111,10 @@ public sealed partial class LayerMount
     /// <summary>
     /// Deletes the file or directory at <paramref name="relativePath"/>,
     /// dropping a whiteout marker in the upper layer when the path also
-    /// exists in a lower layer.
+    /// exists in a lower layer. Under a junction or a directory symbolic
+    /// link that a lower layer holds and no higher layer holds, the engine
+    /// first copies the link up as a link. The delete then removes the
+    /// entry from the link target and drops no whiteout marker.
     /// </summary>
     /// <param name="relativePath">Path relative to the overlay root.</param>
     /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
@@ -147,8 +150,13 @@ public sealed partial class LayerMount
 
     /// <summary>
     /// Renames <paramref name="oldRelativePath"/> to
-    /// <paramref name="newRelativePath"/>, triggering a copy-up first if
-    /// the entry currently resolves only to a lower layer.
+    /// <paramref name="newRelativePath"/>. Outside a link target, the
+    /// engine copies the entry up first if it currently resolves only to a
+    /// lower layer. A rename within the target of a junction or a directory
+    /// symbolic link renames the entry in the target and copies nothing up.
+    /// When a lower layer holds the link and no higher layer holds its
+    /// name, and the destination's parent shows as a directory, the engine
+    /// first copies the link up as a link.
     /// </summary>
     /// <param name="oldRelativePath">Current path relative to the overlay root.</param>
     /// <param name="newRelativePath">Destination path relative to the overlay root.</param>
@@ -160,8 +168,18 @@ public sealed partial class LayerMount
     /// <exception cref="ArgumentNullException">
     /// <paramref name="oldRelativePath"/> or <paramref name="newRelativePath"/> is null.
     /// </exception>
+    /// <exception cref="LayerMountAccessDeniedException">
+    /// If the engine cannot read the attributes or the reparse tag of a
+    /// component on the path of either parent, because that component can
+    /// be a link. Nothing changes.
+    /// </exception>
     /// <exception cref="LayerMountException">
-    /// If the underlying native call returns a non-success HRESULT.
+    /// With the HRESULT of <c>STATUS_NOT_SAME_DEVICE</c> if the source and
+    /// the destination are not under the same link, such as a rename out of
+    /// a link target, and the destination's parent shows as a directory.
+    /// Nothing changes, as overlayfs fails such a rename with EXDEV. Also
+    /// if the underlying native call otherwise returns a non-success
+    /// HRESULT.
     /// </exception>
     public void RenameFile(string oldRelativePath, string newRelativePath, bool replaceIfExists = false)
     {
@@ -186,7 +204,8 @@ public sealed partial class LayerMount
     /// is inside the reserved metadata subtree, or has a segment that
     /// starts with <c>.wh.</c>; if the upper layer holds a junction or a
     /// directory symbolic link at the parent of the path or at an
-    /// ancestor; or if the underlying native call otherwise returns a
+    /// ancestor, or a lower layer holds one there that no higher layer
+    /// holds; or if the underlying native call otherwise returns a
     /// non-success HRESULT.
     /// </exception>
     public void CreateWhiteout(string relativePath, bool isDirectory = false)
@@ -208,7 +227,8 @@ public sealed partial class LayerMount
     /// If <paramref name="dirRelativePath"/> is outside the overlay root,
     /// is inside the reserved metadata subtree, or has a segment that
     /// starts with <c>.wh.</c>; if the upper layer holds a junction or a
-    /// directory symbolic link at the path or at an ancestor; or if the
+    /// directory symbolic link at the path or at an ancestor, or a lower
+    /// layer holds one there that no higher layer holds; or if the
     /// underlying native call otherwise returns a non-success HRESULT.
     /// </exception>
     public void SetOpaque(string dirRelativePath)

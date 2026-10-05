@@ -177,6 +177,19 @@ LinkOnPath FindLinkOnPath(const std::wstring& layerPath, const std::wstring& dir
 // only directories, or that ends at a missing component.
 enum class WalkStop { None, File, Link, Unreadable };
 
+// What a walk says about links on a path. Unreadable is a component whose
+// attributes or reparse tag the walk cannot read, so it can be a link. Each
+// caller decides what Unreadable means for its own operation.
+enum class LinkStop { None, Link, Unreadable };
+
+// The LinkStop of a walk that stopped at stop. A walk that stops at a file,
+// or at no component, gives LinkStop::None.
+LinkStop LinkStopOf(WalkStop stop);
+
+// True when LinkStopOf(stop) is not LinkStop::None, so the walk met a link
+// or a component that can be one.
+bool EndsAtLinkOrUnreadable(WalkStop stop);
+
 // What a layer holds at one path. Unreadable is an entry whose attributes
 // or reparse tag the engine cannot read, for a reason other than a missing
 // path.
@@ -273,5 +286,40 @@ LayerAncestry StepLayerAncestry(const LayerConfig& config,
                                 const LayerDirectory& dir,
                                 int lowerIndex,
                                 const LayerAncestry& parent);
+
+// The first link on a path in the merged view, as FindLinkInView reads it.
+// stop is LinkStop::Link at a link, LinkStop::Unreadable at a component
+// whose attributes or reparse tag the walk cannot read, and LinkStop::None
+// when the view meets neither. source is the layer that holds that
+// component, or LayerSource::None, and path is the component's path
+// relative to the layer root.
+struct LinkInView {
+    LinkStop stop;
+    LayerSource source;
+    std::wstring path;
+};
+
+// Walks dirNorm through the merged view from the root and returns the first
+// link there: a link in the upper, or a link in the first lower that the
+// view reaches at that path when no higher layer holds the link's name. In
+// overlayfs the lookup ends at such a link, and a name under it is in the
+// link target, outside the overlay. A whiteout, an opaque marker or a file
+// that hides a lower from the path also hides that lower's links, as in a
+// directory merge. dirNorm is normalized and relative to the layer root; an
+// empty dirNorm is the root. Walks the path in the upper, and, when that
+// walk stops at no file, link or unreadable component, in each lower. When
+// a lower walk stops at a link or an unreadable component, adds a
+// LayerAncestryOf read in the upper and in each lower that the view
+// reaches.
+LinkInView FindLinkInView(const LayerConfig& config,
+                          const WhiteoutManager& whiteoutMgr,
+                          const std::wstring& dirNorm);
+
+// Returns FindLinkInView of the parent of normalizedPath, which is the
+// first link in the merged view above the entry at normalizedPath. An
+// entry at the root has none.
+LinkInView FindLinkAbove(const LayerConfig& config,
+                         const WhiteoutManager& whiteoutMgr,
+                         const std::wstring& normalizedPath);
 
 }

@@ -567,7 +567,7 @@ public:
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
 
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin")));
+        Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin").status));
 
         const std::wstring upperPath = env.Upper() + L"\\lazy.bin";
         LayerMountMetadata before = MetadataStore::ReadLayerMountMetadata(upperPath, nullptr);
@@ -825,7 +825,7 @@ public:
             CopyUpAndRenameRig rig(config);
 
             DirectoryWatch watch(env.Upper(), kFileChanges);
-            const NTSTATUS status = rig.copyUp.CopyUpMetadataOnly(L"f.txt");
+            const NTSTATUS status = rig.copyUp.CopyUpMetadataOnly(L"f.txt").status;
             const std::vector<DWORD> actions = watch.ActionsFor(L"f.txt");
 
             Assert::AreEqual<NTSTATUS>(STATUS_SUCCESS, status, L"The metacopy succeeds");
@@ -858,7 +858,7 @@ public:
             LayerConfig config = env.MakeConfig();
             config.hostCapabilities = hostCapabilities;
             CopyUpAndRenameRig rig(config);
-            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"f.txt"),
+            AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"f.txt").status,
                 L"The metacopy of the read-only lower file succeeds");
 
             AssertStatus(STATUS_SUCCESS, rig.copyUp.CompleteLazyCopyUp(L"f.txt"),
@@ -887,7 +887,7 @@ public:
             CopyUpAndRenameRig rig(config);
 
             auto armed = ArmForeignFileAt(rig, L"p", env.Upper() + L"\\p\\f.txt");
-            const NTSTATUS status = rig.copyUp.CopyUpMetadataOnly(L"p\\f.txt");
+            const NTSTATUS status = rig.copyUp.CopyUpMetadataOnly(L"p\\f.txt").status;
 
             Assert::IsTrue(armed.foreign.made, L"The test makes the foreign file at the upper path");
             Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,

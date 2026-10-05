@@ -67,18 +67,13 @@ std::wstring MarkerDirectoryOf(const std::wstring& relativePath) {
     return NormalizePathPreserveCase(fs::path(relativePath).parent_path().wstring());
 }
 
-// Checks the upper directory at dirNorm before a marker write. A link at
-// dirNorm or at an ancestor gives STATUS_NOT_A_DIRECTORY, because the marker
-// would go into the link target. A component that the walk cannot read
-// gives STATUS_ACCESS_DENIED. Any other path gives STATUS_SUCCESS.
-NTSTATUS UpperMarkerDirectoryStatus(const std::wstring& upperPath, const std::wstring& dirNorm) {
-    switch (FindLinkOnPath(upperPath, dirNorm)) {
-    case LinkOnPath::Self:
-    case LinkOnPath::Ancestor:
+NTSTATUS MarkerDirectoryStatus(const LinkInView& link) {
+    switch (link.stop) {
+    case LinkStop::Link:
         return STATUS_NOT_A_DIRECTORY;
-    case LinkOnPath::Unreadable:
+    case LinkStop::Unreadable:
         return STATUS_ACCESS_DENIED;
-    case LinkOnPath::None:
+    case LinkStop::None:
         break;
     }
     return STATUS_SUCCESS;
@@ -155,7 +150,7 @@ NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
     }
 
     const NTSTATUS directoryStatus =
-        UpperMarkerDirectoryStatus(config_.upperPath, MarkerDirectoryOf(relativePath));
+        MarkerDirectoryStatus(FindLinkInView(config_, *this, MarkerDirectoryOf(relativePath)));
     if (!NT_SUCCESS(directoryStatus)) {
         return directoryStatus;
     }
@@ -229,7 +224,7 @@ bool WhiteoutManager::IsOpaqueWalkedDirectoryInLayer(const std::wstring& dirRela
 
 NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
     const std::wstring normalized = NormalizePathPreserveCase(dirRelativePath);
-    const NTSTATUS directoryStatus = UpperMarkerDirectoryStatus(config_.upperPath, normalized);
+    const NTSTATUS directoryStatus = MarkerDirectoryStatus(FindLinkInView(config_, *this, normalized));
     if (!NT_SUCCESS(directoryStatus)) {
         return directoryStatus;
     }

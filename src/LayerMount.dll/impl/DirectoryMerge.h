@@ -33,13 +33,13 @@ struct MergedDirectoryWithAncestry {
 };
 
 // Whether the merged view of the directory at dirNorm is in a link that
-// ends the lookup, or under one. That is a junction or a directory symbolic
-// link in the upper, or in the first lower that holds the path when no
-// higher layer hides it. A component whose reparse tag the walk cannot read
-// can be a link, so it counts too. In overlayfs the target of such a link is
-// not an overlay directory, so a .wh. name there is an ordinary name.
-// dirNorm must be the output of NormalizePath. Walks the path once in each
-// layer that the merge of the directory reaches.
+// ends the lookup, or under one, as FindLinkInView finds it. That is a
+// junction or a directory symbolic link in the upper, or in the first lower
+// that holds the path when no higher layer hides it. A component whose
+// reparse tag the walk cannot read can be a link, so it counts too. In
+// overlayfs the target of such a link is not an overlay directory, so a
+// .wh. name there is an ordinary name. dirNorm must be the output of
+// NormalizePath. Costs what FindLinkInView costs.
 bool IsInLinkTarget(const LayerConfig& config,
                     const WhiteoutManager& whiteoutMgr,
                     const std::wstring& dirNorm);

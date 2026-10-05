@@ -26,9 +26,8 @@ enum class WhiteoutNames {
 // at the directory or at an ancestor makes a .wh. name there ordinary. A
 // file there leaves the layer with no directory to scan.
 WhiteoutNames WhiteoutNamesIn(const LayerAncestry& ancestry) {
-    const bool inLink = ancestry.firstNonDirectory == WalkStop::Link ||
-                        ancestry.firstNonDirectory == WalkStop::Unreadable;
-    return inLink ? WhiteoutNames::AreOrdinary : WhiteoutNames::AreMarkers;
+    return EndsAtLinkOrUnreadable(ancestry.firstNonDirectory) ? WhiteoutNames::AreOrdinary
+                                                              : WhiteoutNames::AreMarkers;
 }
 
 std::optional<std::wstring> VisibleEntryKey(const std::wstring& dirNorm,
@@ -241,18 +240,7 @@ MergedDirectoryWithAncestry MergeLayers(const LayerConfig& config,
 bool IsInLinkTarget(const LayerConfig& config,
                     const WhiteoutManager& whiteoutMgr,
                     const std::wstring& dirNorm) {
-    WhiteoutNames lastScanned = WhiteoutNames::AreMarkers;
-    ForEachScannedLayer(
-        config, config.lowerPaths.size() + 1,
-        [&](size_t, const MergeLayer& layer) {
-            return LayerAncestryOf(
-                config, LayerDirectory{whiteoutMgr, layer.path, dirNorm}, layer.lowerIndex);
-        },
-        [&](const MergeLayer&, const LayerAncestry& ancestry) {
-            lastScanned = WhiteoutNamesIn(ancestry);
-            return true;
-        });
-    return lastScanned == WhiteoutNames::AreOrdinary;
+    return FindLinkInView(config, whiteoutMgr, dirNorm).stop != LinkStop::None;
 }
 
 bool IsReservedOverlayPath(const LayerConfig& config,

@@ -1013,7 +1013,7 @@ public:
                     L"The copy-up of the lower subdirectory must succeed");
                 AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"d\\sub\\g.txt"),
                     L"The copy-up of the nested lower file must succeed");
-                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"d\\lazy.bin"),
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"d\\lazy.bin").status,
                     L"The metadata-only copy-up of the lower file must succeed");
             }
             env.WriteFile(env.Upper(), L"d\\new.txt", "upper");
@@ -2354,51 +2354,293 @@ public:
         }
     }
 
-    TEST_METHOD(Rename_FileOntoNameNextToWhiteoutNamedFileInUpperLinkTarget_KeepsTheTargetFile) {
-        for (const LinkCreator createLink : kDirectoryLinkCreators) {
-            for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
-                TempLayerEnvironment env(1);
-                env.WriteFile(env.Upper(), L"f.txt", "f");
-                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper, createLink)) {
-                    continue;
-                }
-                ::LayerMount::LayerMount mount(env.MakeConfig());
+    TEST_METHOD(Rename_FileOntoNameNextToWhiteoutNamedFileInLinkTarget_KeepsTheTargetFile) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                    TempLayerEnvironment env(1);
+                    env.WriteFile(env.Root(), L"target\\f.txt", "f");
+                    if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                        continue;
+                    }
+                    ::LayerMount::LayerMount mount(env.MakeConfig());
 
-                AssertStatus(STATUS_SUCCESS, mount.Rename(L"f.txt", L"link\\foo", replace, kNoCallerPid),
-                    L"A rename of a file to link\\foo must succeed");
-                Assert::AreEqual(std::string("f"), env.ReadFile(env.Root(), L"target\\foo"),
-                    L"The rename must move the file into the link target");
-                Assert::AreEqual(std::string("target"),
-                    env.ReadFile(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
-                    L"The rename must keep the .wh.foo file in the link target");
+                    AssertStatus(STATUS_SUCCESS,
+                        mount.Rename(L"link\\f.txt", L"link\\foo", replace, kNoCallerPid),
+                        L"A rename of a file in a link target to link\\foo must succeed");
+                    Assert::AreEqual(std::string("f"), env.ReadFile(env.Root(), L"target\\foo"),
+                        L"The rename must move the file to foo in the link target");
+                    Assert::AreEqual(std::string("target"),
+                        env.ReadFile(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                        L"The rename must keep the .wh.foo file in the link target");
+                    AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+                }
             }
         }
     }
 
-    TEST_METHOD(Rename_WhiteoutNamedFileUnderUpperLink_MovesTheTargetFile) {
+    TEST_METHOD(Rename_FileWithinLowerLink_RenamesTheFileInTheTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\a", "a");
+                env.WriteFile(env.Root(), L"target\\kept.txt", "kept");
+                if (replace) {
+                    env.WriteFile(env.Root(), L"target\\b", "replaced");
+                }
+                if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link",
+                                          env.Root() + L"\\target")) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                AssertStatus(STATUS_SUCCESS, mount.Rename(L"link\\a", L"link\\b", replace, kNoCallerPid),
+                    L"A rename of a file within a lower link must succeed");
+
+                Assert::IsFalse(env.FileExists(env.Root(), L"target\\a"),
+                    L"The rename must remove a from the link target");
+                Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\b"),
+                    L"The rename must leave the file at b in the link target");
+                Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"link\\a")),
+                    L"The rename must write no whiteout through the link");
+                AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+            }
+        }
+    }
+
+    TEST_METHOD(Rename_DirectoryWithinLowerJunction_RenamesTheDirectoryInTheTarget) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\sub\\inside.txt", "inside");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link\\sub", L"link\\moved", kFailIfExists, kNoCallerPid),
+            L"A rename of a directory within a lower junction must succeed");
+
+        Assert::IsFalse(env.FileExists(env.Root(), L"target\\sub"),
+            L"The rename must remove sub from the junction target");
+        Assert::AreEqual(std::string("inside"), env.ReadFile(env.Root(), L"target\\moved\\inside.txt"),
+            L"The rename must move the directory with its file in the junction target");
+        AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+    }
+
+    TEST_METHOD(Rename_AcrossLinkBoundary_FailsWithNotSameDeviceAndChangesNothing) {
+        struct CrossingRename {
+            const wchar_t* from;
+            const wchar_t* to;
+        };
+        constexpr CrossingRename kCrossings[] = {
+            {L"f.txt", L"link\\foo"},
+            {L"d", L"link\\d"},
+            {L"link\\foo", L"bar"},
+            {L"link\\sub", L"moved"},
+            {L"link\\foo", L"other\\foo"},
+        };
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                for (const CrossingRename& crossing : kCrossings) {
+                    TempLayerEnvironment env(1);
+                    env.WriteFile(env.Lower(0), L"f.txt", "f");
+                    env.WriteFile(env.Lower(0), L"d\\inside.txt", "d");
+                    env.WriteFile(env.Root(), L"target\\foo", "foo");
+                    env.WriteFile(env.Root(), L"target\\sub\\inside.txt", "sub");
+                    env.CreateDir(env.Root(), L"othertarget");
+                    const std::wstring& linkLayer = LinkLayerPath(env, linkSource);
+                    if (!LinkCreatedOrSkipped(createLink, linkLayer + L"\\link", env.Root() + L"\\target") ||
+                        !LinkCreatedOrSkipped(createLink, linkLayer + L"\\other",
+                                              env.Root() + L"\\othertarget")) {
+                        continue;
+                    }
+                    ::LayerMount::LayerMount mount(env.MakeConfig());
+                    const LayerSnapshot targetBefore(env.Root() + L"\\target");
+                    const LayerSnapshot otherTargetBefore(env.Root() + L"\\othertarget");
+                    const LayerSnapshot upperBefore(env.Upper());
+                    const LayerSnapshot lowerBefore(env.Lower(0));
+                    const std::wstring message =
+                        std::wstring(L"A rename of ") + crossing.from + L" to " + crossing.to +
+                        L" crosses a link boundary and must fail";
+
+                    AssertStatus(STATUS_NOT_SAME_DEVICE,
+                        mount.Rename(crossing.from, crossing.to, kReplaceIfExists, kNoCallerPid),
+                        message.c_str());
+
+                    targetBefore.AssertUnchanged(L"The refused rename must change nothing in the link target");
+                    otherTargetBefore.AssertUnchanged(L"The refused rename must change nothing in the other link target");
+                    upperBefore.AssertUnchanged(L"The refused rename must change nothing in the upper");
+                    lowerBefore.AssertUnchanged(L"The refused rename must change nothing in the lower");
+                }
+            }
+        }
+    }
+
+    TEST_METHOD(RenameContext_FileOutOfLowerJunction_FailsWithNotSameDeviceAndKeepsTheFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\foo", "foo");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot upperBefore(env.Upper());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"link\\foo", FILE_READ_ATTRIBUTES | DELETE,
+                                             kNoCreateOptions, kNoCallerPid, &ctx, &info)),
+            L"Preconditions: the file under the lower junction must open");
+
+        const NTSTATUS status = mount.Rename(ctx.get(), L"bar", kFailIfExists, kNoCallerPid);
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_NOT_SAME_DEVICE, status,
+            L"A rename of an open file out of a lower junction must fail");
+        Assert::AreEqual(std::string("foo"), env.ReadFile(env.Root(), L"target\\foo"),
+            L"The refused rename must keep the file in the junction target");
+        upperBefore.AssertUnchanged(L"The refused rename must change nothing in the upper");
+    }
+
+    TEST_METHOD(RenameContext_FileWithinLowerLink_RenamesTheFileInTheTarget) {
         for (const LinkCreator createLink : kDirectoryLinkCreators) {
             TempLayerEnvironment env(1);
-            if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper, createLink)) {
+            env.WriteFile(env.Root(), L"target\\a", "a");
+            if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
                 continue;
             }
             ::LayerMount::LayerMount mount(env.MakeConfig());
+            std::unique_ptr<FileContext> ctx;
+            InternalFileInfo info{};
+            Assert::IsTrue(NT_SUCCESS(mount.Open(L"link\\a", FILE_READ_ATTRIBUTES | DELETE,
+                                                 kNoCreateOptions, kNoCallerPid, &ctx, &info)),
+                L"Preconditions: the file under the lower link must open");
 
-            AssertStatus(STATUS_SUCCESS,
-                mount.Rename(L"link\\.wh.foo", L"link\\.wh.bar", kFailIfExists, kNoCallerPid),
-                L"A rename of a .wh. file under a link to another .wh. name must succeed");
-            AssertStatus(STATUS_SUCCESS,
-                mount.Rename(L"link\\.wh.bar", L"link\\plain", kFailIfExists, kNoCallerPid),
-                L"A rename of a .wh. file under a link to an ordinary name must succeed");
-            AssertStatus(STATUS_SUCCESS,
-                mount.Rename(L"link\\plain", L"link\\.wh.back", kFailIfExists, kNoCallerPid),
-                L"A rename of a file under a link to a .wh. name must succeed");
+            const NTSTATUS status = mount.Rename(ctx.get(), L"link\\b", kFailIfExists, kNoCallerPid);
+            const bool metacopyAfterRename = ctx->isMetacopyOnly;
+            mount.Close(ctx.get());
 
-            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
-                L"The renames must move the .wh.foo file away");
-            Assert::AreEqual(std::string("target"), env.ReadFile(env.Root(), L"target\\.wh.back"),
-                L"The renames must leave the file at .wh.back in the link target");
-            Assert::AreEqual(std::string("target"), ReadThroughMount(mount, L"link\\.wh.back"),
+            AssertStatus(STATUS_SUCCESS, status, L"A rename of an open file within a lower link must succeed");
+            Assert::IsFalse(metacopyAfterRename,
+                L"The renamed context must not count as a metacopy shell, as the target's file holds its data");
+            Assert::IsFalse(env.FileExists(env.Root(), L"target\\a"),
+                L"The rename must remove a from the link target");
+            Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\b"),
+                L"The rename must leave the file at b in the link target");
+            Assert::AreEqual(std::string("a"), ReadThroughMount(mount, L"link\\b"),
                 L"The mount must show the renamed file");
+            AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+        }
+    }
+
+    TEST_METHOD(Rename_IntoMissingDirectoryUnderLowerLink_FailsWithPathNotFoundAndCopiesNoLinkUp) {
+        struct MissingParentRename {
+            const wchar_t* from;
+            const wchar_t* to;
+        };
+        constexpr MissingParentRename kRenames[] = {
+            {L"f.txt", L"link\\missing\\x"},
+            {L"d", L"link\\missing\\d"},
+            {L"link\\a", L"link\\missing\\b"},
+            {L"link\\sub", L"link\\missing\\sub"},
+        };
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            for (const MissingParentRename& rename : kRenames) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Lower(0), L"f.txt", "f");
+                env.WriteFile(env.Lower(0), L"d\\inside.txt", "d");
+                env.WriteFile(env.Root(), L"target\\a", "a");
+                env.WriteFile(env.Root(), L"target\\sub\\inside.txt", "sub");
+                if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot targetBefore(env.Root() + L"\\target");
+                const LayerSnapshot upperBefore(env.Upper());
+                const std::wstring message = std::wstring(L"A rename of ") + rename.from + L" to " +
+                                             rename.to + L" into a missing directory must fail";
+
+                AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+                    mount.Rename(rename.from, rename.to, kReplaceIfExists, kNoCallerPid),
+                    message.c_str());
+
+                targetBefore.AssertUnchanged(L"The failed rename must change nothing in the link target");
+                upperBefore.AssertUnchanged(L"The failed rename must copy no link up into the upper");
+            }
+        }
+    }
+
+    TEST_METHOD(Rename_UnderJunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndChangesNothing) {
+        struct UnreadableRename {
+            const wchar_t* from;
+            const wchar_t* to;
+        };
+        constexpr UnreadableRename kRenames[] = {
+            {L"f.txt", L"link\\bar"},
+            {L"link\\foo", L"bar"},
+            {L"link\\foo", L"link\\bar"},
+        };
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const UnreadableRename& rename : kRenames) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Lower(0), L"f.txt", "f");
+                env.WriteFile(env.Root(), L"target\\foo", "foo");
+                const std::wstring junction = LinkLayerPath(env, linkSource) + L"\\link";
+                if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot targetBefore(env.Root() + L"\\target");
+                const LayerSnapshot upperBefore(env.Upper());
+                const LayerSnapshot lowerBefore(env.Lower(0));
+                NTSTATUS status = STATUS_SUCCESS;
+                {
+                    LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+                    BackupPrivilegeDisabledOnThread noBackupPrivilege;
+                    DisableRestorePrivilegeOnThread();
+                    Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+                        L"The deny ACE must make the junction's reparse tag unreadable");
+                    status = mount.Rename(rename.from, rename.to, kReplaceIfExists, kNoCallerPid);
+                }
+                const std::wstring message = std::wstring(L"A rename of ") + rename.from + L" to " +
+                                             rename.to + L" with an unreadable junction on its path must fail";
+
+                AssertStatus(STATUS_ACCESS_DENIED, status, message.c_str());
+
+                targetBefore.AssertUnchanged(L"The refused rename must change nothing in the junction target");
+                upperBefore.AssertUnchanged(L"The refused rename must change nothing in the upper");
+                lowerBefore.AssertUnchanged(L"The refused rename must change nothing in the lower");
+            }
+        }
+    }
+
+    TEST_METHOD(Rename_WhiteoutNamedFileUnderLink_MovesTheTargetFile) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                AssertStatus(STATUS_SUCCESS,
+                    mount.Rename(L"link\\.wh.foo", L"link\\.wh.bar", kFailIfExists, kNoCallerPid),
+                    L"A rename of a .wh. file under a link to another .wh. name must succeed");
+                AssertStatus(STATUS_SUCCESS,
+                    mount.Rename(L"link\\.wh.bar", L"link\\plain", kFailIfExists, kNoCallerPid),
+                    L"A rename of a .wh. file under a link to an ordinary name must succeed");
+                AssertStatus(STATUS_SUCCESS,
+                    mount.Rename(L"link\\plain", L"link\\.wh.back", kFailIfExists, kNoCallerPid),
+                    L"A rename of a file under a link to a .wh. name must succeed");
+
+                Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                    L"The renames must move the .wh.foo file away");
+                Assert::AreEqual(std::string("target"), env.ReadFile(env.Root(), L"target\\.wh.back"),
+                    L"The renames must leave the file at .wh.back in the link target");
+                Assert::AreEqual(std::string("target"), ReadThroughMount(mount, L"link\\.wh.back"),
+                    L"The mount must show the renamed file");
+                AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+            }
         }
     }
 
@@ -2994,7 +3236,7 @@ public:
             config.hostCapabilities = capabilities;
             {
                 CopyUpAndRenameRig rig(config);
-                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"lazy.bin"),
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"lazy.bin").status,
                     L"The metadata-only copy-up of the lower file must succeed");
             }
             ::LayerMount::LayerMount mount(config);
@@ -3604,6 +3846,81 @@ public:
         Assert::IsTrue(HasAttribute(env.Lower(0) + L"\\link", FILE_ATTRIBUTE_REPARSE_POINT),
             L"The lower link must stay a junction");
         lowerBefore.AssertUnchanged(L"The create must not change the lower's entries");
+    }
+
+    TEST_METHOD(Create_TwoLevelsUnderLowerLink_CreatesTheChildInTheLinkTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            for (const UINT32 createOptions : {kNoCreateOptions, static_cast<UINT32>(FILE_DIRECTORY_FILE)}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\sub\\inside.txt", "inside");
+                if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link",
+                                          env.Root() + L"\\target")) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"link\\sub\\new", createOptions),
+                    L"A create two levels under a lower link must succeed");
+
+                Assert::IsTrue(env.FileExists(env.Root(), L"target\\sub\\new"),
+                    L"The create must put new in the link target");
+                AssertEntryShownAs(mount, L"link\\sub", L"new", L"new");
+                AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+            }
+        }
+    }
+
+    TEST_METHOD(WriteOpen_FileUnderLowerLink_OpensTheTargetFile) {
+        constexpr size_t kAboveShellThreshold = 2 * 1024 * 1024;
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Root(), L"target\\foo", "foo");
+            env.WriteFile(env.Root(), L"target\\sub\\big.bin", std::string(kAboveShellThreshold, 'b'));
+            if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS, OpenForWriteAndClose(mount, L"link\\foo"),
+                L"A write open of a file under a lower link must succeed");
+            AssertStatus(STATUS_SUCCESS, OpenForWriteAndClose(mount, L"link\\sub\\big.bin"),
+                L"A write open of a large file two levels under a lower link must succeed");
+
+            Assert::AreEqual(std::string("foo"), ReadThroughMount(mount, L"link\\foo"),
+                L"The mount must show the target's foo");
+            Assert::AreEqual(std::string(kReadThroughMountBytes, 'b'),
+                ReadThroughMount(mount, L"link\\sub\\big.bin"),
+                L"The mount must show the target's data of big.bin");
+            Assert::IsFalse(HasAttribute(env.Root() + L"\\target\\sub\\big.bin",
+                                         FILE_ATTRIBUTE_SPARSE_FILE),
+                L"The write open must not make the target's file a sparse shell");
+            AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+        }
+    }
+
+    TEST_METHOD(SetInfo_AttributesOfFileUnderLowerJunction_ChangeTheTargetFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\foo", "foo");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Lower(0) + L"\\link",
+                                  env.Root() + L"\\target")) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        Assert::IsTrue(NT_SUCCESS(mount.Open(L"link\\foo", FILE_READ_ATTRIBUTES, kNoCreateOptions,
+                                             kNoCallerPid, &ctx, &info)),
+            L"Preconditions: the file under the lower junction must open");
+        constexpr UINT64 kUnchangedSize = UINT64_MAX;
+        const SetInfoRequest hide{FILE_ATTRIBUTE_HIDDEN, 0, 0, 0, 0, kUnchangedSize, kUnchangedSize};
+
+        const NTSTATUS status = mount.SetInfo(ctx.get(), hide, nullptr);
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, status, L"A set of attributes on a file under a lower junction must succeed");
+        Assert::IsTrue(HasAttribute(env.Root() + L"\\target\\foo", FILE_ATTRIBUTE_HIDDEN),
+            L"The set must change the attributes of the target's file");
+        AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
     }
 
     TEST_METHOD(Create_UnderWhitedOutLowerDirectory_FailsAndWritesNoParent) {

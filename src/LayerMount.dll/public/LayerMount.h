@@ -936,7 +936,11 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(
     LM_FILE_INFO*  outInfo);
 
 /* Deletes the file or directory at `relativePath`, dropping a whiteout
- * marker in the upper layer when the path also exists in a lower layer. */
+ * marker in the upper layer when the path also exists in a lower layer.
+ * Under a junction or a directory symbolic link that a lower layer holds
+ * and no higher layer holds, the engine first copies the link up as a
+ * link. The delete then removes the entry from the link target and drops
+ * no whiteout marker. */
 LM_API HRESULT LM_CALL LayerMountDeleteFile(
     LM_HANDLE handle, PCWSTR relativePath);
 
@@ -955,18 +959,33 @@ LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(
     LM_FILE_HANDLE file);
 
 /* Deletes the open `file`, dropping a whiteout marker in the upper layer
- * when the path also exists in a lower layer. */
+ * when the path also exists in a lower layer. Under a lower link, as for
+ * LayerMountDeleteFile, the delete removes the entry from the link target
+ * and drops no whiteout marker. */
 LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(
     LM_FILE_HANDLE file);
 
-/* Renames `oldRelativePath` to `newRelativePath`, copying the entry into
- * the upper layer first if it currently resolves only to a lower layer.
- * A lower file copies up as a metacopy shell, whose data comes up at the
- * first open with data access. A link or another reparse point that a
- * copy-up clones, a file with an alternate data stream, and any file on a
- * host without LM_CAP_SPARSE_FILES copy their data at the rename.
- * `replaceIfExists` controls whether an existing entry at the
- * destination is replaced or the call fails. */
+/* Renames `oldRelativePath` to `newRelativePath`. Outside a link
+ * target, the engine copies the entry into the upper layer first if it
+ * currently resolves only to a lower layer. A lower file copies up as a
+ * metacopy shell, whose data comes up at the first open with data
+ * access. A link or another reparse point that a copy-up clones, a file
+ * with an alternate data stream, and any file on a host without
+ * LM_CAP_SPARSE_FILES copy their data at the rename. `replaceIfExists`
+ * controls whether an existing entry at the destination is replaced or
+ * the call fails. A rename within the target of a junction or a
+ * directory symbolic link renames the entry in the target and copies
+ * nothing up. When a lower layer holds the link and no higher layer
+ * holds its name, and the destination's parent shows as a directory,
+ * the engine first copies the link up as a link. When the source and
+ * the destination are not under the same link, such as a rename out of
+ * a link target, and the destination's parent shows as a directory,
+ * fails with HRESULT_FROM_NT(STATUS_NOT_SAME_DEVICE) and changes
+ * nothing, as overlayfs fails such a rename with EXDEV. When the engine
+ * cannot read the attributes or the reparse tag of a component on the
+ * path of either parent, fails with
+ * HRESULT_FROM_NT(STATUS_ACCESS_DENIED) and changes nothing, because
+ * that component can be a link. */
 LM_API HRESULT LM_CALL LayerMountRenameFile(
     LM_HANDLE handle,
     PCWSTR     oldRelativePath,
@@ -1067,7 +1086,9 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(
  * E_INVALIDARG too. When the upper layer holds a junction or a directory
  * symbolic link at the parent of the path or at an ancestor, fails with
  * HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing, because the
- * marker would go into the link target. When the engine cannot read the
+ * marker would go into the link target. A lower link there that no higher
+ * layer holds fails the same way, because the marker's upper directory
+ * would hide the link. When the engine cannot read the
  * attributes or the reparse tag of a component of that path, fails with
  * HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
 LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
@@ -1078,9 +1099,10 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
  * outside the overlay root, inside the reserved metadata subtree, or
  * with a segment that starts with `.wh.` with E_INVALIDARG. A `.wh.`
  * segment in a link gets E_INVALIDARG too. When the upper layer holds a
- * junction or a directory symbolic link at the path or at an ancestor,
- * fails with HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing,
- * as overlayfs never makes a symlink opaque. When the engine cannot read
+ * junction or a directory symbolic link at the path or at an ancestor, or
+ * a lower layer holds one there that no higher layer holds, fails with
+ * HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing, as
+ * overlayfs never makes a symlink opaque. When the engine cannot read
  * the attributes or the reparse tag of a component of the path, fails
  * with HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
 LM_API HRESULT LM_CALL LayerMountSetOpaque(

@@ -1046,28 +1046,37 @@ public:
         }
     }
 
-    TEST_METHOD(SetOpaque_DirectoryUnderUpperLink_FailsWithNotADirectoryAndWritesNothingInTheTarget) {
-        for (const LinkCreator createLink : kDirectoryLinkCreators) {
-            TempLayerEnvironment env(1);
-            env.CreateDir(env.Root(), L"target\\sub");
-            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", env.Root() + L"\\target")) {
-                continue;
+    TEST_METHOD(SetOpaque_DirectoryUnderLink_FailsWithNotADirectoryAndWritesNothing) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.CreateDir(env.Root(), L"target\\sub");
+                if (!LinkCreatedOrSkipped(createLink, LinkLayerPath(env, linkSource) + L"\\link",
+                                          env.Root() + L"\\target")) {
+                    continue;
+                }
+                auto config = env.MakeConfig();
+                Cache cache;
+                WhiteoutManager wm(config, &cache);
+                const LayerSnapshot upperBefore(env.Upper());
+
+                AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link"),
+                    L"SetOpaque on a link must fail");
+                AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link\\sub"),
+                    L"SetOpaque on a directory under a link must fail");
+                AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link\\new"),
+                    L"SetOpaque on a missing directory under a link must fail");
+
+                Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+                    L"SetOpaque on a link must write no marker file into the target");
+                Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target\\sub")),
+                    L"SetOpaque under a link must write no marker file into the target");
+                Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Root() + L"\\target\\sub", nullptr),
+                    L"SetOpaque under a link must write no opaque stream into the target");
+                Assert::IsFalse(env.FileExists(env.Root(), L"target\\new"),
+                    L"SetOpaque under a link must make no directory in the target");
+                upperBefore.AssertUnchanged(L"SetOpaque under a link must write nothing in the upper");
             }
-            auto config = env.MakeConfig();
-            Cache cache;
-            WhiteoutManager wm(config, &cache);
-
-            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link\\sub"),
-                L"SetOpaque on a directory under a link must fail");
-            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link\\new"),
-                L"SetOpaque on a missing directory under a link must fail");
-
-            Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target\\sub")),
-                L"SetOpaque under a link must write no marker file into the target");
-            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Root() + L"\\target\\sub", nullptr),
-                L"SetOpaque under a link must write no opaque stream into the target");
-            Assert::IsFalse(env.FileExists(env.Root(), L"target\\new"),
-                L"SetOpaque under a link must make no directory in the target");
         }
     }
 
@@ -1138,31 +1147,35 @@ public:
         }
     }
 
-    TEST_METHOD(SetOpaque_UpperJunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndWritesNothingInTheTarget) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Root(), L"target\\sub");
-        const std::wstring junction = env.Upper() + L"\\link";
-        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
-            return;
+    TEST_METHOD(SetOpaque_JunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndWritesNothing) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Root(), L"target\\sub");
+            const std::wstring junction = LinkLayerPath(env, linkSource) + L"\\link";
+            if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
+                continue;
+            }
+            LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+            BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            DisableRestorePrivilegeOnThread();
+            Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+                L"The deny ACE must make the junction's reparse tag unreadable");
+
+            AssertStatus(STATUS_ACCESS_DENIED, wm.SetOpaque(L"link"),
+                L"SetOpaque on a component whose reparse tag the walk cannot read must fail");
+            AssertStatus(STATUS_ACCESS_DENIED, wm.SetOpaque(L"link\\sub"),
+                L"SetOpaque under a component whose reparse tag the walk cannot read must fail");
+
+            Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+                L"The failed SetOpaque must write no marker file into the junction target");
+            Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target\\sub")),
+                L"The failed SetOpaque must write no marker file under the junction target");
+            Assert::IsTrue(linkSource == LayerSource::Upper || !env.FileExists(env.Upper(), L"link"),
+                L"The failed SetOpaque must make no link directory in the upper");
         }
-        LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        BackupPrivilegeDisabledOnThread noBackupPrivilege;
-        DisableRestorePrivilegeOnThread();
-        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
-            L"The deny ACE must make the junction's reparse tag unreadable");
-
-        AssertStatus(STATUS_ACCESS_DENIED, wm.SetOpaque(L"link"),
-            L"SetOpaque on a component whose reparse tag the walk cannot read must fail");
-        AssertStatus(STATUS_ACCESS_DENIED, wm.SetOpaque(L"link\\sub"),
-            L"SetOpaque under a component whose reparse tag the walk cannot read must fail");
-
-        Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
-            L"The failed SetOpaque must write no marker file into the junction target");
-        Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target\\sub")),
-            L"The failed SetOpaque must write no marker file under the junction target");
     }
 
     TEST_METHOD(RemoveOpaque_UpperJunctionWithUnreadableReparseTag_ReturnsFalseAndKeepsTheTargetMarkers) {
@@ -2011,65 +2024,98 @@ public:
         }
     }
 
-    TEST_METHOD(CreateWhiteout_UnderUpperLink_FailsWithNotADirectoryAndWritesNothingInTheTarget) {
+    TEST_METHOD(CreateWhiteout_UnderLink_FailsWithNotADirectoryAndWritesNothing) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.CreateDir(env.Root(), L"target\\sub");
+                const std::wstring target = env.Root() + L"\\target";
+                const FILETIME stamped = MakeFileTime(2016, 4, 5);
+                StampTimes(target, MakeFileTime(2016, 1, 2), MakeFileTime(2016, 3, 4), stamped);
+                if (!LinkCreatedOrSkipped(createLink, LinkLayerPath(env, linkSource) + L"\\link", target)) {
+                    continue;
+                }
+                auto config = env.MakeConfig();
+                Cache cache;
+                WhiteoutManager wm(config, &cache);
+                const LayerSnapshot upperBefore(env.Upper());
+
+                AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\foo", WhiteoutType::File),
+                    L"A whiteout in a link must fail");
+                AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\sub\\foo", WhiteoutType::Directory),
+                    L"A whiteout under a link must fail");
+                AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\new\\foo", WhiteoutType::File),
+                    L"A whiteout in a missing directory under a link must fail");
+
+                Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                    L"The failed whiteout must write no marker into the target");
+                Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\sub\\foo")),
+                    L"The failed whiteout must write no marker under the target");
+                Assert::IsFalse(env.FileExists(env.Root(), L"target\\new"),
+                    L"The failed whiteout must make no directory in the target");
+                FILETIME creation{}, access{}, write{};
+                GetTimes(target, &creation, &access, &write);
+                Assert::AreEqual(0L, ::CompareFileTime(&stamped, &write),
+                    L"The failed whiteout must leave the target's last-write time as it was");
+                upperBefore.AssertUnchanged(L"The failed whiteout must write nothing in the upper");
+            }
+        }
+    }
+
+    TEST_METHOD(CreateWhiteoutAndSetOpaque_UnderLowerLinkThatAnUpperDirectoryHides_WriteTheMarkersInTheUpper) {
         for (const LinkCreator createLink : kDirectoryLinkCreators) {
             TempLayerEnvironment env(1);
-            env.CreateDir(env.Root(), L"target\\sub");
-            const std::wstring target = env.Root() + L"\\target";
-            const FILETIME stamped = MakeFileTime(2016, 4, 5);
-            StampTimes(target, MakeFileTime(2016, 1, 2), MakeFileTime(2016, 3, 4), stamped);
-            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", target)) {
+            env.CreateDir(env.Root(), L"target");
+            env.CreateDir(env.Upper(), L"link\\sub");
+            if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", env.Root() + L"\\target")) {
                 continue;
             }
             auto config = env.MakeConfig();
             Cache cache;
             WhiteoutManager wm(config, &cache);
 
-            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\foo", WhiteoutType::File),
-                L"A whiteout in a link must fail");
-            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\sub\\foo", WhiteoutType::Directory),
-                L"A whiteout under a link must fail");
-            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\new\\foo", WhiteoutType::File),
-                L"A whiteout in a missing directory under a link must fail");
+            AssertStatus(STATUS_SUCCESS, wm.CreateWhiteout(L"link\\foo", WhiteoutType::File),
+                L"A whiteout in an upper directory over a lower link must succeed");
+            AssertStatus(STATUS_SUCCESS, wm.SetOpaque(L"link\\sub"),
+                L"SetOpaque on an upper directory over a lower link must succeed");
 
+            Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"link\\foo")),
+                L"The whiteout must go into the upper directory");
+            Assert::IsTrue(wm.IsOpaque(L"link\\sub"), L"The upper directory must be opaque");
             Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
-                L"The failed whiteout must write no marker into the target");
-            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\sub\\foo")),
-                L"The failed whiteout must write no marker under the target");
-            Assert::IsFalse(env.FileExists(env.Root(), L"target\\new"),
-                L"The failed whiteout must make no directory in the target");
-            FILETIME creation{}, access{}, write{};
-            GetTimes(target, &creation, &access, &write);
-            Assert::AreEqual(0L, ::CompareFileTime(&stamped, &write),
-                L"The failed whiteout must leave the target's last-write time as it was");
+                L"The whiteout must write nothing into the link target");
         }
     }
 
-    TEST_METHOD(CreateWhiteout_UnderUpperJunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndWritesNothing) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Root(), L"target\\sub");
-        const std::wstring junction = env.Upper() + L"\\link";
-        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
-            return;
+    TEST_METHOD(CreateWhiteout_UnderJunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndWritesNothing) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Root(), L"target\\sub");
+            const std::wstring junction = LinkLayerPath(env, linkSource) + L"\\link";
+            if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
+                continue;
+            }
+            LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+            BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            DisableRestorePrivilegeOnThread();
+            Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+                L"The deny ACE must make the junction's reparse tag unreadable");
+
+            AssertStatus(STATUS_ACCESS_DENIED, wm.CreateWhiteout(L"link\\foo", WhiteoutType::File),
+                L"A whiteout in a component whose reparse tag the walk cannot read must fail");
+            AssertStatus(STATUS_ACCESS_DENIED, wm.CreateWhiteout(L"link\\sub\\foo", WhiteoutType::File),
+                L"A whiteout under a component whose reparse tag the walk cannot read must fail");
+
+            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                L"The failed whiteout must write no marker into the junction target");
+            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\sub\\foo")),
+                L"The failed whiteout must write no marker under the junction target");
+            Assert::IsTrue(linkSource == LayerSource::Upper || !env.FileExists(env.Upper(), L"link"),
+                L"The failed whiteout must make no link directory in the upper");
         }
-        LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        BackupPrivilegeDisabledOnThread noBackupPrivilege;
-        DisableRestorePrivilegeOnThread();
-        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
-            L"The deny ACE must make the junction's reparse tag unreadable");
-
-        AssertStatus(STATUS_ACCESS_DENIED, wm.CreateWhiteout(L"link\\foo", WhiteoutType::File),
-            L"A whiteout in a component whose reparse tag the walk cannot read must fail");
-        AssertStatus(STATUS_ACCESS_DENIED, wm.CreateWhiteout(L"link\\sub\\foo", WhiteoutType::File),
-            L"A whiteout under a component whose reparse tag the walk cannot read must fail");
-
-        Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
-            L"The failed whiteout must write no marker into the junction target");
-        Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\sub\\foo")),
-            L"The failed whiteout must write no marker under the junction target");
     }
 
     TEST_METHOD(RemoveWhiteout_UnderUpperJunctionWithUnreadableReparseTag_ReturnsFalseAndKeepsTheTargetFile) {

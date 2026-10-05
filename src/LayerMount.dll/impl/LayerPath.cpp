@@ -408,15 +408,31 @@ bool HasNonDirectoryOrLinkSelfOrAncestorInLayer(const std::wstring& layerPath,
     return WalkToFirstNonDirectory(layerPath, dirRelativePath).stop != WalkStop::None;
 }
 
-LinkOnPath FindLinkOnPath(const std::wstring& layerPath, const std::wstring& dirRelativePath) {
-    const LayerWalk walk = WalkToFirstNonDirectory(layerPath, dirRelativePath);
-    switch (walk.stop) {
+LinkStop LinkStopOf(WalkStop stop) {
+    switch (stop) {
     case WalkStop::Link:
-        return walk.component == dirRelativePath ? LinkOnPath::Self : LinkOnPath::Ancestor;
+        return LinkStop::Link;
     case WalkStop::Unreadable:
-        return LinkOnPath::Unreadable;
+        return LinkStop::Unreadable;
     case WalkStop::None:
     case WalkStop::File:
+        break;
+    }
+    return LinkStop::None;
+}
+
+bool EndsAtLinkOrUnreadable(WalkStop stop) {
+    return LinkStopOf(stop) != LinkStop::None;
+}
+
+LinkOnPath FindLinkOnPath(const std::wstring& layerPath, const std::wstring& dirRelativePath) {
+    const LayerWalk walk = WalkToFirstNonDirectory(layerPath, dirRelativePath);
+    switch (LinkStopOf(walk.stop)) {
+    case LinkStop::Link:
+        return walk.component == dirRelativePath ? LinkOnPath::Self : LinkOnPath::Ancestor;
+    case LinkStop::Unreadable:
+        return LinkOnPath::Unreadable;
+    case LinkStop::None:
         break;
     }
     return LinkOnPath::None;
@@ -484,6 +500,64 @@ LayerAncestry LayerAncestryOf(const LayerConfig& config,
             config, LayerDirectory{dir.whiteoutMgr, dir.layerPath, walkedPath}, lowerIndex, ancestry);
     }
     return ancestry;
+}
+
+namespace {
+
+std::vector<LayerWalk> WalkLowers(const LayerConfig& config, const std::wstring& dirNorm) {
+    std::vector<LayerWalk> walks;
+    walks.reserve(config.lowerPaths.size());
+    for (const std::wstring& lowerPath : config.lowerPaths) {
+        walks.push_back(WalkToFirstNonDirectory(lowerPath, dirNorm));
+    }
+    return walks;
+}
+
+}
+
+LinkInView FindLinkInView(const LayerConfig& config,
+                          const WhiteoutManager& whiteoutMgr,
+                          const std::wstring& dirNorm) {
+    const LinkInView none{LinkStop::None, LayerSource::None, {}};
+    const LayerWalk upperWalk = WalkToFirstNonDirectory(config.upperPath, dirNorm);
+    if (EndsAtLinkOrUnreadable(upperWalk.stop)) {
+        return LinkInView{LinkStopOf(upperWalk.stop), LayerSource::Upper, upperWalk.component};
+    }
+    if (upperWalk.stop == WalkStop::File) {
+        return none;
+    }
+    const std::vector<LayerWalk> lowerWalks = WalkLowers(config, dirNorm);
+    const bool anyLowerLink = std::any_of(lowerWalks.begin(), lowerWalks.end(),
+        [](const LayerWalk& walk) { return EndsAtLinkOrUnreadable(walk.stop); });
+    if (!anyLowerLink) {
+        return none;
+    }
+    const LayerAncestry upper =
+        LayerAncestryOf(config, LayerDirectory{whiteoutMgr, config.upperPath, dirNorm}, -1);
+    if (upper.whitedOut || upper.opaque) {
+        return none;
+    }
+    for (size_t i = 0; i < config.lowerPaths.size(); ++i) {
+        const LayerAncestry lower = LayerAncestryOf(
+            config, LayerDirectory{whiteoutMgr, config.lowerPaths[i], dirNorm}, static_cast<int>(i));
+        if (lower.whitedOut || lower.linkUnderHigherEntry) {
+            return none;
+        }
+        const LayerWalk& walk = lowerWalks[i];
+        if (EndsAtLinkOrUnreadable(walk.stop)) {
+            return LinkInView{LinkStopOf(walk.stop), LayerSource::Lower, walk.component};
+        }
+        if (lower.opaque || walk.stop == WalkStop::File) {
+            return none;
+        }
+    }
+    return none;
+}
+
+LinkInView FindLinkAbove(const LayerConfig& config,
+                         const WhiteoutManager& whiteoutMgr,
+                         const std::wstring& normalizedPath) {
+    return FindLinkInView(config, whiteoutMgr, fs::path(normalizedPath).parent_path().wstring());
 }
 
 LowerVisibility LowersBelow(const LayerDirectory& dir) {
