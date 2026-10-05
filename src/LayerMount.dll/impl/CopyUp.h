@@ -3,7 +3,6 @@
 #include "LayerMount.h"
 #include "LayerPath.h"
 #include "ScopedHandle.h"
-#include "../abi/CapabilityGate.h"
 #include "../abi/EventEmitter.h"
 
 #include <atomic>
@@ -60,7 +59,6 @@ public:
            Cache& cache,
            LayerMountStats& stats);
 
-    void SetCapabilityGate(::LayerMount::abi::CapabilityGate gate) noexcept { capabilities_ = gate; }
     void SetEventEmitter(::LayerMount::abi::EventEmitter* events) noexcept { events_ = events; }
 
     // Bump the copy-up stat counter and emit LM_EVT_COPY_UP to the host
@@ -217,10 +215,6 @@ private:
     WhiteoutManager& whiteoutMgr_;
     Cache& cache_;
     LayerMountStats& stats_;
-    ::LayerMount::abi::CapabilityGate capabilities_{
-        LM_CAP_ADS | LM_CAP_REPARSE_POINTS | LM_CAP_SPARSE_FILES |
-        LM_CAP_MULTIPLE_STREAMS | LM_CAP_NTFS_ACLS
-    };
     ::LayerMount::abi::EventEmitter* events_ = nullptr;
 
     std::atomic<uint64_t> workCounter_{0};

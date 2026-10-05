@@ -252,7 +252,7 @@ NTSTATUS CopyUp::CopyUpReparseCloneAndCount(const std::wstring& normalized,
                                             const CopyUpTarget& target) {
     const NTSTATUS status = CloneReparsePointThroughWorkDir(
         {target.source.absolutePath, target.source.attributes}, GenerateWorkPath(),
-        target.upperPath, {CopiedEntryRecord::NewFromSource, config_, capabilities_});
+        target.upperPath, {CopiedEntryRecord::NewFromSource, config_});
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -282,7 +282,7 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
 
     // SetFileAttributes cannot set FILE_ATTRIBUTE_SPARSE_FILE. Only FSCTL_SET_SPARSE can.
     if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
-        capabilities_.HasSparseFiles() &&
+        config_.Capabilities().HasSparseFiles() &&
         !SetSparse(dstHandle.Get())) {
         return SparseRefusalStatus();
     }
@@ -862,7 +862,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
             }
             status = CloneReparsePointThroughWorkDir(
                 {source.absolutePath, source.attributes}, GenerateWorkPath(), newUpperPath,
-                {CopiedEntryRecord::NewFromSource, config_, capabilities_});
+                {CopiedEntryRecord::NewFromSource, config_});
             if (!NT_SUCCESS(status)) {
                 return status;
             }

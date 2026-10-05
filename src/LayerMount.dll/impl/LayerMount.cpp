@@ -448,8 +448,7 @@ std::wstring FinalPathOfDirectory(const std::wstring& path) {
 LayerMount::LayerMount(LayerConfig config)
     : config_(std::move(config))
     , upperFinalPath_(FinalPathOfDirectory(config_.upperPath))
-    , capabilities_(config_.hostCapabilities)
-    , securityPolicy_(capabilities_)
+    , securityPolicy_(config_.Capabilities())
     , events_()
     , cache_(std::make_unique<Cache>(config_.pathCacheCapacity))
     , whiteoutMgr_(std::make_unique<WhiteoutManager>(config_, cache_.get()))
@@ -457,10 +456,9 @@ LayerMount::LayerMount(LayerConfig config)
     , stats_()
     , copyUp_(std::make_unique<CopyUp>(config_, *pathResolver_, *whiteoutMgr_, *cache_, stats_))
     , directoryRename_(std::make_unique<DirectoryRename>(
-          config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_, capabilities_))
+          config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_))
     , upperEntryRemover_(std::make_unique<UpperEntryRemover>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_)) {
-    copyUp_->SetCapabilityGate(capabilities_);
     copyUp_->SetEventEmitter(&events_);
     whiteoutMgr_->SetEventEmitter(&events_);
     if (config_.enableProcessTracking) {
@@ -1254,7 +1252,7 @@ NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm,
     // A metacopy shell needs a sparse upper file. When the upper layer has
     // no sparse support, the shell becomes a dense file of zeros, so the
     // copy-up copies the data instead.
-    if (srcSize.QuadPart > kMetacopyThresholdBytes && capabilities_.HasSparseFiles()) {
+    if (srcSize.QuadPart > kMetacopyThresholdBytes && config_.Capabilities().HasSparseFiles()) {
         NTSTATUS status = copyUp_->CopyUpMetadataOnly(hostNorm);
         if (NT_SUCCESS(status)) {
             ctx->isMetacopyOnly = true;

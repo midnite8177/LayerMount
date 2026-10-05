@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WindowsNtStatus.h"
+#include "../abi/CapabilityGate.h"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -44,6 +45,10 @@ struct LayerConfig {
     // sparse / NTFS ACLs should pass the appropriate bits to LayerMountCreate
     // so the engine takes the fast path.
     UINT32 hostCapabilities = 0;
+
+    ::LayerMount::abi::CapabilityGate Capabilities() const noexcept {
+        return ::LayerMount::abi::CapabilityGate(hostCapabilities);
+    }
 
     // Checks the layout and writes and deletes a probe file in upperPath.
     // Returns false and sets error on failure.
@@ -177,7 +182,6 @@ namespace LayerImage { class LayerImageManager; }
 #include "ProcessTracker.h"
 #include "SecurityPolicy.h"
 
-#include "../abi/CapabilityGate.h"
 #include "../abi/EventEmitter.h"
 
 namespace LayerMount {
@@ -636,10 +640,6 @@ public:
         return processTracker_;
     }
 
-    const ::LayerMount::abi::CapabilityGate& Capabilities() const noexcept {
-        return capabilities_;
-    }
-
     ::LayerMount::abi::EventEmitter& Events() noexcept { return events_; }
     const ::LayerMount::abi::EventEmitter& Events() const noexcept { return events_; }
 
@@ -836,7 +836,6 @@ private:
     // extended form that GetFinalPathNameByHandleW gives. Empty when the
     // mount could not read it.
     std::wstring upperFinalPath_;
-    ::LayerMount::abi::CapabilityGate capabilities_;
     SecurityPolicy                    securityPolicy_;
     ::LayerMount::abi::EventEmitter   events_;
     std::unique_ptr<Cache> cache_;

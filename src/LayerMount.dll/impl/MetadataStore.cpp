@@ -1,7 +1,6 @@
 #include "MetadataStore.h"
 #include "LayerPath.h"
 #include "SidecarMetadata.h"
-#include "../abi/CapabilityGate.h"
 
 #include <nlohmann/json.hpp>
 
@@ -74,7 +73,7 @@ namespace {
 
 inline bool UseSidecarFor(const LayerConfig* config) {
     if (config == nullptr) return false;
-    return !abi::CapabilityGate(config->hostCapabilities).HasAds();
+    return !config->Capabilities().HasAds();
 }
 
 inline bool IsDefaultMetadata(const LayerMountMetadata& m) {

@@ -59,12 +59,6 @@ void MakeSparseWithDataRange(const std::wstring& path, LONGLONG logicalBytes,
     ::CloseHandle(h);
 }
 
-::LayerMount::abi::CapabilityGate GateWithoutSparseFiles() {
-    return ::LayerMount::abi::CapabilityGate(
-        LM_CAP_ADS | LM_CAP_REPARSE_POINTS | LM_CAP_MULTIPLE_STREAMS |
-        LM_CAP_NTFS_ACLS);
-}
-
 bool HasSparseAttribute(const std::wstring& path) {
     DWORD a = ::GetFileAttributesW(path.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_SPARSE_FILE) != 0;
@@ -238,8 +232,9 @@ public:
         Assert::IsTrue(HasSparseAttribute(srcPath),
             L"Precondition: lower file must be sparse");
 
-        CopyUpAndRenameRig rig(env.MakeConfig());
-        rig.copyUp.SetCapabilityGate(GateWithoutSparseFiles());
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities &= ~LM_CAP_SPARSE_FILES;
+        CopyUpAndRenameRig rig(config);
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"sparse.bin")));
 
@@ -256,12 +251,11 @@ public:
         Assert::IsTrue(HasSparseAttribute(srcPath),
             L"Precondition: lower file must be sparse");
 
-        CopyUpAndRenameRig rig(env.MakeConfig());
-        rig.copyUp.SetCapabilityGate(GateWithoutSparseFiles());
-        DirectoryRename dirRename(rig.config, rig.resolver, rig.whiteouts, rig.cache,
-                                  rig.copyUp, GateWithoutSparseFiles());
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities &= ~LM_CAP_SPARSE_FILES;
+        CopyUpAndRenameRig rig(config);
 
-        Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
+        Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             CallerPath(L"tree"), CallerPath(L"moved"),
             EntryKind::Directory, ReplaceExisting::No)));
 

@@ -162,7 +162,7 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
 
     // SetFileAttributes cannot set FILE_ATTRIBUTE_SPARSE_FILE. Only FSCTL_SET_SPARSE can.
     if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_SPARSE_FILE) &&
-        policy.capabilities.HasSparseFiles() &&
+        policy.config.Capabilities().HasSparseFiles() &&
         !SetSparse(dstHandle.Get())) {
         return SparseRefusalStatus();
     }
@@ -307,14 +307,12 @@ DirectoryRename::DirectoryRename(ConfigRef config,
                                  PathResolver& pathResolver,
                                  WhiteoutManager& whiteoutMgr,
                                  Cache& cache,
-                                 CopyUp& copyUp,
-                                 ::LayerMount::abi::CapabilityGate capabilities)
+                                 CopyUp& copyUp)
     : config_(config.Get())
     , pathResolver_(pathResolver)
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache)
-    , copyUp_(copyUp)
-    , capabilities_(capabilities) {
+    , copyUp_(copyUp) {
 }
 
 bool DirectoryRename::DestinationExistsInMerged(const std::wstring& normalizedPath) const {
@@ -352,7 +350,7 @@ NTSTATUS DirectoryRename::CopyMergedDirectory(const ResolvedPath& lowerSource,
     }
     return FinishCopiedDirectory(
         mergedViewSource, lowerSource.absolutePath, stagedPath,
-        {CopiedEntryRecord::NewFromSource, config_, capabilities_},
+        {CopiedEntryRecord::NewFromSource, config_},
         [&]() { return whiteoutMgr_.SetOpaqueAtPath(stagedPath); });
 }
 
@@ -378,7 +376,7 @@ NTSTATUS DirectoryRename::CopyMergedEntry(const MergedDirectoryWithAncestry& old
     const std::wstring dstAbs = dstParentPath + L"\\" + name;
     return CopyEntry(
         JoinDirPath(source.root, oldParent.dirPath) + L"\\" + name,
-        entry.findData.dwFileAttributes, dstAbs, {source.record, config_, capabilities_},
+        entry.findData.dwFileAttributes, dstAbs, {source.record, config_},
         [&]() {
             return CopyMergedChildren(
                 MergeChildDirectory(config_, whiteoutMgr_, oldParent, name), dstAbs);
@@ -407,7 +405,7 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
     const NTSTATUS status = sourceKind == EntryKind::Link
         ? CloneReparsePointThroughWorkDir({source.absolutePath, source.attributes},
                                           copyUp_.GenerateWorkPath(), newUpperPath,
-                                          {CopiedEntryRecord::NewFromSource, config_, capabilities_})
+                                          {CopiedEntryRecord::NewFromSource, config_})
         : BuildInContainerAndMove(
               copyUp_.GenerateWorkPath(), newUpperPath, config_,
               [&](const std::wstring& stagedPath) {

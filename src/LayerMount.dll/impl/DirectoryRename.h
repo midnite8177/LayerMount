@@ -4,7 +4,6 @@
 #include "DirectoryMerge.h"
 #include "LayerPath.h"
 #include "EntryCopy.h"
-#include "../abi/CapabilityGate.h"
 
 #include <string>
 
@@ -24,8 +23,7 @@ public:
                     PathResolver& pathResolver,
                     WhiteoutManager& whiteoutMgr,
                     Cache& cache,
-                    CopyUp& copyUp,
-                    ::LayerMount::abi::CapabilityGate capabilities);
+                    CopyUp& copyUp);
 
     // Builds a copy of the merged view of the old directory in the work
     // directory, marks it opaque, moves it to the new upper path, and removes
@@ -116,7 +114,6 @@ private:
     WhiteoutManager& whiteoutMgr_;
     Cache& cache_;
     CopyUp& copyUp_;
-    ::LayerMount::abi::CapabilityGate capabilities_;
 };
 
 }

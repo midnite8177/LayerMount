@@ -1112,8 +1112,7 @@ struct CopyUpAndRenameRig {
           resolver(config, whiteouts, cache),
           stats(),
           copyUp(config, resolver, whiteouts, cache, stats),
-          directoryRename(config, resolver, whiteouts, cache, copyUp,
-                          ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities)) {}
+          directoryRename(config, resolver, whiteouts, cache, copyUp) {}
 
     LayerMount::LayerConfig      config;
     LayerMount::Cache            cache;

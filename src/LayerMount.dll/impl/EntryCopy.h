@@ -1,7 +1,6 @@
 #pragma once
 
 #include "LayerMount.h"
-#include "../abi/CapabilityGate.h"
 
 #include <optional>
 #include <string>
@@ -26,7 +25,6 @@ enum class NewUpperEntryKind { File, Directory };
 struct EntryCopyPolicy {
     CopiedEntryRecord record;
     const LayerConfig& config;
-    ::LayerMount::abi::CapabilityGate capabilities;
 };
 
 LayerMountMetadata MakeCopyUpMetadata(const std::wstring& sourcePath);

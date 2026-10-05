@@ -73,8 +73,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
@@ -99,8 +98,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
@@ -123,8 +121,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         AssertStatus(STATUS_SUCCESS, wm.SetOpaque(L"src"), L"SetOpaque must mark the upper directory");
         Assert::IsTrue(wm.IsOpaque(L"src"));
@@ -190,8 +187,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             CallerPath(L"ld"), CallerPath(L"newdir"),
@@ -355,8 +351,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
@@ -384,8 +379,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameLowerDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
@@ -413,8 +407,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
@@ -436,8 +429,7 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu,
-                                  ::LayerMount::abi::CapabilityGate(kDefaultHostCapabilities));
+        DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         // ReplaceExisting::Yes skips the merged-view collision check, so the
         // call reaches the move while dst is still in the upper.
