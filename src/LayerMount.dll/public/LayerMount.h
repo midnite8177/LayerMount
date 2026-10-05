@@ -937,10 +937,12 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(
 
 /* Deletes the file or directory at `relativePath`, dropping a whiteout
  * marker in the upper layer when the path also exists in a lower layer.
- * Under a junction or a directory symbolic link that a lower layer holds
- * and no higher layer holds, the engine first copies the link up as a
- * link. The delete then removes the entry from the link target and drops
- * no whiteout marker. */
+ * A relative symbolic link above the last component resolves in the
+ * merged view, so the delete acts on the target's view path. Under a
+ * junction or an absolute symbolic link that a lower layer holds and no
+ * higher layer holds, the engine first copies the link up as a link. The
+ * delete then removes the entry from the link target and drops no
+ * whiteout marker. */
 LM_API HRESULT LM_CALL LayerMountDeleteFile(
     LM_HANDLE handle, PCWSTR relativePath);
 
@@ -973,8 +975,10 @@ LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(
  * with an alternate data stream, and any file on a host without
  * LM_CAP_SPARSE_FILES copy their data at the rename. `replaceIfExists`
  * controls whether an existing entry at the destination is replaced or
- * the call fails. A rename within the target of a junction or a
- * directory symbolic link renames the entry in the target and copies
+ * the call fails. A relative symbolic link above the last component of
+ * either path resolves in the merged view, so the rename acts on the
+ * target's view path. A rename within the target of a junction or an
+ * absolute symbolic link renames the entry in the target and copies
  * nothing up. When a lower layer holds the link and no higher layer
  * holds its name, and the destination's parent shows as a directory,
  * the engine first copies the link up as a link. When the source and
@@ -1066,7 +1070,7 @@ LM_API HRESULT LM_CALL LayerMountSetSecurity(
 /* Enumerates the merged directory listing at `dirRelativePath`, invoking
  * `callback` once per visible entry with its name and LM_FILE_INFO.
  * Whiteout markers and the entries they hide are never reported. In a
- * junction or a directory symbolic link that ends the lookup, or under
+ * junction or an absolute symbolic link that ends the lookup, or under
  * one, a `.wh.` name is an ordinary entry. The listing reports it, and it
  * hides nothing, as in overlayfs. Stops and returns the callback's
  * HRESULT the first time it returns anything other than S_OK. When a
@@ -1083,12 +1087,14 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(
  * directory- or file-shaped marker. Rejects a path outside the overlay
  * root, inside the reserved metadata subtree, or with a segment that
  * starts with `.wh.` with E_INVALIDARG. A `.wh.` segment in a link gets
- * E_INVALIDARG too. When the upper layer holds a junction or a directory
- * symbolic link at the parent of the path or at an ancestor, fails with
- * HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing, because the
- * marker would go into the link target. A lower link there that no higher
- * layer holds fails the same way, because the marker's upper directory
- * would hide the link. When the engine cannot read the
+ * E_INVALIDARG too. A relative symbolic link above the last component
+ * resolves in the merged view, so the marker hides the entry at the
+ * target's view path. When the upper layer holds a junction or an
+ * absolute symbolic link at the parent of the path or at an ancestor,
+ * fails with HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing,
+ * because the marker would go into the link target. A lower link there
+ * that no higher layer holds fails the same way, because the marker's
+ * upper directory would hide the link. When the engine cannot read the
  * attributes or the reparse tag of a component of that path, fails with
  * HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
 LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
@@ -1098,11 +1104,13 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
  * lower-layer entry beneath it regardless of name. Rejects a path
  * outside the overlay root, inside the reserved metadata subtree, or
  * with a segment that starts with `.wh.` with E_INVALIDARG. A `.wh.`
- * segment in a link gets E_INVALIDARG too. When the upper layer holds a
- * junction or a directory symbolic link at the path or at an ancestor, or
- * a lower layer holds one there that no higher layer holds, fails with
- * HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing, as
- * overlayfs never makes a symlink opaque. When the engine cannot read
+ * segment in a link gets E_INVALIDARG too. A relative symbolic link at
+ * an ancestor resolves in the merged view, so the call marks the
+ * directory at the target's view path. When the upper layer holds a link
+ * at the path itself, or a junction or an absolute symbolic link at an
+ * ancestor, or a lower layer holds one there that no higher layer holds,
+ * fails with HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing,
+ * as overlayfs never makes a symlink opaque. When the engine cannot read
  * the attributes or the reparse tag of a component of the path, fails
  * with HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
 LM_API HRESULT LM_CALL LayerMountSetOpaque(

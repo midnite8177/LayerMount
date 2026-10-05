@@ -93,28 +93,20 @@ std::wstring BuildLowerLinkToTarget(const TempLayerEnv& env, LowerLinkKind linkK
     std::filesystem::create_directories(directoryTarget);
     { std::ofstream f(directoryTarget + L"\\inside.txt"); f << "inside-payload"; }
 
-    const std::wstring lowerLink = env.Lower(0) + L"\\link";
-    bool created = false;
-    std::wstring target;
+    LinkCreator createLink = CreateDirectoryJunction;
+    std::wstring target = directoryTarget;
     switch (linkKind) {
     case LowerLinkKind::FileSymlink:
+        createLink = CreateFileSymlink;
         target = fileTarget;
-        created = ::CreateSymbolicLinkW(lowerLink.c_str(), target.c_str(),
-                                        SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
         break;
     case LowerLinkKind::DirectorySymlink:
-        target = directoryTarget;
-        created = ::CreateSymbolicLinkW(lowerLink.c_str(), target.c_str(),
-                                        SYMBOLIC_LINK_FLAG_DIRECTORY |
-                                        SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+        createLink = CreateDirectorySymlink;
         break;
     case LowerLinkKind::Junction:
-        target = directoryTarget;
-        created = CreateDirectoryJunction(lowerLink, target);
         break;
     }
-    if (!created) {
-        Logger::WriteMessage((L"Skipping: could not create the lower link " + lowerLink).c_str());
+    if (!LinkCreatedOrSkipped(createLink, env.Lower(0) + L"\\link", target)) {
         return {};
     }
     return target;
@@ -221,10 +213,7 @@ public:
         TempLayerEnv env(1);
         const std::wstring target = env.Root() + L"\\target.txt";
         { std::ofstream f(target); f << "target-payload"; }
-        const std::wstring lowerLink = env.Lower(0) + L"\\link.txt";
-        if (!::CreateSymbolicLinkW(lowerLink.c_str(), target.c_str(),
-                                   SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
-            Logger::WriteMessage(L"Skipping: could not create the file symlink");
+        if (!LinkCreatedOrSkipped(CreateFileSymlink, env.Lower(0) + L"\\link.txt", target)) {
             return;
         }
 

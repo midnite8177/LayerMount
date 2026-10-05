@@ -584,8 +584,17 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
     return STATUS_SUCCESS;
 }
 
+ViewLookup LayerMount::WalkCallerPath(const std::wstring& callerPath,
+                                      FinalLink finalLink) const {
+    return pathResolver_->ViewPathThroughLinks(callerPath, finalLink);
+}
+
 NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath) {
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
     if (pathResolver_->ExistsInUpper(normalized)) {
         return STATUS_SUCCESS;
     }
@@ -795,7 +804,11 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
 }
 
 MergedDirectory LayerMount::MergeDirectoryEntries(const std::wstring& dirRelativePath) const {
-    return MergeDirectoryAcrossLayers(config_, *whiteoutMgr_, dirRelativePath);
+    const ViewLookup view = WalkCallerPath(dirRelativePath, FinalLink::Follow);
+    if (!NT_SUCCESS(view.status)) {
+        return MergedDirectory{view.status, {}};
+    }
+    return MergeDirectoryAcrossLayers(config_, *whiteoutMgr_, view.path.Path());
 }
 
 namespace {
@@ -1064,6 +1077,10 @@ private:
     bool armed_ = false;
 };
 
+FinalLink FinalLinkFor(UINT32 createOptions) {
+    return (createOptions & FILE_OPEN_REPARSE_POINT) != 0 ? FinalLink::Keep : FinalLink::Follow;
+}
+
 }
 
 NTSTATUS LayerMount::Open(const std::wstring& relativePath,
@@ -1077,7 +1094,11 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     }
     *outCtx = nullptr;
 
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLinkFor(createOptions));
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
 
     std::wstring hostNorm;
     std::wstring streamSuffix;
@@ -1256,13 +1277,21 @@ std::optional<StreamPath> ParseStreamPath(const std::wstring& relativePath) {
     return path;
 }
 
-NTSTATUS LayerMount::Create(const CreateRequest& request,
+NTSTATUS LayerMount::Create(const CreateRequest& callerRequest,
                            std::unique_ptr<FileContext>* outCtx,
                            InternalFileInfo* outInfo) {
     if (outCtx == nullptr || outInfo == nullptr) {
         return STATUS_INVALID_PARAMETER;
     }
     *outCtx = nullptr;
+
+    const ViewLookup view =
+        WalkCallerPath(callerRequest.relativePath, FinalLinkFor(callerRequest.createOptions));
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    CreateRequest request = callerRequest;
+    request.relativePath = view.path.Path();
 
     std::optional<StreamPath> path = ParseStreamPath(request.relativePath);
     if (!path) {
@@ -1786,7 +1815,7 @@ NTSTATUS LayerMount::Flush(FileContext* ctx,
 }
 
 NTSTATUS LayerMount::DirectoryEmptinessStatus(const std::wstring& dirNorm) const {
-    const MergedDirectory merged = MergeDirectoryEntries(dirNorm);
+    const MergedDirectory merged = MergeDirectoryAcrossLayers(config_, *whiteoutMgr_, dirNorm);
     if (!NT_SUCCESS(merged.status)) {
         return merged.status;
     }
@@ -1832,7 +1861,11 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
 }
 
 NTSTATUS LayerMount::CanDelete(const std::wstring& relativePath, DWORD callerPid) {
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
 
     std::wstring hostNorm;
     std::wstring streamSuffix;
@@ -1889,7 +1922,11 @@ NTSTATUS LayerMount::CanDeleteEntry(const std::wstring& hostNorm,
 }
 
 NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
 
     std::wstring hostNorm;
     std::wstring streamSuffix;
@@ -1897,7 +1934,7 @@ NTSTATUS LayerMount::Delete(const std::wstring& relativePath, DWORD callerPid) {
         return STATUS_OBJECT_NAME_INVALID;
     }
 
-    NTSTATUS canDelete = CanDelete(normalized, callerPid);
+    const NTSTATUS canDelete = CanDeleteEntry(hostNorm, streamSuffix, callerPid);
     if (!NT_SUCCESS(canDelete)) {
         return canDelete;
     }
@@ -2093,10 +2130,25 @@ NTSTATUS LayerMount::CheckRename(const RenamePaths& paths,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::Rename(const std::wstring& oldRelativePath,
-                           const std::wstring& newRelativePath,
+NTSTATUS LayerMount::Rename(const std::wstring& callerOldPath,
+                           const std::wstring& callerNewPath,
                            BOOLEAN replaceIfExists,
                            DWORD callerPid) {
+    const ViewLookup oldView = WalkCallerPath(callerOldPath, FinalLink::Keep);
+    if (!NT_SUCCESS(oldView.status)) {
+        return oldView.status;
+    }
+    const ViewLookup newView = WalkCallerPath(callerNewPath, FinalLink::Keep);
+    if (!NT_SUCCESS(newView.status)) {
+        return newView.status;
+    }
+    return RenameViewPaths(oldView.path.Path(), newView.path.Path(), replaceIfExists, callerPid);
+}
+
+NTSTATUS LayerMount::RenameViewPaths(const std::wstring& oldRelativePath,
+                                     const std::wstring& newRelativePath,
+                                     BOOLEAN replaceIfExists,
+                                     DWORD callerPid) {
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
     CheckedRename checked{RenameKinds{EntryKind::File, std::nullopt},
@@ -2199,17 +2251,22 @@ NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
 }
 
 NTSTATUS LayerMount::Rename(FileContext* ctx,
-                           const std::wstring& newRelativePath,
+                           const std::wstring& callerNewPath,
                            BOOLEAN replaceIfExists,
                            DWORD callerPid) {
     if (ctx == nullptr) {
         return STATUS_INVALID_PARAMETER;
     }
+    const ViewLookup newView = WalkCallerPath(callerNewPath, FinalLink::Keep);
+    if (!NT_SUCCESS(newView.status)) {
+        return newView.status;
+    }
+    const std::wstring& newRelativePath = newView.path.Path();
 
     const std::wstring oldRelativePath = ctx->relativePath;
     if (NormalizePathPreserveCase(oldRelativePath) ==
         NormalizePathPreserveCase(newRelativePath)) {
-        return Rename(oldRelativePath, newRelativePath, replaceIfExists, callerPid);
+        return RenameViewPaths(oldRelativePath, newRelativePath, replaceIfExists, callerPid);
     }
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
@@ -2249,9 +2306,14 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
 }
 
 NTSTATUS LayerMount::UpdateContextPath(FileContext* ctx,
-                                       const std::wstring& newRelativePath) {
+                                       const std::wstring& callerNewPath) {
     if (ctx == nullptr) return STATUS_INVALID_HANDLE;
-    const std::wstring newNorm = NormalizePath(newRelativePath);
+    const ViewLookup newView = WalkCallerPath(callerNewPath, FinalLink::Keep);
+    if (!NT_SUCCESS(newView.status)) {
+        return newView.status;
+    }
+    const std::wstring& newRelativePath = newView.path.Path();
+    const std::wstring& newNorm = newView.path.Normalized();
 
     std::wstring newHostNorm;
     std::wstring newStreamSuffix;
@@ -2296,7 +2358,11 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
                                 SIZE_T* requiredBytes) {
     const SECURITY_INFORMATION effective = DropSaclWithoutPrivilege(securityInformation);
 
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Follow);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
 
     std::wstring targetPath;
     if (normalized.empty()) {
@@ -2357,7 +2423,11 @@ NTSTATUS LayerMount::SetSecurity(const std::wstring& relativePath,
     if (sd == nullptr) {
         return STATUS_INVALID_PARAMETER;
     }
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Follow);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
 
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
         if (!tracker->CheckAccess(callerPid, normalized, OperationType::SetSecurity)) {
@@ -2418,7 +2488,11 @@ NTSTATUS LayerMount::GetReparsePoint(const std::wstring& relativePath,
                                     PVOID buffer,
                                     SIZE_T bufferBytes,
                                     SIZE_T* requiredBytes) {
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
     if (normalized.empty()) {
         return STATUS_NOT_A_REPARSE_POINT;
     }
@@ -2482,7 +2556,11 @@ NTSTATUS LayerMount::SetReparsePoint(const std::wstring& relativePath,
     if (bufferBytes > MAXIMUM_REPARSE_DATA_BUFFER_SIZE) {
         return STATUS_INVALID_PARAMETER;
     }
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
 
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
         if (!tracker->CheckAccess(callerPid, normalized, OperationType::SetInfo)) {
@@ -2531,7 +2609,11 @@ NTSTATUS LayerMount::DeleteReparsePoint(const std::wstring& relativePath,
     if (buffer == nullptr || bufferBytes == 0) {
         return STATUS_INVALID_PARAMETER;
     }
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
 
     if (auto tracker = Tracker(); tracker && callerPid != 0) {
         if (!tracker->CheckAccess(callerPid, normalized, OperationType::SetInfo)) {
@@ -2705,7 +2787,11 @@ NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
                                       std::vector<InternalStreamInfo>& out) {
     out.clear();
 
-    std::wstring normalized = NormalizePath(relativePath);
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Follow);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    const std::wstring& normalized = view.path.Normalized();
     ResolvedPath resolved = pathResolver_->ResolvePath(normalized);
     if (!resolved.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -2747,6 +2833,53 @@ NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
     if (lastErr != ERROR_HANDLE_EOF && lastErr != ERROR_SUCCESS) {
         return NtStatusFromWin32(lastErr);
     }
+    return STATUS_SUCCESS;
+}
+
+namespace {
+
+// Whether CreateWhiteout and SetOpaque may write a marker for the path.
+bool AcceptsMarker(const ViewPath& path) {
+    return IsSafeRelativePath(path.Normalized()) && !IsReservedRelativePath(path.Normalized());
+}
+
+}
+
+NTSTATUS LayerMount::CreateWhiteout(const std::wstring& relativePath,
+                                    WhiteoutType type,
+                                    MarkerPath* markerPath) {
+    *markerPath = MarkerPath::Accepted;
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    if (!AcceptsMarker(view.path)) {
+        *markerPath = MarkerPath::Refused;
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    return whiteoutMgr_->CreateWhiteout(view.path.Path(), type);
+}
+
+NTSTATUS LayerMount::SetOpaque(const std::wstring& dirRelativePath, MarkerPath* markerPath) {
+    *markerPath = MarkerPath::Accepted;
+    const ViewLookup view = WalkCallerPath(dirRelativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    if (!AcceptsMarker(view.path)) {
+        *markerPath = MarkerPath::Refused;
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    return whiteoutMgr_->SetOpaque(view.path.Path());
+}
+
+NTSTATUS LayerMount::ResolvePath(const std::wstring& relativePath,
+                                 ResolvedPath* resolved) const {
+    const ViewLookup view = WalkCallerPath(relativePath, FinalLink::Keep);
+    if (!NT_SUCCESS(view.status)) {
+        return view.status;
+    }
+    *resolved = pathResolver_->ResolvePath(view.path.Path());
     return STATUS_SUCCESS;
 }
 

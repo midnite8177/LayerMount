@@ -286,7 +286,8 @@ Overlayfs looks up a path one name at a time, and the topmost layer that
 holds a name decides. It follows a symlink only when the symlink is that
 topmost entry. A lower symlink under a higher directory of the same name
 adds nothing, and the lookup stops there, so the deeper lowers add
-nothing either. The engine applies the same rule to links:
+nothing either. The engine applies the same rule to junctions and
+absolute symbolic links:
 
 - When no higher layer holds the link's name, Win32 follows the link. A
   listing of the link, or of a directory under it, shows the link
@@ -299,6 +300,39 @@ nothing either. The engine applies the same rule to links:
   adds anything either. `HasLinkUnderHigherLayerEntry` makes this check
   for each lower before its scan or its probe.
 
+A relative symbolic link, one with `SYMLINK_FLAG_RELATIVE` in its
+reparse data, resolves in the merged view, as a relative symlink does in
+overlayfs. This holds for such a link in any layer. Each ABI call that
+takes a path reaches a `LayerMount` method that first passes the path to
+`PathResolver::ViewPathThroughLinks`. Only that walk makes a `ViewPath`,
+the type the rest of the method uses. The walk drops each `.` component,
+walks the path through the view, resolves a link's target from the
+link's parent directory in the view, and puts the result in place of the
+link. A path with a `..` component skips the walk, and the method's path
+checks refuse it. A `..` in a link target at the view root stays at the
+root, as at a Linux `/` or a Windows drive root. More than 40 links on
+one lookup fail with `STATUS_REPARSE_POINT_NOT_RESOLVED`, as Linux fails
+a lookup past `MAXSYMLINKS`.
+
+The engine then acts on the target's view path. A write under `a\link`
+copies up the target's entry and leaves the link in its layer, and a
+listing of the link is the merged listing of its target. A link at a
+middle component is always followed. `FinalLink` names the calls that
+follow a link at the last component: an open, a create, a listing, a
+stream enumeration and the security calls, unless the open or the create
+passes `FILE_OPEN_REPARSE_POINT`. A delete, a rename, the reparse point
+calls, `EnsureInUpperLayer`, `CreateWhiteout`, `SetOpaque` and
+`LayerMountResolvePath` act on the link itself. A copy of the link, by a
+rename of it or of a directory that holds it, keeps the target text,
+which then resolves from the link's new place. A handle opened through
+the link holds the target's view path, so its events name the target.
+The walk reads the target of each link from disk, so a new target that
+`SetReparsePoint` writes takes effect at the next lookup. No path cache
+entry names a path under a relative link, because the walk puts the
+target in place of the link before any lookup under it. The walk stops
+at a junction or an absolute symbolic link, and the rules above apply to
+it.
+
 A link is never opaque, as overlayfs gives a symlink no opaque xattr.
 `WhiteoutManager` owns this rule, so no caller checks for a link itself.
 `IsOpaqueInLayer` and `HasOpaqueSelfOrAncestorInLayer` ignore a marker
@@ -306,11 +340,14 @@ at a link or under one. They walk the path only after they find a
 marker, so a directory without a marker costs no walk.
 `StepLayerAncestry` already knows that no ancestor is a link, so it
 reads the marker without that walk. `SetOpaque` on a link, or on a
-directory under one, fails with `STATUS_NOT_A_DIRECTORY` and writes
-nothing. That holds for an upper link and for a lower link that no
-higher layer holds, as `FindLinkInView` finds them. A write under an
-upper link would go into the target, and a write under such a lower
-link would make a plain upper directory that hides the link. When the
+directory under a junction or an absolute symbolic link, fails with
+`STATUS_NOT_A_DIRECTORY` and writes nothing. That holds for an upper
+link and for a lower link that no higher layer holds, as
+`FindLinkInView` finds them. A relative symbolic link above the
+directory never reaches `SetOpaque`, because the walk has put the target
+in its place. A write under an upper link would go into the target, and
+a write under such a lower link would make a plain upper directory that
+hides the link. When the
 walk cannot read a component of the path, `SetOpaque` fails with
 `STATUS_ACCESS_DENIED`, because that component can be a link.
 `RemoveOpaque` on a link removes the link's own opaque metadata and
@@ -324,8 +361,9 @@ holds the directory. When the walk cannot read a reparse tag, the lowers
 stay hidden, as they do when the walk cannot read a component's
 attributes.
 
-A `.wh.` file in a link target, or under it, is an ordinary file. In
-overlayfs the lookup ends at a symlink, and the target is not an overlay
+A `.wh.` file in the target of a junction or an absolute symbolic link,
+or under it, is an ordinary file. In overlayfs the lookup ends at a
+symlink to an absolute path, and the target is not an overlay
 directory. This holds for an upper link and for a lower link that no
 higher layer holds. `HasWhiteout`, and through it
 `HasWhitedOutAncestorInLayer`, ignore a marker whose directory is a link
@@ -346,10 +384,11 @@ removes nothing and returns false. A caller can
 open, create, rename and delete a `.wh.` name there, as "Path safety
 guards" describes.
 
-In overlayfs a write through a lower symlink acts on the target
-directly, outside the overlay. The engine matches that. A write under a
-lower link that no higher layer holds first copies the link up as a
-link. A create, a write open and a set-information call do it through
+In overlayfs a write through a lower symlink to an absolute path acts on
+the target directly, outside the overlay. The engine matches that for a
+junction and an absolute symbolic link. A write under such a lower link
+that no higher layer holds first copies the link up as a link. A
+create, a write open and a set-information call do it through
 `CopyUp::EnsureUpperParent`, a delete through
 `CopyUp::CopyUpLowerLinkAbove`, and a rename through
 `CopyUpRenameLink`. From then on the upper link reaches the entry in the
@@ -761,9 +800,11 @@ A lower junction or directory symbolic link copies up as a link, and
 so does a lower file symbolic link in `CopyUpFile`. The engine creates
 the link in a container in the work directory, writes its copy-up
 record on the link, and one rename moves the link to its upper path.
-The link target stays as it was. When `EnsureUpperParent` copies up
-such a link above the entry, the upper reaches the entry through the
-link, and the copy-up of the entry copies nothing. A lower file with
+The link target stays as it was, and a relative target resolves in the
+view from the link's upper path. When `EnsureUpperParent` copies up a
+junction or an absolute symbolic link above the entry, the upper
+reaches the entry through the link, and the copy-up of the entry copies
+nothing. A lower file with
 the reparse tag of a WSL special file (a Unix socket, FIFO, character
 device or block device) or of an app execution alias also copies up as
 a clone of its reparse point. Overlayfs copies up a special file as a

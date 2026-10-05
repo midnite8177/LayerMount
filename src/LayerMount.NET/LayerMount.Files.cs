@@ -111,10 +111,12 @@ public sealed partial class LayerMount
     /// <summary>
     /// Deletes the file or directory at <paramref name="relativePath"/>,
     /// dropping a whiteout marker in the upper layer when the path also
-    /// exists in a lower layer. Under a junction or a directory symbolic
-    /// link that a lower layer holds and no higher layer holds, the engine
-    /// first copies the link up as a link. The delete then removes the
-    /// entry from the link target and drops no whiteout marker.
+    /// exists in a lower layer. A relative symbolic link above the last
+    /// component resolves in the merged view, so the delete acts on the
+    /// target's view path. Under a junction or an absolute symbolic link
+    /// that a lower layer holds and no higher layer holds, the engine first
+    /// copies the link up as a link. The delete then removes the entry from
+    /// the link target and drops no whiteout marker.
     /// </summary>
     /// <param name="relativePath">Path relative to the overlay root.</param>
     /// <exception cref="ArgumentNullException"><paramref name="relativePath"/> is null.</exception>
@@ -152,8 +154,11 @@ public sealed partial class LayerMount
     /// Renames <paramref name="oldRelativePath"/> to
     /// <paramref name="newRelativePath"/>. Outside a link target, the
     /// engine copies the entry up first if it currently resolves only to a
-    /// lower layer. A rename within the target of a junction or a directory
-    /// symbolic link renames the entry in the target and copies nothing up.
+    /// lower layer. A relative symbolic link above the last component of
+    /// either path resolves in the merged view, so the rename acts on the
+    /// target's view path. A rename within the target of a junction or an
+    /// absolute symbolic link renames the entry in the target and copies
+    /// nothing up.
     /// When a lower layer holds the link and no higher layer holds its
     /// name, and the destination's parent shows as a directory, the engine
     /// first copies the link up as a link.
@@ -194,7 +199,10 @@ public sealed partial class LayerMount
 
     /// <summary>
     /// Creates a whiteout marker for <paramref name="relativePath"/> in
-    /// the upper layer, hiding the corresponding lower-layer entry.
+    /// the upper layer, hiding the corresponding lower-layer entry. A
+    /// relative symbolic link above the last component resolves in the
+    /// merged view, so the marker hides the entry at the target's view
+    /// path.
     /// </summary>
     /// <param name="relativePath">Path relative to the overlay root.</param>
     /// <param name="isDirectory">Whether to create a directory- or file-shaped marker.</param>
@@ -202,8 +210,8 @@ public sealed partial class LayerMount
     /// <exception cref="LayerMountException">
     /// If <paramref name="relativePath"/> is outside the overlay root,
     /// is inside the reserved metadata subtree, or has a segment that
-    /// starts with <c>.wh.</c>; if the upper layer holds a junction or a
-    /// directory symbolic link at the parent of the path or at an
+    /// starts with <c>.wh.</c>; if the upper layer holds a junction or an
+    /// absolute symbolic link at the parent of the path or at an
     /// ancestor, or a lower layer holds one there that no higher layer
     /// holds; or if the underlying native call otherwise returns a
     /// non-success HRESULT.
@@ -219,16 +227,19 @@ public sealed partial class LayerMount
 
     /// <summary>
     /// Marks the directory at <paramref name="dirRelativePath"/> opaque,
-    /// hiding every lower-layer entry beneath it regardless of name.
+    /// hiding every lower-layer entry beneath it regardless of name. A
+    /// relative symbolic link at an ancestor resolves in the merged view,
+    /// so the call marks the directory at the target's view path.
     /// </summary>
     /// <param name="dirRelativePath">Directory path relative to the overlay root.</param>
     /// <exception cref="ArgumentNullException"><paramref name="dirRelativePath"/> is null.</exception>
     /// <exception cref="LayerMountException">
     /// If <paramref name="dirRelativePath"/> is outside the overlay root,
     /// is inside the reserved metadata subtree, or has a segment that
-    /// starts with <c>.wh.</c>; if the upper layer holds a junction or a
-    /// directory symbolic link at the path or at an ancestor, or a lower
-    /// layer holds one there that no higher layer holds; or if the
+    /// starts with <c>.wh.</c>; if the upper layer holds a link at the
+    /// path itself, or a junction or an absolute symbolic link at an
+    /// ancestor, or a lower layer holds one there that no higher layer
+    /// holds; or if the
     /// underlying native call otherwise returns a non-success HRESULT.
     /// </exception>
     public void SetOpaque(string dirRelativePath)
@@ -459,7 +470,7 @@ public sealed partial class LayerMount
     /// <summary>
     /// Merged view of a directory across the upper + lower layers. The
     /// listing shows no whiteout marker and no entry that one hides. In a
-    /// junction or a directory symbolic link that ends the lookup, or
+    /// junction or an absolute symbolic link that ends the lookup, or
     /// under one, a <c>.wh.</c> name is an ordinary entry and hides
     /// nothing. The callback fires once per entry in sorted order. Return
     /// <c>false</c> to stop the listing. The method then returns

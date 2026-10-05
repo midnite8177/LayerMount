@@ -1,9 +1,11 @@
 #include "LayerPath.h"
 #include "MetadataStore.h"
 #include "NtStatusUtil.h"
+#include "ScopedHandle.h"
 #include "WhiteoutManager.h"
 #include "EntryCopy.h"
 
+#include <winioctl.h>
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -76,23 +78,25 @@ std::wstring WithStoredLeafName(const std::wstring& targetPath,
 
 namespace {
 
-// Reads the tag of the entry at path, not of its target. Opens a file or a
-// directory.
-NTSTATUS ReadReparseTag(const std::wstring& path, DWORD* tag) {
-    HANDLE entry = ::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+// Opens the entry at path, not its target, to read its attributes. Opens a
+// file or a directory.
+ScopedHandle OpenReparseEntry(const std::wstring& path) {
+    return ScopedHandle(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
-        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (entry == INVALID_HANDLE_VALUE) {
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+}
+
+// Reads the tag of the entry at path, not of its target.
+NTSTATUS ReadReparseTag(const std::wstring& path, DWORD* tag) {
+    const ScopedHandle entry = OpenReparseEntry(path);
+    if (!entry.IsValid()) {
         return NtStatusFromWin32(::GetLastError());
     }
     FILE_ATTRIBUTE_TAG_INFO tagInfo{};
-    const BOOL read = ::GetFileInformationByHandleEx(
-        entry, FileAttributeTagInfo, &tagInfo, sizeof(tagInfo));
-    const DWORD readErr = read ? 0 : ::GetLastError();
-    ::CloseHandle(entry);
-    if (!read) {
-        return NtStatusFromWin32(readErr);
+    if (!::GetFileInformationByHandleEx(
+            entry.Get(), FileAttributeTagInfo, &tagInfo, sizeof(tagInfo))) {
+        return NtStatusFromWin32(::GetLastError());
     }
     *tag = tagInfo.ReparseTag;
     return STATUS_SUCCESS;
@@ -169,6 +173,65 @@ NTSTATUS ClonesReparsePoint(const std::wstring& path, DWORD attributes, bool* cl
     const bool isDirectory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     *clones = IsLinkReparseTag(tag) || (!isDirectory && IsSelfContainedFileReparseTag(tag));
     return STATUS_SUCCESS;
+}
+
+namespace {
+
+// The user-mode SDK headers declare no REPARSE_DATA_BUFFER, so this file
+// declares the layout of a symbolic link's reparse data.
+#pragma pack(push, 1)
+struct SymbolicLinkReparseHeader {
+    ULONG ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    USHORT SubstituteNameOffset;
+    USHORT SubstituteNameLength;
+    USHORT PrintNameOffset;
+    USHORT PrintNameLength;
+    ULONG Flags;
+};
+#pragma pack(pop)
+
+constexpr ULONG kSymlinkFlagRelative = 0x1;
+
+}
+
+ReparseLink ReadReparseLink(const std::wstring& path, std::wstring* relativeTarget) {
+    relativeTarget->clear();
+    const ScopedHandle entry = OpenReparseEntry(path);
+    if (!entry.IsValid()) {
+        return ReparseLink::OtherLink;
+    }
+    std::vector<BYTE> data(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    DWORD returned = 0;
+    const BOOL read = ::DeviceIoControl(entry.Get(), FSCTL_GET_REPARSE_POINT, nullptr, 0,
+                                        data.data(), static_cast<DWORD>(data.size()),
+                                        &returned, nullptr);
+    if (!read || returned < sizeof(ULONG)) {
+        return ReparseLink::OtherLink;
+    }
+    ULONG tag = 0;
+    std::memcpy(&tag, data.data(), sizeof(tag));
+    if (!IsLinkReparseTag(tag)) {
+        return ReparseLink::None;
+    }
+    if (tag != IO_REPARSE_TAG_SYMLINK || returned < sizeof(SymbolicLinkReparseHeader)) {
+        return ReparseLink::OtherLink;
+    }
+    SymbolicLinkReparseHeader header{};
+    std::memcpy(&header, data.data(), sizeof(header));
+    const size_t nameStart = sizeof(header) + header.SubstituteNameOffset;
+    if ((header.Flags & kSymlinkFlagRelative) == 0 ||
+        nameStart + header.SubstituteNameLength > returned) {
+        return ReparseLink::OtherLink;
+    }
+    std::wstring target(header.SubstituteNameLength / sizeof(wchar_t), L'\0');
+    std::memcpy(target.data(), data.data() + nameStart, target.size() * sizeof(wchar_t));
+    if (target.find(L':') != std::wstring::npos) {
+        return ReparseLink::OtherLink;
+    }
+    *relativeTarget = std::move(target);
+    return ReparseLink::RelativeSymlink;
 }
 
 namespace {

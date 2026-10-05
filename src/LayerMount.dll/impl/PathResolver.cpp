@@ -5,6 +5,9 @@
 #include "Cache.h"
 #include "LayerPath.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace LayerMount {
 
 namespace {
@@ -22,6 +25,64 @@ LowerVisibility LowersBelowParentOf(const WhiteoutManager& whiteoutMgr,
                                     const std::wstring& normalized) {
     const std::wstring parent = ParentDir(normalized);
     return LowersBelow(LayerDirectory{whiteoutMgr, layerPath, parent});
+}
+
+std::vector<std::wstring> SplitComponents(const std::wstring& path) {
+    std::vector<std::wstring> components;
+    size_t start = 0;
+    while (start < path.size()) {
+        size_t end = path.find(L'\\', start);
+        if (end == std::wstring::npos) {
+            end = path.size();
+        }
+        if (end > start) {
+            components.push_back(path.substr(start, end - start));
+        }
+        start = end + 1;
+    }
+    return components;
+}
+
+std::wstring JoinComponents(const std::vector<std::wstring>& components, size_t count) {
+    std::wstring joined;
+    for (size_t i = 0; i < count; ++i) {
+        if (i > 0) {
+            joined.push_back(L'\\');
+        }
+        joined.append(components[i]);
+    }
+    return joined;
+}
+
+std::vector<std::wstring> ResolveRelativeTarget(std::vector<std::wstring> parent,
+                                                std::wstring target) {
+    std::replace(target.begin(), target.end(), L'/', L'\\');
+    if (!target.empty() && target.front() == L'\\') {
+        parent.clear();
+    }
+    for (std::wstring& component : SplitComponents(target)) {
+        if (component == L"..") {
+            if (!parent.empty()) {
+                parent.pop_back();
+            }
+        } else if (component != L".") {
+            parent.push_back(std::move(component));
+        }
+    }
+    return parent;
+}
+
+// Puts the view path of target, the target of the relative link at
+// components[linkIndex], in place of the components up to and including
+// the link.
+void SpliceLinkTarget(std::vector<std::wstring>* components,
+                      size_t linkIndex,
+                      const std::wstring& target) {
+    std::vector<std::wstring> spliced = ResolveRelativeTarget(
+        std::vector<std::wstring>(components->begin(), components->begin() + linkIndex),
+        target);
+    spliced.insert(spliced.end(), components->begin() + linkIndex + 1, components->end());
+    *components = std::move(spliced);
 }
 
 }
@@ -53,6 +114,53 @@ std::optional<std::wstring> PathResolver::ResolvableNormalized(
 
 ResolvedPath PathResolver::ResolvePath(const std::wstring& relativePath) const {
     return ResolvePathInternal(relativePath, 0, nullptr);
+}
+
+ViewLookup PathResolver::ViewPathThroughLinks(const std::wstring& path,
+                                              FinalLink finalLink) const {
+    const std::wstring callerPath = NormalizePathPreserveCase(path);
+    const size_t colon = callerPath.find(L':');
+    const std::wstring streamSuffix =
+        colon == std::wstring::npos ? std::wstring() : callerPath.substr(colon);
+    std::vector<std::wstring> components = SplitComponents(callerPath.substr(0, colon));
+    if (std::find(components.begin(), components.end(), L"..") != components.end()) {
+        return ViewLookup{STATUS_SUCCESS, ViewPath(callerPath, NormalizePath(callerPath))};
+    }
+    components.erase(std::remove(components.begin(), components.end(), L"."), components.end());
+
+    int hops = 0;
+    size_t walked = 0;
+    while (walked < components.size()) {
+        if (walked + 1 == components.size() && finalLink == FinalLink::Keep) {
+            break;
+        }
+        const ResolvedPath shown = ResolvePath(JoinComponents(components, walked + 1));
+        if (!shown.Found()) {
+            break;
+        }
+        if ((shown.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            std::wstring target;
+            const ReparseLink link = ReadReparseLink(shown.absolutePath, &target);
+            if (link == ReparseLink::OtherLink) {
+                break;
+            }
+            if (link == ReparseLink::RelativeSymlink) {
+                if (++hops > kMaxLinkHops) {
+                    return ViewLookup{STATUS_REPARSE_POINT_NOT_RESOLVED, ViewPath({}, {})};
+                }
+                SpliceLinkTarget(&components, walked, target);
+                walked = 0;
+                continue;
+            }
+        }
+        if (!IsDirectory(shown.attributes)) {
+            break;
+        }
+        ++walked;
+    }
+    std::wstring viewPath = JoinComponents(components, components.size()) + streamSuffix;
+    std::wstring normalized = NormalizePath(viewPath);
+    return ViewLookup{STATUS_SUCCESS, ViewPath(std::move(viewPath), std::move(normalized))};
 }
 
 ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,

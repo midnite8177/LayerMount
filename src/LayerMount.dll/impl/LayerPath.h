@@ -91,6 +91,21 @@ NTSTATUS EntryKindOf(const std::wstring& path, DWORD attributes, EntryKind* kind
 // STATUS_INVALID_PARAMETER.
 NTSTATUS ClonesReparsePoint(const std::wstring& path, DWORD attributes, bool* clones);
 
+// What the reparse point of an entry is to a lookup in the merged view.
+// RelativeSymlink is a symbolic link with SYMLINK_FLAG_RELATIVE, which
+// resolves in the view. OtherLink is any other name surrogate, such as a
+// junction or an absolute symbolic link, which Win32 follows on the
+// physical path. None is a reparse point that is not a link.
+enum class ReparseLink { None, RelativeSymlink, OtherLink };
+
+// Reads the reparse data of the entry at path, not of its target. For a
+// RelativeSymlink, sets *relativeTarget to the link's substitute name. A
+// relative target that holds a colon gives OtherLink, because a
+// drive-relative target or a stream name has no view path. A reparse
+// point whose data cannot be read also gives OtherLink. The lookup leaves
+// both to Win32.
+ReparseLink ReadReparseLink(const std::wstring& path, std::wstring* relativeTarget);
+
 enum class ReplaceExisting { No, Yes };
 
 // Renames an upper file or directory within its volume. A junction or a
@@ -301,14 +316,17 @@ struct LinkInView {
 
 // Walks dirNorm through the merged view from the root and returns the first
 // link there: a link in the upper, or a link in the first lower that the
-// view reaches at that path when no higher layer holds the link's name. In
-// overlayfs the lookup ends at such a link, and a name under it is in the
-// link target, outside the overlay. A whiteout, an opaque marker or a file
-// that hides a lower from the path also hides that lower's links, as in a
-// directory merge. dirNorm is normalized and relative to the layer root; an
-// empty dirNorm is the root. Walks the path in the upper, and, when that
-// walk stops at no file, link or unreadable component, in each lower. When
-// a lower walk stops at a link or an unreadable component, adds a
+// view reaches at that path when no higher layer holds the link's name. A
+// name under a junction or an absolute symbolic link is in the link target,
+// outside the overlay. dirNorm must be a view path that
+// PathResolver::ViewPathThroughLinks has walked. A relative symbolic link
+// still on it, which that walk kept at the last component, comes back as a
+// link like any other. A whiteout, an opaque marker or a file that hides a
+// lower from the path also hides that lower's links, as in a directory
+// merge. dirNorm is normalized and relative to the layer root; an empty
+// dirNorm is the root. Walks the path in the upper, and, when that walk
+// stops at no file, link or unreadable component, in each lower. When a
+// lower walk stops at a link or an unreadable component, adds a
 // LayerAncestryOf read in the upper and in each lower that the view
 // reaches.
 LinkInView FindLinkInView(const LayerConfig& config,

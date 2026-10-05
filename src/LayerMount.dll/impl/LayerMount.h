@@ -109,6 +109,54 @@ enum class EntryKind {
     Link,
 };
 
+// Whether a walk through the merged view follows a relative symbolic link
+// at the last component of a path. A link at any other component is always
+// followed. Open and Create follow it unless createOptions holds
+// FILE_OPEN_REPARSE_POINT. MergeDirectoryEntries, EnumerateStreams,
+// GetSecurity and SetSecurity follow it. The other calls that take a path
+// keep it and act on the link itself.
+enum class FinalLink {
+    Follow,
+    Keep,
+};
+
+// A path in the merged view, as PathResolver::ViewPathThroughLinks gives
+// it. Only that walk makes one, so a call that takes a ViewPath cannot
+// skip the walk.
+class ViewPath {
+public:
+    // The path in the case of the caller's path and of the link targets,
+    // with the caller's stream suffix.
+    const std::wstring& Path() const { return path_; }
+
+    // Path() in NormalizePath form.
+    const std::wstring& Normalized() const { return normalized_; }
+
+private:
+    friend class PathResolver;
+
+    ViewPath(std::wstring path, std::wstring normalized)
+        : path_(std::move(path))
+        , normalized_(std::move(normalized)) {
+    }
+
+    std::wstring path_;
+    std::wstring normalized_;
+};
+
+// The status of a walk through the merged view and its path. The path is
+// empty when the status is a failure.
+struct ViewLookup {
+    NTSTATUS status;
+    ViewPath path;
+};
+
+// Whether CreateWhiteout or SetOpaque accepted the view path for a marker.
+enum class MarkerPath {
+    Accepted,
+    Refused,
+};
+
 struct CreateResolution {
     // The overlay's hit, as ResolvePath returns it.
     ResolvedPath overlayHit;
@@ -409,6 +457,9 @@ public:
     // fills outInfo. Returns the new context via outCtx (caller takes
     // ownership).
     //
+    // A relative symbolic link at the last component of the path resolves
+    // in the merged view unless createOptions holds FILE_OPEN_REPARSE_POINT.
+    //
     // A metacopy shell fills before its handle opens when grantedAccess
     // asks for data: read, write, append, or execute. An open for
     // attributes, security, or delete, and an open of one of the shell's
@@ -441,7 +492,7 @@ public:
     // without a stream suffix, and for a stream create when the host file
     // that the overlay holds already has that stream. A stream create on
     // a metacopy shell keeps the shell sparse.
-    NTSTATUS Create(const CreateRequest& request,
+    NTSTATUS Create(const CreateRequest& callerRequest,
                     std::unique_ptr<FileContext>* outCtx,
                     InternalFileInfo* outInfo);
 
@@ -517,10 +568,11 @@ public:
     NTSTATUS CanDelete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS CanDelete(FileContext* ctx);
 
-    // Calls CanDelete first. Removes the entry from the upper, and writes a
-    // whiteout when a lower holds it. Under a lower link that no higher
-    // layer holds, copies the link up as a link first, so the delete
-    // removes the entry from the link target and writes no whiteout.
+    // Makes the checks of CanDelete first. Removes the entry from the upper,
+    // and writes a whiteout when a lower holds it. Under a lower junction or
+    // absolute symbolic link that no higher layer holds, copies the link up
+    // as a link first, so the delete removes the entry from the link target
+    // and writes no whiteout.
     NTSTATUS Delete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS Delete(FileContext* ctx);
 
@@ -553,15 +605,16 @@ public:
     // and destination are not under the same link with
     // STATUS_NOT_SAME_DEVICE, and one with a component on either path that
     // it cannot read with STATUS_ACCESS_DENIED, before any change. A rename
-    // within one lower link target, into a destination parent that the
-    // merged view shows as a directory, copies the link up as a link
-    // first, then renames the entry in the target and writes no whiteout.
-    NTSTATUS Rename(const std::wstring& oldRelativePath,
-                    const std::wstring& newRelativePath,
+    // within the target of one lower junction or absolute symbolic link,
+    // into a destination parent that the merged view shows as a directory,
+    // copies the link up as a link first, then renames the entry in the
+    // target and writes no whiteout.
+    NTSTATUS Rename(const std::wstring& callerOldPath,
+                    const std::wstring& callerNewPath,
                     BOOLEAN replaceIfExists,
                     DWORD callerPid);
     NTSTATUS Rename(FileContext* ctx,
-                    const std::wstring& newRelativePath,
+                    const std::wstring& callerNewPath,
                     BOOLEAN replaceIfExists,
                     DWORD callerPid);
 
@@ -577,7 +630,7 @@ public:
     // unchanged on rejection so the caller can surface the error without
     // losing state.
     NTSTATUS UpdateContextPath(FileContext* ctx,
-                               const std::wstring& newRelativePath);
+                               const std::wstring& callerNewPath);
 
     // Path-based security accessor. Two-call buffer pattern:
     //   sd == nullptr or sdBytes == 0 -> writes needed bytes to
@@ -646,6 +699,24 @@ public:
     NTSTATUS EnumerateStreams(const std::wstring& relativePath,
                               std::vector<InternalStreamInfo>& out);
 
+    // WhiteoutManager::CreateWhiteout for the view path of relativePath.
+    // Sets *markerPath to Refused, writes nothing and returns
+    // STATUS_OBJECT_NAME_INVALID when IsSafeRelativePath refuses the view
+    // path or IsReservedRelativePath names it. Otherwise sets it to
+    // Accepted and returns the status of the walk or of the write.
+    NTSTATUS CreateWhiteout(const std::wstring& relativePath,
+                            WhiteoutType type,
+                            MarkerPath* markerPath);
+
+    // WhiteoutManager::SetOpaque for the view path of dirRelativePath, with
+    // the path checks of CreateWhiteout.
+    NTSTATUS SetOpaque(const std::wstring& dirRelativePath, MarkerPath* markerPath);
+
+    // Sets *resolved to PathResolver::ResolvePath of the view path of
+    // relativePath. Returns the walk's failure and leaves *resolved
+    // unchanged when the walk fails.
+    NTSTATUS ResolvePath(const std::wstring& relativePath, ResolvedPath* resolved) const;
+
     PathResolver& Resolver() { return *pathResolver_; }
     WhiteoutManager& Whiteouts() { return *whiteoutMgr_; }
     CopyUp& CopyUpEngine() { return *copyUp_; }
@@ -687,6 +758,17 @@ public:
 
 private:
     std::shared_ptr<ProcessTracker> TryMakeProcessTracker();
+
+    // PathResolver::ViewPathThroughLinks of a caller's path. Each public
+    // call that takes a path starts with it.
+    ViewLookup WalkCallerPath(const std::wstring& callerPath, FinalLink finalLink) const;
+
+    // The path-based rename after the walk, for paths that are already
+    // view paths.
+    NTSTATUS RenameViewPaths(const std::wstring& oldRelativePath,
+                             const std::wstring& newRelativePath,
+                             BOOLEAN replaceIfExists,
+                             DWORD callerPid);
 
     NTSTATUS OpenRoot(UINT32 grantedAccess,
                       UINT32 createOptions,

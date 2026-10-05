@@ -626,6 +626,75 @@ inline DWORD ReparseTagOf(const std::wstring& path) {
     return info.ReparseTag;
 }
 
+// REPARSE_DATA_BUFFER is a kernel-header type, so the symbolic link layout
+// is spelled out here. The path buffer follows Flags.
+#pragma pack(push, 1)
+struct SymlinkReparseHeader {
+    ULONG ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    USHORT SubstituteNameOffset;
+    USHORT SubstituteNameLength;
+    USHORT PrintNameOffset;
+    USHORT PrintNameLength;
+    ULONG Flags;
+};
+#pragma pack(pop)
+
+inline constexpr ULONG kSymlinkFlagRelative = 0x1;
+inline constexpr size_t kReparseTagAndLengthBytes = sizeof(ULONG) + 2 * sizeof(USHORT);
+
+// The reparse data of a relative symbolic link to target, with target as
+// both the substitute name and the print name.
+inline std::vector<BYTE> RelativeSymlinkReparseBuffer(const std::wstring& target) {
+    const size_t nameBytes = target.size() * sizeof(wchar_t);
+    std::vector<BYTE> buffer(sizeof(SymlinkReparseHeader) + 2 * nameBytes);
+    SymlinkReparseHeader header{};
+    header.ReparseTag = IO_REPARSE_TAG_SYMLINK;
+    header.ReparseDataLength =
+        static_cast<USHORT>(buffer.size() - kReparseTagAndLengthBytes);
+    header.SubstituteNameOffset = 0;
+    header.SubstituteNameLength = static_cast<USHORT>(nameBytes);
+    header.PrintNameOffset = static_cast<USHORT>(nameBytes);
+    header.PrintNameLength = static_cast<USHORT>(nameBytes);
+    header.Flags = kSymlinkFlagRelative;
+    std::memcpy(buffer.data(), &header, sizeof(header));
+    std::memcpy(buffer.data() + sizeof(header), target.data(), nameBytes);
+    std::memcpy(buffer.data() + sizeof(header) + nameBytes, target.data(), nameBytes);
+    return buffer;
+}
+
+struct SymlinkTarget {
+    std::wstring substituteName;
+    bool relative;
+};
+
+// Reads the reparse data of the symbolic link at path, not of its target.
+// Fails the test when the entry is not a symbolic link.
+inline SymlinkTarget ReadSymlinkTarget(const std::wstring& path) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    ::LayerMount::ScopedHandle handle(::CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    std::vector<BYTE> data(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    DWORD returned = 0;
+    const bool read = handle.IsValid() &&
+                      ::DeviceIoControl(handle.Get(), FSCTL_GET_REPARSE_POINT, nullptr, 0,
+                                        data.data(), static_cast<DWORD>(data.size()),
+                                        &returned, nullptr) != FALSE;
+    Assert::IsTrue(read && returned >= sizeof(SymlinkReparseHeader),
+        (L"ReadSymlinkTarget: the reparse data of " + path + L" must be readable").c_str());
+    SymlinkReparseHeader header{};
+    std::memcpy(&header, data.data(), sizeof(header));
+    Assert::AreEqual(static_cast<ULONG>(IO_REPARSE_TAG_SYMLINK), header.ReparseTag,
+        (L"ReadSymlinkTarget: " + path + L" must be a symbolic link").c_str());
+    std::wstring name(header.SubstituteNameLength / sizeof(wchar_t), L'\0');
+    std::memcpy(name.data(), data.data() + sizeof(header) + header.SubstituteNameOffset,
+                name.size() * sizeof(wchar_t));
+    return SymlinkTarget{name, (header.Flags & kSymlinkFlagRelative) != 0};
+}
+
 inline void AssertUpperLinkListsWholeTarget(const TempLayerEnvironment& env,
                                             const ::LayerMount::LayerMount& mount,
                                             const std::wstring& linkPath,
@@ -1067,6 +1136,26 @@ inline std::string ReadThroughMount(::LayerMount::LayerMount& mount,
     mount.Close(ctx.get());
     Assert::IsTrue(NT_SUCCESS(readStatus), L"ReadThroughMount: the read must succeed");
     return std::string(buffer, transferred);
+}
+
+// Opens path through the mount for read and write and writes data at its
+// start. Fails the test when the open or the write fails.
+inline void WriteThroughMount(::LayerMount::LayerMount& mount,
+                              const std::wstring& path,
+                              const std::string& data) {
+    constexpr UINT64 fromStart = 0u;
+    std::unique_ptr<::LayerMount::FileContext> ctx;
+    ::LayerMount::InternalFileInfo info{};
+    AssertStatus(STATUS_SUCCESS,
+        mount.Open(path, FILE_READ_DATA | FILE_WRITE_DATA, kNoCreateOptions, kNoCallerPid,
+                   &ctx, &info),
+        (L"The write open of " + path + L" must succeed").c_str());
+    ULONG transferred = 0;
+    const NTSTATUS status = mount.Write(ctx.get(), data.data(), fromStart,
+                                        static_cast<ULONG>(data.size()), FALSE, FALSE,
+                                        &transferred, nullptr);
+    mount.Close(ctx.get());
+    AssertStatus(STATUS_SUCCESS, status, (L"The write to " + path + L" must succeed").c_str());
 }
 
 // Opens path through the mount and returns the file size that the open

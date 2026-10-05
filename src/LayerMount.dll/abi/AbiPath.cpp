@@ -50,8 +50,11 @@ LM_API HRESULT LM_CALL LayerMountResolvePath(LM_HANDLE         handle,
         return E_HANDLE;
     }
 
-    ::LayerMount::ResolvedPath resolved =
-        mountHolder->core->Resolver().ResolvePath(relativePath);
+    ::LayerMount::ResolvedPath resolved;
+    const NTSTATUS status = mountHolder->core->ResolvePath(relativePath, &resolved);
+    if (!NT_SUCCESS(status)) {
+        return HresultFromNtStatus(status);
+    }
 
     outResolved->source     = ToPublicLayerSource(resolved.source);
     outResolved->lowerIndex = (resolved.source == ::LayerMount::LayerSource::Lower)

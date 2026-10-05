@@ -205,6 +205,82 @@ public:
         Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES, attrs,
             L"After EnsureInUpperLayer, file must exist in the upper layer");
     }
+
+    TEST_METHOD(ResolvePath_FileUnderRelativeLowerLinkAfterCopyUp_ResolvesToTheUpperTarget) {
+        TempLayerEnv  env(1);
+        if (!RelativeLowerLinkBuiltOrSkipped(env)) {
+            return;
+        }
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountEnsureInUpperLayer(mount.Get(), L"\\a\\link\\foo"),
+            L"The copy-up through the relative link must succeed");
+
+        std::vector<wchar_t> buf(MAX_PATH);
+        LM_RESOLVED_PATH rp{};
+        rp.absolutePath      = buf.data();
+        rp.absolutePathChars = buf.size();
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountResolvePath(mount.Get(), L"\\a\\link\\foo", &rp),
+            L"The resolve through the relative link must succeed");
+        Assert::AreEqual<int>(LM_LAYER_UPPER, static_cast<int>(rp.source),
+            L"The resolve must find the copied-up target file in the upper");
+        Assert::AreEqual(0, ::_wcsicmp((env.Upper() + L"\\target\\foo").c_str(), rp.absolutePath),
+            L"The resolve must return the upper's target\\foo");
+        Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\a\\link"),
+            L"The copy-up must not copy the relative link up");
+    }
+
+    TEST_METHOD(CreateWhiteout_FileUnderRelativeLowerLink_HidesTheViewTargetFile) {
+        TempLayerEnv  env(1);
+        if (!RelativeLowerLinkBuiltOrSkipped(env)) {
+            return;
+        }
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCreateWhiteout(mount.Get(), L"\\a\\link\\foo", FALSE),
+            L"The whiteout through the relative link must succeed");
+
+        LM_RESOLVED_PATH rp{};
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountResolvePath(mount.Get(), L"\\target\\foo", &rp),
+            L"The resolve of target\\foo must succeed");
+        Assert::IsTrue(rp.isWhiteout != FALSE,
+            L"The whiteout must hide the view's target\\foo");
+        Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\a"),
+            L"The whiteout must write nothing under the link's name");
+    }
+
+    TEST_METHOD(SetOpaque_RelativeLowerLinkItselfAndBelowIt_FailsOnTheLinkAndMarksTheViewTarget) {
+        TempLayerEnv  env(1);
+        if (!RelativeLowerLinkBuiltOrSkipped(env)) {
+            return;
+        }
+        std::filesystem::create_directories(env.Lower(0) + L"\\target\\sub");
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY),
+            ::LayerMountSetOpaque(mount.Get(), L"\\a\\link"),
+            L"The opaque mark on the relative link itself must fail");
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountSetOpaque(mount.Get(), L"\\a\\link\\sub"),
+            L"The opaque mark through the relative link must succeed");
+
+        Assert::IsTrue(std::filesystem::is_directory(env.Upper() + L"\\target\\sub"),
+            L"The opaque mark must land on the view's target\\sub");
+        Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\a"),
+            L"The opaque marks must write nothing under the link's name");
+    }
+
+private:
+    static bool RelativeLowerLinkBuiltOrSkipped(const TempLayerEnv& env) {
+        env.WriteLowerFile(0, L"target\\foo", "foo");
+        std::filesystem::create_directories(env.Lower(0) + L"\\a");
+        return LinkCreatedOrSkipped(CreateDirectorySymlink, env.Lower(0) + L"\\a\\link",
+                                    L"..\\target");
+    }
 };
 
 }

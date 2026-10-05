@@ -31,6 +31,11 @@ std::shared_ptr<::LayerMount::abi::FileHolder> ResolveFileHolder(LM_FILE_HANDLE 
     return holder;
 }
 
+HRESULT HresultFromMarkerWrite(NTSTATUS status, ::LayerMount::MarkerPath markerPath) {
+    return markerPath == ::LayerMount::MarkerPath::Refused ? E_INVALIDARG
+                                                           : HresultFromNtStatus(status);
+}
+
 inline void ToPublicFileInfo(const ::LayerMount::InternalFileInfo& src,
                              LM_FILE_INFO& dst) {
     dst.fileAttributes = src.FileAttributes;
@@ -989,15 +994,12 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(LM_HANDLE handle,
         return E_HANDLE;
     }
 
-    const std::wstring normalized = ::LayerMount::NormalizePath(relativePath);
-    if (!::LayerMount::IsSafeRelativePath(normalized) ||
-        ::LayerMount::IsReservedRelativePath(normalized)) {
-        return E_INVALIDARG;
-    }
-
-    return HresultFromNtStatus(mountHolder->core->Whiteouts().CreateWhiteout(relativePath,
+    ::LayerMount::MarkerPath markerPath = ::LayerMount::MarkerPath::Accepted;
+    const NTSTATUS status = mountHolder->core->CreateWhiteout(relativePath,
         isDirectory ? ::LayerMount::WhiteoutType::Directory
-                    : ::LayerMount::WhiteoutType::File));
+                    : ::LayerMount::WhiteoutType::File,
+        &markerPath);
+    return HresultFromMarkerWrite(status, markerPath);
 
     LM_ABI_END();
 }
@@ -1019,13 +1021,9 @@ LM_API HRESULT LM_CALL LayerMountSetOpaque(LM_HANDLE handle, PCWSTR dirRelativeP
         return E_HANDLE;
     }
 
-    const std::wstring normalized = ::LayerMount::NormalizePath(dirRelativePath);
-    if (!::LayerMount::IsSafeRelativePath(normalized) ||
-        ::LayerMount::IsReservedRelativePath(normalized)) {
-        return E_INVALIDARG;
-    }
-
-    return HresultFromNtStatus(mountHolder->core->Whiteouts().SetOpaque(dirRelativePath));
+    ::LayerMount::MarkerPath markerPath = ::LayerMount::MarkerPath::Accepted;
+    const NTSTATUS status = mountHolder->core->SetOpaque(dirRelativePath, &markerPath);
+    return HresultFromMarkerWrite(status, markerPath);
 
     LM_ABI_END();
 }

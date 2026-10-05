@@ -359,6 +359,29 @@ inline bool CreateDirectoryJunction(const std::wstring& junction, const std::wst
     return _wsystem(command.c_str()) == 0;
 }
 
+inline bool CreateDirectorySymlink(const std::wstring& link, const std::wstring& target) {
+    return ::CreateSymbolicLinkW(link.c_str(), target.c_str(),
+        SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+}
+
+inline bool CreateFileSymlink(const std::wstring& link, const std::wstring& target) {
+    return ::CreateSymbolicLinkW(link.c_str(), target.c_str(),
+        SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+}
+
+using LinkCreator = bool (*)(const std::wstring& link, const std::wstring& target);
+
+inline bool LinkCreatedOrSkipped(LinkCreator createLink,
+                                 const std::wstring& link,
+                                 const std::wstring& target) {
+    if (createLink(link, target)) {
+        return true;
+    }
+    Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+        (L"[SKIP] the test could not create the link " + link).c_str());
+    return false;
+}
+
 // Convenience: build an overlay from env's defaults and assert creation.
 inline LayerMountHolder CreateLayerMount(const TempLayerEnv& env,
                                    UINT32 caps =

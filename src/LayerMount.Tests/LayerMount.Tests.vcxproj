@@ -96,6 +96,7 @@
     <ClCompile Include="MetadataStoreTests.cpp" />
     <ClCompile Include="PathResolverTests.cpp" />
     <ClCompile Include="PathTraversalTests.cpp" />
+    <ClCompile Include="RelativeLinkTests.cpp" />
     <ClCompile Include="RenameMoveTests.cpp" />
     <ClCompile Include="SecurityAdvancedTests.cpp" />
     <ClCompile Include="TestMain.cpp" />

@@ -16,6 +16,26 @@ public:
 
     ResolvedPath ResolvePath(const std::wstring& relativePath) const;
 
+    // Returns the view path that path names in the merged view, where a
+    // relative symbolic link in any layer resolves as overlayfs resolves
+    // it. Drops each `.` and empty component of path, then walks it from
+    // the root through the entries the view shows. At a relative symbolic
+    // link, resolves the link's target from the link's parent directory,
+    // puts the result in place of the components up to and including the
+    // link, and walks again from the root. In the target, `.` is the same
+    // directory, `..` is the parent, `..` at the root is the root, and a
+    // leading separator starts at the root. The walk stops at a missing
+    // entry, at a file, and at a junction or any other link, which Win32
+    // follows on the physical path. finalLink says whether a link at the
+    // last component is followed. The view path keeps the case of path and
+    // of the link targets, and keeps the stream suffix of path. A path with
+    // a `..` component comes back unwalked, as NormalizePathPreserveCase
+    // gives it, so the caller's own checks refuse it. More than
+    // kMaxLinkHops links fail with STATUS_REPARSE_POINT_NOT_RESOLVED. Costs
+    // a ResolvePath per walked component and a reparse read per reparse
+    // point.
+    ViewLookup ViewPathThroughLinks(const std::wstring& path, FinalLink finalLink) const;
+
     // Returns the first visible lower that holds the path. An upper entry, a
     // whiteout or an opaque marker at the path itself does not hide it. A
     // whiteout, an opaque marker, a non-directory or a link at an ancestor in
@@ -102,6 +122,8 @@ private:
                                        const ResolvedPath& hit) const;
 
     static constexpr int kMaxRedirectDepth = 40;
+    // MAXSYMLINKS in Linux, the most links one lookup follows.
+    static constexpr int kMaxLinkHops = 40;
 
     const LayerConfig& config_;
     WhiteoutManager& whiteoutMgr_;
