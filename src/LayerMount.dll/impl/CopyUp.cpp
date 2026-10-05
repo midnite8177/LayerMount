@@ -870,11 +870,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
         return STATUS_ACCESS_DENIED;
     }
 
-    // A link gets no opaque marker, as overlayfs gives a symlink no opaque
-    // xattr. The marker-file check would also go through the link into its
-    // target.
-    const bool wasOpaque = destinationKind == EntryKind::Directory &&
-                           whiteoutMgr_.IsOpaque(newNorm);
+    const bool wasOpaque = destinationKind != EntryKind::File && whiteoutMgr_.IsOpaque(newNorm);
     if (wasOpaque) {
         whiteoutMgr_.RemoveOpaque(newNorm);
     }

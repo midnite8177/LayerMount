@@ -384,6 +384,8 @@ inline bool CreateFileSymlink(const std::wstring& link, const std::wstring& targ
 
 using LinkCreator = bool (*)(const std::wstring& link, const std::wstring& target);
 
+constexpr LinkCreator kDirectoryLinkCreators[] = {CreateDirectoryJunction, CreateDirectorySymlink};
+
 inline bool LinkCreatedOrSkipped(LinkCreator createLink,
                                  const std::wstring& link,
                                  const std::wstring& target) {

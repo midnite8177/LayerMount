@@ -2156,8 +2156,7 @@ NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
     const ReplaceExisting replace =
         replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No;
     if (route == DirectoryRenameRoute::MoveUpper) {
-        return directoryRename_->RenameUpperDirectory(oldCallerPath, newCallerPath, sourceKind,
-                                                      replace);
+        return directoryRename_->RenameUpperDirectory(oldCallerPath, newCallerPath, replace);
     }
 
     // The name that the move back in WhiteOutRenameSource gives the entry.
@@ -2166,7 +2165,7 @@ NTSTATUS LayerMount::RenameDirectoryEntry(const std::wstring& oldRelativePath,
         : pathResolver_->GetUpperPathForCopyUp(oldNorm, pathResolver_->ResolveLowerPath(oldNorm));
     const NTSTATUS status = route == DirectoryRenameRoute::MergeLower
         ? directoryRename_->RenameLowerDirectory(oldCallerPath, newCallerPath, sourceKind, replace)
-        : directoryRename_->RenameUpperDirectory(oldCallerPath, newCallerPath, sourceKind, replace);
+        : directoryRename_->RenameUpperDirectory(oldCallerPath, newCallerPath, replace);
     if (!NT_SUCCESS(status)) return status;
     return WhiteOutRenameSource(RenamePaths{oldNorm, newNorm}, WhiteoutType::Directory,
                                 oldUpperPath, destHadWhiteout);

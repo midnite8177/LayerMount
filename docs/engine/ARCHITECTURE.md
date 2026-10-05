@@ -299,9 +299,20 @@ nothing either. The engine applies the same rule to links:
   adds anything either. `HasLinkUnderHigherLayerEntry` makes this check
   for each lower before its scan or its probe.
 
-A link cannot carry an opaque marker, because the marker would go into
-its target. Instead, `LowersBelow` walks the directory's path in the
-layer and stops at a link. A probe or a scan through the link sees the
+A link is never opaque, as overlayfs gives a symlink no opaque xattr.
+`WhiteoutManager` owns this rule, so no caller checks for a link itself.
+`IsOpaqueInLayer` and `HasOpaqueSelfOrAncestorInLayer` ignore a marker at
+a link or under one. They walk the path only after they find a marker,
+so a directory without a marker costs no walk. `StepLayerAncestry`
+already knows that no ancestor is a link, so it reads the marker without
+that walk. `SetOpaque` on a link, or on a directory under one, fails with `STATUS_NOT_A_DIRECTORY` and writes
+nothing into the target. When the walk cannot read a component of the
+path, `SetOpaque` fails with `STATUS_ACCESS_DENIED`, because that
+component can be a link. `RemoveOpaque` on a link removes the link's own
+opaque metadata and keeps the marker file in the target. Under a link it
+removes nothing. The link hides the lowers below it through
+`LowersBelow`, which walks the directory's path in the layer and stops
+at a link. A probe or a scan through the link sees the
 target as a directory, so the walk runs even when the layer holds the
 directory. When the walk cannot read a reparse tag, the lowers stay
 hidden, as they do when the walk cannot read a component's attributes.
@@ -711,7 +722,7 @@ The engine handles ten cases. The last three also apply to a file source:
 - **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
   if present. When a lower layer has an entry at the destination path,
   mark the destination opaque. A junction or directory symlink gets no
-  opaque marker, because the marker would go into its target.
+  opaque marker, because `WhiteoutManager` refuses to mark a link.
 - **lower → upper, dest-not-present**: build a copy of the merged view
   of the source in a container, as for a link copy-up. The copy gets
   its copy-up record, then the opaque marker, and last its attributes,

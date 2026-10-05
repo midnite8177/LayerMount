@@ -30,8 +30,7 @@ NTSTATUS UpperEntryRemover::Remove(const std::wstring& normalized) {
         return probe;
     }
     if (upperExists) {
-        // A marker check through a link reads the markers of its target.
-        if (kind == EntryKind::Directory && whiteoutMgr_.IsOpaque(normalized)) {
+        if (kind != EntryKind::File && whiteoutMgr_.IsOpaque(normalized)) {
             whiteoutMgr_.RemoveOpaque(normalized);
         }
         const NTSTATUS removal = RemoveUpperEntryOfKind(upperPath, kind, config_);

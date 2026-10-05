@@ -52,28 +52,54 @@ public:
     NTSTATUS CreateWhiteout(const std::wstring& relativePath, WhiteoutType type);
     bool RemoveWhiteout(const std::wstring& relativePath);
 
-    // Check if directory is opaque in the upper layer (ADS marker or .wh..wh..opq)
+    // IsOpaqueInLayer for the upper layer.
     bool IsOpaque(const std::wstring& dirRelativePath) const;
 
+    // Whether the directory holds an opaque marker in the layer: the opaque
+    // metadata or the .wh..wh..opq file. A link, which is a junction or a
+    // directory symbolic link, is never opaque, as overlayfs gives a symlink
+    // no opaque xattr. A directory under a link, or on a path with a
+    // component that the walk cannot read, is not opaque either. When the
+    // directory holds a marker, the call walks the path from the layer root
+    // as FindLinkOnPath does.
     bool IsOpaqueInLayer(const std::wstring& dirRelativePath,
                          const std::wstring& layerPath) const;
+
+    // IsOpaqueInLayer for a directory whose path the caller walked from the
+    // layer root and found only plain directories on. Reads the markers and
+    // does not walk again.
+    bool IsOpaqueWalkedDirectoryInLayer(const std::wstring& dirRelativePath,
+                                        const std::wstring& layerPath) const;
 
     // Writes both opaque markers in the upper layer. Succeeds when either
     // write does. When both fail, returns the error of the marker file
     // create as an NTSTATUS. The directory keeps its times; SetOpaque
     // ignores a failure to restore them. Overlayfs keeps opacity in an
-    // extended attribute, which does not change mtime.
+    // extended attribute, which does not change mtime. When the upper holds
+    // a link at the directory or at an ancestor, SetOpaque returns
+    // STATUS_NOT_A_DIRECTORY and writes nothing, so no marker, directory or
+    // time write goes through the link into its target. When the walk
+    // cannot read a component of the path, SetOpaque returns
+    // STATUS_ACCESS_DENIED, as overlayfs fails a path it cannot search.
     NTSTATUS SetOpaque(const std::wstring& dirRelativePath);
 
     // Writes both opaque markers on the directory at dirFullPath, as
-    // SetOpaque does. The directory must exist. Makes no directory and
-    // invalidates no cache entry.
+    // SetOpaque does. The directory must exist and must not be under a
+    // link. Returns STATUS_NOT_A_DIRECTORY when the directory is a link, and
+    // the error of the reparse tag read when it cannot read the tag. Makes no
+    // directory and invalidates no cache entry.
     NTSTATUS SetOpaqueAtPath(const std::wstring& dirFullPath);
+
+    // Removes both opaque markers in the upper layer. On a link, removes
+    // only the link's own opaque metadata and keeps the marker file in its
+    // target. Under a link, or when the walk cannot read a component of the
+    // path, removes nothing and returns true.
     bool RemoveOpaque(const std::wstring& dirRelativePath);
 
     // Whether the directory, an ancestor of it, or the layer root is opaque in
-    // the layer. dirRelativePath is relative to the layer root, and an empty
-    // dirRelativePath is the root.
+    // the layer. A marker at a link or under one does not count, as
+    // IsOpaqueInLayer reads it. dirRelativePath is relative to the layer root,
+    // and an empty dirRelativePath is the root.
     bool HasOpaqueSelfOrAncestorInLayer(const std::wstring& dirRelativePath,
                                         const std::wstring& layerPath) const;
 
@@ -90,6 +116,9 @@ public:
                                             const std::wstring& relativePath);
 
 private:
+    bool HoldsOpaqueMarker(const std::wstring& dirFullPath) const;
+    NTSTATUS WriteOpaqueMarkers(const std::wstring& dirFullPath);
+
     const LayerConfig& config_;
     Cache* cache_;
     ::LayerMount::abi::EventEmitter* events_ = nullptr;

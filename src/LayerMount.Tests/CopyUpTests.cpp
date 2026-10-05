@@ -813,7 +813,7 @@ public:
 
         NTSTATUS status = rig.directoryRename.RenameUpperDirectory(
             CallerPath(L"srcdir"), CallerPath(L"dstdir"),
-            EntryKind::Directory, ReplaceExisting::No);
+            ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
 
         std::wstring src = env.Upper() + L"\\srcdir";

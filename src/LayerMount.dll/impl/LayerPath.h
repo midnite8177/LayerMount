@@ -160,6 +160,18 @@ std::wstring JoinLayerScanPath(const std::wstring& layerPath,
 bool HasNonDirectoryOrLinkSelfOrAncestorInLayer(const std::wstring& layerPath,
                                                 const std::wstring& dirRelativePath);
 
+// Where a walk of a path from the layer root meets a link. Unreadable is a
+// component whose attributes or reparse tag the walk cannot read, so it can
+// be a link.
+enum class LinkOnPath { None, Self, Ancestor, Unreadable };
+
+// Walks dirRelativePath from the layer root as
+// HasNonDirectoryOrLinkSelfOrAncestorInLayer does. A walk that stops at a
+// non-directory, or at a missing component, returns LinkOnPath::None.
+// dirRelativePath must be normalized, so that a link at its last component
+// returns LinkOnPath::Self.
+LinkOnPath FindLinkOnPath(const std::wstring& layerPath, const std::wstring& dirRelativePath);
+
 // What a layer holds at one path. Unreadable is an entry whose attributes
 // or reparse tag the engine cannot read, for a reason other than a missing
 // path.
@@ -211,7 +223,8 @@ enum class LowerVisibility {
 // directory, so LowersBelow walks the path even when the layer holds the
 // directory. Every call walks every component of the path, with one
 // GetFileAttributesW per component and one more open per directory reparse
-// point.
+// point. Each directory on the path that holds an opaque marker adds one
+// more walk from the layer root.
 LowerVisibility LowersBelow(const LayerDirectory& dir);
 
 // What one layer holds at a directory and at its ancestors. A directory
@@ -222,7 +235,8 @@ struct LayerAncestry {
     // A whiteout in the layer at the directory or at an ancestor.
     bool whitedOut;
     // An opaque marker at the directory, at an ancestor or at the layer
-    // root, as LowersBelow reads it.
+    // root, as LowersBelow reads it. StepLayerAncestry reads the marker only
+    // at a plain directory whose ancestors do not set nonDirectoryOrLink.
     bool opaque;
     // A non-directory, a link or an unreadable entry at the directory or at
     // an ancestor, as HasNonDirectoryOrLinkSelfOrAncestorInLayer reads it.

@@ -352,6 +352,13 @@ private:
     LM_HANDLE handle_ = nullptr;
 };
 
+// mklink /J needs no symbolic-link privilege.
+inline bool CreateDirectoryJunction(const std::wstring& junction, const std::wstring& target) {
+    const std::wstring command =
+        L"cmd.exe /c mklink /J \"" + junction + L"\" \"" + target + L"\" >nul 2>&1";
+    return _wsystem(command.c_str()) == 0;
+}
+
 // Convenience: build an overlay from env's defaults and assert creation.
 inline LayerMountHolder CreateLayerMount(const TempLayerEnv& env,
                                    UINT32 caps =

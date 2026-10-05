@@ -51,17 +51,6 @@ void LM_CALL SinkEvent(const LM_EVENT* evt, void* ctx) {
     s->messages.emplace_back(evt->message ? evt->message : L"");
 }
 
-// Create a directory junction (lowerPath -> targetPath) via cmd /c mklink.
-// Junctions do not require SeCreateSymbolicLinkPrivilege, so this works
-// off-admin. Returns true on success.
-bool CreateDirectoryJunction(const std::wstring& junction,
-                              const std::wstring& target) {
-    // Quote both paths to tolerate spaces.
-    std::wstring cmd = L"cmd.exe /c mklink /J \"" + junction +
-                       L"\" \"" + target + L"\" >nul 2>&1";
-    return _wsystem(cmd.c_str()) == 0;
-}
-
 // Writes inside.txt holding "inside-payload" into target and creates the
 // lower junction "link" to target. Logs a skip and returns false when the
 // junction cannot be created.

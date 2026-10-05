@@ -205,8 +205,9 @@ public sealed partial class LayerMount
     /// <exception cref="LayerMountException">
     /// If <paramref name="dirRelativePath"/> is outside the overlay root,
     /// is inside the reserved metadata subtree, or has a segment that
-    /// starts with <c>.wh.</c>, or if the underlying native call
-    /// otherwise returns a non-success HRESULT.
+    /// starts with <c>.wh.</c>; if the upper layer holds a junction or a
+    /// directory symbolic link at the path or at an ancestor; or if the
+    /// underlying native call otherwise returns a non-success HRESULT.
     /// </exception>
     public void SetOpaque(string dirRelativePath)
     {

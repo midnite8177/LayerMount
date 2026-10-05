@@ -46,7 +46,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            EntryKind::Directory, ReplaceExisting::No);
+            ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st));
 
         Assert::IsFalse(env.FileExists(env.Upper(), L"src"));
@@ -71,7 +71,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            EntryKind::Directory, ReplaceExisting::No)));
+            ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\inner.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\deep\\more.txt"));
@@ -97,7 +97,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            EntryKind::Directory, ReplaceExisting::No)));
+            ReplaceExisting::No)));
 
         Assert::IsFalse(wm.IsOpaque(L"src"),
             L"Opacity should no longer be reported for the vanished source path");
@@ -170,7 +170,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            EntryKind::Directory, ReplaceExisting::No);
+            ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -226,7 +226,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             CallerPath(L"src"), CallerPath(L"dst"),
-            EntryKind::Directory, ReplaceExisting::No);
+            ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st),
             L"Whited-out destination is invisible in merged view — rename "
             L"without replace must succeed, not collision.");
@@ -2313,6 +2313,45 @@ public:
             L"The rename must leave the junction target's file");
         Assert::AreEqual(std::string("f"), ReadThroughMount(mount, L"link"),
             L"The new name must show the moved file's data");
+    }
+
+    TEST_METHOD(Rename_UpperLinkToOpaqueMarkedTarget_KeepsTheTargetMarker) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Root(), OpaqueMarkerPath(L"target"), "");
+            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", env.Root() + L"\\target")) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"link", L"moved", kFailIfExists, kNoCallerPid),
+                L"A rename of an upper link must succeed");
+            Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved", FILE_ATTRIBUTE_REPARSE_POINT),
+                L"The upper entry at moved must be the moved link");
+            Assert::IsTrue(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+                L"The rename of the link must keep the marker file in its target");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoUpperLinkToOpaqueMarkedTarget_KeepsTheTargetMarker) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Root(), OpaqueMarkerPath(L"target"), "");
+            env.WriteFile(env.Lower(0), L"f.txt", "f");
+            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", env.Root() + L"\\target")) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"f.txt", L"link", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename of a file onto an upper link must succeed");
+            Assert::AreEqual(static_cast<DWORD>(0), ReparseTagOf(env.Upper() + L"\\link"),
+                L"The upper link must be the moved file");
+            Assert::IsTrue(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+                L"The replace rename must keep the marker file in the link target");
+        }
     }
 
     TEST_METHOD(ReplaceRename_UpperDirectoryThatCannotMove_KeepsTheDestination) {

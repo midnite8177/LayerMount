@@ -66,6 +66,23 @@ void AssertLinkHidesLowerChildren(const TempLayerEnvironment& env,
         L"The link target's own child must resolve in the layer that holds the link");
 }
 
+// Makes the upper link "link" to the directory target under the environment
+// root. target and target\sub each hold an opaque marker file. Logs a skip
+// and returns false when the link cannot be created.
+bool UpperLinkToMarkedTargetCreatedOrSkipped(const TempLayerEnvironment& env,
+                                             LinkCreator createLink) {
+    env.WriteFile(env.Root(), OpaqueMarkerPath(L"target"), "");
+    env.WriteFile(env.Root(), OpaqueMarkerPath(L"target\\sub"), "");
+    return LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", env.Root() + L"\\target");
+}
+
+void AssertTargetMarkersKept(const TempLayerEnvironment& env) {
+    Assert::IsTrue(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+        L"The opaque marker file in the link target must stay");
+    Assert::IsTrue(env.FileExists(env.Root(), OpaqueMarkerPath(L"target\\sub")),
+        L"The opaque marker file in the subdirectory of the link target must stay");
+}
+
 void AssertLinkListsOnlyTargetEntries(const TempLayerEnvironment& env) {
     ::LayerMount::LayerMount mount(env.MakeConfig());
 
@@ -957,6 +974,195 @@ public:
         WhiteoutManager wm(config, &cache);
 
         Assert::IsFalse(wm.HasOpaqueSelfOrAncestorInLayer(L"a\\b", env.Lower(0)));
+    }
+
+    TEST_METHOD(IsOpaque_UpperLinkToMarkedTarget_ReturnsFalse) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            if (!UpperLinkToMarkedTargetCreatedOrSkipped(env, createLink)) {
+                continue;
+            }
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\link", nullptr),
+                L"Preconditions: the link must hold its own opaque stream");
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            Assert::IsFalse(wm.IsOpaque(L"link"),
+                L"A link must never be opaque");
+            Assert::IsFalse(wm.IsOpaqueInLayer(L"link", env.Upper()),
+                L"A link must never be opaque in its layer");
+            Assert::IsFalse(wm.HasOpaqueSelfOrAncestorInLayer(L"link", env.Upper()),
+                L"A link must not count as an opaque directory");
+        }
+    }
+
+    TEST_METHOD(IsOpaqueInLayer_DirectoryUnderUpperLink_IgnoresTheMarkerInTheTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            if (!UpperLinkToMarkedTargetCreatedOrSkipped(env, createLink)) {
+                continue;
+            }
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Root() + L"\\target\\sub", nullptr),
+                L"Preconditions: the subdirectory of the target must hold an opaque stream");
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            Assert::IsFalse(wm.IsOpaqueInLayer(L"link\\sub", env.Upper()),
+                L"A directory under a link must not be opaque");
+            Assert::IsFalse(wm.HasOpaqueSelfOrAncestorInLayer(L"link\\sub", env.Upper()),
+                L"A directory under a link must have no opaque self or ancestor");
+        }
+    }
+
+    TEST_METHOD(SetOpaque_UpperLink_FailsWithNotADirectoryAndChangesNothingInTheTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Root(), L"target");
+            const std::wstring target = env.Root() + L"\\target";
+            const FILETIME stamped = MakeFileTime(2016, 4, 5);
+            StampTimes(target, MakeFileTime(2016, 1, 2), MakeFileTime(2016, 3, 4), stamped);
+            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", target)) {
+                continue;
+            }
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link"),
+                L"SetOpaque on a link must fail");
+
+            Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+                L"SetOpaque on a link must write no marker file into the target");
+            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(target, nullptr),
+                L"SetOpaque on a link must write no opaque stream onto the target");
+            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\link", nullptr),
+                L"SetOpaque on a link must write no opaque stream onto the link");
+            FILETIME creation{}, access{}, write{};
+            GetTimes(target, &creation, &access, &write);
+            Assert::AreEqual(0L, ::CompareFileTime(&stamped, &write),
+                L"SetOpaque on a link must leave the target's last-write time as it was");
+        }
+    }
+
+    TEST_METHOD(SetOpaque_DirectoryUnderUpperLink_FailsWithNotADirectoryAndWritesNothingInTheTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Root(), L"target\\sub");
+            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", env.Root() + L"\\target")) {
+                continue;
+            }
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link\\sub"),
+                L"SetOpaque on a directory under a link must fail");
+            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaque(L"link\\new"),
+                L"SetOpaque on a missing directory under a link must fail");
+
+            Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target\\sub")),
+                L"SetOpaque under a link must write no marker file into the target");
+            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Root() + L"\\target\\sub", nullptr),
+                L"SetOpaque under a link must write no opaque stream into the target");
+            Assert::IsFalse(env.FileExists(env.Root(), L"target\\new"),
+                L"SetOpaque under a link must make no directory in the target");
+        }
+    }
+
+    TEST_METHOD(RemoveOpaque_UpperLinkToMarkedTarget_ClearsTheLinkStreamAndKeepsTheTargetMarkers) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            if (!UpperLinkToMarkedTargetCreatedOrSkipped(env, createLink)) {
+                continue;
+            }
+            const std::wstring link = env.Upper() + L"\\link";
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(link, nullptr),
+                L"Preconditions: the link must hold its own opaque stream");
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            Assert::IsTrue(wm.RemoveOpaque(L"link"), L"RemoveOpaque on a link must succeed");
+            Assert::IsTrue(wm.RemoveOpaque(L"link\\sub"),
+                L"RemoveOpaque on a directory under a link must succeed");
+
+            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(link, nullptr),
+                L"RemoveOpaque on a link must remove the link's own opaque stream");
+            AssertTargetMarkersKept(env);
+        }
+    }
+
+    TEST_METHOD(RemoveOpaque_UpperLinkWithTrailingSeparator_ClearsTheLinkStreamAndKeepsTheTargetMarkers) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            if (!UpperLinkToMarkedTargetCreatedOrSkipped(env, createLink)) {
+                continue;
+            }
+            const std::wstring link = env.Upper() + L"\\link";
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(link, nullptr),
+                L"Preconditions: the link must hold its own opaque stream");
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            Assert::IsTrue(wm.RemoveOpaque(L"link\\"), L"RemoveOpaque on a link must succeed");
+
+            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(link, nullptr),
+                L"RemoveOpaque on a link with a trailing separator must remove the link's own "
+                L"opaque stream");
+            AssertTargetMarkersKept(env);
+        }
+    }
+
+    TEST_METHOD(SetOpaqueAtPath_UpperLink_FailsWithNotADirectoryAndWritesNothingInTheTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Root(), L"target");
+            const std::wstring link = env.Upper() + L"\\link";
+            if (!LinkCreatedOrSkipped(createLink, link, env.Root() + L"\\target")) {
+                continue;
+            }
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.SetOpaqueAtPath(link),
+                L"SetOpaqueAtPath on a link must fail");
+
+            Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+                L"SetOpaqueAtPath on a link must write no marker file into the target");
+            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(link, nullptr),
+                L"SetOpaqueAtPath on a link must write no opaque stream onto the link");
+        }
+    }
+
+    TEST_METHOD(SetOpaque_UpperJunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndWritesNothingInTheTarget) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Root(), L"target\\sub");
+        const std::wstring junction = env.Upper() + L"\\link";
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
+            return;
+        }
+        LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        DisableRestorePrivilegeOnThread();
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+            L"The deny ACE must make the junction's reparse tag unreadable");
+
+        AssertStatus(STATUS_ACCESS_DENIED, wm.SetOpaque(L"link"),
+            L"SetOpaque on a component whose reparse tag the walk cannot read must fail");
+        AssertStatus(STATUS_ACCESS_DENIED, wm.SetOpaque(L"link\\sub"),
+            L"SetOpaque under a component whose reparse tag the walk cannot read must fail");
+
+        Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
+            L"The failed SetOpaque must write no marker file into the junction target");
+        Assert::IsFalse(env.FileExists(env.Root(), OpaqueMarkerPath(L"target\\sub")),
+            L"The failed SetOpaque must write no marker file under the junction target");
     }
 
     TEST_METHOD(PathResolve_OpaqueUpperDir_HidesAllLowerChildren) {

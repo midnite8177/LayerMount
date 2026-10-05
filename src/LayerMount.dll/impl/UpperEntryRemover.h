@@ -20,9 +20,9 @@ public:
                       Cache& cache);
 
     // Removes the upper entry at normalized as RemoveUpperEntryOfKind does,
-    // with its opaque marker unless the entry is a link, and writes a
-    // whiteout when a lower holds the name. Returns the status of a failed
-    // probe, removal or whiteout write.
+    // with the opaque marker of a directory, and writes a whiteout when a
+    // lower holds the name. A link keeps the markers of its target. Returns
+    // the status of a failed probe, removal or whiteout write.
     NTSTATUS Remove(const std::wstring& normalized);
 
 private:

@@ -66,6 +66,23 @@ public:
             L"The opaque mark must leave the directory's last-write time as it was");
     }
 
+    TEST_METHOD(SetOpaque_UpperJunction_FailsWithNotADirectoryAndWritesNoMarkerIntoTheTarget) {
+        TempLayerEnv  env(1);
+        const std::wstring target = env.Root() + L"\\target";
+        std::filesystem::create_directories(target);
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", target)) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY),
+            ::LayerMountSetOpaque(mount.Get(), L"link"),
+            L"The opaque mark on an upper junction must fail");
+        Assert::IsFalse(std::filesystem::exists(target + L"\\.wh..wh..opq"),
+            L"The failed opaque mark must write no marker file into the junction target");
+    }
+
     TEST_METHOD(ResolvePath_ShortBuffer_ReturnsMoreDataAndRequired) {
         TempLayerEnv  env(1);
         env.WriteLowerFile(0, L"long_name_file.dat", "x");

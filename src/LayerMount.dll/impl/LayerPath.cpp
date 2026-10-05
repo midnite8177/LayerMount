@@ -398,6 +398,20 @@ bool HasNonDirectoryOrLinkSelfOrAncestorInLayer(const std::wstring& layerPath,
     return WalkToFirstNonDirectory(layerPath, dirRelativePath).stop != WalkStop::None;
 }
 
+LinkOnPath FindLinkOnPath(const std::wstring& layerPath, const std::wstring& dirRelativePath) {
+    const LayerWalk walk = WalkToFirstNonDirectory(layerPath, dirRelativePath);
+    switch (walk.stop) {
+    case WalkStop::Link:
+        return walk.component == dirRelativePath ? LinkOnPath::Self : LinkOnPath::Ancestor;
+    case WalkStop::Unreadable:
+        return LinkOnPath::Unreadable;
+    case WalkStop::None:
+    case WalkStop::File:
+        break;
+    }
+    return LinkOnPath::None;
+}
+
 bool HasLinkUnderHigherLayerEntry(const LayerConfig& config,
                                   size_t lowerIndex,
                                   const std::wstring& dirRelativePath) {
@@ -429,11 +443,14 @@ LayerAncestry StepLayerAncestry(const LayerConfig& config,
     }
     LayerAncestry ancestry = parent;
     ancestry.whitedOut = parent.whitedOut || dir.whiteoutMgr.HasWhiteout(dir.dirNorm, dir.layerPath);
-    ancestry.opaque = parent.opaque || dir.whiteoutMgr.IsOpaqueInLayer(dir.dirNorm, dir.layerPath);
     if (parent.nonDirectoryOrLink) {
         return ancestry;
     }
     const ComponentKind kind = ComponentKindInLayer(dir.layerPath, dir.dirNorm);
+    ancestry.opaque =
+        parent.opaque ||
+        (kind == ComponentKind::Directory &&
+         dir.whiteoutMgr.IsOpaqueWalkedDirectoryInLayer(dir.dirNorm, dir.layerPath));
     ancestry.absent = kind == ComponentKind::Missing;
     ancestry.nonDirectoryOrLink = kind == ComponentKind::File || kind == ComponentKind::Link ||
                                   kind == ComponentKind::Unreadable;

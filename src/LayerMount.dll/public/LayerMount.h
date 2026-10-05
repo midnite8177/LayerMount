@@ -1067,7 +1067,12 @@ LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
 /* Marks the directory at `dirRelativePath` opaque, hiding every
  * lower-layer entry beneath it regardless of name. Rejects a path
  * outside the overlay root, inside the reserved metadata subtree, or
- * with a segment that starts with `.wh.` with E_INVALIDARG. */
+ * with a segment that starts with `.wh.` with E_INVALIDARG. When the
+ * upper layer holds a junction or a directory symbolic link at the path
+ * or at an ancestor, fails with HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY)
+ * and writes nothing, as overlayfs never makes a symlink opaque. When the
+ * engine cannot read the attributes or the reparse tag of a component of
+ * the path, fails with HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
 LM_API HRESULT LM_CALL LayerMountSetOpaque(
     LM_HANDLE handle, PCWSTR dirRelativePath);
 
