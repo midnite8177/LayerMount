@@ -19,37 +19,33 @@ class Cache;
 class FileBasicInfoGuard;
 
 // An upper destination entry that CopyUp::SetRenameDestinationAside moved
-// into the work directory. Until Commit runs, the destructor acts on a
-// failed rename. When the destination path is free, it moves the entry
-// back and restores a directory's opaque marker. When the rename placed an
-// entry at the path, it removes the copy in the work directory. Commit
-// removes that copy. An object that holds no entry does nothing.
+// into the work directory, with its opaque marker. Until Commit runs, the
+// destructor acts on a failed rename. When the destination path is free,
+// it moves the entry back, and the marker moves back with it. When the
+// rename placed an entry at the path, it removes the copy in the work
+// directory. Commit removes that copy. An object that holds no entry does
+// nothing.
 class RenameDestinationAside {
 public:
-    RenameDestinationAside(ConfigRef config, WhiteoutManager& whiteoutMgr, Cache& cache);
+    RenameDestinationAside(ConfigRef config, Cache& cache);
     ~RenameDestinationAside();
 
     RenameDestinationAside(const RenameDestinationAside&) = delete;
     RenameDestinationAside& operator=(const RenameDestinationAside&) = delete;
 
-    // Takes the entry that moved from upperPath to asidePath. The
-    // destructor moves it back and, when wasOpaque is true, marks
-    // normalizedPath opaque again.
+    // Takes the entry that moved from upperPath to asidePath.
     void Hold(std::wstring normalizedPath,
               std::wstring upperPath,
-              std::wstring asidePath,
-              bool wasOpaque);
+              std::wstring asidePath);
 
     void Commit();
 
 private:
     const LayerConfig& config_;
-    WhiteoutManager& whiteoutMgr_;
     Cache& cache_;
     std::wstring normalizedPath_;
     std::wstring upperPath_;
     std::wstring asidePath_;
-    bool wasOpaque_ = false;
 };
 
 // The result of CopyUp::CopyUpMetadataOnly and CopyUp::CopyUpFileOrShell.
@@ -177,11 +173,13 @@ public:
 
     // Moves the upper entry at newNorm into the work directory, so a
     // replace-rename can put its source at the path. destinationKind is
-    // the kind of the merged view's entry at newNorm. A Directory loses
-    // its opaque marker first. A Link moves as a link, and its target
-    // keeps its markers. Nothing moves and aside stays empty when the
-    // upper has no entry at newNorm. A read-only File destination fails
-    // with STATUS_ACCESS_DENIED, and nothing moves. aside must be empty.
+    // the kind of the merged view's entry at newNorm. A Directory takes
+    // its opaque marker along; in the sidecar store, the record follows on
+    // a best-effort basis. A Link moves as a link, and its target keeps
+    // its markers. Nothing moves and aside stays empty when the upper has
+    // no entry at newNorm, and when the move fails. A read-only File
+    // destination fails with STATUS_ACCESS_DENIED, and nothing moves.
+    // aside must be empty.
     NTSTATUS SetRenameDestinationAside(const std::wstring& newNorm,
                                        EntryKind destinationKind,
                                        RenameDestinationAside* aside);

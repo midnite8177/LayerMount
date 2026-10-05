@@ -2670,6 +2670,61 @@ public:
         }
     }
 
+    TEST_METHOD(ReplaceRename_OntoOpaqueDirectoryThatRefusesNewMarkers_KeepsItsLowerChildHidden) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+            env.WriteFile(env.Lower(0), L"dst\\old.txt", "old");
+            env.CreateDir(env.Upper(), L"dst");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\dst", &config),
+                L"The opaque metadata must mark the upper dst");
+            ::LayerMount::LayerMount mount(config);
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const std::wstring destination = env.Upper() + L"\\dst";
+                const DirectoryRefusesNewEntries destinationRefusesMarkers(destination,
+                                                                           FILE_ADD_FILE);
+                Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED,
+                    NewFileError(destination + L":probe"),
+                    L"The upper dst must refuse a new stream");
+                const ScopedHandle heldChild =
+                    HoldOpen(env.Upper() + L"\\src\\a.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
+                status = mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid);
+            }
+
+            Assert::IsFalse(NT_SUCCESS(status),
+                L"The rename must fail while a child of src is open");
+            AssertDestinationStillHidesItsLowerChild(env, mount);
+            AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+        });
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoOpaqueUpperDirectory_LeavesTheNewDirectoryNotOpaque) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+            env.CreateDir(env.Upper(), L"dst");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            WhiteoutManager markers(config, nullptr);
+            AssertStatus(STATUS_SUCCESS, markers.SetOpaque(L"dst"),
+                L"SetOpaque must mark the upper dst");
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid),
+                L"A replace rename onto an empty opaque directory must succeed");
+
+            AssertOnlyEntryShownAs(mount, L"", L"dst");
+            AssertOnlyEntryShownAs(mount, L"dst", L"a.txt");
+            Assert::IsFalse(markers.IsOpaque(L"dst"),
+                L"The renamed directory must not take the opaque marker of the replaced dst");
+        });
+    }
+
     TEST_METHOD(ReplaceRename_LowerDirectoryThatCannotCopy_KeepsTheDestination) {
         for (const LowerChildHiding hiding : {LowerChildHiding::Whiteout, LowerChildHiding::OpaqueMarker}) {
             TempLayerEnvironment env(1);

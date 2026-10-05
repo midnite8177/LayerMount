@@ -901,13 +901,15 @@ The engine handles ten cases. The last three also apply to a file source:
   effects. This applies to an upper source and to a lower source.
 - **replace=true, dest is a directory with no visible children**: an
   upper directory that holds only whiteouts or an opaque marker is
-  empty. The engine clears the opaque marker of the upper destination
-  and moves the directory into the work directory. Then it does the
-  rename as for a destination that is not present. When the rename
-  fails, the engine moves the destination back and restores its opaque
-  marker. When the rename succeeds, the engine removes the copy in the
-  work directory. The new directory is opaque when a lower layer has
-  the destination path, so no lower child of the old destination shows.
+  empty. The engine moves the upper destination into the work
+  directory, and its opaque marker moves with it, as overlayfs leaves
+  the opaque xattr on the destination. In the sidecar store, the record
+  follows on a best-effort basis. Then it does the rename as for a
+  destination that is not present. When the rename fails, the engine
+  moves the destination back with its marker. When the rename succeeds,
+  the engine removes the copy in the work directory. The new directory
+  is opaque when a lower layer has the destination path, so no lower
+  child of the old destination shows.
 - **rename to a destination that already exists in the merged view
   (with replace=false)**: the engine rejects the rename with
   `STATUS_OBJECT_NAME_COLLISION` before any side effects.

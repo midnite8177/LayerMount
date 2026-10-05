@@ -835,10 +835,8 @@ NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
     return STATUS_SUCCESS;
 }
 
-RenameDestinationAside::RenameDestinationAside(ConfigRef config,
-                                               WhiteoutManager& whiteoutMgr,
-                                               Cache& cache)
-    : config_(config.Get()), whiteoutMgr_(whiteoutMgr), cache_(cache) {}
+RenameDestinationAside::RenameDestinationAside(ConfigRef config, Cache& cache)
+    : config_(config.Get()), cache_(cache) {}
 
 RenameDestinationAside::~RenameDestinationAside() {
     if (asidePath_.empty()) {
@@ -846,22 +844,18 @@ RenameDestinationAside::~RenameDestinationAside() {
     }
     if (::GetFileAttributesW(upperPath_.c_str()) != INVALID_FILE_ATTRIBUTES) {
         RemoveUpperEntry(asidePath_, config_);
-    } else if (NT_SUCCESS(MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No,
-                                         config_)) &&
-               wasOpaque_) {
-        whiteoutMgr_.SetOpaque(normalizedPath_);
+    } else {
+        MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No, config_);
     }
     cache_.InvalidateWithAncestors(normalizedPath_);
 }
 
 void RenameDestinationAside::Hold(std::wstring normalizedPath,
                                   std::wstring upperPath,
-                                  std::wstring asidePath,
-                                  bool wasOpaque) {
+                                  std::wstring asidePath) {
     normalizedPath_ = std::move(normalizedPath);
     upperPath_ = std::move(upperPath);
     asidePath_ = std::move(asidePath);
-    wasOpaque_ = wasOpaque;
 }
 
 void RenameDestinationAside::Commit() {
@@ -891,23 +885,15 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
         return STATUS_ACCESS_DENIED;
     }
 
-    const bool wasOpaque = destinationKind != EntryKind::File && whiteoutMgr_.IsOpaque(newNorm);
-    if (wasOpaque) {
-        whiteoutMgr_.RemoveOpaque(newNorm);
-    }
     const std::wstring asidePath = GenerateWorkPath();
     const NTSTATUS moveStatus = MoveUpperEntry(upperPath, asidePath, ReplaceExisting::No,
                                                config_);
-    if (!NT_SUCCESS(moveStatus) && wasOpaque) {
-        whiteoutMgr_.SetOpaque(newNorm);
-    }
-    // Runs on a failed move too, because the marker calls changed the upper.
-    cache_.InvalidateWithAncestors(newNorm);
     if (!NT_SUCCESS(moveStatus)) {
         return moveStatus;
     }
+    cache_.InvalidateWithAncestors(newNorm);
 
-    aside->Hold(newNorm, upperPath, asidePath, wasOpaque);
+    aside->Hold(newNorm, upperPath, asidePath);
     return STATUS_SUCCESS;
 }
 

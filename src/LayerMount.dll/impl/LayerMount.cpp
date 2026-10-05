@@ -2187,7 +2187,7 @@ LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldR
         if (!NT_SUCCESS(status)) return failure(status);
     }
 
-    RenameDestinationAside destinationAside(config_, *whiteoutMgr_, *cache_);
+    RenameDestinationAside destinationAside(config_, *cache_);
     if (replaceIfExists && kinds.destination.has_value()) {
         status = copyUp_->SetRenameDestinationAside(newNorm, *kinds.destination,
                                                     &destinationAside);
