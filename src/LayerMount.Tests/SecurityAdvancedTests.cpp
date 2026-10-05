@@ -288,7 +288,7 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
-            CallerPath(L"src-secured"), CallerPath(L"dst-secured"),
+            {CallerPath(L"src-secured"), CallerPath(L"dst-secured")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         const std::wstring newKid = env.Upper() + L"\\dst-secured\\kid.txt";
@@ -443,7 +443,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"p\\moved"),
+            {CallerPath(L"tree"), CallerPath(L"p\\moved")},
             EntryKind::Directory, ReplaceExisting::No),
             L"The rename of the lower directory succeeds");
 
@@ -466,7 +466,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"link"), CallerPath(L"p\\moved"),
+            {CallerPath(L"link"), CallerPath(L"p\\moved")},
             EntryKind::Link, ReplaceExisting::No),
             L"The rename of the lower junction succeeds");
 
@@ -534,7 +534,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"p\\moved"),
+            {CallerPath(L"tree"), CallerPath(L"p\\moved")},
             EntryKind::Directory, ReplaceExisting::No),
             L"The rename of the lower tree succeeds");
 

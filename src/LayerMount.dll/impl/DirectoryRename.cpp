@@ -11,6 +11,7 @@
 #include "ScopedHandle.h"
 
 #include <aclapi.h>
+#include <cassert>
 #include <vector>
 
 #pragma comment(lib, "advapi32.lib")
@@ -383,20 +384,20 @@ NTSTATUS DirectoryRename::CopyMergedEntry(const MergedDirectoryWithAncestry& old
         });
 }
 
-NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
-                                               const CallerPath& newCallerPath,
+NTSTATUS DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
                                                EntryKind sourceKind,
                                                ReplaceExisting replace) {
-    const std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
-    const std::wstring newNorm = NormalizePath(newCallerPath.Text());
-    const std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(newCallerPath);
+    assert(sourceKind == EntryKind::Directory || sourceKind == EntryKind::Link);
+    const std::wstring oldNorm = NormalizePath(paths.oldPath.Text());
+    const std::wstring newNorm = NormalizePath(paths.newPath.Text());
+    const std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(paths.newPath);
 
     const ResolvedPath source = pathResolver_.ResolveLowerPath(oldNorm);
     if (!source.Found()) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    const NTSTATUS destinationStatus = PrepareRenameDestination(newCallerPath, replace);
+    const NTSTATUS destinationStatus = PrepareRenameDestination(paths.newPath, replace);
     if (!NT_SUCCESS(destinationStatus)) {
         return destinationStatus;
     }
@@ -422,14 +423,15 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const CallerPath& oldCallerPath,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS DirectoryRename::RenameUpperDirectory(const CallerPath& oldCallerPath,
-                                               const CallerPath& newCallerPath,
+NTSTATUS DirectoryRename::RenameUpperDirectory(const RenameCallerPaths& paths,
+                                               EntryKind sourceKind,
                                                ReplaceExisting replace) {
-    std::wstring oldNorm = NormalizePath(oldCallerPath.Text());
-    std::wstring newNorm = NormalizePath(newCallerPath.Text());
-    std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(newCallerPath);
+    assert(sourceKind == EntryKind::Directory || sourceKind == EntryKind::Link);
+    std::wstring oldNorm = NormalizePath(paths.oldPath.Text());
+    std::wstring newNorm = NormalizePath(paths.newPath.Text());
+    std::wstring newUpperPath = pathResolver_.GetUpperPathForNewEntry(paths.newPath);
 
-    NTSTATUS destinationStatus = PrepareRenameDestination(newCallerPath, replace);
+    NTSTATUS destinationStatus = PrepareRenameDestination(paths.newPath, replace);
     if (!NT_SUCCESS(destinationStatus)) {
         return destinationStatus;
     }
@@ -437,17 +439,21 @@ NTSTATUS DirectoryRename::RenameUpperDirectory(const CallerPath& oldCallerPath,
     std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
 
     const bool wasOpaque = whiteoutMgr_.IsOpaque(oldNorm);
+    const bool marksSource = sourceKind != EntryKind::Link && !wasOpaque &&
+                             pathResolver_.ResolveLowerPath(newNorm).Found();
+    if (marksSource) {
+        const NTSTATUS markStatus = whiteoutMgr_.SetOpaqueAtPath(oldUpperPath);
+        if (!NT_SUCCESS(markStatus)) {
+            return markStatus;
+        }
+    }
 
     const NTSTATUS moveStatus = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);
     if (!NT_SUCCESS(moveStatus)) {
+        if (marksSource) {
+            cache_.InvalidateWithAncestors(oldNorm);
+        }
         return moveStatus;
-    }
-
-    if (wasOpaque) {
-        whiteoutMgr_.RemoveOpaque(oldNorm);
-    }
-    if (wasOpaque || pathResolver_.ResolveLowerPath(newNorm).Found()) {
-        whiteoutMgr_.SetOpaque(newNorm);
     }
 
     cache_.InvalidateWithAncestors(oldNorm);

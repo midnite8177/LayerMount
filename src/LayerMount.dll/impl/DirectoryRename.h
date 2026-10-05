@@ -25,37 +25,45 @@ public:
                     Cache& cache,
                     CopyUp& copyUp);
 
+    // The old and new paths of a rename, as the caller gives them.
+    struct RenameCallerPaths {
+        const CallerPath& oldPath;
+        const CallerPath& newPath;
+    };
+
     // Builds a copy of the merged view of the old directory in the work
     // directory, marks it opaque, moves it to the new upper path, and removes
     // the old upper entry. The copy inherits the ACEs that the new upper
     // parent gives. The caller writes the whiteout at the old path.
-    // sourceKind is Directory or Link. A Link source copies as a link,
-    // without its upper shadow and without opacity.
+    // A Link source copies as a link, without its upper shadow and without
+    // opacity.
     // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
     // destination exists in the merged view. The move fails with
     // STATUS_OBJECT_NAME_COLLISION when an entry holds the new upper path,
     // and that entry stays as it was. The new upper entry gets its name in
-    // newCallerPath's case. A failure leaves the old tree as it was and
+    // the case of paths.newPath. A failure leaves the old tree as it was and
     // tries to remove the copy in the work directory.
     // Warning: this call never replaces an entry. With ReplaceExisting::Yes,
     // the caller must first move the destination aside with
     // CopyUp::SetRenameDestinationAside.
-    NTSTATUS RenameLowerDirectory(const CallerPath& oldCallerPath,
-                                  const CallerPath& newCallerPath,
+    NTSTATUS RenameLowerDirectory(const RenameCallerPaths& paths,
                                   EntryKind sourceKind,
                                   ReplaceExisting replace);
 
-    // Fails with STATUS_OBJECT_PATH_NOT_FOUND and writes nothing when
-    // CopyUp::EnsureUpperParent refuses the new parent. Moves the upper
-    // directory or link and carries its opaque marker. Marks the moved entry
-    // opaque when a lower layer has its new path, so lower children of a
-    // replaced destination stay hidden. A moved link never becomes opaque.
-    // The moved entry gets its name in newCallerPath's case. When a lower
-    // layer has the old path, the caller writes the whiteout there.
-    // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when the
-    // destination exists in the merged view.
-    NTSTATUS RenameUpperDirectory(const CallerPath& oldCallerPath,
-                                  const CallerPath& newCallerPath,
+    // Fails with the status of CopyUp::EnsureUpperParent and writes nothing
+    // when that call refuses the new parent. Moves the upper directory or
+    // link and carries its opaque marker. When a lower layer has the new
+    // path and the source directory is not opaque, marks the source opaque
+    // before the move. The mark hides the lower children at the new path.
+    // A failed mark fails the rename with its status, and nothing moves. A
+    // Link source is never marked. When the move fails after a mark, the
+    // source keeps the mark, and the lower children at the old path stay
+    // hidden. The moved entry gets its name in the case of paths.newPath.
+    // When a lower layer has the old path, the caller writes the whiteout
+    // there. ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION
+    // when the destination exists in the merged view.
+    NTSTATUS RenameUpperDirectory(const RenameCallerPaths& paths,
+                                  EntryKind sourceKind,
                                   ReplaceExisting replace);
 
 private:

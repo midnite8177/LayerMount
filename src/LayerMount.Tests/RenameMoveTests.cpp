@@ -45,8 +45,8 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"),
-            ReplaceExisting::No);
+            {CallerPath(L"src"), CallerPath(L"dst")},
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st));
 
         Assert::IsFalse(env.FileExists(env.Upper(), L"src"));
@@ -70,8 +70,8 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"),
-            ReplaceExisting::No)));
+            {CallerPath(L"src"), CallerPath(L"dst")},
+            EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\inner.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\deep\\more.txt"));
@@ -96,8 +96,8 @@ public:
         Assert::IsTrue(wm.IsOpaque(L"src"));
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"),
-            ReplaceExisting::No)));
+            {CallerPath(L"src"), CallerPath(L"dst")},
+            EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsFalse(wm.IsOpaque(L"src"),
             L"Opacity should no longer be reported for the vanished source path");
@@ -120,7 +120,7 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
-            CallerPath(L"ld"), CallerPath(L"newdir"),
+            {CallerPath(L"ld"), CallerPath(L"newdir")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\top.txt"));
@@ -169,8 +169,8 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"),
-            ReplaceExisting::No);
+            {CallerPath(L"src"), CallerPath(L"dst")},
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -197,7 +197,7 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameLowerDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"),
+            {CallerPath(L"src"), CallerPath(L"dst")},
             EntryKind::Directory, ReplaceExisting::No);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
@@ -225,8 +225,8 @@ public:
         DirectoryRename dirRename(config, resolver, wm, cache, cu);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"),
-            ReplaceExisting::No);
+            {CallerPath(L"src"), CallerPath(L"dst")},
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(st),
             L"Whited-out destination is invisible in merged view — rename "
             L"without replace must succeed, not collision.");
@@ -249,7 +249,7 @@ public:
         // ReplaceExisting::Yes skips the merged-view collision check, so the
         // call reaches the move while dst is still in the upper.
         const NTSTATUS st = dirRename.RenameLowerDirectory(
-            CallerPath(L"src"), CallerPath(L"dst"),
+            {CallerPath(L"src"), CallerPath(L"dst")},
             EntryKind::Directory, ReplaceExisting::Yes);
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
@@ -533,20 +533,24 @@ private:
     BackupPrivilegeDisabledOnThread noBackupPrivilege_;
 };
 
-// Denies FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY and FILE_DELETE_CHILD on the
-// directory at path and disables SE_BACKUP_NAME and SE_RESTORE_NAME on the
-// thread. Declare it after the mount, because the mount enables the
-// privileges on the process, and with them the deny does not apply.
+// Denies deniedAccess on the directory at path and disables SE_BACKUP_NAME
+// and SE_RESTORE_NAME on the thread. deniedAccess must hold FILE_ADD_FILE,
+// so the directory refuses a new file. When deniedAccess also holds
+// FILE_ADD_SUBDIRECTORY, the directory refuses a new directory too. Declare
+// it after the mount, because the mount enables the privileges on the
+// process, and with them the deny does not apply.
 class DirectoryRefusesNewEntries {
 public:
-    explicit DirectoryRefusesNewEntries(const std::wstring& path)
-        : denied_(path, FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD) {
+    DirectoryRefusesNewEntries(const std::wstring& path, DWORD deniedAccess)
+        : denied_(path, deniedAccess) {
         DisableRestorePrivilegeOnThread();
         const std::wstring probe = path + L"\\probe";
         Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, NewFileError(probe),
             (path + L" must refuse a new file").c_str());
-        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, NewDirectoryError(probe),
-            (path + L" must refuse a new directory").c_str());
+        if ((deniedAccess & FILE_ADD_SUBDIRECTORY) != 0) {
+            Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, NewDirectoryError(probe),
+                (path + L" must refuse a new directory").c_str());
+        }
     }
 
     DirectoryRefusesNewEntries(const DirectoryRefusesNewEntries&) = delete;
@@ -1533,7 +1537,8 @@ public:
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
         {
-            DirectoryRefusesNewEntries lowerSubRefuses(env.Lower(0) + L"\\d\\sub");
+            DirectoryRefusesNewEntries lowerSubRefuses(env.Lower(0) + L"\\d\\sub",
+                FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD);
             AssertStatus(STATUS_SUCCESS, mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
                 L"The rename of the merged directory must succeed");
         }
@@ -3065,19 +3070,28 @@ public:
     }
 
     TEST_METHOD(Rename_OpaqueUpperDirectoryOverLowerDirectory_KeepsTheLowerChildrenHidden) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"d\\lower.txt", "lower");
-        env.WriteFile(env.Upper(), L"d\\upper.txt", "upper");
-        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d"), "");
-        ::LayerMount::LayerMount mount(env.MakeConfig());
-        const LayerSnapshot lowerBefore(env.Lower(0));
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\lower.txt", "lower");
+            env.WriteFile(env.Lower(0), L"moved\\other.txt", "lower");
+            env.WriteFile(env.Upper(), L"d\\upper.txt", "upper");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"moved"), "");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\d", &config),
+                L"The test must mark the upper d opaque in the metadata store");
+            ::LayerMount::LayerMount mount(config);
+            const LayerSnapshot lowerBefore(env.Lower(0));
 
-        AssertStatus(STATUS_SUCCESS,
-            mount.Rename(L"d", L"moved", kFailIfExists, kNoCallerPid),
-            L"A rename of an opaque upper directory over a lower directory must succeed");
-        AssertOnlyEntryShownAs(mount, L"moved", L"upper.txt");
-        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"d", L"moved");
-        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"d", L"moved", kFailIfExists, kNoCallerPid),
+                L"A rename of an opaque upper directory over a lower directory must succeed");
+            AssertOnlyEntryShownAs(mount, L"moved", L"upper.txt");
+            AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"d", L"moved");
+            Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\d", &config),
+                L"The rename must leave no opaque metadata at the old name");
+            lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+        });
     }
 
     TEST_METHOD(Rename_UpperDirectoryUnderOpaqueParentOverHiddenLowerDirectory_MovesOnlyTheUpperChildren) {
@@ -3505,6 +3519,40 @@ public:
         AssertOnlyEntryShownAs(mount, L"", L"link");
         AssertListsOnlyTheLinkTarget(mount, L"link");
         lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryOntoWhitedOutLowerDirectoryWhenTheOpaqueMarkerFails_KeepsTheOldName) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Upper(), L"src\\a.txt", "upper");
+            env.WriteFile(env.Lower(0), L"dst\\old.txt", "lower");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst"), "");
+            env.CreateDir(env.Upper(), kSidecarDirName);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            const LayerSnapshot upperBefore(env.Upper());
+            const LayerSnapshot lowerBefore(env.Lower(0));
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const std::wstring source = env.Upper() + L"\\src";
+                const std::wstring sidecar = env.Upper() + L"\\" + kSidecarDirName;
+                const DirectoryRefusesNewEntries sourceRefusesNewFiles(source, FILE_ADD_FILE);
+                const DirectoryRefusesNewEntries sidecarRefusesNewFiles(sidecar, FILE_ADD_FILE);
+                Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, NewFileError(source + L":probe"),
+                    L"The upper src must refuse a new stream");
+                status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+            }
+
+            AssertStatus(STATUS_ACCESS_DENIED, status,
+                L"The rename must fail when the engine cannot mark the directory opaque");
+            upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+            lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+            AssertListedDirectoryWithChild(mount, L"src", L"a.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"dst"),
+                L"An open of dst after the failed rename must find nothing");
+        });
     }
 
     TEST_METHOD(Rename_LowerDirectoryWhenTheWhiteoutFails_KeepsTheOldName) {

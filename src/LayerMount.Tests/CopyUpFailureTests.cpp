@@ -1155,7 +1155,7 @@ public:
 
         CopyUpAndRenameRig rig(env.MakeConfig());
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No);
         heldSrc.Reset();
 
@@ -1180,7 +1180,7 @@ public:
             FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
             FILE_NOTIFY_CHANGE_SECURITY);
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No);
         const std::vector<DWORD> actions = watch.ActionsFor(L"moved");
 
@@ -1213,7 +1213,7 @@ public:
             CopyUpAndRenameRig rig(config);
 
             AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
-                CallerPath(L"tree"), CallerPath(L"moved"),
+                {CallerPath(L"tree"), CallerPath(L"moved")},
                 EntryKind::Directory, ReplaceExisting::No),
                 L"The rename of the lower tree succeeds");
 
@@ -1242,7 +1242,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
         DirectoryWatch watch(env.Upper(), FILE_NOTIFY_CHANGE_DIR_NAME);
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No);
         heldSrc.Reset();
         const std::vector<DWORD> actions = watch.ActionsFor(L"moved");
@@ -1269,7 +1269,7 @@ public:
 
             auto armed = ArmForeignDirectoryAt(rig, L"p", env.Upper() + L"\\p\\moved", L"");
             const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-                CallerPath(L"p\\tree"), CallerPath(L"p\\moved"),
+                {CallerPath(L"p\\tree"), CallerPath(L"p\\moved")},
                 EntryKind::Directory, ReplaceExisting::No);
 
             Assert::IsTrue(armed.foreign.made,
@@ -1300,7 +1300,7 @@ public:
 
             auto armed = ArmForeignDirectoryAt(rig, L"p", env.Upper() + L"\\p\\moved", L"");
             const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-                CallerPath(L"p\\link"), CallerPath(L"p\\moved"),
+                {CallerPath(L"p\\link"), CallerPath(L"p\\moved")},
                 EntryKind::Link, ReplaceExisting::No);
 
             Assert::IsTrue(armed.foreign.made,

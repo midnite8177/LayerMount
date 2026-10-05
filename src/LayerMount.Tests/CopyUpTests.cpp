@@ -812,8 +812,8 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         NTSTATUS status = rig.directoryRename.RenameUpperDirectory(
-            CallerPath(L"srcdir"), CallerPath(L"dstdir"),
-            ReplaceExisting::No);
+            {CallerPath(L"srcdir"), CallerPath(L"dstdir")},
+            EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
 
         std::wstring src = env.Upper() + L"\\srcdir";
@@ -836,7 +836,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"ldir"), CallerPath(L"newdir"),
+            {CallerPath(L"ldir"), CallerPath(L"newdir")},
             EntryKind::Directory, ReplaceExisting::No);
         Assert::IsTrue(NT_SUCCESS(status));
 

@@ -256,7 +256,7 @@ public:
         CopyUpAndRenameRig rig(config);
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"moved\\sparse.bin"));
@@ -276,7 +276,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(HasSparseAttribute(env.Upper() + L"\\moved\\sparse.bin"),
@@ -299,7 +299,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved\\cmp.bin", FILE_ATTRIBUTE_COMPRESSED),
@@ -324,7 +324,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         const std::wstring movedTree = env.Upper() + L"\\moved";
@@ -352,7 +352,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved\\sub", FILE_ATTRIBUTE_COMPRESSED),
@@ -375,7 +375,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved\\plain.txt", FILE_ATTRIBUTE_ENCRYPTED),
@@ -534,7 +534,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::AreEqual(std::string("user notes"),
@@ -589,7 +589,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No)));
 
         Assert::AreEqual(std::string("tree notes"),
@@ -614,7 +614,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"tree"), CallerPath(L"moved"),
+            {CallerPath(L"tree"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No),
             L"The rename of a tree with extended attributes must succeed");
 
@@ -639,7 +639,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"ro"), CallerPath(L"moved"),
+            {CallerPath(L"ro"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No);
         const std::wstring upperDir = env.Upper() + L"\\moved";
         const std::wstring upperFile = upperDir + L"\\file.txt";
@@ -672,7 +672,7 @@ public:
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
-            CallerPath(L"ro"), CallerPath(L"moved"),
+            {CallerPath(L"ro"), CallerPath(L"moved")},
             EntryKind::Directory, ReplaceExisting::No);
         const std::wstring upperDir = env.Upper() + L"\\moved";
         const DWORD upperAttrs = ::GetFileAttributesW(upperDir.c_str());
