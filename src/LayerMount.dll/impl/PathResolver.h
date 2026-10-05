@@ -47,9 +47,21 @@ public:
 
     bool HasTypeConflict(const std::wstring& relativePath) const;
 
+    // IsReservedOverlayPath with this resolver's layers. normalized must be
+    // the output of NormalizePath.
+    bool IsReservedPath(const std::wstring& normalized) const;
+
     const LayerConfig& Config() const { return config_; }
 
 private:
+    // Whether the path is safe and not reserved. normalized must be the
+    // output of NormalizePath.
+    bool IsResolvablePath(const std::wstring& normalized) const;
+
+    // The normalized form of relativePath, or no value when it is empty or
+    // IsResolvablePath refuses it.
+    std::optional<std::wstring> ResolvableNormalized(const std::wstring& relativePath) const;
+
     // When lowerWalk is not null, it receives ResolveLowerPath's result for
     // relativePath itself if the call learns it: after the walk of the lowers
     // runs, or when an opaque, non-directory or link ancestor in the upper

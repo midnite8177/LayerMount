@@ -172,6 +172,11 @@ enum class LinkOnPath { None, Self, Ancestor, Unreadable };
 // returns LinkOnPath::Self.
 LinkOnPath FindLinkOnPath(const std::wstring& layerPath, const std::wstring& dirRelativePath);
 
+// Where a walk of a path from the layer root stops: at the first component
+// that is a file, a link or an unreadable entry. None is a walk that meets
+// only directories, or that ends at a missing component.
+enum class WalkStop { None, File, Link, Unreadable };
+
 // What a layer holds at one path. Unreadable is an entry whose attributes
 // or reparse tag the engine cannot read, for a reason other than a missing
 // path.
@@ -232,15 +237,20 @@ LowerVisibility LowersBelow(const LayerDirectory& dir);
 // directory. LayerAncestryOf reads a whole path. StepLayerAncestry reads
 // one more component, so a walk down a tree reads each component once.
 struct LayerAncestry {
-    // A whiteout in the layer at the directory or at an ancestor.
+    // A whiteout in the layer at the directory or at an ancestor, as
+    // HasWhiteout reads it. StepLayerAncestry reads the marker only in a
+    // parent whose firstNonDirectory is WalkStop::None.
     bool whitedOut;
     // An opaque marker at the directory, at an ancestor or at the layer
     // root, as LowersBelow reads it. StepLayerAncestry reads the marker only
-    // at a plain directory whose ancestors do not set nonDirectoryOrLink.
+    // at a plain directory whose parent's firstNonDirectory is
+    // WalkStop::None.
     bool opaque;
-    // A non-directory, a link or an unreadable entry at the directory or at
-    // an ancestor, as HasNonDirectoryOrLinkSelfOrAncestorInLayer reads it.
-    bool nonDirectoryOrLink;
+    // Where a walk of the directory's path from the layer root stops: at the
+    // first file, link or unreadable entry at an ancestor or at the
+    // directory. HasNonDirectoryOrLinkSelfOrAncestorInLayer returns true
+    // when this is not WalkStop::None.
+    WalkStop firstNonDirectory;
     // For a lower: the first such entry is a link at a path that a higher
     // layer also holds, as HasLinkUnderHigherLayerEntry reads it. Always
     // false for the upper.

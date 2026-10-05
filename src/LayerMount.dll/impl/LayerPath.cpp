@@ -315,13 +315,6 @@ std::wstring JoinLayerScanPath(const std::wstring& layerPath,
 
 namespace {
 
-enum class WalkStop {
-    None,
-    File,
-    Link,
-    Unreadable,
-};
-
 // Where a walk of a path in one layer stopped. component is the path of the
 // component that stopped it, relative to the layer root, and is empty when
 // stop is WalkStop::None.
@@ -329,6 +322,23 @@ struct LayerWalk {
     WalkStop stop;
     std::wstring component;
 };
+
+// Where a walk stops at a component of this kind. A directory or a missing
+// component gives WalkStop::None.
+WalkStop WalkStopAt(ComponentKind kind) {
+    switch (kind) {
+    case ComponentKind::File:
+        return WalkStop::File;
+    case ComponentKind::Link:
+        return WalkStop::Link;
+    case ComponentKind::Unreadable:
+        return WalkStop::Unreadable;
+    case ComponentKind::Missing:
+    case ComponentKind::Directory:
+        break;
+    }
+    return WalkStop::None;
+}
 
 // Walks dirRelativePath from the layer root to the first component that is
 // not a directory, as HasNonDirectoryOrLinkSelfOrAncestorInLayer describes.
@@ -442,18 +452,19 @@ LayerAncestry StepLayerAncestry(const LayerConfig& config,
         return parent;
     }
     LayerAncestry ancestry = parent;
-    ancestry.whitedOut = parent.whitedOut || dir.whiteoutMgr.HasWhiteout(dir.dirNorm, dir.layerPath);
-    if (parent.nonDirectoryOrLink) {
+    if (parent.firstNonDirectory != WalkStop::None) {
         return ancestry;
     }
+    ancestry.whitedOut =
+        parent.whitedOut ||
+        dir.whiteoutMgr.HasWhiteoutUnderWalkedDirectoryInLayer(dir.dirNorm, dir.layerPath);
     const ComponentKind kind = ComponentKindInLayer(dir.layerPath, dir.dirNorm);
     ancestry.opaque =
         parent.opaque ||
         (kind == ComponentKind::Directory &&
          dir.whiteoutMgr.IsOpaqueWalkedDirectoryInLayer(dir.dirNorm, dir.layerPath));
     ancestry.absent = kind == ComponentKind::Missing;
-    ancestry.nonDirectoryOrLink = kind == ComponentKind::File || kind == ComponentKind::Link ||
-                                  kind == ComponentKind::Unreadable;
+    ancestry.firstNonDirectory = WalkStopAt(kind);
     ancestry.linkUnderHigherEntry =
         kind == ComponentKind::Link && lowerIndex >= 0 &&
         HigherLayerHoldsEntry(config, static_cast<size_t>(lowerIndex), dir.dirNorm);
@@ -464,7 +475,7 @@ LayerAncestry LayerAncestryOf(const LayerConfig& config,
                               const LayerDirectory& dir,
                               int lowerIndex) {
     LayerAncestry ancestry{false, dir.whiteoutMgr.IsOpaqueInLayer(std::wstring(), dir.layerPath),
-                           false, false, false};
+                           WalkStop::None, false, false};
     fs::path walked;
     for (const fs::path& component : fs::path(dir.dirNorm)) {
         walked /= component;

@@ -1046,10 +1046,13 @@ LM_API HRESULT LM_CALL LayerMountSetSecurity(
 
 /* Enumerates the merged directory listing at `dirRelativePath`, invoking
  * `callback` once per visible entry with its name and LM_FILE_INFO.
- * Whiteout markers and the entries they hide are never reported. Stops
- * and returns the callback's HRESULT the first time it returns anything
- * other than S_OK. When a layer holds the directory but cannot list it,
- * returns that listing's failure without invoking `callback`. */
+ * Whiteout markers and the entries they hide are never reported. In a
+ * junction or a directory symbolic link that ends the lookup, or under
+ * one, a `.wh.` name is an ordinary entry. The listing reports it, and it
+ * hides nothing, as in overlayfs. Stops and returns the callback's
+ * HRESULT the first time it returns anything other than S_OK. When a
+ * layer holds the directory but cannot list it, returns that listing's
+ * failure without invoking `callback`. */
 LM_API HRESULT LM_CALL LayerMountMergeDirectory(
     LM_HANDLE             handle,
     PCWSTR                 dirRelativePath,
@@ -1060,19 +1063,26 @@ LM_API HRESULT LM_CALL LayerMountMergeDirectory(
  * hiding the corresponding lower-layer entry. `isDirectory` selects the
  * directory- or file-shaped marker. Rejects a path outside the overlay
  * root, inside the reserved metadata subtree, or with a segment that
- * starts with `.wh.` with E_INVALIDARG. */
+ * starts with `.wh.` with E_INVALIDARG. A `.wh.` segment in a link gets
+ * E_INVALIDARG too. When the upper layer holds a junction or a directory
+ * symbolic link at the parent of the path or at an ancestor, fails with
+ * HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing, because the
+ * marker would go into the link target. When the engine cannot read the
+ * attributes or the reparse tag of a component of that path, fails with
+ * HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
 LM_API HRESULT LM_CALL LayerMountCreateWhiteout(
     LM_HANDLE handle, PCWSTR relativePath, BOOL isDirectory);
 
 /* Marks the directory at `dirRelativePath` opaque, hiding every
  * lower-layer entry beneath it regardless of name. Rejects a path
  * outside the overlay root, inside the reserved metadata subtree, or
- * with a segment that starts with `.wh.` with E_INVALIDARG. When the
- * upper layer holds a junction or a directory symbolic link at the path
- * or at an ancestor, fails with HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY)
- * and writes nothing, as overlayfs never makes a symlink opaque. When the
- * engine cannot read the attributes or the reparse tag of a component of
- * the path, fails with HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
+ * with a segment that starts with `.wh.` with E_INVALIDARG. A `.wh.`
+ * segment in a link gets E_INVALIDARG too. When the upper layer holds a
+ * junction or a directory symbolic link at the path or at an ancestor,
+ * fails with HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY) and writes nothing,
+ * as overlayfs never makes a symlink opaque. When the engine cannot read
+ * the attributes or the reparse tag of a component of the path, fails
+ * with HRESULT_FROM_NT(STATUS_ACCESS_DENIED). */
 LM_API HRESULT LM_CALL LayerMountSetOpaque(
     LM_HANDLE handle, PCWSTR dirRelativePath);
 

@@ -83,6 +83,54 @@ public:
             L"The failed opaque mark must write no marker file into the junction target");
     }
 
+    TEST_METHOD(CreateWhiteout_UnderUpperJunction_FailsWithNotADirectoryAndWritesNoMarkerIntoTheTarget) {
+        TempLayerEnv  env(1);
+        const std::wstring target = env.Root() + L"\\target";
+        std::filesystem::create_directories(target);
+        if (!CreateDirectoryJunction(env.Upper() + L"\\link", target)) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the upper junction");
+            return;
+        }
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_NOT_A_DIRECTORY),
+            ::LayerMountCreateWhiteout(mount.Get(), L"link\\foo", FALSE),
+            L"A whiteout in an upper junction must fail");
+        Assert::AreEqual<HRESULT>(E_INVALIDARG,
+            ::LayerMountCreateWhiteout(mount.Get(), L"link\\.wh.foo", TRUE),
+            L"A whiteout of a .wh. name in an upper junction must be rejected");
+        Assert::IsFalse(std::filesystem::exists(target + L"\\.wh.foo"),
+            L"The failed whiteout must write no marker file into the junction target");
+        Assert::IsFalse(std::filesystem::exists(target + L"\\.wh..wh.foo"),
+            L"The failed whiteout of a .wh. name must write no marker file into the junction target");
+    }
+
+    TEST_METHOD(CreateWhiteoutAndSetOpaque_MarkerSegmentInLowerJunction_ReturnInvalidArgAndWriteNothing) {
+        TempLayerEnv  env(1);
+        const std::wstring target = env.Root() + L"\\target";
+        std::filesystem::create_directories(target);
+        std::ofstream(target + L"\\inside.txt") << "inside";
+        if (!CreateDirectoryJunction(env.Lower(0) + L"\\link", target)) {
+            Logger::WriteMessage(L"[SKIP] mklink /J could not create the lower junction");
+            return;
+        }
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(E_INVALIDARG,
+            ::LayerMountCreateWhiteout(mount.Get(), L"link\\.wh.x", FALSE),
+            L"A whiteout of a .wh. name in a lower junction must be rejected");
+        Assert::AreEqual<HRESULT>(E_INVALIDARG,
+            ::LayerMountSetOpaque(mount.Get(), L"link\\.wh.x"),
+            L"An opaque mark on a .wh. name in a lower junction must be rejected");
+
+        Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\link"),
+            L"The rejected calls must make no link directory in the upper");
+        const auto targetEntries = std::distance(std::filesystem::directory_iterator(target),
+                                                 std::filesystem::directory_iterator());
+        Assert::AreEqual<std::ptrdiff_t>(1, targetEntries,
+            L"The rejected calls must write nothing in the junction target");
+    }
+
     TEST_METHOD(ResolvePath_ShortBuffer_ReturnsMoreDataAndRequired) {
         TempLayerEnv  env(1);
         env.WriteLowerFile(0, L"long_name_file.dat", "x");

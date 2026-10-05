@@ -1165,6 +1165,29 @@ public:
             L"The failed SetOpaque must write no marker file under the junction target");
     }
 
+    TEST_METHOD(RemoveOpaque_UpperJunctionWithUnreadableReparseTag_ReturnsFalseAndKeepsTheTargetMarkers) {
+        TempLayerEnvironment env(1);
+        if (!UpperLinkToMarkedTargetCreatedOrSkipped(env, CreateDirectoryJunction)) {
+            return;
+        }
+        const std::wstring junction = env.Upper() + L"\\link";
+        LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        DisableRestorePrivilegeOnThread();
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+            L"The deny ACE must make the junction's reparse tag unreadable");
+
+        Assert::IsFalse(wm.RemoveOpaque(L"link"),
+            L"RemoveOpaque on a component whose reparse tag the walk cannot read must fail");
+        Assert::IsFalse(wm.RemoveOpaque(L"link\\sub"),
+            L"RemoveOpaque under a component whose reparse tag the walk cannot read must fail");
+
+        AssertTargetMarkersKept(env);
+    }
+
     TEST_METHOD(PathResolve_OpaqueUpperDir_HidesAllLowerChildren) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"sub");
@@ -1849,6 +1872,244 @@ public:
             L"A denied rename must leave the marker in place");
         AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"sub\\gone.txt"),
             L"A denied rename must keep the lower file hidden");
+    }
+};
+
+TEST_CLASS(LinkTargetWhiteoutTests) {
+public:
+    TEST_CLASS_INITIALIZE(ClassInit) {
+        AssertTempIsNTFS();
+    }
+
+    TEST_METHOD(HasWhiteout_WhiteoutNamedFilesInLinkTarget_ReturnsFalse) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\sub"), "target");
+                env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\deep\\name"), "target");
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                const std::wstring& layer = LinkLayerPath(env, linkSource);
+                auto config = env.MakeConfig();
+                Cache cache;
+                WhiteoutManager wm(config, &cache);
+
+                Assert::IsFalse(wm.HasWhiteout(L"link\\foo", layer),
+                    L"A .wh.foo file in a link target must not be a whiteout");
+                Assert::IsFalse(wm.HasWhiteout(L"link\\deep\\name", layer),
+                    L"A .wh. file under a link target must not be a whiteout");
+                Assert::IsFalse(wm.HasWhiteoutInAnyLayer(L"link\\foo"),
+                    L"No layer must count a .wh.foo file in a link target as a whiteout");
+                Assert::IsFalse(wm.HasWhitedOutAncestorInLayer(L"link\\sub\\x", layer),
+                    L"A .wh.sub file in a link target must not white out link\\sub");
+            }
+        }
+    }
+
+    TEST_METHOD(ResolvePath_MissingNameNextToWhiteoutNamedFileInLinkTarget_IsNotFoundAndNotWhiteout) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ResolverUnderTest r(env);
+
+                const ResolvedPath resolved = r.resolver.ResolvePath(L"link\\foo");
+
+                Assert::IsFalse(resolved.Found(), L"link\\foo must not resolve, as the target holds no foo");
+                Assert::IsFalse(resolved.isWhiteout,
+                    L"The .wh.foo file in the link target must not make link\\foo a whiteout");
+            }
+        }
+    }
+
+    TEST_METHOD(Open_FileNextToWhiteoutNamedFileInLinkTarget_ReadsTheTargetFile) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\foo", "shown");
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                Assert::AreEqual(std::string("shown"), ReadThroughMount(mount, L"link\\foo"),
+                    L"The .wh.foo file in the link target must not hide the target's foo");
+            }
+        }
+    }
+
+    TEST_METHOD(Open_WhiteoutNamedFileInLinkTarget_ReadsTheTargetFile) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                Assert::AreEqual(std::string("target"), ReadThroughMount(mount, L"link\\.wh.foo"),
+                    L"A .wh.foo file in a link target must open as an ordinary file");
+            }
+        }
+    }
+
+    TEST_METHOD(MergeDirectoryEntries_LinkToTargetWithWhiteoutNamedFiles_ListsThemAndTheNamesTheyMatch) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\shown", "target");
+                env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\shown"), "target");
+                env.WriteFile(env.Root(), OpaqueMarkerPath(L"target"), "target");
+                env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\sub\\name"), "target");
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                const MergedDirectory atLink = mount.MergeDirectoryEntries(L"link");
+                const MergedDirectory underLink = mount.MergeDirectoryEntries(L"link\\sub");
+
+                AssertStatus(STATUS_SUCCESS, atLink.status, L"The merge at the link must succeed");
+                Assert::AreEqual<size_t>(5, atLink.entries.size(),
+                    L"The listing of the link must hold every entry of the target");
+                for (const wchar_t* name : {L".wh.foo", L".wh.shown", L"shown", L".wh..wh..opq", L"sub"}) {
+                    Assert::IsTrue(atLink.entries.count(name) == 1,
+                        (std::wstring(L"The listing of the link must hold ") + name).c_str());
+                }
+                AssertEveryListedEntryResolves(env, L"link", atLink.entries);
+                AssertStatus(STATUS_SUCCESS, underLink.status, L"The merge under the link must succeed");
+                Assert::IsTrue(underLink.entries.count(L".wh.name") == 1,
+                    L"The listing under the link must hold the .wh.name file");
+                AssertEveryListedEntryResolves(env, L"link\\sub", underLink.entries);
+            }
+        }
+    }
+
+    TEST_METHOD(WhiteoutInUpperDirectoryOverLowerLink_StaysAMarker) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"link\\foo"), "");
+            env.WriteFile(env.Upper(), L"link\\kept.txt", "upper");
+            if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Lower, createLink)) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            const MergedDirectory listed = mount.MergeDirectoryEntries(L"link");
+
+            Assert::IsTrue(listed.entries.count(L".wh.foo") == 0,
+                L"A whiteout in an upper directory over a lower link must not be listed");
+            Assert::IsTrue(listed.entries.count(L"kept.txt") == 1,
+                L"The upper directory's own file must be listed");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"link\\.wh.foo"),
+                L"A whiteout in an upper directory over a lower link must not open");
+            AssertStatus(STATUS_ACCESS_DENIED, CreateThroughMount(mount, L"link\\.wh.new", kNoCreateOptions),
+                L"A create of a .wh. name in an upper directory over a lower link must be denied");
+        }
+    }
+
+    TEST_METHOD(CreateWhiteout_UnderUpperLink_FailsWithNotADirectoryAndWritesNothingInTheTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Root(), L"target\\sub");
+            const std::wstring target = env.Root() + L"\\target";
+            const FILETIME stamped = MakeFileTime(2016, 4, 5);
+            StampTimes(target, MakeFileTime(2016, 1, 2), MakeFileTime(2016, 3, 4), stamped);
+            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", target)) {
+                continue;
+            }
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\foo", WhiteoutType::File),
+                L"A whiteout in a link must fail");
+            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\sub\\foo", WhiteoutType::Directory),
+                L"A whiteout under a link must fail");
+            AssertStatus(STATUS_NOT_A_DIRECTORY, wm.CreateWhiteout(L"link\\new\\foo", WhiteoutType::File),
+                L"A whiteout in a missing directory under a link must fail");
+
+            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                L"The failed whiteout must write no marker into the target");
+            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\sub\\foo")),
+                L"The failed whiteout must write no marker under the target");
+            Assert::IsFalse(env.FileExists(env.Root(), L"target\\new"),
+                L"The failed whiteout must make no directory in the target");
+            FILETIME creation{}, access{}, write{};
+            GetTimes(target, &creation, &access, &write);
+            Assert::AreEqual(0L, ::CompareFileTime(&stamped, &write),
+                L"The failed whiteout must leave the target's last-write time as it was");
+        }
+    }
+
+    TEST_METHOD(CreateWhiteout_UnderUpperJunctionWithUnreadableReparseTag_FailsWithAccessDeniedAndWritesNothing) {
+        TempLayerEnvironment env(1);
+        env.CreateDir(env.Root(), L"target\\sub");
+        const std::wstring junction = env.Upper() + L"\\link";
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, junction, env.Root() + L"\\target")) {
+            return;
+        }
+        LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        DisableRestorePrivilegeOnThread();
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+            L"The deny ACE must make the junction's reparse tag unreadable");
+
+        AssertStatus(STATUS_ACCESS_DENIED, wm.CreateWhiteout(L"link\\foo", WhiteoutType::File),
+            L"A whiteout in a component whose reparse tag the walk cannot read must fail");
+        AssertStatus(STATUS_ACCESS_DENIED, wm.CreateWhiteout(L"link\\sub\\foo", WhiteoutType::File),
+            L"A whiteout under a component whose reparse tag the walk cannot read must fail");
+
+        Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+            L"The failed whiteout must write no marker into the junction target");
+        Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\sub\\foo")),
+            L"The failed whiteout must write no marker under the junction target");
+    }
+
+    TEST_METHOD(RemoveWhiteout_UnderUpperJunctionWithUnreadableReparseTag_ReturnsFalseAndKeepsTheTargetFile) {
+        TempLayerEnvironment env(1);
+        if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper,
+                                                     CreateDirectoryJunction)) {
+            return;
+        }
+        const std::wstring junction = env.Upper() + L"\\link";
+        LinkAccessDenied synchronizeDenied(junction, SYNCHRONIZE);
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        BackupPrivilegeDisabledOnThread noBackupPrivilege;
+        DisableRestorePrivilegeOnThread();
+        Assert::AreEqual<DWORD>(ERROR_ACCESS_DENIED, LinkTagOpenError(junction),
+            L"The deny ACE must make the junction's reparse tag unreadable");
+
+        Assert::IsFalse(wm.RemoveWhiteout(L"link\\foo"),
+            L"RemoveWhiteout under a component whose reparse tag the walk cannot read must fail");
+
+        Assert::IsTrue(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+            L"The failed RemoveWhiteout must keep the .wh.foo file in the target");
+    }
+
+    TEST_METHOD(RemoveWhiteout_UnderUpperLink_SucceedsAndKeepsTheTargetFile) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper, createLink)) {
+                continue;
+            }
+            auto config = env.MakeConfig();
+            Cache cache;
+            WhiteoutManager wm(config, &cache);
+
+            Assert::IsTrue(wm.RemoveWhiteout(L"link\\foo"), L"RemoveWhiteout under a link must succeed");
+
+            Assert::IsTrue(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                L"RemoveWhiteout under a link must keep the .wh.foo file in the target");
+        }
     }
 };
 

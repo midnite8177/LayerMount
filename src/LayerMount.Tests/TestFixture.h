@@ -397,6 +397,26 @@ inline bool LinkCreatedOrSkipped(LinkCreator createLink,
     return false;
 }
 
+constexpr LayerMount::LayerSource kLinkLayerSources[] = {LayerMount::LayerSource::Upper,
+                                                         LayerMount::LayerSource::Lower};
+
+inline const std::wstring& LinkLayerPath(const TempLayerEnvironment& env,
+                                         LayerMount::LayerSource linkSource) {
+    return linkSource == LayerMount::LayerSource::Upper ? env.Upper() : env.Lower(0);
+}
+
+// Makes "link" in the upper, or in lower 0, as linkSource selects, a link
+// to the directory target under the environment root. target holds the
+// file .wh.foo with the text "target". Logs a skip and returns false when
+// the link cannot be created.
+inline bool LinkToWhiteoutNamedFileCreatedOrSkipped(const TempLayerEnvironment& env,
+                                                    LayerMount::LayerSource linkSource,
+                                                    LinkCreator createLink) {
+    env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\foo"), "target");
+    return LinkCreatedOrSkipped(createLink, LinkLayerPath(env, linkSource) + L"\\link",
+                                env.Root() + L"\\target");
+}
+
 // Makes the lower junction parent\link to the directory target under the
 // environment root. Logs a skip and returns false when the junction cannot
 // be created.

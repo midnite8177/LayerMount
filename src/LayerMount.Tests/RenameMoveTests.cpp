@@ -811,7 +811,7 @@ public:
         AssertUpperDirectoryCopiedUp(env, L"Foo");
     }
 
-    TEST_METHOD(Rename_LowerDirectoryIntoDirectoryWhitedOutUnderUpperJunction_FailsAndWritesNothing) {
+    TEST_METHOD(Rename_LowerDirectoryIntoLowerDirectoryThatAnUpperJunctionHides_FailsAndWritesNothing) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\sub"), "");
         env.WriteFile(env.Lower(0), L"link\\sub\\a.txt", "x");
@@ -826,7 +826,7 @@ public:
 
         AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
             mount.Rename(L"x", L"link\\sub\\x", kFailIfExists, kNoCallerPid),
-            L"A rename into a directory that a whiteout under an upper junction hides must fail");
+            L"A rename into a lower directory that an upper junction hides must fail");
         upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
         targetBefore.AssertUnchanged(L"The failed rename must write nothing in the junction target");
     }
@@ -2351,6 +2351,54 @@ public:
                 L"The upper link must be the moved file");
             Assert::IsTrue(env.FileExists(env.Root(), OpaqueMarkerPath(L"target")),
                 L"The replace rename must keep the marker file in the link target");
+        }
+    }
+
+    TEST_METHOD(Rename_FileOntoNameNextToWhiteoutNamedFileInUpperLinkTarget_KeepsTheTargetFile) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Upper(), L"f.txt", "f");
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                AssertStatus(STATUS_SUCCESS, mount.Rename(L"f.txt", L"link\\foo", replace, kNoCallerPid),
+                    L"A rename of a file to link\\foo must succeed");
+                Assert::AreEqual(std::string("f"), env.ReadFile(env.Root(), L"target\\foo"),
+                    L"The rename must move the file into the link target");
+                Assert::AreEqual(std::string("target"),
+                    env.ReadFile(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                    L"The rename must keep the .wh.foo file in the link target");
+            }
+        }
+    }
+
+    TEST_METHOD(Rename_WhiteoutNamedFileUnderUpperLink_MovesTheTargetFile) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper, createLink)) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"link\\.wh.foo", L"link\\.wh.bar", kFailIfExists, kNoCallerPid),
+                L"A rename of a .wh. file under a link to another .wh. name must succeed");
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"link\\.wh.bar", L"link\\plain", kFailIfExists, kNoCallerPid),
+                L"A rename of a .wh. file under a link to an ordinary name must succeed");
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"link\\plain", L"link\\.wh.back", kFailIfExists, kNoCallerPid),
+                L"A rename of a file under a link to a .wh. name must succeed");
+
+            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                L"The renames must move the .wh.foo file away");
+            Assert::AreEqual(std::string("target"), env.ReadFile(env.Root(), L"target\\.wh.back"),
+                L"The renames must leave the file at .wh.back in the link target");
+            Assert::AreEqual(std::string("target"), ReadThroughMount(mount, L"link\\.wh.back"),
+                L"The mount must show the renamed file");
         }
     }
 

@@ -374,31 +374,27 @@ bool TryParseStreamPath(const std::wstring& normalized,
     return true;
 }
 
-namespace {
-
 bool IsRootSidecarPath(const std::wstring& normalized) {
     return normalized == kSidecarDirName || IsInsideDirectory(normalized, kSidecarDirName);
 }
 
-bool HasMarkerSegment(std::wstring_view normalized) {
+std::optional<std::wstring_view> ParentOfFirstMarkerSegment(std::wstring_view normalized) {
     size_t start = 0;
     while (true) {
         const size_t separator = normalized.find(L'\\', start);
         if (WhiteoutManager::IsWhiteoutName(
                 normalized.substr(start, separator - start))) {
-            return true;
+            return start == 0 ? std::wstring_view() : normalized.substr(0, start - 1);
         }
         if (separator == std::wstring_view::npos) {
-            return false;
+            return std::nullopt;
         }
         start = separator + 1;
     }
 }
 
-}
-
 bool IsReservedRelativePath(const std::wstring& normalized) {
-    return IsRootSidecarPath(normalized) || HasMarkerSegment(normalized);
+    return IsRootSidecarPath(normalized) || ParentOfFirstMarkerSegment(normalized).has_value();
 }
 
 bool EnsureDirectoryExists(const std::wstring& path) {
@@ -1342,7 +1338,7 @@ std::unique_ptr<FileContext> LayerMount::BuildCreate(const CreateRequest& reques
 NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
                                               const UpperCreate& create,
                                               CreateResolution* resolution) const {
-    if (IsReservedRelativePath(create.path.hostNorm)) {
+    if (pathResolver_->IsReservedPath(create.path.hostNorm)) {
         return STATUS_ACCESS_DENIED;
     }
 
@@ -2048,7 +2044,8 @@ NTSTATUS LayerMount::CheckRenameRequest(const RenamePaths& paths, DWORD callerPi
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (IsReservedRelativePath(paths.oldNorm) || IsReservedRelativePath(paths.newNorm)) {
+    if (pathResolver_->IsReservedPath(paths.oldNorm) ||
+        pathResolver_->IsReservedPath(paths.newNorm)) {
         return STATUS_ACCESS_DENIED;
     }
 
@@ -2243,7 +2240,7 @@ NTSTATUS LayerMount::UpdateContextPath(FileContext* ctx,
     if (!TryParseStreamPath(newNorm, newHostNorm, newStreamSuffix)) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (IsReservedRelativePath(newHostNorm)) {
+    if (pathResolver_->IsReservedPath(newHostNorm)) {
         return STATUS_INVALID_PARAMETER;
     }
     if (ctx->relativePath == newHostNorm &&

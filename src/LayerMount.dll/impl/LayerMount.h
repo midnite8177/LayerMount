@@ -249,9 +249,20 @@ std::optional<StreamPath> ParseStreamPath(const std::wstring& relativePath);
 // beneath a marker-named directory. The sidecar store exists only at the
 // root, so a `.overlay` below the root is an ordinary name. The `.overlay`
 // compare is case-sensitive, so `normalized` must be the lowercased output
-// of `NormalizePath`.
+// of `NormalizePath`. This is the string check only. A gate that resolves
+// a caller's path in the overlay uses IsReservedOverlayPath, which also
+// reads the layers.
 constexpr const wchar_t* kSidecarDirName = L".overlay";
 bool IsReservedRelativePath(const std::wstring& normalized);
+
+// Whether `normalized` is the sidecar subtree `.overlay` at the overlay root
+// or a path beneath it, as IsReservedRelativePath reads it.
+bool IsRootSidecarPath(const std::wstring& normalized);
+
+// The directory that holds the first segment of `normalized` that starts
+// with `kWhiteoutPrefix` in any case, or no value when no segment does. An
+// empty view is the overlay root. The view points into `normalized`.
+std::optional<std::wstring_view> ParentOfFirstMarkerSegment(std::wstring_view normalized);
 
 // Recursively create directories. Returns true on success or if already exists.
 bool EnsureDirectoryExists(const std::wstring& path);
@@ -553,8 +564,9 @@ public:
     // rename affects a concurrent open handle on the source path.
     // Returns STATUS_INVALID_PARAMETER if the new path is empty, a drive
     // or stream-qualified form, contains `..` traversal, or is a reserved
-    // path (see `IsReservedRelativePath`). The open handle is left unchanged on
-    // rejection so the caller can surface the error without losing state.
+    // path (see `PathResolver::IsReservedPath`). The open handle is left
+    // unchanged on rejection so the caller can surface the error without
+    // losing state.
     NTSTATUS UpdateContextPath(FileContext* ctx,
                                const std::wstring& newRelativePath);
 

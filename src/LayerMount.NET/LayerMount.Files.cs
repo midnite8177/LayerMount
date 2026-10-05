@@ -184,8 +184,10 @@ public sealed partial class LayerMount
     /// <exception cref="LayerMountException">
     /// If <paramref name="relativePath"/> is outside the overlay root,
     /// is inside the reserved metadata subtree, or has a segment that
-    /// starts with <c>.wh.</c>, or if the underlying native call
-    /// otherwise returns a non-success HRESULT.
+    /// starts with <c>.wh.</c>; if the upper layer holds a junction or a
+    /// directory symbolic link at the parent of the path or at an
+    /// ancestor; or if the underlying native call otherwise returns a
+    /// non-success HRESULT.
     /// </exception>
     public void CreateWhiteout(string relativePath, bool isDirectory = false)
     {
@@ -436,7 +438,10 @@ public sealed partial class LayerMount
 
     /// <summary>
     /// Merged view of a directory across the upper + lower layers. The
-    /// callback fires once per entry in sorted order. Return
+    /// listing shows no whiteout marker and no entry that one hides. In a
+    /// junction or a directory symbolic link that ends the lookup, or
+    /// under one, a <c>.wh.</c> name is an ordinary entry and hides
+    /// nothing. The callback fires once per entry in sorted order. Return
     /// <c>false</c> to stop the listing. The method then returns
     /// normally. If the callback throws, the listing stops and the
     /// callback's exception propagates to the caller unchanged.

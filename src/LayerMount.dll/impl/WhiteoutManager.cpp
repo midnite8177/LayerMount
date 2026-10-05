@@ -63,6 +63,27 @@ bool MarkerFileExists(const std::wstring& path) {
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
+std::wstring MarkerDirectoryOf(const std::wstring& relativePath) {
+    return NormalizePathPreserveCase(fs::path(relativePath).parent_path().wstring());
+}
+
+// Checks the upper directory at dirNorm before a marker write. A link at
+// dirNorm or at an ancestor gives STATUS_NOT_A_DIRECTORY, because the marker
+// would go into the link target. A component that the walk cannot read
+// gives STATUS_ACCESS_DENIED. Any other path gives STATUS_SUCCESS.
+NTSTATUS UpperMarkerDirectoryStatus(const std::wstring& upperPath, const std::wstring& dirNorm) {
+    switch (FindLinkOnPath(upperPath, dirNorm)) {
+    case LinkOnPath::Self:
+    case LinkOnPath::Ancestor:
+        return STATUS_NOT_A_DIRECTORY;
+    case LinkOnPath::Unreadable:
+        return STATUS_ACCESS_DENIED;
+    case LinkOnPath::None:
+        break;
+    }
+    return STATUS_SUCCESS;
+}
+
 }
 
 WhiteoutManager::WhiteoutManager(ConfigRef config, Cache* cache)
@@ -106,6 +127,12 @@ std::wstring WhiteoutManager::GetWhiteoutFullPath(const std::wstring& layerPath,
 
 bool WhiteoutManager::HasWhiteout(const std::wstring& relativePath,
                                    const std::wstring& layerPath) const {
+    return HasWhiteoutUnderWalkedDirectoryInLayer(relativePath, layerPath) &&
+           FindLinkOnPath(layerPath, MarkerDirectoryOf(relativePath)) == LinkOnPath::None;
+}
+
+bool WhiteoutManager::HasWhiteoutUnderWalkedDirectoryInLayer(const std::wstring& relativePath,
+                                                             const std::wstring& layerPath) const {
     return MarkerFileExists(GetWhiteoutFullPath(layerPath, relativePath));
 }
 
@@ -127,6 +154,12 @@ NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
         return SetOpaque(relativePath);
     }
 
+    const NTSTATUS directoryStatus =
+        UpperMarkerDirectoryStatus(config_.upperPath, MarkerDirectoryOf(relativePath));
+    if (!NT_SUCCESS(directoryStatus)) {
+        return directoryStatus;
+    }
+
     std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
 
     fs::path parentDir = fs::path(whPath).parent_path();
@@ -143,10 +176,6 @@ NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
         cache_->InvalidateWithAncestors(NormalizePath(relativePath));
     }
 
-    // Notify the host that a whiteout marker was created. The event's
-    // hr field is S_OK (informational); consumers
-    // distinguish file vs directory whiteouts by the `type` argument
-    // they passed, not by the event itself (which carries only the path).
     if (events_ != nullptr) {
         events_->Emit(LM_EVT_WHITEOUT_CREATED, S_OK, relativePath.c_str(), nullptr);
     }
@@ -154,6 +183,16 @@ NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
 }
 
 bool WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
+    switch (FindLinkOnPath(config_.upperPath, MarkerDirectoryOf(relativePath))) {
+    case LinkOnPath::Self:
+    case LinkOnPath::Ancestor:
+        return true;
+    case LinkOnPath::Unreadable:
+        return false;
+    case LinkOnPath::None:
+        break;
+    }
+
     std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
 
     if (!DeleteMarkerFile(whPath)) {
@@ -190,14 +229,9 @@ bool WhiteoutManager::IsOpaqueWalkedDirectoryInLayer(const std::wstring& dirRela
 
 NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
     const std::wstring normalized = NormalizePathPreserveCase(dirRelativePath);
-    switch (FindLinkOnPath(config_.upperPath, normalized)) {
-    case LinkOnPath::Self:
-    case LinkOnPath::Ancestor:
-        return STATUS_NOT_A_DIRECTORY;
-    case LinkOnPath::Unreadable:
-        return STATUS_ACCESS_DENIED;
-    case LinkOnPath::None:
-        break;
+    const NTSTATUS directoryStatus = UpperMarkerDirectoryStatus(config_.upperPath, normalized);
+    if (!NT_SUCCESS(directoryStatus)) {
+        return directoryStatus;
     }
 
     std::wstring dirFullPath = JoinDirPath(config_.upperPath, normalized);
@@ -250,8 +284,11 @@ NTSTATUS WhiteoutManager::WriteOpaqueMarkers(const std::wstring& dirFullPath) {
 bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
     const std::wstring normalized = NormalizePathPreserveCase(dirRelativePath);
     const LinkOnPath link = FindLinkOnPath(config_.upperPath, normalized);
-    if (link == LinkOnPath::Ancestor || link == LinkOnPath::Unreadable) {
+    if (link == LinkOnPath::Ancestor) {
         return true;
+    }
+    if (link == LinkOnPath::Unreadable) {
+        return false;
     }
 
     std::wstring dirFullPath = JoinDirPath(config_.upperPath, normalized);

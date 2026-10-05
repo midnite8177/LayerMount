@@ -139,6 +139,53 @@ public:
         Assert::AreEqual(std::string("lower"), env.ReadFile(env.Lower(0), L"f.txt"),
             L"Creates and deletes through the mount must leave the lower file as it was");
     }
+
+    TEST_METHOD(Create_NameNextToWhiteoutNamedFileInLinkTarget_KeepsTheTargetFile) {
+        for (const ::LayerMount::LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+
+                AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"link\\foo", kNoCreateOptions),
+                    L"A create of link\\foo must succeed");
+                Assert::IsTrue(env.FileExists(env.Root(), L"target\\foo"),
+                    L"The create must write foo in the link target");
+                Assert::AreEqual(std::string("target"), env.ReadFile(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                    L"The create must keep the .wh.foo file in the link target");
+            }
+        }
+    }
+
+    TEST_METHOD(Create_WhiteoutNamedFileUnderUpperLink_WritesAnOrdinaryFileInTheTarget) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            env.CreateDir(env.Root(), L"target");
+            if (!LinkCreatedOrSkipped(createLink, env.Upper() + L"\\link", env.Root() + L"\\target")) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"link\\.wh.new", kNoCreateOptions),
+                L"A create of a .wh. name under a link must succeed");
+            AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"link\\.wh.dir", FILE_DIRECTORY_FILE),
+                L"A directory create of a .wh. name under a link must succeed");
+            AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"link\\.wh.dir\\child", kNoCreateOptions),
+                L"A create under a .wh. directory under a link must succeed");
+
+            Assert::IsTrue(env.FileExists(env.Root(), L"target\\.wh.new"),
+                L"The create must write the .wh.new file in the link target");
+            Assert::IsTrue(env.FileExists(env.Root(), L"target\\.wh.dir\\child"),
+                L"The creates must write the .wh.dir directory and its child in the link target");
+            const ::LayerMount::MergedDirectory listed = mount.MergeDirectoryEntries(L"link");
+            Assert::IsTrue(listed.entries.count(L".wh.new") == 1 && listed.entries.count(L".wh.dir") == 1,
+                L"The listing of the link must show the new entries");
+            Assert::IsTrue(mount.MergeDirectoryEntries(L"link\\.wh.dir").entries.count(L"child") == 1,
+                L"The listing of the .wh.dir directory must show its child");
+        }
+    }
 };
 
 }

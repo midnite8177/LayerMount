@@ -1,4 +1,5 @@
 #include "PathResolver.h"
+#include "DirectoryMerge.h"
 #include "WhiteoutManager.h"
 #include "MetadataStore.h"
 #include "Cache.h"
@@ -8,24 +9,12 @@ namespace LayerMount {
 
 namespace {
 
-bool IsResolvablePath(const std::wstring& normalized) {
-    return IsSafeRelativePath(normalized) && !IsReservedRelativePath(normalized);
-}
-
 bool IsDirectory(DWORD attributes) {
     return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 std::wstring ParentDir(const std::wstring& normalized) {
     return std::filesystem::path(normalized).parent_path().wstring();
-}
-
-std::optional<std::wstring> ResolvableNormalized(const std::wstring& relativePath) {
-    std::wstring normalized = NormalizePath(relativePath);
-    if (normalized.empty() || !IsResolvablePath(normalized)) {
-        return std::nullopt;
-    }
-    return normalized;
 }
 
 LowerVisibility LowersBelowParentOf(const WhiteoutManager& whiteoutMgr,
@@ -43,6 +32,23 @@ PathResolver::PathResolver(ConfigRef config,
     : config_(config.Get())
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache) {
+}
+
+bool PathResolver::IsReservedPath(const std::wstring& normalized) const {
+    return IsReservedOverlayPath(config_, whiteoutMgr_, normalized);
+}
+
+bool PathResolver::IsResolvablePath(const std::wstring& normalized) const {
+    return IsSafeRelativePath(normalized) && !IsReservedPath(normalized);
+}
+
+std::optional<std::wstring> PathResolver::ResolvableNormalized(
+    const std::wstring& relativePath) const {
+    std::wstring normalized = NormalizePath(relativePath);
+    if (normalized.empty() || !IsResolvablePath(normalized)) {
+        return std::nullopt;
+    }
+    return normalized;
 }
 
 ResolvedPath PathResolver::ResolvePath(const std::wstring& relativePath) const {

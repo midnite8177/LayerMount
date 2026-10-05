@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -12,10 +13,27 @@ namespace LayerMount {
 
 namespace {
 
+// How a scan reads a .wh. name. AreMarkers is for a directory of the
+// overlay, where the name is a whiteout or the opaque marker. AreOrdinary is
+// for a directory in a link or under one, where the name is an ordinary
+// entry, as in overlayfs.
+enum class WhiteoutNames {
+    AreMarkers,
+    AreOrdinary,
+};
+
+// A link, or a component that the walk cannot read and that can be a link,
+// at the directory or at an ancestor makes a .wh. name there ordinary. A
+// file there leaves the layer with no directory to scan.
+WhiteoutNames WhiteoutNamesIn(const LayerAncestry& ancestry) {
+    const bool inLink = ancestry.firstNonDirectory == WalkStop::Link ||
+                        ancestry.firstNonDirectory == WalkStop::Unreadable;
+    return inLink ? WhiteoutNames::AreOrdinary : WhiteoutNames::AreMarkers;
+}
+
 std::optional<std::wstring> VisibleEntryKey(const std::wstring& dirNorm,
                                             const std::wstring& name) {
     if (name == L"." || name == L"..") return std::nullopt;
-    if (WhiteoutManager::IsWhiteoutName(name)) return std::nullopt;
     std::wstring key = CaseFoldedName(name);
     if (dirNorm.empty() && IsReservedRelativePath(key)) return std::nullopt;
     return key;
@@ -52,13 +70,43 @@ struct LayerDirectoryScan {
     std::vector<LayerDirectoryEntry> entries;
 };
 
+// Adds one entry that a scan reads to the scan.
+using ScanEntryAdder = void (*)(const std::wstring& dirNorm,
+                                const WIN32_FIND_DATAW& findData,
+                                LayerDirectoryScan& scan);
+
+void AddOrdinaryEntry(const std::wstring& dirNorm,
+                      const WIN32_FIND_DATAW& findData,
+                      LayerDirectoryScan& scan) {
+    const std::optional<std::wstring> key = VisibleEntryKey(dirNorm, findData.cFileName);
+    if (key) scan.entries.push_back(LayerDirectoryEntry{*key, findData});
+}
+
+// Adds a whiteout's hidden name to whitedOutNames, skips the opaque marker,
+// and adds any other entry as AddOrdinaryEntry does.
+void AddMarkerOrEntry(const std::wstring& dirNorm,
+                      const WIN32_FIND_DATAW& findData,
+                      LayerDirectoryScan& scan) {
+    const std::wstring name = findData.cFileName;
+    if (const std::optional<std::wstring> hidden = WhiteoutManager::WhitedOutNameOfEntry(name)) {
+        scan.whitedOutNames.push_back(CaseFoldedName(*hidden));
+        return;
+    }
+    if (WhiteoutManager::IsWhiteoutName(name)) return;
+    AddOrdinaryEntry(dirNorm, findData, scan);
+}
+
 // Reads one layer's directory in one enumeration. whitedOutNames holds the
 // case-folded names that the layer's whiteouts hide, and entries holds the
-// layer's visible entries. A directory absent from the layer gives
-// STATUS_SUCCESS and no names. A failed scan gives the status of its Win32
-// error and holds what it read before the failure.
+// layer's visible entries. With WhiteoutNames::AreOrdinary, whitedOutNames
+// stays empty and entries holds the .wh. names. A directory absent from the
+// layer gives STATUS_SUCCESS and no names. A failed scan gives the status of
+// its Win32 error and holds what it read before the failure.
 LayerDirectoryScan ScanLayerDirectory(const std::wstring& layerPath,
-                                      const std::wstring& dirNorm) {
+                                      const std::wstring& dirNorm,
+                                      WhiteoutNames whiteoutNames) {
+    const ScanEntryAdder addEntry =
+        whiteoutNames == WhiteoutNames::AreMarkers ? AddMarkerOrEntry : AddOrdinaryEntry;
     LayerDirectoryScan scan{STATUS_SUCCESS, {}, {}};
     WIN32_FIND_DATAW findData;
     const std::wstring searchPath = JoinLayerScanPath(layerPath, dirNorm);
@@ -72,15 +120,7 @@ LayerDirectoryScan ScanLayerDirectory(const std::wstring& layerPath,
     }
 
     do {
-        const std::wstring name = findData.cFileName;
-        if (const std::optional<std::wstring> hidden =
-                WhiteoutManager::WhitedOutNameOfEntry(name)) {
-            scan.whitedOutNames.push_back(CaseFoldedName(*hidden));
-            continue;
-        }
-        const std::optional<std::wstring> key = VisibleEntryKey(dirNorm, name);
-        if (!key) continue;
-        scan.entries.push_back(LayerDirectoryEntry{*key, findData});
+        addEntry(dirNorm, findData, scan);
     } while (FindNextFileW(hFind, &findData));
 
     // FindNextFileW returns false both at the end of the directory and on a
@@ -118,8 +158,9 @@ MergeLayer MergeLayerAt(const LayerConfig& config, size_t slot) {
 // nothing and returns the scan's status.
 NTSTATUS MergeLayerEntries(const MergeLayer& layer,
                            const std::wstring& dirPath,
+                           WhiteoutNames whiteoutNames,
                            DirectoryMerge& merge) {
-    const LayerDirectoryScan scan = ScanLayerDirectory(layer.path, dirPath);
+    const LayerDirectoryScan scan = ScanLayerDirectory(layer.path, dirPath, whiteoutNames);
     if (!NT_SUCCESS(scan.status)) return scan.status;
 
     if (layer.source == LayerSource::Lower) AddLayerWhiteouts(scan, merge);
@@ -142,8 +183,29 @@ bool HidesLayerAndBelow(const MergeLayer& layer, const LayerAncestry& ancestry) 
 // Whether the layers below the layer add nothing to the directory. An upper
 // whiteout hides the lowers, as it does for an open.
 bool HidesLayersBelow(const MergeLayer& layer, const LayerAncestry& ancestry) {
-    return ancestry.opaque || ancestry.nonDirectoryOrLink ||
+    return ancestry.opaque || ancestry.firstNonDirectory != WalkStop::None ||
            (layer.source == LayerSource::Upper && ancestry.whitedOut);
+}
+
+// Walks the layers in slots below slotLimit in priority order, and calls
+// scanLayer(layer, ancestry) on each layer that the merge of the directory
+// scans. ancestryAt(slot, layer) gives the ancestry of the directory in that
+// layer, for each layer that the walk reaches. The walk stops at a layer
+// that hides itself and the layers below it, after a layer that hides the
+// layers below it, and when scanLayer returns false.
+template <typename AncestryAt, typename ScanLayer>
+void ForEachScannedLayer(const LayerConfig& config,
+                         size_t slotLimit,
+                         const AncestryAt& ancestryAt,
+                         const ScanLayer& scanLayer) {
+    const size_t slotCount = (std::min)(slotLimit, config.lowerPaths.size() + 1);
+    for (size_t slot = 0; slot < slotCount; ++slot) {
+        const MergeLayer layer = MergeLayerAt(config, slot);
+        const LayerAncestry& ancestry = ancestryAt(slot, layer);
+        if (HidesLayerAndBelow(layer, ancestry)) return;
+        if (!scanLayer(layer, ancestry)) return;
+        if (HidesLayersBelow(layer, ancestry)) return;
+    }
 }
 
 // Merges the directory at dirPath across the layers in slots below
@@ -157,30 +219,62 @@ MergedDirectoryWithAncestry MergeLayers(const LayerConfig& config,
                                         const AncestryAt& ancestryAt) {
     MergedDirectoryWithAncestry result{MergedDirectory{STATUS_SUCCESS, {}}, dirPath, {}};
     DirectoryMerge merge;
-    const size_t slotCount = (std::min)(slotLimit, config.lowerPaths.size() + 1);
-    for (size_t slot = 0; slot < slotCount; ++slot) {
-        const MergeLayer layer = MergeLayerAt(config, slot);
-        result.layers.push_back(ancestryAt(slot, layer));
-        const LayerAncestry& ancestry = result.layers.back();
-        if (HidesLayerAndBelow(layer, ancestry)) break;
-        const NTSTATUS status = MergeLayerEntries(layer, dirPath, merge);
-        if (!NT_SUCCESS(status)) {
-            result.merged.status = status;
-            return result;
-        }
-        if (HidesLayersBelow(layer, ancestry)) break;
+    ForEachScannedLayer(
+        config, slotLimit,
+        [&](size_t slot, const MergeLayer& layer) -> const LayerAncestry& {
+            result.layers.push_back(ancestryAt(slot, layer));
+            return result.layers.back();
+        },
+        [&](const MergeLayer& layer, const LayerAncestry& ancestry) {
+            result.merged.status =
+                MergeLayerEntries(layer, dirPath, WhiteoutNamesIn(ancestry), merge);
+            return NT_SUCCESS(result.merged.status);
+        });
+    if (NT_SUCCESS(result.merged.status)) {
+        result.merged.entries = std::move(merge.entries);
     }
-    result.merged.entries = std::move(merge.entries);
     return result;
 }
 
+}
+
+bool IsInLinkTarget(const LayerConfig& config,
+                    const WhiteoutManager& whiteoutMgr,
+                    const std::wstring& dirNorm) {
+    WhiteoutNames lastScanned = WhiteoutNames::AreMarkers;
+    ForEachScannedLayer(
+        config, config.lowerPaths.size() + 1,
+        [&](size_t, const MergeLayer& layer) {
+            return LayerAncestryOf(
+                config, LayerDirectory{whiteoutMgr, layer.path, dirNorm}, layer.lowerIndex);
+        },
+        [&](const MergeLayer&, const LayerAncestry& ancestry) {
+            lastScanned = WhiteoutNamesIn(ancestry);
+            return true;
+        });
+    return lastScanned == WhiteoutNames::AreOrdinary;
+}
+
+bool IsReservedOverlayPath(const LayerConfig& config,
+                           const WhiteoutManager& whiteoutMgr,
+                           const std::wstring& normalized) {
+    if (IsRootSidecarPath(normalized)) {
+        return true;
+    }
+    const std::optional<std::wstring_view> markerParent = ParentOfFirstMarkerSegment(normalized);
+    if (!markerParent.has_value()) {
+        return false;
+    }
+    const bool markerAtRoot = markerParent->empty();
+    return markerAtRoot || !IsInLinkTarget(config, whiteoutMgr, std::wstring(*markerParent));
 }
 
 MergedDirectoryWithAncestry MergeDirectoryWithAncestry(const LayerConfig& config,
                                                        const WhiteoutManager& whiteoutMgr,
                                                        const std::wstring& dirRelativePath) {
     const std::wstring dirNorm = NormalizePath(dirRelativePath);
-    if ((!dirNorm.empty() && !IsSafeRelativePath(dirNorm)) || IsReservedRelativePath(dirNorm)) {
+    if ((!dirNorm.empty() && !IsSafeRelativePath(dirNorm)) ||
+        IsReservedOverlayPath(config, whiteoutMgr, dirNorm)) {
         return MergedDirectoryWithAncestry{MergedDirectory{STATUS_SUCCESS, {}}, dirNorm, {}};
     }
     return MergeLayers(config, dirNorm, config.lowerPaths.size() + 1,

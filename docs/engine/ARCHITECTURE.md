@@ -301,21 +301,46 @@ nothing either. The engine applies the same rule to links:
 
 A link is never opaque, as overlayfs gives a symlink no opaque xattr.
 `WhiteoutManager` owns this rule, so no caller checks for a link itself.
-`IsOpaqueInLayer` and `HasOpaqueSelfOrAncestorInLayer` ignore a marker at
-a link or under one. They walk the path only after they find a marker,
-so a directory without a marker costs no walk. `StepLayerAncestry`
-already knows that no ancestor is a link, so it reads the marker without
-that walk. `SetOpaque` on a link, or on a directory under one, fails with `STATUS_NOT_A_DIRECTORY` and writes
+`IsOpaqueInLayer` and `HasOpaqueSelfOrAncestorInLayer` ignore a marker
+at a link or under one. They walk the path only after they find a
+marker, so a directory without a marker costs no walk.
+`StepLayerAncestry` already knows that no ancestor is a link, so it
+reads the marker without that walk. `SetOpaque` on a link, or on a
+directory under one, fails with `STATUS_NOT_A_DIRECTORY` and writes
 nothing into the target. When the walk cannot read a component of the
 path, `SetOpaque` fails with `STATUS_ACCESS_DENIED`, because that
 component can be a link. `RemoveOpaque` on a link removes the link's own
 opaque metadata and keeps the marker file in the target. Under a link it
-removes nothing. The link hides the lowers below it through
-`LowersBelow`, which walks the directory's path in the layer and stops
-at a link. A probe or a scan through the link sees the
-target as a directory, so the walk runs even when the layer holds the
-directory. When the walk cannot read a reparse tag, the lowers stay
-hidden, as they do when the walk cannot read a component's attributes.
+removes nothing and returns true. When the walk cannot read a component
+of the path, it removes nothing and returns false. The link hides the
+lowers below it through `LowersBelow`, which walks the directory's path
+in the layer and stops at a link. A probe or a scan through the link
+sees the target as a directory, so the walk runs even when the layer
+holds the directory. When the walk cannot read a reparse tag, the lowers
+stay hidden, as they do when the walk cannot read a component's
+attributes.
+
+A `.wh.` file in a link target, or under it, is an ordinary file. In
+overlayfs the lookup ends at a symlink, and the target is not an overlay
+directory. This holds for an upper link and for a lower link that no
+higher layer holds. `HasWhiteout`, and through it
+`HasWhitedOutAncestorInLayer`, ignore a marker whose directory is a link
+or under one, or on a path with a component that the walk cannot read.
+They walk the path only after they find a marker, as `IsOpaqueInLayer`
+does. `StepLayerAncestry` reads no whiteout in a link. A listing of a
+link, or of a directory under it, shows the `.wh.` names as entries, and
+they hide nothing. Thus a directory there that holds only `.wh.` files
+is not empty, and a delete of it fails with
+`STATUS_DIRECTORY_NOT_EMPTY`. `CreateWhiteout` fails with
+`STATUS_NOT_A_DIRECTORY` when the marker's directory is an upper link or
+under one, and with `STATUS_ACCESS_DENIED` when the walk cannot read a
+component of that path. It writes nothing in either case.
+`RemoveWhiteout` under an upper link removes nothing and returns true, so
+a create of `link\foo` or a rename onto it keeps the target's `.wh.foo`.
+When the walk cannot read a component of that path, `RemoveWhiteout`
+removes nothing and returns false. A caller can
+open, create, rename and delete a `.wh.` name there, as "Path safety
+guards" describes.
 
 ### Resurrection windows and ordering
 
@@ -342,8 +367,9 @@ otherwise resurface on the next resolve.
 Whiteout markers are *never* visible in the overlay. The resolver
 returns not found for any path with a segment that starts with `.wh.`,
 so a caller who knows a marker's name still cannot open, read, delete
-or rename it. See "Path safety guards". Directory merging in
-`MergeDirectoryAcrossLayers` (`impl/DirectoryMerge.cpp`), which
+or rename it. In a link, a `.wh.` name is an ordinary name and not a
+marker. See "Links in a layer" and "Path safety guards". Directory
+merging in `MergeDirectoryAcrossLayers` (`impl/DirectoryMerge.cpp`), which
 `LayerMount::MergeDirectoryEntries` and the directory rename use:
 
 1. Enumerates upper. For each `.wh.<name>` it sees, it strips the prefix
@@ -364,6 +390,9 @@ or rename it. See "Path safety guards". Directory merging in
    from the upper and stops the merge before the lowers, because a
    whiteout that the scan did not read can hide a lower's entry. The
    merge then returns the scan's status and no entries.
+   A layer whose directory is a link, or is under one, is the last layer
+   that the merge scans. Its scan lists the `.wh.` names as entries and
+   adds no name to `whitedOutNames`.
 2. For each lower, it enumerates the directory once. It adds the names
    that the lower's whiteouts hide to the same set, and it holds the
    lower's entries back until the scan ends. A lower that has no
@@ -490,6 +519,21 @@ It rejects:
   marker-named directory. Without it, creating `dir\.wh.name` would
   write a live whiteout, and creating `dir\.wh..wh..opq` would make
   `dir` opaque.
+
+The gates that take a path from a caller call `IsReservedOverlayPath`
+(`impl/DirectoryMerge.cpp`). These are the resolver, `Create`, `Rename`,
+`UpdateContextPath` and the directory merge. The resolver and the
+`LayerMount` gates call it through `PathResolver::IsReservedPath`.
+`IsReservedOverlayPath` makes one exception to the second kind. When the
+merged view reads the directory that holds the first `.wh.` segment in a
+link, or under one, the path is not reserved, because a `.wh.` name
+there is an ordinary name. `IsInLinkTarget` makes that check with the
+layer rules of the listing, so every name that a listing shows
+resolves. The string check runs first, and only a path with a `.wh.`
+segment walks the layers. Outside a link the marker names stay
+reserved. `LayerMountCreateWhiteout` and `LayerMountSetOpaque` use
+`IsReservedRelativePath` alone and reject every `.wh.` segment, because
+a marker never goes into a link target.
 
 The resolver treats a reserved path as not found in the upper and in
 every lower. `Create` returns `STATUS_ACCESS_DENIED`, and so does
@@ -920,7 +964,8 @@ The engine reserves three namespaces:
 - The `<upper>\.overlay\` directory. `IsReservedRelativePath` rejects
   every read and write that targets it, and `MergeDirectoryEntries`
   filters it out of root listings.
-- Names that start with `.wh.`, in every directory and every layer.
+- Names that start with `.wh.`, in every directory and every layer,
+  outside a link target (see "Links in a layer").
   `IsReservedRelativePath` rejects a path with such a segment, so the
   ABI calls `LayerMountCreateWhiteout` and `LayerMountSetOpaque` return
   `E_INVALIDARG` for it. `MergeDirectoryEntries` filters the markers out

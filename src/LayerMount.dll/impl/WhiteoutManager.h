@@ -41,14 +41,34 @@ public:
     // marker.
     static std::optional<std::wstring> WhitedOutNameOfEntry(const std::wstring& entryName);
 
-    // Does a .wh.<name> marker exist for relativePath in the given layer?
+    // Whether the layer holds the .wh.<name> marker for relativePath. In
+    // overlayfs a symlink ends the lookup, and its target is not an overlay
+    // directory. A link is a junction or a directory symbolic link. A marker
+    // in a link or under one is an ordinary file and does not count.
+    // Neither does a marker on a path with a component that the walk cannot
+    // read. When the marker exists, the call walks the path from the layer
+    // root as FindLinkOnPath does.
     bool HasWhiteout(const std::wstring& relativePath,
                      const std::wstring& layerPath) const;
+
+    // HasWhiteout for a path whose parent directory the caller walked from
+    // the layer root and found only plain directories on. Reads the marker
+    // and does not walk again.
+    bool HasWhiteoutUnderWalkedDirectoryInLayer(const std::wstring& relativePath,
+                                                const std::wstring& layerPath) const;
 
     bool HasWhiteoutInAnyLayer(const std::wstring& relativePath) const;
 
     // Both functions change the upper layer only. CreateWhiteout returns
-    // the error of the marker write that failed as an NTSTATUS.
+    // the error of the marker write that failed as an NTSTATUS. When the
+    // upper holds a link at the marker's directory or at an ancestor,
+    // CreateWhiteout returns STATUS_NOT_A_DIRECTORY and writes nothing, so
+    // no marker or directory goes through the link into its target. When
+    // the walk cannot read a component of that path, CreateWhiteout returns
+    // STATUS_ACCESS_DENIED. Under a link, RemoveWhiteout removes nothing and
+    // returns true, because a .wh.<name> file there is an ordinary file.
+    // When the walk cannot read a component, RemoveWhiteout removes nothing
+    // and returns false.
     NTSTATUS CreateWhiteout(const std::wstring& relativePath, WhiteoutType type);
     bool RemoveWhiteout(const std::wstring& relativePath);
 
@@ -92,8 +112,8 @@ public:
 
     // Removes both opaque markers in the upper layer. On a link, removes
     // only the link's own opaque metadata and keeps the marker file in its
-    // target. Under a link, or when the walk cannot read a component of the
-    // path, removes nothing and returns true.
+    // target. Under a link, removes nothing and returns true. When the walk
+    // cannot read a component of the path, removes nothing and returns false.
     bool RemoveOpaque(const std::wstring& dirRelativePath);
 
     // Whether the directory, an ancestor of it, or the layer root is opaque in
@@ -104,8 +124,8 @@ public:
                                         const std::wstring& layerPath) const;
 
     // Whether an ancestor of relativePath, not counting the layer root, has a
-    // whiteout marker in the layer. A whiteout at a directory path hides every
-    // descendant from that layer downward.
+    // whiteout marker in the layer, as HasWhiteout reads it. A whiteout at a
+    // directory path hides every descendant from that layer downward.
     bool HasWhitedOutAncestorInLayer(const std::wstring& relativePath,
                                      const std::wstring& layerPath) const;
 

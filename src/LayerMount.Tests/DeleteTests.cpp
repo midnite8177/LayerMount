@@ -482,6 +482,45 @@ public:
             L"The delete of the link must leave the file in the link target");
     }
 
+    TEST_METHOD(Delete_WhiteoutNamedFileUnderUpperLink_RemovesTheTargetFile) {
+        for (const LinkCreator createLink : kDirectoryLinkCreators) {
+            TempLayerEnvironment env(1);
+            if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, LayerSource::Upper, createLink)) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+
+            AssertStatus(STATUS_SUCCESS, mount.Delete(L"link\\.wh.foo", kNoCallerPid),
+                L"The delete of a .wh. file under a link must succeed");
+
+            Assert::IsFalse(env.FileExists(env.Root(), WhiteoutMarkerPath(L"target\\foo")),
+                L"The delete must remove the .wh.foo file from the link target");
+            Assert::IsTrue(mount.MergeDirectoryEntries(L"link").entries.empty(),
+                L"The listing of the link must not show the deleted file");
+        }
+    }
+
+    TEST_METHOD(Delete_DirectoryUnderLinkHoldingOnlyAWhiteoutNamedFile_FailsWithDirectoryNotEmpty) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), WhiteoutMarkerPath(L"target\\sub\\x"), "target");
+                if (!LinkToWhiteoutNamedFileCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot targetBefore(env.Root() + L"\\target");
+                const LayerSnapshot upperBefore(env.Upper());
+
+                AssertStatus(STATUS_DIRECTORY_NOT_EMPTY, mount.Delete(L"link\\sub", kNoCallerPid),
+                    L"A directory under a link that holds a .wh. file is not empty");
+
+                targetBefore.AssertUnchanged(L"The failed delete must change nothing in the link target");
+                upperBefore.AssertUnchanged(L"The failed delete must write nothing in the upper");
+            }
+        }
+    }
+
     TEST_METHOD(Delete_LowerJunctionToTargetHoldingAFile_WritesAWhiteout) {
         AssertPathDeleteOfLowerLinkWhitesItOutAndKeepsTargetFile(CreateDirectoryJunction);
     }
