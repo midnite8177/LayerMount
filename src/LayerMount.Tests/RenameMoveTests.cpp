@@ -32,37 +32,6 @@ public:
         AssertTempIsNTFS();
     }
 
-    static NTSTATUS SimulateLowerFileRename(CopyUp& cu,
-                                            PathResolver& resolver,
-                                            WhiteoutManager& wm,
-                                            Cache& cache,
-                                            const std::wstring& oldNorm,
-                                            const std::wstring& newNorm,
-                                            ReplaceExisting replace) {
-        if (wm.HasWhiteout(newNorm, resolver.Config().upperPath)) {
-            wm.RemoveWhiteout(newNorm);
-        }
-
-        NTSTATUS st = cu.CopyUpFile(oldNorm);
-        if (!NT_SUCCESS(st)) return st;
-
-        const std::wstring oldUpper = resolver.GetUpperPath(oldNorm);
-        const std::wstring newUpper = resolver.GetUpperPath(newNorm);
-        EnsureDirectoryExists(
-            std::filesystem::path(newUpper).parent_path().wstring());
-
-        const DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
-        if (!::MoveFileExW(oldUpper.c_str(), newUpper.c_str(), flags)) {
-            return HRESULT_FROM_WIN32(::GetLastError());
-        }
-
-        wm.CreateWhiteout(oldNorm, WhiteoutType::File);
-
-        cache.InvalidateWithAncestors(oldNorm);
-        cache.InvalidateWithAncestors(newNorm);
-        return STATUS_SUCCESS;
-    }
-
     TEST_METHOD(UpperOnlyEmptyDirRename_SucceedsWithoutOpaque) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Upper(), L"src");
@@ -136,45 +105,6 @@ public:
             L"Opaque marker must travel with the directory");
     }
 
-    TEST_METHOD(LowerOnlyFileRename_CopiesUpMovesAndWhiteouts) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"source.txt", "payload");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-
-        resolver.ResolvePath(L"source.txt");
-        Assert::IsTrue(cache.Get(L"source.txt").has_value());
-
-        Assert::IsTrue(NT_SUCCESS(
-            SimulateLowerFileRename(cu, resolver, wm, cache,
-                                    L"source.txt", L"target.txt", ReplaceExisting::No)));
-
-        Assert::IsTrue(env.FileExists(env.Upper(), L"target.txt"));
-        Assert::AreEqual(std::string("payload"),
-                         env.ReadFile(env.Upper(), L"target.txt"));
-        Assert::IsTrue(env.FileExists(env.Lower(0), L"source.txt"),
-            L"Rename must never mutate the lower layer");
-
-        Assert::IsTrue(wm.HasWhiteout(L"source.txt", env.Upper()));
-        Assert::IsFalse(wm.HasWhiteout(L"target.txt", env.Upper()));
-
-        Assert::IsFalse(cache.Get(L"source.txt").has_value());
-        Assert::IsFalse(cache.Get(L"target.txt").has_value());
-
-        ResolvedPath rOld = resolver.ResolvePath(L"source.txt");
-        Assert::IsFalse(rOld.Found());
-        Assert::IsTrue(rOld.isWhiteout);
-
-        ResolvedPath rNew = resolver.ResolvePath(L"target.txt");
-        Assert::IsTrue(rNew.Found());
-        Assert::IsTrue(rNew.source == LayerSource::Upper);
-    }
-
     TEST_METHOD(LowerOnlyDirRename_RecursiveCopyAndOpaque) {
         TempLayerEnvironment env(1);
         env.CreateDir(env.Lower(0), L"ld\\nested");
@@ -202,121 +132,6 @@ public:
 
         Assert::IsTrue(env.FileExists(env.Lower(0), L"ld\\top.txt"));
         Assert::IsTrue(env.FileExists(env.Lower(0), L"ld\\nested\\inner.txt"));
-    }
-
-    TEST_METHOD(ShadowedFileRename_UpperIsSource_LowerIntact) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"shared.txt", "LOWER");
-        env.WriteFile(env.Upper(),  L"shared.txt", "UPPER");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-
-        const std::wstring oldUpper = resolver.GetUpperPath(L"shared.txt");
-        const std::wstring newUpper = resolver.GetUpperPath(L"renamed.txt");
-        Assert::IsTrue(::MoveFileExW(oldUpper.c_str(), newUpper.c_str(), 0) != FALSE);
-        cache.InvalidateWithAncestors(L"shared.txt");
-        cache.InvalidateWithAncestors(L"renamed.txt");
-
-        ResolvedPath rOld = resolver.ResolvePath(L"shared.txt");
-        Assert::IsTrue(rOld.Found());
-        Assert::IsTrue(rOld.source == LayerSource::Lower,
-            L"With the upper copy gone and no whiteout, the lower file resurfaces");
-
-        ResolvedPath rNew = resolver.ResolvePath(L"renamed.txt");
-        Assert::IsTrue(rNew.Found());
-        Assert::IsTrue(rNew.source == LayerSource::Upper);
-
-        Assert::AreEqual(std::string("UPPER"),
-                         env.ReadFile(env.Upper(), L"renamed.txt"));
-        Assert::AreEqual(std::string("LOWER"),
-                         env.ReadFile(env.Lower(0), L"shared.txt"));
-    }
-
-    TEST_METHOD(RenameOntoWhitedOutTarget_WhiteoutIsCleared) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"src.txt",    "src-payload");
-        env.WriteFile(env.Lower(0), L"target.txt", "target-lower");
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-
-        AssertStatus(STATUS_SUCCESS, wm.CreateWhiteout(L"target.txt", WhiteoutType::File),
-                     L"CreateWhiteout must succeed");
-        Assert::IsTrue(wm.HasWhiteout(L"target.txt", env.Upper()));
-
-        Assert::IsTrue(NT_SUCCESS(
-            SimulateLowerFileRename(cu, resolver, wm, cache,
-                                    L"src.txt", L"target.txt", ReplaceExisting::Yes)));
-
-        Assert::IsFalse(wm.HasWhiteout(L"target.txt", env.Upper()));
-        Assert::AreEqual(std::string("src-payload"),
-                         env.ReadFile(env.Upper(), L"target.txt"));
-
-        Assert::IsTrue(wm.HasWhiteout(L"src.txt", env.Upper()));
-    }
-
-    TEST_METHOD(RenameMetacopyFile_MetadataSurvivesMove) {
-        TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"lazy.bin", std::string(1024, 'Q'));
-
-        auto config = env.MakeConfig();
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-        LayerMountStats stats;
-        CopyUp cu(config, resolver, wm, cache, stats);
-
-        Assert::IsTrue(NT_SUCCESS(cu.CopyUpMetadataOnly(L"lazy.bin")));
-        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(
-                           env.Upper() + L"\\lazy.bin", nullptr).metacopy);
-
-        const std::wstring oldUpper = resolver.GetUpperPath(L"lazy.bin");
-        const std::wstring newUpper = resolver.GetUpperPath(L"renamed.bin");
-        Assert::IsTrue(::MoveFileExW(oldUpper.c_str(), newUpper.c_str(), 0) != FALSE);
-        cache.InvalidateWithAncestors(L"lazy.bin");
-        cache.InvalidateWithAncestors(L"renamed.bin");
-
-        LayerMountMetadata md = MetadataStore::ReadLayerMountMetadata(
-            env.Upper() + L"\\renamed.bin", nullptr);
-        Assert::IsTrue(md.metacopy, L"metacopy flag must survive MoveFileExW");
-        Assert::IsFalse(md.originLayer.empty(),
-            L"originLayer must survive MoveFileExW");
-
-        Assert::IsTrue(NT_SUCCESS(cu.CompleteLazyCopyUp(L"renamed.bin")));
-        Assert::AreEqual(std::string(1024, 'Q'),
-                         env.ReadFile(env.Upper(), L"renamed.bin"));
-    }
-
-    TEST_METHOD(RenameInsideOpaqueDir_SucceedsAndOpacityPreserved) {
-        TempLayerEnvironment env(1);
-        env.CreateDir(env.Upper(), L"box");
-        env.WriteFile(env.Upper(), L"box\\a.txt", "data");
-        auto config = env.MakeConfig();
-        AssertStatus(STATUS_SUCCESS, WhiteoutManager(config, nullptr).SetOpaque(L"box"),
-            L"SetOpaque must mark the upper directory");
-
-        Cache cache;
-        WhiteoutManager wm(config, &cache);
-        PathResolver resolver(config, wm, cache);
-
-        const std::wstring oldUpper = resolver.GetUpperPath(L"box\\a.txt");
-        const std::wstring newUpper = resolver.GetUpperPath(L"box\\b.txt");
-        Assert::IsTrue(::MoveFileExW(oldUpper.c_str(), newUpper.c_str(), 0) != FALSE);
-        cache.InvalidateWithAncestors(L"box\\a.txt");
-        cache.InvalidateWithAncestors(L"box\\b.txt");
-
-        Assert::IsTrue(env.FileExists(env.Upper(), L"box\\b.txt"));
-        Assert::IsTrue(wm.IsOpaque(L"box"),
-            L"Opacity of the containing directory must be unaffected by child rename");
     }
 
     TEST_METHOD(RedirectCycle_ResolverDepthGuardFires) {
@@ -2917,6 +2732,138 @@ public:
         Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"p\\f.txt")),
             L"The rename must write no whiteout for a name whose lower entry the opaque parent hides");
         lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_UpperFileInOpaqueDirectory_KeepsTheDirectoryOpaque) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"box\\hidden.txt", "lower");
+        env.WriteFile(env.Upper(), L"box\\a.txt", "data");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"box"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"box\\a.txt", L"box\\b.txt", kFailIfExists, kNoCallerPid),
+            L"A rename of an upper file inside an opaque directory must succeed");
+        Assert::IsTrue(env.FileExists(env.Upper(), OpaqueMarkerPath(L"box")),
+            L"The directory must keep its opaque marker");
+        AssertOnlyEntryShownAs(mount, L"box", L"b.txt");
+        Assert::AreEqual(std::string("data"), ReadThroughMount(mount, L"box\\b.txt"),
+            L"The new name must show the upper file's data");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"box\\a.txt")),
+            L"The rename must write no whiteout for a name that no lower holds");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_LowerOnlyFile_CopiesItUpAndWhitesOutTheOldName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"source.txt", "payload");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+        AssertOnlyEntryShownAs(mount, L"", L"source.txt");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"source.txt", L"target.txt", kFailIfExists, kNoCallerPid),
+            L"A rename of a lower-only file must succeed");
+        Assert::AreEqual(std::string("payload"), env.ReadFile(env.Upper(), L"target.txt"),
+            L"The upper target.txt must hold the lower file's data");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"target.txt")),
+            L"The rename must write no whiteout at the new name");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"source.txt", L"target.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"source.txt"),
+            L"An open of the old name must find nothing");
+        Assert::AreEqual(std::string("payload"), ReadThroughMount(mount, L"target.txt"),
+            L"The new name must show the lower file's data");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_FileInUpperAndLower_KeepsTheLowerFileHiddenAtTheOldName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"shared.txt", "LOWER");
+        env.WriteFile(env.Upper(), L"shared.txt", "UPPER");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"shared.txt", L"renamed.txt", kFailIfExists, kNoCallerPid),
+            L"A rename of a file in the upper and the lower must succeed");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"shared.txt", L"renamed.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"shared.txt"),
+            L"An open of the old name must not find the lower file");
+        Assert::AreEqual(std::string("UPPER"), ReadThroughMount(mount, L"renamed.txt"),
+            L"The new name must show the upper file's data");
+        Assert::AreEqual(std::string("LOWER"), env.ReadFile(env.Lower(0), L"shared.txt"),
+            L"The lower file must keep its data");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(ReplaceRename_LowerFileOntoWhitedOutName_RemovesTheWhiteoutAndShowsTheFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"src.txt", "src-payload");
+        env.WriteFile(env.Lower(0), L"target.txt", "target-lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"target.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"src.txt", L"target.txt", kReplaceIfExists, kNoCallerPid),
+            L"A rename onto a whited-out name must succeed");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"target.txt")),
+            L"The rename must remove the whiteout at the new name");
+        Assert::AreEqual(std::string("src-payload"), env.ReadFile(env.Upper(), L"target.txt"),
+            L"The upper target.txt must hold the renamed file's data");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"src.txt", L"target.txt");
+        Assert::AreEqual(std::string("src-payload"), ReadThroughMount(mount, L"target.txt"),
+            L"The new name must show the renamed file's data");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_LowerFileOntoWhitedOutNameWithoutReplace_RemovesTheWhiteoutAndShowsTheFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"src.txt", "src-payload");
+        env.WriteFile(env.Lower(0), L"target.txt", "target-lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"target.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot lowerBefore(env.Lower(0));
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"src.txt", L"target.txt", kFailIfExists, kNoCallerPid),
+            L"A rename onto a whited-out name must succeed without replace");
+        Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"target.txt")),
+            L"The rename must remove the whiteout at the new name");
+        AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"src.txt", L"target.txt");
+        Assert::AreEqual(std::string("src-payload"), ReadThroughMount(mount, L"target.txt"),
+            L"The new name must show the renamed file's data");
+        lowerBefore.AssertUnchanged(L"The rename must write nothing in the lower");
+    }
+
+    TEST_METHOD(Rename_MetacopyShell_KeepsItsMetadataAndReadsTheLowerData) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"lazy.bin", "lazy lower data");
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            {
+                CopyUpAndRenameRig rig(config);
+                AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"lazy.bin"),
+                    L"The metadata-only copy-up of the lower file must succeed");
+            }
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"lazy.bin", L"renamed.bin", kFailIfExists, kNoCallerPid),
+                L"A rename of a metacopy shell must succeed");
+
+            const LayerMountMetadata metadata =
+                MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\renamed.bin", &config);
+            Assert::IsTrue(metadata.metacopy,
+                L"The upper renamed.bin must keep the metacopy flag");
+            Assert::IsFalse(metadata.originLayer.empty(),
+                L"The upper renamed.bin must keep its origin layer");
+            AssertRootShowsOnlyNewNameOverWhiteout(env, mount, L"lazy.bin", L"renamed.bin");
+            Assert::AreEqual(std::string("lazy lower data"), ReadThroughMount(mount, L"renamed.bin"),
+                L"The new name must show the lower file's data");
+        });
     }
 
     TEST_METHOD(Rename_UpperDirectoryOntoNameWhoseLowerEntryAnOpaqueParentHides_Succeeds) {
