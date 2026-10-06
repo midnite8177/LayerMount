@@ -408,8 +408,12 @@ public:
     // exist, and a path the engine cannot stat.
     ResolvedSizes SizesOf(const ResolvedPath& resolved) const;
 
-    // Ensure a file is in the upper layer (copy-up if needed).
-    // Updates FileContext on success.
+    // Moves the handle to the upper entry. When only a lower holds the
+    // entry, copies it up first. A file handle without a stream suffix can
+    // get a metacopy shell, and CopyUpFileOrShell decides. When the upper
+    // holds the entry, ReadMetacopyFlag reads its flag. Then
+    // FillShellForDataAccess fills a shell for a handle with data access.
+    // When the fill fails, the handle stays on its current entry.
     NTSTATUS EnsureInUpperLayer(const std::wstring& relativePath, FileContext* ctx);
 
     // Path-based copy-up. Triggers `CopyUp::CopyUpDirectory` /
@@ -853,16 +857,33 @@ private:
     // lower's streams in over the new one.
     NTSTATUS PrepareStreamHost(const UpperCreate& create);
 
-    // Sets ctx->isMetacopyOnly when it stages a shell.
-    NTSTATUS CopyUpForWriteOpen(const std::wstring& hostNorm, FileContext* ctx);
+    // Copies the entry of ctx up. A file without a stream suffix goes
+    // through CopyUpFileOrShell with shellOnlyAboveBytes, and
+    // ctx->isMetacopyOnly becomes true when that call stages a shell.
+    NTSTATUS CopyUpForHandle(const std::wstring& hostNorm,
+                             FileContext* ctx,
+                             std::optional<LONGLONG> shellOnlyAboveBytes);
 
     // Fill a metacopy shell from its recorded origin. Returns the fill's
     // status on failure and clears ctx->isMetacopyOnly on success.
     NTSTATUS FillShell(const std::wstring& hostNorm, FileContext* ctx);
 
-    // Fills a shell that a handle without data access left sparse, then
-    // reopens the handle. The fill sets the origin's timestamps on the
-    // upper file as its last step.
+    // Sets ctx->isMetacopyOnly from the metacopy flag of the upper entry
+    // when ctx has no stream suffix. Another operation can have left that
+    // entry as a shell: a handle, a rename, or a path-based security
+    // change.
+    void ReadMetacopyFlag(const std::wstring& hostNorm, FileContext* ctx);
+
+    // Fills the shell when ctx is a file handle with data access. Read
+    // never fills a shell, so a handle that can read needs the data before
+    // its first read. A handle with write access needs it too, because
+    // paging reads arrive on a write handle. ComputePhysicalHandleAccess
+    // gives that handle the read-data right for them.
+    NTSTATUS FillShellForDataAccess(const std::wstring& hostNorm, FileContext* ctx);
+
+    // Fills the shell that the entry of this handle holds, then reopens
+    // the handle. The fill keeps the times and attributes that the shell
+    // had.
     NTSTATUS EnsureMetacopyMaterialized(FileContext* ctx);
 
     // Merges the directory's entries. Returns a failed scan's status,

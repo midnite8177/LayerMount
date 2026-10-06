@@ -17,6 +17,10 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
 using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::AddDenyAce;
+using LayerMountTestShared::AceSpec;
+using LayerMountTestShared::DaclWithOneMoreAce;
+using LayerMountTestShared::LocalAcl;
+using LayerMountTestShared::WellKnownSid;
 using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
 using LayerMountTestShared::DirectoryListingDenied;
 using LayerMountTestShared::AssertListingDenied;
@@ -679,21 +683,26 @@ void LM_CALL HoldRecordAtFirstWhiteout(const LM_EVENT* evt, void* context) {
                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
 }
 
+// Returns one "(type;flags;mask;sid)" group for an ACE.
+std::wstring AceText(BYTE type, BYTE flags, ACCESS_MASK mask, PSID sid) {
+    LPWSTR sidString = nullptr;
+    Assert::IsTrue(::ConvertSidToStringSidW(sid, &sidString) != FALSE,
+        L"The test must convert the SID of an ACE");
+    const std::wstring text = L"(" + std::to_wstring(type) + L";" + std::to_wstring(flags) +
+                              L";" + std::to_wstring(mask) + L";" + sidString + L")";
+    ::LocalFree(sidString);
+    return text;
+}
+
 // Returns the explicit allow and deny ACEs in the DACL of path, in order,
-// as one "(type;flags;mask;sid)" group each.
+// as one AceText group each.
 std::wstring ExplicitAcesOf(const std::wstring& path) {
     std::wstring aces;
     ForEachAllowOrDenyAce(path, [&](const ACE_HEADER& header, ACCESS_MASK mask, PSID sid) {
         if ((header.AceFlags & INHERITED_ACE) != 0) {
             return;
         }
-        LPWSTR sidString = nullptr;
-        Assert::IsTrue(::ConvertSidToStringSidW(sid, &sidString) != FALSE,
-            (L"The test must convert an ACE SID in the DACL of " + path).c_str());
-        aces += L"(" + std::to_wstring(header.AceType) + L";" +
-                std::to_wstring(header.AceFlags) + L";" + std::to_wstring(mask) + L";" +
-                sidString + L")";
-        ::LocalFree(sidString);
+        aces += AceText(header.AceType, header.AceFlags, mask, sid);
     });
     return aces;
 }
@@ -722,6 +731,37 @@ void AssertFullCopy(const TempLayerEnvironment& env, const std::wstring& name,
         (L"The copy-up record of " + upperPath + L" must not have the metacopy flag").c_str());
     Assert::IsTrue(LowerFileData() == env.ReadFile(env.Upper(), name),
         (upperPath + L" must hold the lower file's data").c_str());
+}
+
+NTSTATUS SetDaclWithOneMoreAce(::LayerMount::LayerMount& mount, const std::wstring& path,
+                               const std::wstring& templatePath, const AceSpec& ace) {
+    const LocalAcl merged = DaclWithOneMoreAce(templatePath, ace);
+    SECURITY_DESCRIPTOR sd{};
+    Assert::IsTrue(::InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) != FALSE &&
+                   ::SetSecurityDescriptorDacl(&sd, TRUE, merged.get(), FALSE) != FALSE,
+        L"The test must build the security descriptor");
+    return mount.SetSecurity(path, DACL_SECURITY_INFORMATION, &sd, kNoCallerPid);
+}
+
+SetInfoRequest LastWriteTimeChange() {
+    const FILETIME written = MakeFileTime(2020, 1, 10);
+    return SetInfoRequest{INVALID_FILE_ATTRIBUTES, 0, 0,
+                          ComposeUInt64(written.dwHighDateTime, written.dwLowDateTime), 0,
+                          kUnchangedSize, kUnchangedSize};
+}
+
+// Sets the times of LastWriteTimeChange through a handle opened with access,
+// and returns the status of the set.
+NTSTATUS SetTimesThroughHandle(::LayerMount::LayerMount& mount, const std::wstring& path,
+                               UINT32 access) {
+    std::unique_ptr<FileContext> ctx;
+    InternalFileInfo info{};
+    AssertStatus(STATUS_SUCCESS,
+        mount.Open(path, access, kNoCreateOptions, kNoCallerPid, &ctx, &info),
+        (L"The open of " + path + L" must succeed").c_str());
+    const NTSTATUS status = mount.SetInfo(ctx.get(), LastWriteTimeChange(), nullptr);
+    mount.Close(ctx.get());
+    return status;
 }
 
 void OpenForWriteThroughMount(::LayerMount::LayerMount& mount, const std::wstring& path) {
@@ -3953,27 +3993,158 @@ public:
         TempLayerEnvironment& env = layers.env;
         const LayerConfig config = env.MakeConfig();
         ::LayerMount::LayerMount mount(config);
-        std::unique_ptr<FileContext> ctx;
-        InternalFileInfo info{};
-        AssertStatus(STATUS_SUCCESS, mount.Open(L"big.bin", FILE_WRITE_ATTRIBUTES,
-                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
-            L"The open of the placeholder file for its attributes must succeed");
-        const FILETIME written = MakeFileTime(2020, 1, 10);
-        const UINT64 lastWriteTime = ComposeUInt64(written.dwHighDateTime, written.dwLowDateTime);
-        const SetInfoRequest touch{INVALID_FILE_ATTRIBUTES, 0, 0, lastWriteTime, 0,
-                                   kUnchangedSize, kUnchangedSize};
 
-        const NTSTATUS status = mount.SetInfo(ctx.get(), touch, nullptr);
-        mount.Close(ctx.get());
+        const NTSTATUS status = SetTimesThroughHandle(mount, L"big.bin", FILE_WRITE_ATTRIBUTES);
 
         AssertStatus(STATUS_SUCCESS, status,
             L"The set of the last-write time of the placeholder file must succeed");
-        Assert::AreEqual(lastWriteTime, LastWriteTimeThroughMount(mount, L"big.bin"),
+        Assert::AreEqual(LastWriteTimeChange().lastWriteTime,
+                         LastWriteTimeThroughMount(mount, L"big.bin"),
             L"The file must show the last-write time that the set gave it");
         AssertMetacopyShell(env.Upper() + L"\\big.bin", config);
         Assert::IsTrue(
             HasAttribute(env.Lower(0) + L"\\big.bin", FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS),
             L"The lower placeholder file must stay dehydrated");
+    }
+
+    TEST_METHOD(SetSecurity_DaclOfLargePartlyDehydratedCloudPlaceholderFileWithoutProvider_ChangesOnAMetacopyShell) {
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
+        constexpr size_t kSize = 2 * 1024 * 1024;
+        constexpr ByteRange kDropped{512 * 1024, 1024 * 1024};
+        if (!layers.DehydratedPlaceholderFileWithoutProviderOrSkipped(L"big.bin", kSize, kDropped)) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+        const std::wstring lowerPath = env.Lower(0) + L"\\big.bin";
+        const WellKnownSid batch(WinBatchSid);
+
+        const NTSTATUS status = SetDaclWithOneMoreAce(
+            mount, L"big.bin", lowerPath,
+            AceSpec{GRANT_ACCESS, FILE_READ_ATTRIBUTES, NO_INHERITANCE, batch.Get()});
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The set of the DACL of the placeholder file must succeed");
+        const std::wstring upperPath = env.Upper() + L"\\big.bin";
+        AssertMetacopyShell(upperPath, config);
+        const std::wstring addedAce =
+            AceText(ACCESS_ALLOWED_ACE_TYPE, 0, FILE_READ_ATTRIBUTES, batch.Get());
+        Assert::IsTrue(ExplicitAcesOf(upperPath).find(addedAce) != std::wstring::npos,
+            L"The upper file must carry the ACE that the set added");
+        Assert::IsTrue(HasAttribute(lowerPath, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS),
+            L"The lower placeholder file must stay dehydrated");
+    }
+
+    TEST_METHOD(SetSecurity_DaclThatDeniesWriteToEveryoneOnLargeLowerFile_LaterReadReturnsTheLowerData) {
+        TempLayerEnvironment env(1);
+        const std::string lowerData = "lower file data" + std::string(2 * 1024 * 1024, 'D');
+        env.WriteFile(env.Lower(0), L"big.bin", lowerData);
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+        constexpr DWORD kWriteRights =
+            FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+        const WellKnownSid everyone(WinWorldSid);
+        AssertStatus(STATUS_SUCCESS,
+            SetDaclWithOneMoreAce(mount, L"big.bin", env.Lower(0) + L"\\big.bin",
+                                  AceSpec{DENY_ACCESS, kWriteRights, NO_INHERITANCE,
+                                          everyone.Get()}),
+            L"The set of a DACL that denies write to everyone must succeed");
+        const std::wstring upperPath = env.Upper() + L"\\big.bin";
+        Assert::IsTrue(MetadataStore::ReadLayerMountMetadata(upperPath, &config).metacopy,
+            L"The set of the DACL must leave a metacopy shell in the upper");
+        Assert::IsTrue(
+            ExplicitAcesOf(upperPath).find(
+                AceText(ACCESS_DENIED_ACE_TYPE, 0, kWriteRights, everyone.Get())) !=
+                std::wstring::npos,
+            L"The upper file must carry the ACE that denies write to everyone");
+
+        Assert::AreEqual(lowerData.substr(0, kReadThroughMountBytes),
+                         ReadThroughMount(mount, L"big.bin"),
+            L"A read through the mount must return the lower file's data");
+    }
+
+    TEST_METHOD(SetInfo_TimesOfLowerFileByAHandleWithoutDataAccess_LeavesAMetacopyShell) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+
+        const NTSTATUS status = SetTimesThroughHandle(mount, L"a.bin", FILE_READ_ATTRIBUTES);
+
+        AssertStatus(STATUS_SUCCESS, status, L"The set of the last-write time must succeed");
+        AssertMetacopyShell(env.Upper() + L"\\a.bin", config);
+        Assert::AreEqual(LowerFileDataStart(), ReadThroughMount(mount, L"a.bin"),
+            L"A read through the mount must return the lower file's data");
+    }
+
+    TEST_METHOD(SetInfo_TimesOfLowerFileByAHandleWithDataAccess_CopiesTheData) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+
+        const NTSTATUS status = SetTimesThroughHandle(mount, L"a.bin", FILE_READ_DATA);
+
+        AssertStatus(STATUS_SUCCESS, status, L"The set of the last-write time must succeed");
+        AssertFullCopy(env, L"a.bin", config);
+    }
+
+    TEST_METHOD(SetInfo_TimesOfLowerFileByAStreamHandleWithoutDataAccess_CopiesTheData) {
+        TempLayerEnvironment env(1);
+        WriteLowerFileWithZoneStream(env, L"a.bin", LowerFileData());
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+
+        const NTSTATUS status =
+            SetTimesThroughHandle(mount, L"a.bin:" + kZoneStream, FILE_READ_ATTRIBUTES);
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The set of the last-write time through the stream handle must succeed");
+        AssertFullCopy(env, L"a.bin", config);
+    }
+
+    TEST_METHOD(Overwrite_LowerFileByAHandleWithoutDataAccess_LeavesAnEmptyFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"a.bin", FILE_READ_ATTRIBUTES,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The lower file must open");
+
+        const NTSTATUS status = mount.Overwrite(ctx.get(), 0, FALSE, 0, nullptr);
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, status, L"The overwrite must succeed");
+        Assert::AreEqual(0ULL, FileSizeThroughMount(mount, L"a.bin"),
+            L"A data open after the overwrite must show an empty file");
+    }
+
+    TEST_METHOD(SetInfo_TimesByALowerHandleWithDataAccessAfterAnotherHandleLeftAMetacopyShell_ReadsTheLowerData) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"a.bin", FILE_READ_DATA,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The lower file must open for its data");
+        AssertStatus(STATUS_SUCCESS, SetTimesThroughHandle(mount, L"a.bin", FILE_READ_ATTRIBUTES),
+            L"The set of the last-write time through a second handle must succeed");
+
+        const NTSTATUS setStatus = mount.SetInfo(ctx.get(), LastWriteTimeChange(), nullptr);
+        char buffer[kReadThroughMountBytes] = {};
+        ULONG read = 0;
+        const NTSTATUS readStatus = mount.Read(ctx.get(), buffer, 0, sizeof(buffer), &read);
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, setStatus,
+            L"The set of the last-write time through the first handle must succeed");
+        AssertStatus(STATUS_SUCCESS, readStatus, L"A read through the first handle must succeed");
+        Assert::AreEqual(LowerFileDataStart(), std::string(buffer, read),
+            L"A read through the first handle must return the lower file's data");
     }
 
     TEST_METHOD(CaseOnlyRename_LowerFile_LeavesAMetacopyShellListedInTheNewCase) {

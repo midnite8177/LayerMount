@@ -19,6 +19,10 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
 using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::AddDenyAce;
+using LayerMountTestShared::AceSpec;
+using LayerMountTestShared::DaclWithOneMoreAce;
+using LayerMountTestShared::LocalAcl;
+using LayerMountTestShared::WellKnownSid;
 using LayerMountTestShared::EveryoneSid;
 using LayerMountTestShared::ForEachAllowOrDenyAce;
 
@@ -71,40 +75,16 @@ std::vector<BYTE> AceFlagsForSid(const std::wstring& path, PSID target) {
     return flags;
 }
 
-struct WellKnownSid {
-    explicit WellKnownSid(WELL_KNOWN_SID_TYPE type) {
-        DWORD size = sizeof(buffer);
-        Assert::IsTrue(::CreateWellKnownSid(type, nullptr, buffer, &size) != FALSE,
-            L"The test must build the well-known SID");
-    }
-    PSID Get() const { return const_cast<BYTE*>(buffer); }
-    BYTE buffer[SECURITY_MAX_SID_SIZE];
-};
-
 void GrantInheritableReadAttributes(const std::wstring& path, PSID sid) {
-    PACL current = nullptr;
-    PSECURITY_DESCRIPTOR sd = nullptr;
+    const LocalAcl merged = DaclWithOneMoreAce(
+        path, AceSpec{GRANT_ACCESS, FILE_READ_ATTRIBUTES,
+                      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, sid});
     Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        ::GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-                                nullptr, nullptr, &current, nullptr, &sd),
-        L"The test must read the directory's DACL");
-    EXPLICIT_ACCESSW ea{};
-    ea.grfAccessPermissions = FILE_READ_ATTRIBUTES;
-    ea.grfAccessMode = GRANT_ACCESS;
-    ea.grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
-    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(sid);
-    PACL merged = nullptr;
-    const DWORD mergeStatus = ::SetEntriesInAclW(1, &ea, current, &merged);
-    ::LocalFree(sd);
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS, mergeStatus, L"The grant must merge into the DACL");
-    const DWORD setStatus = ::SetNamedSecurityInfoW(
-        const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-        nullptr, nullptr, merged, nullptr);
-    ::LocalFree(merged);
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS, setStatus, L"The directory's DACL must take the grant");
+        ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, merged.get(), nullptr),
+        L"The directory's DACL must take the grant");
 }
 
 // upper\p holds an inherited ACE for parentSid, and the work directory an

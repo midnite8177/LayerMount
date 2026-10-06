@@ -24,6 +24,56 @@ struct EveryoneSid {
     ~EveryoneSid() { if (sid) ::FreeSid(sid); }
 };
 
+struct WellKnownSid {
+    explicit WellKnownSid(WELL_KNOWN_SID_TYPE type) {
+        DWORD size = sizeof(buffer);
+        Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
+            ::CreateWellKnownSid(type, nullptr, buffer, &size) != FALSE,
+            L"The test must build the well-known SID");
+    }
+    PSID Get() const { return const_cast<BYTE*>(buffer); }
+    BYTE buffer[SECURITY_MAX_SID_SIZE];
+};
+
+// One ACE for DaclWithOneMoreAce. The caller keeps sid alive for the call.
+struct AceSpec {
+    ACCESS_MODE mode;
+    DWORD accessMask;
+    DWORD inheritance;
+    PSID sid;
+};
+
+using LocalAcl = std::unique_ptr<ACL, decltype(&::LocalFree)>;
+
+// Returns the DACL of the entry at path with ace merged in. Asserts when the
+// read or the merge fails.
+inline LocalAcl DaclWithOneMoreAce(const std::wstring& path, const AceSpec& ace) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+
+    PACL current = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+        ::GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, &current, nullptr, &sd),
+        (L"The test must read the DACL of " + path).c_str());
+    const std::unique_ptr<void, decltype(&::LocalFree)> sdOwner(sd, &::LocalFree);
+
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = ace.accessMask;
+    ea.grfAccessMode        = ace.mode;
+    ea.grfInheritance       = ace.inheritance;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName    = reinterpret_cast<LPWSTR>(ace.sid);
+
+    PACL merged = nullptr;
+    const DWORD mergeStatus = ::SetEntriesInAclW(1, &ea, current, &merged);
+    LocalAcl owner(merged, &::LocalFree);
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, mergeStatus,
+        (L"The ACE must merge into the DACL of " + path).c_str());
+    return owner;
+}
+
 // Merges a deny ACE for Everyone, carrying accessMask and the given
 // inheritance flags, into the directory's existing DACL. The DACL stays
 // unprotected, so an ACE with inheritance flags propagates to existing
@@ -36,34 +86,13 @@ inline void AddDenyAce(const std::wstring& path,
     EveryoneSid everyone;
     Assert::IsNotNull(everyone.sid, L"the Everyone SID allocates");
 
-    PACL currentDacl = nullptr;
-    PSECURITY_DESCRIPTOR sd = nullptr;
+    const LocalAcl newDacl =
+        DaclWithOneMoreAce(path, AceSpec{DENY_ACCESS, accessMask, inheritance, everyone.sid});
     Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        ::GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT,
-                                DACL_SECURITY_INFORMATION,
-                                nullptr, nullptr, &currentDacl, nullptr, &sd),
-        L"GetNamedSecurityInfoW reads the directory's DACL");
-
-    EXPLICIT_ACCESSW ea{};
-    ea.grfAccessPermissions = accessMask;
-    ea.grfAccessMode        = DENY_ACCESS;
-    ea.grfInheritance       = inheritance;
-    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
-    ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea.Trustee.ptstrName    = reinterpret_cast<LPWSTR>(everyone.sid);
-
-    PACL newDacl = nullptr;
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        ::SetEntriesInAclW(1, &ea, currentDacl, &newDacl),
-        L"the deny ACE merges into the existing DACL");
-    ::LocalFree(sd);
-
-    DWORD setResult = ::SetNamedSecurityInfoW(
-        const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-        nullptr, nullptr, newDacl, nullptr);
-    ::LocalFree(newDacl);
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS, setResult,
+        ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, newDacl.get(), nullptr),
         L"the directory's DACL takes the deny ACE");
 }
 

@@ -660,13 +660,15 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
+    // With SE_BACKUP_NAME, this open reads an origin whose DACL denies read
+    // to the engine's account.
     ScopedHandle srcHandle(CreateFileW(
         metadata.originLayer.c_str(),
         GENERIC_READ,
         FILE_SHARE_READ,
         nullptr,
         OPEN_EXISTING,
-        FILE_FLAG_SEQUENTIAL_SCAN,
+        FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr));
 
     if (!srcHandle.IsValid()) {
@@ -712,7 +714,8 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
 
 NTSTATUS CopyUp::FillMetacopyShell(ScopedHandle& srcHandle,
                                    const std::wstring& upperPath) {
-    // Open destination (upper layer file) for writing. Share modes must
+    // With SE_RESTORE_NAME, this backup-semantics open writes the shell
+    // even when a DACL that a caller set on it denies write. Share modes must
     // include SHARE_READ | SHARE_WRITE | SHARE_DELETE so a caller that
     // already holds a writable handle on the file does not fail this open
     // with a sharing violation.
@@ -722,19 +725,17 @@ NTSTATUS CopyUp::FillMetacopyShell(ScopedHandle& srcHandle,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
         OPEN_EXISTING,
-        0,
+        FILE_FLAG_BACKUP_SEMANTICS,
         nullptr));
 
     if (!dstHandle.IsValid()) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
-    // Seek to beginning of both files
     LARGE_INTEGER zero = {};
     SetFilePointerEx(srcHandle.Get(), zero, nullptr, FILE_BEGIN);
     SetFilePointerEx(dstHandle.Get(), zero, nullptr, FILE_BEGIN);
 
-    // Copy all data
     NTSTATUS status = CopyFileDataKeepingHoles(srcHandle.Get(), dstHandle.Get());
     if (!NT_SUCCESS(status)) {
         return status;

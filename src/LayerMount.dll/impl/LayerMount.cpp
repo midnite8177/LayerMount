@@ -36,6 +36,8 @@ namespace LayerMount {
 namespace {
 NTSTATUS ReopenContextHandle(FileContext* ctx);
 
+constexpr LONGLONG kShellOnlyAboveBytes = 1LL * 1024 * 1024;
+
 // Opens a short-lived handle to a physical path. Returns an invalid
 // ScopedHandle on failure and leaves GetLastError set. The caller passes
 // the directory status, because a path-based query fails for a
@@ -533,6 +535,11 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
         if (::CompareStringOrdinal(ctx->actualPath.c_str(), static_cast<int>(ctx->actualPath.size()),
                                    upperFullPath.c_str(), static_cast<int>(upperFullPath.size()),
                                    TRUE) != CSTR_EQUAL) {
+            ReadMetacopyFlag(normalized, ctx);
+            NTSTATUS fillStatus = FillShellForDataAccess(normalized, ctx);
+            if (!NT_SUCCESS(fillStatus)) {
+                return fillStatus;
+            }
             ctx->actualPath = upperFullPath;
             ctx->writable = true;
             NTSTATUS reopenStatus = ReopenContextHandle(ctx);
@@ -543,13 +550,11 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath,
         return STATUS_SUCCESS;
     }
 
-    NTSTATUS status;
-    if (ctx->isDirectory) {
-        status = copyUp_->CopyUpDirectory(normalized);
-    } else {
-        status = copyUp_->CopyUpFile(normalized);
+    NTSTATUS status = CopyUpForHandle(normalized, ctx, kShellAtAnySize);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
-
+    status = FillShellForDataAccess(normalized, ctx);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1211,7 +1216,7 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     ctx->createOptions = createOptions;
 
     if (resolved.source == LayerSource::Lower && HasWriteAccess(resolvedAccess)) {
-        NTSTATUS status = CopyUpForWriteOpen(hostNorm, ctx.get());
+        NTSTATUS status = CopyUpForHandle(hostNorm, ctx.get(), kShellOnlyAboveBytes);
         if (!NT_SUCCESS(status)) {
             return status;
         }
@@ -1222,17 +1227,13 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         ctx->writable = (resolved.source == LayerSource::Upper);
     }
 
-    if (resolved.source == LayerSource::Upper && streamSuffix.empty()) {
-        LayerMountMetadata metadata =
-            MetadataStore::ReadLayerMountMetadata(ctx->actualPath, &config_);
-        ctx->isMetacopyOnly = metadata.metacopy;
+    if (resolved.source == LayerSource::Upper) {
+        ReadMetacopyFlag(hostNorm, ctx.get());
     }
 
-    if (ctx->isMetacopyOnly && !ctx->isDirectory && HasFileDataAccess(resolvedAccess)) {
-        NTSTATUS fillStatus = FillShell(hostNorm, ctx.get());
-        if (!NT_SUCCESS(fillStatus)) {
-            return fillStatus;
-        }
+    NTSTATUS fillStatus = FillShellForDataAccess(hostNorm, ctx.get());
+    if (!NT_SUCCESS(fillStatus)) {
+        return fillStatus;
     }
 
     DWORD flags = ctx->isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0;
@@ -1296,7 +1297,9 @@ NTSTATUS LayerMount::OpenRoot(UINT32 grantedAccess,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm, FileContext* ctx) {
+NTSTATUS LayerMount::CopyUpForHandle(const std::wstring& hostNorm,
+                                     FileContext* ctx,
+                                     std::optional<LONGLONG> shellOnlyAboveBytes) {
     if (ctx->isDirectory) {
         return copyUp_->CopyUpDirectory(hostNorm);
     }
@@ -1304,8 +1307,7 @@ NTSTATUS LayerMount::CopyUpForWriteOpen(const std::wstring& hostNorm, FileContex
         return copyUp_->CopyUpFile(hostNorm);
     }
 
-    constexpr LONGLONG kShellOnlyAboveBytes = 1LL * 1024 * 1024;
-    const FileCopyUpResult copied = copyUp_->CopyUpFileOrShell(hostNorm, kShellOnlyAboveBytes);
+    const FileCopyUpResult copied = copyUp_->CopyUpFileOrShell(hostNorm, shellOnlyAboveBytes);
     if (copied.stagedShell) {
         ctx->isMetacopyOnly = true;
     }
@@ -1617,6 +1619,21 @@ NTSTATUS LayerMount::FillShell(const std::wstring& hostNorm, FileContext* ctx) {
     return STATUS_SUCCESS;
 }
 
+void LayerMount::ReadMetacopyFlag(const std::wstring& hostNorm, FileContext* ctx) {
+    if (ctx->streamSuffix.empty()) {
+        ctx->isMetacopyOnly =
+            MetadataStore::ReadLayerMountMetadata(pathResolver_->GetUpperPath(hostNorm),
+                                                  &config_).metacopy;
+    }
+}
+
+NTSTATUS LayerMount::FillShellForDataAccess(const std::wstring& hostNorm, FileContext* ctx) {
+    if (ctx->isMetacopyOnly && !ctx->isDirectory && HasFileDataAccess(ctx->grantedAccess)) {
+        return FillShell(hostNorm, ctx);
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS LayerMount::EnsureMetacopyMaterialized(FileContext* ctx) {
     if (!ctx->isMetacopyOnly) {
         return STATUS_SUCCESS;
@@ -1825,16 +1842,19 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
     NTSTATUS status = EnsureInUpperLayer(ctx->relativePath, ctx);
     if (!NT_SUCCESS(status)) return status;
 
+    // The fill comes first, because a fill after the truncate brings back the origin's data.
+    NTSTATUS metacopyStatus = EnsureMetacopyMaterialized(ctx);
+    if (!NT_SUCCESS(metacopyStatus)) return metacopyStatus;
+
     const bool isStreamHandle = !ctx->streamSuffix.empty();
 
     if (!isStreamHandle) {
-        // Skipped for stream handles: `ctx->actualPath` carries the stream
-        // suffix, so FindFirstStreamW would enumerate the *host* file's
-        // streams and DeleteUserAlternateDataStreams would wipe every sibling stream
-        // alongside the one the caller meant to truncate. NTFS overwrite
-        // semantics target the open stream only -- the kernel-level
-        // SetFileInformationByHandle below truncates the stream's data
-        // without touching siblings.
+        // A stream handle skips this step. Its actualPath carries the stream
+        // suffix, so FindFirstStreamW lists the streams of the host file, and
+        // DeleteUserAlternateDataStreams removes every sibling stream with
+        // the one that the caller truncates. An NTFS overwrite changes only
+        // the open stream. SetFileInformationByHandle below truncates the
+        // data of that stream and leaves the siblings.
         status = DeleteUserAlternateDataStreams(ctx->actualPath);
         if (!NT_SUCCESS(status)) return status;
     }
@@ -2567,7 +2587,7 @@ NTSTATUS LayerMount::SetSecurity(const std::wstring& relativePath,
         if ((resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             status = copyUp_->CopyUpDirectory(normalized);
         } else {
-            status = copyUp_->CopyUpFile(normalized);
+            status = copyUp_->CopyUpFileOrShell(normalized, kShellAtAnySize).status;
         }
         if (!NT_SUCCESS(status)) return status;
     }
