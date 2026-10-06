@@ -97,6 +97,31 @@ bool ClearReadOnly(const std::wstring& path, DWORD attributes) {
     return false;
 }
 
+// The status of a move into the directory reparse point at path. The open
+// follows the link. A dangling link and a link to a file give
+// STATUS_OBJECT_PATH_NOT_FOUND, as overlayfs gives ENOENT and ENOTDIR. Any
+// other failed open gives the status of that failure.
+NTSTATUS MoveIntoReparsePointStatus(const std::wstring& path) {
+    const ScopedHandle target(::CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!target.IsValid()) {
+        const DWORD error = ::GetLastError();
+        // The open of a directory link to a file fails with ERROR_DIRECTORY.
+        const bool leadsToNoDirectory = error == ERROR_FILE_NOT_FOUND ||
+                                        error == ERROR_PATH_NOT_FOUND ||
+                                        error == ERROR_DIRECTORY;
+        return leadsToNoDirectory ? STATUS_OBJECT_PATH_NOT_FOUND : NtStatusFromWin32(error);
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!::GetFileInformationByHandle(target.Get(), &info)) {
+        return NtStatusFromWin32(::GetLastError());
+    }
+    return (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ? STATUS_SUCCESS
+                                                                    : STATUS_OBJECT_PATH_NOT_FOUND;
+}
+
 // Hides the entry at path, a link itself and not its target. Returns the
 // attributes it had before, or none when the read or the write fails.
 std::optional<DWORD> HideEntry(const std::wstring& path) {
@@ -901,8 +926,7 @@ NTSTATUS CopyUp::CheckDestinationReplaceable(const std::wstring& newNorm,
     if (destinationKind != EntryKind::File) {
         return STATUS_SUCCESS;
     }
-    const DWORD attributes =
-        ::GetFileAttributesW(pathResolver_.GetStoredUpperPath(newNorm).c_str());
+    const DWORD attributes = pathResolver_.UpperAttributes(newNorm);
     if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
         return STATUS_ACCESS_DENIED;
     }
@@ -990,8 +1014,14 @@ NTSTATUS CopyUp::EnsureUpperParent(const std::wstring& normalizedPath) {
         return STATUS_SUCCESS;
     }
     const std::wstring parent = normalizedPath.substr(0, separator);
-    if (pathResolver_.ExistsInUpper(parent)) {
-        return STATUS_SUCCESS;
+    const DWORD upperAttributes = pathResolver_.UpperAttributes(parent);
+    if (upperAttributes != INVALID_FILE_ATTRIBUTES) {
+        if ((upperAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            return STATUS_OBJECT_PATH_NOT_FOUND;
+        }
+        return (upperAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+            ? MoveIntoReparsePointStatus(pathResolver_.GetUpperPath(parent))
+            : STATUS_SUCCESS;
     }
 
     const ResolvedPath shown = pathResolver_.ResolvePath(parent);

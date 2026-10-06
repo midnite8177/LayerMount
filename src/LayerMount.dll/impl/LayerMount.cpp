@@ -1932,9 +1932,10 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
     if (destResolved.Found() && !replaceIfExists) {
         return STATUS_OBJECT_NAME_COLLISION;
     }
-    if (kinds->source != EntryKind::File &&
-        IsInsideDirectory(paths.newNorm, paths.oldNorm)) {
-        return STATUS_INVALID_PARAMETER;
+    const bool sourceIsDirectory = kinds->source == EntryKind::Directory;
+    // Overlayfs gives EINVAL for a directory and ENOTDIR for a non-directory.
+    if (IsInsideDirectory(paths.newNorm, paths.oldNorm)) {
+        return sourceIsDirectory ? STATUS_INVALID_PARAMETER : STATUS_OBJECT_PATH_NOT_FOUND;
     }
     if (!destResolved.Found()) {
         return STATUS_SUCCESS;
@@ -1949,7 +1950,6 @@ NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
         return kindStatus;
     }
     kinds->destination = destinationKind;
-    const bool sourceIsDirectory = kinds->source == EntryKind::Directory;
     const bool destinationIsDirectory = destinationKind == EntryKind::Directory;
     if (sourceIsDirectory != destinationIsDirectory) {
         return sourceIsDirectory ? STATUS_NOT_A_DIRECTORY : STATUS_FILE_IS_A_DIRECTORY;

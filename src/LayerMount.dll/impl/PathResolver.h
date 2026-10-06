@@ -46,6 +46,10 @@ public:
 
     bool ExistsInUpper(const std::wstring& relativePath) const;
 
+    // The attributes of the upper entry at relativePath, a link itself and
+    // not its target. INVALID_FILE_ATTRIBUTES when the upper holds none.
+    DWORD UpperAttributes(const std::wstring& relativePath) const;
+
     // The upper path in lowercase, for a lookup of an entry the upper may
     // hold. A new upper entry takes its name from GetUpperPathForNewEntry or
     // GetUpperPathForCopyUp instead.

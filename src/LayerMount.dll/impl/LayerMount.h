@@ -103,8 +103,7 @@ struct ResolvedPath {
 // tag is a name surrogate, such as a junction or a directory symbolic link.
 // Any other directory reparse point is a Directory. A rename or a delete does
 // not follow a Link and treats it as a non-directory, as overlayfs treats a
-// symlink. The one exception is that a Link rename source keeps the
-// directory check that refuses a destination inside its own tree.
+// symlink.
 enum class EntryKind {
     File,
     Directory,
@@ -613,12 +612,15 @@ public:
     // it. A rename to the identical name succeeds and changes nothing.
     // replaceIfExists FALSE fails with STATUS_OBJECT_NAME_COLLISION when
     // the destination already exists. Otherwise the rename of a directory
-    // or a link to a path inside its own tree fails with
-    // STATUS_INVALID_PARAMETER, even when the destination is a non-empty
-    // directory. A directory rename with replaceIfExists TRUE onto a
-    // directory fails with STATUS_DIRECTORY_NOT_EMPTY when the merged view
-    // shows a child of the destination. A link, as EntryKind defines
-    // it, is a non-directory on either side of a rename. With
+    // to a path inside its own tree fails with STATUS_INVALID_PARAMETER,
+    // even when the destination is a non-empty directory, and the rename
+    // of a file or a link to a path inside itself fails with
+    // STATUS_OBJECT_PATH_NOT_FOUND. A rename to a destination whose parent
+    // is a file, or a link that does not lead to a directory, fails with
+    // STATUS_OBJECT_PATH_NOT_FOUND. A directory rename with replaceIfExists
+    // TRUE onto a directory fails with STATUS_DIRECTORY_NOT_EMPTY when the
+    // merged view shows a child of the destination. A link, as EntryKind
+    // defines it, is a non-directory on either side of a rename. With
     // replaceIfExists TRUE, a file or a link replaces a link, and a link
     // replaces a file. The link moves as a link, and its target stays
     // unchanged. Before the move, Rename moves an upper destination outside

@@ -361,17 +361,37 @@ void AssertRootShowsOnlyFileNamed(const ::LayerMount::LayerMount& mount, const s
         (L"The root must list " + displayName + L" as a file").c_str());
 }
 
+enum class ListedAs {
+    File,
+    Directory,
+};
+
+struct ListedEntry {
+    std::wstring displayName;
+    ListedAs kind;
+};
+
+void AssertRootShowsTwoEntries(const ::LayerMount::LayerMount& mount,
+                               const ListedEntry& first,
+                               const ListedEntry& second) {
+    const MergedDirectory listing = mount.MergeDirectoryEntries(L"");
+    AssertStatus(STATUS_SUCCESS, listing.status, L"The root listing must succeed");
+    Assert::AreEqual(size_t{2}, listing.entries.size(),
+        (L"The root must hold only " + first.displayName + L" and " + second.displayName).c_str());
+    for (const ListedEntry& entry : {first, second}) {
+        AssertEntryShownAs(mount, L"", ListingKey(entry.displayName), entry.displayName);
+        const bool isDirectory = entry.kind == ListedAs::Directory;
+        Assert::AreEqual(isDirectory, RootListsAsDirectory(listing, entry.displayName),
+            (L"The root must list " + entry.displayName +
+             (isDirectory ? L" as a directory" : L" as a file")).c_str());
+    }
+}
+
 void AssertRootShowsFileAndDirectory(const ::LayerMount::LayerMount& mount,
                                      const std::wstring& fileName,
                                      const std::wstring& directoryName) {
-    AssertEntryShownAs(mount, L"", ListingKey(fileName), fileName);
-    AssertEntryShownAs(mount, L"", ListingKey(directoryName), directoryName);
-    const MergedDirectory listing = mount.MergeDirectoryEntries(L"");
-    Assert::AreEqual(size_t{2}, listing.entries.size(), L"The root must hold two entries");
-    Assert::IsFalse(RootListsAsDirectory(listing, fileName),
-        (L"The root must list " + fileName + L" as a file").c_str());
-    Assert::IsTrue(RootListsAsDirectory(listing, directoryName),
-        (L"The root must list " + directoryName + L" as a directory").c_str());
+    AssertRootShowsTwoEntries(mount, ListedEntry{fileName, ListedAs::File},
+                              ListedEntry{directoryName, ListedAs::Directory});
 }
 
 enum class LowerChildHiding {
@@ -2415,16 +2435,130 @@ public:
 
     TEST_METHOD(RenameFile_ToAPathUnderItself_FailsWithPathNotFound) {
         for (const DirectoryLayer sourceLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
-            TempLayerEnvironment env(1);
-            env.WriteFile(LayerRoot(env, sourceLayer), L"a", "x");
-            ::LayerMount::LayerMount mount(env.MakeConfig());
-            const LayerSnapshot upperBefore(env.Upper());
+            for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(LayerRoot(env, sourceLayer), L"a", "x");
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot upperBefore(env.Upper());
 
-            AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
-                mount.Rename(L"a", L"a\\b", kFailIfExists, kNoCallerPid),
-                L"A rename of a file to a path under itself must fail");
-            upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
-            AssertRootShowsOnlyFileNamed(mount, L"a");
+                AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+                    mount.Rename(L"a", L"a\\b", replace, kNoCallerPid),
+                    L"A rename of a file to a path under itself must fail");
+                upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+                AssertRootShowsOnlyFileNamed(mount, L"a");
+            }
+        }
+    }
+
+    TEST_METHOD(RenameLink_ToAPathUnderItself_FailsWithPathNotFound) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createInnerLink : kDirectoryLinkCreators) {
+                for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                    TempLayerEnvironment env(1);
+                    env.CreateDir(env.Root(), L"target");
+                    env.WriteFile(env.Root(), L"innertarget\\c.txt", "c");
+                    if (!LinkCreatedOrSkipped(CreateDirectoryJunction,
+                                              LinkLayerPath(env, linkSource) + L"\\link",
+                                              env.Root() + L"\\target") ||
+                        !LinkCreatedOrSkipped(createInnerLink, env.Root() + L"\\target\\inner",
+                                              env.Root() + L"\\innertarget")) {
+                        continue;
+                    }
+                    ::LayerMount::LayerMount mount(env.MakeConfig());
+                    const LayerSnapshot upperBefore(env.Upper());
+                    const LayerSnapshot lowerBefore(env.Lower(0));
+                    const LayerSnapshot targetBefore(env.Root() + L"\\target");
+                    const LayerSnapshot innerTargetBefore(env.Root() + L"\\innertarget");
+
+                    AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+                        mount.Rename(L"link\\inner", L"link\\inner\\b", replace, kNoCallerPid),
+                        L"A rename of a link to a path under itself must fail");
+                    upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+                    lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+                    targetBefore.AssertUnchanged(L"The failed rename must change nothing in the link target");
+                    innerTargetBefore.AssertUnchanged(
+                        L"The failed rename must change nothing in the target of the renamed link");
+                }
+            }
+        }
+    }
+
+    TEST_METHOD(Rename_ToAPathUnderAFile_FailsWithPathNotFound) {
+        struct RenameSource {
+            const wchar_t* upperEntry;
+            const wchar_t* lowerEntry;
+            ListedAs kind;
+        };
+        const RenameSource kSources[] = {
+            {nullptr, L"x", ListedAs::File},
+            {L"x", nullptr, ListedAs::File},
+            {nullptr, L"x\\c.txt", ListedAs::Directory},
+            {L"x\\c.txt", nullptr, ListedAs::Directory},
+            {L"x\\c.txt", L"x\\d.txt", ListedAs::Directory},
+        };
+        for (const RenameSource& source : kSources) {
+            for (const DirectoryLayer fileLayer : {DirectoryLayer::Lower, DirectoryLayer::Upper}) {
+                for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                    TempLayerEnvironment env(1);
+                    env.WriteFile(LayerRoot(env, fileLayer), L"a", "a");
+                    if (source.upperEntry != nullptr) {
+                        env.WriteFile(env.Upper(), source.upperEntry, "x");
+                    }
+                    if (source.lowerEntry != nullptr) {
+                        env.WriteFile(env.Lower(0), source.lowerEntry, "x");
+                    }
+                    ::LayerMount::LayerMount mount(env.MakeConfig());
+                    const LayerSnapshot upperBefore(env.Upper());
+                    const LayerSnapshot lowerBefore(env.Lower(0));
+
+                    AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+                        mount.Rename(L"x", L"a\\b", replace, kNoCallerPid),
+                        L"A rename of x to a path under the file a must fail");
+                    upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+                    lowerBefore.AssertUnchanged(L"The failed rename must write nothing in the lower");
+                    AssertRootShowsTwoEntries(mount, ListedEntry{L"a", ListedAs::File},
+                                              ListedEntry{L"x", source.kind});
+                }
+            }
+        }
+    }
+
+    TEST_METHOD(Rename_ToAPathUnderADirectoryLinkThatLeadsToNoDirectory_FailsWithPathNotFound) {
+        struct ParentLink {
+            LinkCreator createLink;
+            const wchar_t* target;
+        };
+        const ParentLink kParentLinks[] = {
+            {CreateDirectorySymlink, L"missing"},
+            {CreateDirectoryJunction, L"missing"},
+            {CreateDirectorySymlink, L"f.txt"},
+        };
+        for (const ParentLink& parentLink : kParentLinks) {
+            for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"f.txt", "f");
+                env.WriteFile(env.Root(), L"target\\x", "x");
+                if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Upper() + L"\\link",
+                                          env.Root() + L"\\target") ||
+                    !LinkCreatedOrSkipped(parentLink.createLink, env.Root() + L"\\target\\l",
+                                          env.Root() + L"\\" + parentLink.target)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const LayerSnapshot upperBefore(env.Upper());
+                const LayerSnapshot targetBefore(env.Root() + L"\\target");
+                const std::wstring message =
+                    std::wstring(L"A rename of x to a path under a link to ") + parentLink.target +
+                    L" must fail";
+
+                AssertStatus(STATUS_OBJECT_PATH_NOT_FOUND,
+                    mount.Rename(L"link\\x", L"link\\l\\b", replace, kNoCallerPid),
+                    message.c_str());
+                upperBefore.AssertUnchanged(L"The failed rename must write nothing in the upper");
+                targetBefore.AssertUnchanged(L"The failed rename must change nothing in the link target");
+                Assert::AreEqual(std::string("x"), env.ReadFile(env.Root(), L"target\\x"),
+                    L"The failed rename must keep x in the link target");
+            }
         }
     }
 

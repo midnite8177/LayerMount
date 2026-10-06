@@ -347,9 +347,11 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
 }
 
 bool PathResolver::ExistsInUpper(const std::wstring& relativePath) const {
-    std::wstring normalized = NormalizePath(relativePath);
-    std::wstring fullPath = JoinDirPath(config_.upperPath, normalized);
-    return GetFileAttributesW(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    return UpperAttributes(relativePath) != INVALID_FILE_ATTRIBUTES;
+}
+
+DWORD PathResolver::UpperAttributes(const std::wstring& relativePath) const {
+    return GetFileAttributesW(GetUpperPath(relativePath).c_str());
 }
 
 std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const {

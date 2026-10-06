@@ -905,7 +905,7 @@ crash left there.
 
 Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.
-The engine handles ten cases. The last three also apply to a file source:
+The engine handles eleven cases. The last six also apply to a file source:
 
 - **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
   if present. When a lower layer has an entry at the destination path,
@@ -984,15 +984,23 @@ The engine handles ten cases. The last three also apply to a file source:
 - **rename to a destination that already exists in the merged view
   (with replace=false)**: the engine rejects the rename with
   `STATUS_OBJECT_NAME_COLLISION` before any side effects.
-- **rename to a path inside the source directory's own tree**
-  (`a` to `a\b` or `a\new\b`): the engine rejects the rename with
-  `STATUS_INVALID_PARAMETER` before any side effects, as NTFS does. The
-  collision check above runs first, so replace=false onto an existing
-  `a\b` still returns `STATUS_OBJECT_NAME_COLLISION`. Replace=true onto
-  a non-empty `a\b` returns `STATUS_INVALID_PARAMETER`, not
-  `STATUS_DIRECTORY_NOT_EMPTY`. A junction or directory symlink source
-  gets the same check. A file source gets no such check. A file
-  `a` renamed to `a\b` fails with `STATUS_OBJECT_PATH_NOT_FOUND`.
+- **rename to a path inside the source's own tree** (`a` to `a\b` or
+  `a\new\b`): the engine rejects the rename before any side effects. A
+  directory source fails with `STATUS_INVALID_PARAMETER`, as overlayfs
+  returns `EINVAL`. A file source and a junction or directory symlink
+  source fail with `STATUS_OBJECT_PATH_NOT_FOUND`, as overlayfs returns
+  `ENOTDIR` for a non-directory. The collision check above runs first,
+  so replace=false onto an existing `a\b` still returns
+  `STATUS_OBJECT_NAME_COLLISION`. Replace=true onto a non-empty `a\b`
+  returns `STATUS_INVALID_PARAMETER`, not `STATUS_DIRECTORY_NOT_EMPTY`.
+- **rename to a path under a file** (`x` to `a\b`, where `a` is a file
+  in a lower or in the upper): the engine rejects the rename with
+  `STATUS_OBJECT_PATH_NOT_FOUND` before any side effects, as overlayfs
+  returns `ENOTDIR`. This applies to every source kind. A destination
+  parent in the upper that is a junction or directory symlink must lead
+  to a directory. A dangling link and a link to a file also fail with
+  `STATUS_OBJECT_PATH_NOT_FOUND`, as overlayfs returns `ENOENT` and
+  `ENOTDIR`.
 - **replace=true onto an ancestor of the source** (`a\f` onto `a`):
   the engine rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY`
   before any side effects, as overlayfs returns `ENOTEMPTY`. This
