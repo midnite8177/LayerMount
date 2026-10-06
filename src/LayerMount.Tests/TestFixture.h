@@ -1040,6 +1040,25 @@ private:
     CHAR previousThreadMode_ = 0;
 };
 
+// Reads range of the file at path. The read hydrates that range of a
+// placeholder file when a serving provider is connected, and fails when the
+// provider refuses or no provider is connected. Asserts the open and the
+// seek and ignores the result of the read.
+inline void TryHydrate(const std::wstring& path, ByteRange range) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    const ::LayerMount::ScopedHandle handle(::CreateFileW(
+        path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, 0, nullptr));
+    Assert::IsTrue(handle.IsValid(), (L"The test must open " + path + L" to read it").c_str());
+    LARGE_INTEGER position{};
+    position.QuadPart = range.offset;
+    Assert::IsTrue(::SetFilePointerEx(handle.Get(), position, nullptr, FILE_BEGIN) != FALSE,
+        (L"The test must seek to the range it reads in " + path).c_str());
+    std::string buffer(static_cast<size_t>(range.length), '\0');
+    DWORD read = 0;
+    ::ReadFile(handle.Get(), buffer.data(), static_cast<DWORD>(range.length), &read, nullptr);
+}
+
 // The layer of a CloudPlaceholderLayers that is the cloud sync root.
 enum class SyncRootLayer { Lower, Upper };
 
@@ -1091,6 +1110,21 @@ struct CloudPlaceholderLayers {
                syncRoot.ProviderConnectedOrSkipped(fetch) &&
                syncRoot.DehydratedOrSkipped(syncRootPath + L"\\" + file, dropped);
     }
+
+    // Does what DehydratedPlaceholderFileOrSkipped does with a provider that
+    // refuses each fetch, then reads the dropped range and disconnects the
+    // provider. With a serving provider, that read hydrates the range, so a
+    // test that needs the range dehydrated fails. Logs a skip and returns
+    // false when the platform refuses.
+    bool DehydratedPlaceholderFileWithoutProviderOrSkipped(const std::wstring& file, size_t size,
+                                                           ByteRange dropped) {
+        if (!DehydratedPlaceholderFileOrSkipped(file, size, dropped, CloudFetch::Refuse)) {
+            return false;
+        }
+        TryHydrate(syncRootPath + L"\\" + file, dropped);
+        syncRoot.DisconnectProvider();
+        return true;
+    }
 };
 
 // Returns up to length bytes at offset in the file at path, fewer when the
@@ -1109,25 +1143,6 @@ inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD le
     ::CloseHandle(h);
     buf.resize(r);
     return buf;
-}
-
-// Reads range of the file at path. The read hydrates that range of a
-// placeholder file when a serving provider is connected, and fails when the
-// provider refuses or no provider is connected. Asserts the open and the
-// seek and ignores the result of the read.
-inline void TryHydrate(const std::wstring& path, ByteRange range) {
-    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
-    const ::LayerMount::ScopedHandle handle(::CreateFileW(
-        path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, 0, nullptr));
-    Assert::IsTrue(handle.IsValid(), (L"The test must open " + path + L" to read it").c_str());
-    LARGE_INTEGER position{};
-    position.QuadPart = range.offset;
-    Assert::IsTrue(::SetFilePointerEx(handle.Get(), position, nullptr, FILE_BEGIN) != FALSE,
-        (L"The test must seek to the range it reads in " + path).c_str());
-    std::string buffer(static_cast<size_t>(range.length), '\0');
-    DWORD read = 0;
-    ::ReadFile(handle.Get(), buffer.data(), static_cast<DWORD>(range.length), &read, nullptr);
 }
 
 inline constexpr UINT32 kNoCreateOptions = 0u;

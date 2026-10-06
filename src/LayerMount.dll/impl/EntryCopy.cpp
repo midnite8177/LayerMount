@@ -239,10 +239,13 @@ NTSTATUS ReadStreamList(HANDLE handle, std::vector<BYTE>& list) {
 
 // Reads the FILE_STREAM_INFO list of the file or directory at path. The
 // open uses FILE_FLAG_BACKUP_SEMANTICS, so it reads the stream list of a
-// file whose DACL denies this process.
+// file whose DACL denies this process. The open asks for
+// FILE_READ_ATTRIBUTES only, because an open with data access fails with
+// STATUS_CLOUD_FILE_ACCESS_DENIED for a cloud placeholder file with a
+// dehydrated range when no sync provider is connected.
 NTSTATUS ReadStreamListOfPath(const std::wstring& path, std::vector<BYTE>& list) {
     ScopedHandle handle(::CreateFileW(
-        path.c_str(), FILE_GENERIC_READ,
+        path.c_str(), FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
     if (!handle.IsValid()) {

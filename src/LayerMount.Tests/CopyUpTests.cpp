@@ -376,13 +376,10 @@ public:
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
         constexpr ByteRange kDropped{64 * 1024, 128 * 1024};
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, kDropped, CloudFetch::Refuse)) {
+        if (!layers.DehydratedPlaceholderFileWithoutProviderOrSkipped(L"x.bin", kSize, kDropped)) {
             return;
         }
         TempLayerEnvironment& env = layers.env;
-        // With a serving provider, this read hydrates the range and the copy-up succeeds.
-        TryHydrate(env.Lower(0) + L"\\x.bin", kDropped);
-        layers.syncRoot.DisconnectProvider();
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_CLOUD_FILE_ACCESS_DENIED, rig.copyUp.CopyUpFile(L"x.bin"),
@@ -932,16 +929,13 @@ public:
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 2 * 1024 * 1024;
         constexpr ByteRange kDropped{512 * 1024, 1024 * 1024};
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, kDropped, CloudFetch::Refuse)) {
+        if (!layers.DehydratedPlaceholderFileWithoutProviderOrSkipped(L"big.bin", kSize, kDropped)) {
             return;
         }
         TempLayerEnvironment& env = layers.env;
-        // With a serving provider, this read hydrates the range and the fill succeeds.
-        TryHydrate(env.Lower(0) + L"\\big.bin", kDropped);
         CopyUpAndRenameRig rig(env.MakeConfig());
         AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin").status,
             L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");
-        layers.syncRoot.DisconnectProvider();
 
         AssertStatus(STATUS_CLOUD_FILE_ACCESS_DENIED, rig.copyUp.CompleteLazyCopyUp(L"big.bin"),
             L"The fill must fail with the status of the lower read when no provider can serve the dehydrated range");

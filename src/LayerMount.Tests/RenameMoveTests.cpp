@@ -294,6 +294,9 @@ const std::wstring& LayerRoot(const TempLayerEnvironment& env, DirectoryLayer la
     return layer == DirectoryLayer::Upper ? env.Upper() : env.Lower(0);
 }
 
+// The size in a SetInfoRequest that leaves the size of the file unchanged.
+constexpr UINT64 kUnchangedSize = UINT64_MAX;
+
 void AssertEntryShownAs(const ::LayerMount::LayerMount& mount,
                         const std::wstring& dir,
                         const std::wstring& key,
@@ -3940,6 +3943,39 @@ public:
         AssertZoneStreamShown(mount, L"big.bin");
     }
 
+    TEST_METHOD(SetInfo_TimesOfLargePartlyDehydratedCloudPlaceholderFileWithoutProvider_ChangeOnAMetacopyShell) {
+        CloudPlaceholderLayers layers{SyncRootLayer::Lower};
+        constexpr size_t kSize = 2 * 1024 * 1024;
+        constexpr ByteRange kDropped{512 * 1024, 1024 * 1024};
+        if (!layers.DehydratedPlaceholderFileWithoutProviderOrSkipped(L"big.bin", kSize, kDropped)) {
+            return;
+        }
+        TempLayerEnvironment& env = layers.env;
+        const LayerConfig config = env.MakeConfig();
+        ::LayerMount::LayerMount mount(config);
+        std::unique_ptr<FileContext> ctx;
+        InternalFileInfo info{};
+        AssertStatus(STATUS_SUCCESS, mount.Open(L"big.bin", FILE_WRITE_ATTRIBUTES,
+                                                kNoCreateOptions, kNoCallerPid, &ctx, &info),
+            L"The open of the placeholder file for its attributes must succeed");
+        const FILETIME written = MakeFileTime(2020, 1, 10);
+        const UINT64 lastWriteTime = ComposeUInt64(written.dwHighDateTime, written.dwLowDateTime);
+        const SetInfoRequest touch{INVALID_FILE_ATTRIBUTES, 0, 0, lastWriteTime, 0,
+                                   kUnchangedSize, kUnchangedSize};
+
+        const NTSTATUS status = mount.SetInfo(ctx.get(), touch, nullptr);
+        mount.Close(ctx.get());
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The set of the last-write time of the placeholder file must succeed");
+        Assert::AreEqual(lastWriteTime, LastWriteTimeThroughMount(mount, L"big.bin"),
+            L"The file must show the last-write time that the set gave it");
+        AssertMetacopyShell(env.Upper() + L"\\big.bin", config);
+        Assert::IsTrue(
+            HasAttribute(env.Lower(0) + L"\\big.bin", FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS),
+            L"The lower placeholder file must stay dehydrated");
+    }
+
     TEST_METHOD(CaseOnlyRename_LowerFile_LeavesAMetacopyShellListedInTheNewCase) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"a.bin", LowerFileData());
@@ -5056,7 +5092,6 @@ public:
         Assert::IsTrue(NT_SUCCESS(mount.Open(L"link\\foo", FILE_READ_ATTRIBUTES, kNoCreateOptions,
                                              kNoCallerPid, &ctx, &info)),
             L"Preconditions: the file under the lower junction must open");
-        constexpr UINT64 kUnchangedSize = UINT64_MAX;
         const SetInfoRequest hide{FILE_ATTRIBUTE_HIDDEN, 0, 0, 0, 0, kUnchangedSize, kUnchangedSize};
 
         const NTSTATUS status = mount.SetInfo(ctx.get(), hide, nullptr);
