@@ -5,6 +5,25 @@
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
+namespace LayerMount {
+
+class ScopedHandleInfoQuery {
+public:
+    ScopedHandleInfoQuery(LayerMount& mount, LayerMount::HandleInfoQuery query)
+        : mount_(mount), saved_(mount.handleInfoQuery_) {
+        mount_.handleInfoQuery_ = query;
+    }
+    ~ScopedHandleInfoQuery() { mount_.handleInfoQuery_ = saved_; }
+    ScopedHandleInfoQuery(const ScopedHandleInfoQuery&) = delete;
+    ScopedHandleInfoQuery& operator=(const ScopedHandleInfoQuery&) = delete;
+
+private:
+    LayerMount& mount_;
+    LayerMount::HandleInfoQuery saved_;
+};
+
+}
+
 namespace LayerMountTests {
 
 TEST_CLASS(CreateOverWhiteoutTests) {
@@ -299,7 +318,80 @@ public:
             L"Once the marker is free, a stream create at the name must succeed");
     }
 
+    TEST_METHOD(CreateFile_AtWhitedOutNameWhenTheHandleQueryFails_LeavesTheNameDeleted) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"b.txt", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"b.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_ACCESS_DENIED,
+            CreateWhileHandleQueryFails(mount, L"b.txt", kNoCreateOptions),
+            L"The create must fail with the error of the handle query");
+        AssertNameStaysWhitedOutInEmptyRoot(env, mount, L"b.txt");
+        AssertStatus(STATUS_SUCCESS, CreateThroughMount(mount, L"b.txt", kNoCreateOptions),
+            L"Once the query works, a create at the name must succeed");
+    }
+
+    TEST_METHOD(CreateFile_AtNewNameWhenTheHandleQueryFails_LeavesNoEntry) {
+        TempLayerEnvironment env(1);
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_ACCESS_DENIED,
+            CreateWhileHandleQueryFails(mount, L"new.txt", kNoCreateOptions),
+            L"The create must fail with the error of the handle query");
+        Assert::IsFalse(env.FileExists(env.Upper(), L"new.txt"),
+            L"The failed create must leave no upper entry at the name");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"new.txt"),
+            L"The mount must not show the name after the failed create");
+        Assert::IsTrue(mount.MergeDirectoryEntries(L"").entries.empty(),
+            L"The root must stay empty after the failed create");
+    }
+
+    TEST_METHOD(CreateDirectory_OverWhitedOutLowerDirectoryWhenTheHandleQueryFails_LeavesNoOpaqueDirectory) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"d\\inner.txt", "lower");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"d"), "");
+            auto config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+
+            AssertStatus(STATUS_ACCESS_DENIED,
+                CreateWhileHandleQueryFails(mount, L"d", FILE_DIRECTORY_FILE),
+                L"The directory create must fail with the error of the handle query");
+            AssertNameStaysWhitedOutInEmptyRoot(env, mount, L"d");
+            Assert::IsFalse(::LayerMount::MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\d", &config),
+                L"The failed create must leave no opaque metadata marker for d");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"d\\inner.txt"),
+                L"The mount must still hide the deleted lower directory's child");
+        });
+    }
+
+    TEST_METHOD(CreateStream_AtWhitedOutNameWhenTheHandleQueryFails_LeavesNoHostFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"b.txt", "lower");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"b.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_ACCESS_DENIED,
+            CreateWhileHandleQueryFails(mount, L"b.txt:s", kNoCreateOptions),
+            L"The stream create must fail with the error of the handle query");
+        AssertNameStaysWhitedOutInEmptyRoot(env, mount, L"b.txt");
+    }
+
 private:
+    static BOOL WINAPI FailingHandleInfoQuery(HANDLE, LPBY_HANDLE_FILE_INFORMATION) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+
+    static NTSTATUS CreateWhileHandleQueryFails(::LayerMount::LayerMount& mount,
+                                                const std::wstring& name,
+                                                UINT32 createOptions) {
+        const ::LayerMount::ScopedHandleInfoQuery failingQuery(mount, &FailingHandleInfoQuery);
+        return CreateThroughMount(mount, name, createOptions);
+    }
+
     // Creates name through the mount while a handle without FILE_SHARE_DELETE
     // holds the upper whiteout marker of whitedOutName open, and returns the
     // create's status.

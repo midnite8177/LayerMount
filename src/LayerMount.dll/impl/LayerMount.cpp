@@ -734,7 +734,7 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
     memset(fileInfo, 0, sizeof(*fileInfo));
 
     BY_HANDLE_FILE_INFORMATION info;
-    if (!GetFileInformationByHandle(handle, &info)) {
+    if (!handleInfoQuery_(handle, &info)) {
         return NtStatusFromWin32(GetLastError());
     }
 
@@ -1382,20 +1382,13 @@ NTSTATUS LayerMount::Create(const CreateRequest& callerRequest,
     std::unique_ptr<FileContext> ctx = BuildCreate(request, &create);
 
     const NTSTATUS createStatus = IsDirectoryCreate(request)
-        ? CreateDirectoryInUpper(create, ctx.get())
-        : CreateFileInUpper(create, ctx.get());
+        ? CreateDirectoryInUpper(create, ctx.get(), outInfo)
+        : CreateFileInUpper(create, ctx.get(), outInfo);
     if (!NT_SUCCESS(createStatus)) {
         return createStatus;
     }
 
     cache_->InvalidateWithAncestors(create.path.hostNorm);
-
-    NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
-                                             ctx->entryIsReparsePoint);
-    if (!NT_SUCCESS(status)) {
-        ::CloseHandle(ctx->handle);
-        return status;
-    }
 
     stats_.activeHandles.fetch_add(1, std::memory_order_relaxed);
     *outCtx = std::move(ctx);
@@ -1457,7 +1450,8 @@ NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
 }
 
 NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
-                                            FileContext* ctx) {
+                                            FileContext* ctx,
+                                            InternalFileInfo* outInfo) {
     DirectoryRollback rollback(ctx, *whiteoutMgr_, events_);
     if (!::CreateDirectoryW(create.upperPath.c_str(), nullptr)) {
         return NtStatusFromWin32(::GetLastError());
@@ -1489,16 +1483,17 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
     if (!NT_SUCCESS(resolveStatus)) {
         return resolveStatus;
     }
-    const NTSTATUS whiteoutStatus = RemoveWhiteoutAtCreatedName(create);
-    if (!NT_SUCCESS(whiteoutStatus)) {
-        return whiteoutStatus;
+    const NTSTATUS finishStatus = FinishCreatedEntry(create, ctx, outInfo);
+    if (!NT_SUCCESS(finishStatus)) {
+        return finishStatus;
     }
     rollback.Disarm();
     return STATUS_SUCCESS;
 }
 
 NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
-                                       FileContext* ctx) {
+                                       FileContext* ctx,
+                                       InternalFileInfo* outInfo) {
     if (!create.path.streamSuffix.empty()) {
         NTSTATUS hostStatus = PrepareStreamHost(create);
         if (!NT_SUCCESS(hostStatus)) {
@@ -1534,29 +1529,44 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
     }
 
     if (create.path.streamSuffix.empty()) {
-        NTSTATUS sdStatus = WriteSecurityToNewObject(create.upperPath, create.securityDescriptor);
-        if (!NT_SUCCESS(sdStatus)) {
-            return sdStatus;
-        }
-
-        if (create.allocationSize > 0) {
-            FILE_ALLOCATION_INFO allocInfo;
-            allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(create.allocationSize);
-            if (!::SetFileInformationByHandle(ctx->handle, FileAllocationInfo,
-                                               &allocInfo, sizeof(allocInfo))) {
-                return NtStatusFromWin32(::GetLastError());
-            }
+        const NTSTATUS hostStatus = ApplyNewHostFileSettings(create, ctx->handle);
+        if (!NT_SUCCESS(hostStatus)) {
+            return hostStatus;
         }
     }
-    const NTSTATUS whiteoutStatus = RemoveWhiteoutAtCreatedName(create);
-    if (!NT_SUCCESS(whiteoutStatus)) {
-        return whiteoutStatus;
+    const NTSTATUS finishStatus = FinishCreatedEntry(create, ctx, outInfo);
+    if (!NT_SUCCESS(finishStatus)) {
+        return finishStatus;
     }
     rollback.Disarm();
     return STATUS_SUCCESS;
 }
 
-NTSTATUS LayerMount::RemoveWhiteoutAtCreatedName(const UpperCreate& create) {
+NTSTATUS LayerMount::ApplyNewHostFileSettings(const UpperCreate& create, HANDLE handle) {
+    const NTSTATUS sdStatus =
+        WriteSecurityToNewObject(create.upperPath, create.securityDescriptor);
+    if (!NT_SUCCESS(sdStatus)) {
+        return sdStatus;
+    }
+    if (create.allocationSize > 0) {
+        FILE_ALLOCATION_INFO allocInfo;
+        allocInfo.AllocationSize.QuadPart = static_cast<LONGLONG>(create.allocationSize);
+        if (!::SetFileInformationByHandle(handle, FileAllocationInfo,
+                                           &allocInfo, sizeof(allocInfo))) {
+            return NtStatusFromWin32(::GetLastError());
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS LayerMount::FinishCreatedEntry(const UpperCreate& create,
+                                        FileContext* ctx,
+                                        InternalFileInfo* outInfo) {
+    const NTSTATUS infoStatus =
+        FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath, ctx->entryIsReparsePoint);
+    if (!NT_SUCCESS(infoStatus)) {
+        return infoStatus;
+    }
     if (!create.resolution.whiteoutAtPath) {
         return STATUS_SUCCESS;
     }

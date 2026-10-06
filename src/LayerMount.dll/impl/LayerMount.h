@@ -490,9 +490,9 @@ public:
     // self-relative security descriptor that SecurityPolicy picks, and
     // pre-allocates allocationSize bytes when non-zero. Marks a new
     // directory as opaque when a whiteout at the path hides a lower
-    // directory of the same name. Removes a whiteout at the path after the
-    // new entry is complete; when that removal fails, the create removes
-    // the new entry it made and returns the removal's error. Returns
+    // directory of the same name. Fills outInfo from the new handle, then
+    // removes a whiteout at the path. When the fill or that removal fails,
+    // the create removes the new entry it made and returns the error. Returns
     // STATUS_OBJECT_NAME_COLLISION when the overlay already holds a path
     // without a stream suffix, and for a stream create when the host file
     // that the overlay holds already has that stream. A stream create on
@@ -810,29 +810,36 @@ private:
                                       const UpperCreate& create,
                                       CreateResolution* resolution) const;
 
-    // The directory half of Create. Makes the directory in the upper,
-    // marks it opaque when a lower holds a directory at the path, applies
-    // the caller's security descriptor, opens ctx->handle, and removes the
-    // whiteout at the path last. An upper directory that already exists
-    // fails the create. A failure after CreateDirectoryW made the
-    // directory closes ctx->handle and removes the directory with its
-    // opaque markers.
-    NTSTATUS CreateDirectoryInUpper(const UpperCreate& create, FileContext* ctx);
+    // The directory half of Create. An upper directory that already exists
+    // fails the create. A failure after CreateDirectoryW made the directory,
+    // up to and including FinishCreatedEntry, closes ctx->handle and removes
+    // the directory with its opaque markers.
+    NTSTATUS CreateDirectoryInUpper(const UpperCreate& create,
+                                    FileContext* ctx,
+                                    InternalFileInfo* outInfo);
 
     // The file half of Create. Creates the file, or the stream named by
-    // streamSuffix on its host file, in the upper and opens ctx->handle.
-    // The security descriptor and allocationSize apply to a host file,
-    // never to a stream. Removes the whiteout at the path last. A failure
-    // after CreateFileW made the entry closes ctx->handle and deletes the
-    // entry, and the host file too when the stream create made it.
-    NTSTATUS CreateFileInUpper(const UpperCreate& create, FileContext* ctx);
+    // streamSuffix on its host file. The security descriptor and
+    // allocationSize apply to a host file, never to a stream. A failure
+    // after CreateFileW made the entry, up to and including
+    // FinishCreatedEntry, closes ctx->handle and deletes the entry, and the
+    // host file too when the stream create made it.
+    NTSTATUS CreateFileInUpper(const UpperCreate& create,
+                               FileContext* ctx,
+                               InternalFileInfo* outInfo);
 
-    // Removes the upper whiteout at the path of create. Each half of Create
-    // calls it as its last change, so a step that fails before it leaves
-    // the whiteout to hide the lower entry. Returns STATUS_SUCCESS when the
-    // upper holds no whiteout at the path, and the removal's error when it
-    // fails.
-    NTSTATUS RemoveWhiteoutAtCreatedName(const UpperCreate& create);
+    // Writes the caller's security descriptor to a new host file and
+    // pre-allocates allocationSize bytes when non-zero.
+    NTSTATUS ApplyNewHostFileSettings(const UpperCreate& create, HANDLE handle);
+
+    // The last step of each half of Create, while its undo is still armed.
+    // Fills outInfo from ctx->handle, then removes the upper whiteout at the
+    // path. The removal comes last because nothing can undo it: a step that
+    // fails before it leaves the whiteout to hide the lower entry. Returns
+    // the first error.
+    NTSTATUS FinishCreatedEntry(const UpperCreate& create,
+                                FileContext* ctx,
+                                InternalFileInfo* outInfo);
 
     // Copies the host file of a stream create up with its data and streams
     // when the overlay shows it from a lower. A host that a whiteout or an
@@ -986,6 +993,12 @@ private:
     // extended form that GetFinalPathNameByHandleW gives. Empty when the
     // mount could not read it.
     std::wstring upperFinalPath_;
+    // The call FillFileInfoFromHandle makes to read a handle's file
+    // information. Never null. Tests replace it through
+    // ScopedHandleInfoQuery to make the query fail.
+    using HandleInfoQuery = BOOL (WINAPI*)(HANDLE, LPBY_HANDLE_FILE_INFORMATION);
+    HandleInfoQuery handleInfoQuery_ = &::GetFileInformationByHandle;
+    friend class ScopedHandleInfoQuery;
     SecurityPolicy                    securityPolicy_;
     ::LayerMount::abi::EventEmitter   events_;
     std::unique_ptr<Cache> cache_;
