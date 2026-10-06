@@ -125,7 +125,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             {CallerPath(L"ld"), CallerPath(L"newdir")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\top.txt"));
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\nested\\inner.txt"));
@@ -204,7 +204,7 @@ public:
 
         const NTSTATUS st = dirRename.RenameLowerDirectory(
             {CallerPath(L"src"), CallerPath(L"dst")},
-            EntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No).status;
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st));
@@ -258,7 +258,7 @@ public:
         // call reaches the move while dst is still in the upper.
         const NTSTATUS st = dirRename.RenameLowerDirectory(
             {CallerPath(L"src"), CallerPath(L"dst")},
-            EntryKind::Directory, ReplaceExisting::Yes);
+            EntryKind::Directory, ReplaceExisting::Yes).status;
         Assert::AreEqual(
             static_cast<long>(STATUS_OBJECT_NAME_COLLISION),
             static_cast<long>(st),
@@ -4176,6 +4176,34 @@ public:
 
         AssertStatus(STATUS_ACCESS_DENIED, status,
             L"The rename must fail when the engine cannot write the whiteout at the old name");
+        Assert::IsTrue(WorkHoldsFileNamed(env, WhiteoutMarkerPath(L"gone.txt")),
+            L"The work directory must keep the replaced dst with its whiteout marker");
+    }
+
+    TEST_METHOD(ReplaceRename_MergedDirectoryWhenItsUpperCannotMoveAsideAndItsCopyCannotGo_KeepsTheReplacedDirectoryInTheWorkDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"src\\old.txt", "old");
+        env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+        env.CreateDir(env.Upper(), L"src\\sub");
+        env.WriteFile(env.Lower(0), L"dst\\gone.txt", "gone");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst\\gone.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const AccessDenied copyOfSubRefusesDelete(env.Upper() + L"\\src\\sub", DELETE);
+            const AccessDenied copyOfSrcRefusesChildDelete(env.Upper() + L"\\src", FILE_DELETE_CHILD);
+            const BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            DisableRestorePrivilegeOnThread();
+            const ScopedHandle openChildBlocksMoveOfSrc =
+                HoldOpen(env.Upper() + L"\\src\\a.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_ACCESS_DENIED, status,
+            L"The rename must fail when the upper src cannot move aside");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\sub"),
+            L"The merged copy of src must stay at dst when its removal fails");
         Assert::IsTrue(WorkHoldsFileNamed(env, WhiteoutMarkerPath(L"gone.txt")),
             L"The work directory must keep the replaced dst with its whiteout marker");
     }

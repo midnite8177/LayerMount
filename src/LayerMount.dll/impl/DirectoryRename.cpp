@@ -387,9 +387,9 @@ NTSTATUS DirectoryRename::CopyMergedEntry(const MergedDirectoryWithAncestry& old
         });
 }
 
-NTSTATUS DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
-                                               EntryKind sourceKind,
-                                               ReplaceExisting replace) {
+RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
+                                                       EntryKind sourceKind,
+                                                       ReplaceExisting replace) {
     assert(sourceKind == EntryKind::Directory || sourceKind == EntryKind::Link);
     const std::wstring oldNorm = NormalizePath(paths.oldPath.Text());
     const std::wstring newNorm = NormalizePath(paths.newPath.Text());
@@ -397,12 +397,12 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
 
     const ResolvedPath source = pathResolver_.ResolveLowerPath(oldNorm);
     if (!source.Found()) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+        return {STATUS_OBJECT_NAME_NOT_FOUND, false};
     }
 
     const NTSTATUS destinationStatus = PrepareRenameDestination(paths.newPath, replace);
     if (!NT_SUCCESS(destinationStatus)) {
-        return destinationStatus;
+        return {destinationStatus, false};
     }
 
     const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
@@ -416,7 +416,7 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
                   return CopyMergedDirectory(source, {oldNorm, oldUpperPath}, stagedPath);
               });
     if (!NT_SUCCESS(status)) {
-        return status;
+        return {status, false};
     }
 
     std::wstring asidePath;
@@ -424,15 +424,16 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
         oldUpperPath, [this]() { return copyUp_.GenerateWorkPath(); }, config_, &asidePath);
     WarnRecordLeftBehind(events_, aside, oldNorm);
     const NTSTATUS asideStatus = aside.status;
+    bool newNameOccupied = false;
     if (!NT_SUCCESS(asideStatus)) {
-        RemoveUpperEntry(newUpperPath, config_);
+        newNameOccupied = !NT_SUCCESS(RemoveUpperEntry(newUpperPath, config_));
     } else if (!asidePath.empty()) {
         RemoveUpperEntry(asidePath, config_);
     }
 
     cache_.InvalidateWithAncestors(oldNorm);
     cache_.InvalidateWithAncestors(newNorm);
-    return asideStatus;
+    return {asideStatus, newNameOccupied};
 }
 
 NTSTATUS DirectoryRename::RenameUpperDirectory(const RenameCallerPaths& paths,

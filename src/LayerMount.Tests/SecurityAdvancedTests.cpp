@@ -290,7 +290,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             {CallerPath(L"src-secured"), CallerPath(L"dst-secured")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         const std::wstring newKid = env.Upper() + L"\\dst-secured\\kid.txt";
         const size_t countOnChild = CountDaclAcesForSid(newKid, everyone.sid);
@@ -445,7 +445,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"p\\moved")},
-            EntryKind::Directory, ReplaceExisting::No),
+            EntryKind::Directory, ReplaceExisting::No).status,
             L"The rename of the lower directory succeeds");
 
         const std::wstring moved = env.Upper() + L"\\p\\moved";
@@ -468,7 +468,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"link"), CallerPath(L"p\\moved")},
-            EntryKind::Link, ReplaceExisting::No),
+            EntryKind::Link, ReplaceExisting::No).status,
             L"The rename of the lower junction succeeds");
 
         AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\moved", setup);
@@ -536,7 +536,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"p\\moved")},
-            EntryKind::Directory, ReplaceExisting::No),
+            EntryKind::Directory, ReplaceExisting::No).status,
             L"The rename of the lower tree succeeds");
 
         Assert::AreEqual(std::string("x"), env.ReadFile(env.Upper(), L"p\\moved\\sub\\x.txt"),

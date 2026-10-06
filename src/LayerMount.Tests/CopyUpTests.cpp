@@ -837,7 +837,7 @@ public:
 
         NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"ldir"), CallerPath(L"newdir")},
-            EntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No).status;
         Assert::IsTrue(NT_SUCCESS(status));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"newdir\\file.txt"));

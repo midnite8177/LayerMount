@@ -4,6 +4,7 @@
 #include "DirectoryMerge.h"
 #include "LayerPath.h"
 #include "EntryCopy.h"
+#include "RenameResult.h"
 
 #include <string>
 
@@ -44,17 +45,18 @@ public:
     // STATUS_OBJECT_NAME_COLLISION when an entry holds the new upper path,
     // and that entry stays as it was. The new upper entry gets its name in
     // the case of paths.newPath. After the move, the old upper entry moves
-    // into the work directory in one step, and the call removes it there.
-    // When it cannot be probed or moved, the call returns that error, tries
-    // to remove the new upper entry, and leaves the old upper entry whole.
-    // Any other failure leaves the old tree as it was and tries to remove
-    // the copy in the work directory.
+    // into the work directory in one step, and the call tries to remove it there.
+    // When it cannot be probed or moved, the call returns that error,
+    // removes the new upper entry, and leaves the old upper entry whole.
+    // When that removal fails, the new upper entry stays, and the result's
+    // newNameOccupied is true. Any other failure leaves the old tree as it was
+    // and tries to remove the copy in the work directory.
     // Warning: this call never replaces an entry. With ReplaceExisting::Yes,
     // the caller must first move the destination aside with
     // CopyUp::SetRenameDestinationAside.
-    NTSTATUS RenameLowerDirectory(const RenameCallerPaths& paths,
-                                  EntryKind sourceKind,
-                                  ReplaceExisting replace);
+    RenameStepResult RenameLowerDirectory(const RenameCallerPaths& paths,
+                                          EntryKind sourceKind,
+                                          ReplaceExisting replace);
 
     // Fails with the status of CopyUp::EnsureUpperParent and writes nothing
     // when that call refuses the new parent. Moves the upper directory or

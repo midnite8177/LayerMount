@@ -986,7 +986,8 @@ private:
     // Moves a directory or a link along route, then writes the whiteout at
     // the old name for the MergeLower and MoveUpperAndWhiteout routes. When
     // that write fails, undoes the rename as RenameRollback::WhiteOutSource
-    // describes.
+    // describes. A failed move on the MergeLower route returns the result of
+    // DirectoryRename::RenameLowerDirectory.
     RenameStepResult RenameDirectoryEntry(const RenameRequest& request,
                                           EntryKind sourceKind,
                                           DirectoryRenameRoute route,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LayerMount.h"
+#include "RenameResult.h"
 
 #include <string>
 
@@ -18,42 +19,6 @@ void WarnRecordLeftBehind(const abi::EventEmitter& events,
                           const UpperEntryMove& move,
                           const std::wstring& relativePath);
 
-// What an undo of a rename does with the opaque marker of the entry it
-// moves back.
-enum class UndoOpaqueMarker {
-    Keep,
-    // The entry was not opaque before the rename, and the rename marks it
-    // opaque when a lower holds the new name. The undo removes the marker.
-    Remove,
-};
-
-// A rename that moved an upper entry from oldUpperPath to newNorm. oldNorm
-// and newNorm are in NormalizePath form.
-struct UpperRename {
-    std::wstring oldNorm;
-    std::wstring newNorm;
-    std::wstring oldUpperPath;
-    UndoOpaqueMarker opaqueMarker;
-};
-
-// The result of a step of a rename that runs after its entry moved.
-struct RenameStepResult {
-    NTSTATUS status;
-    // True when the step failed and its undo could not move the entry
-    // back, so the rename stays in effect.
-    bool renameStayed;
-};
-
-// The result of a rename's move of its source: its status, whether it left
-// a metacopy shell at the new name, whether a failed move stays in effect,
-// and what an undo of the move needs.
-struct MovedSource {
-    NTSTATUS status;
-    bool stagedShell;
-    bool renameStayed;
-    UpperRename rename;
-};
-
 // The steps of a rename that run after its entry moved, and the undo that
 // they share when one of them fails. A step of the undo that fails emits an
 // LM_EVT_WARNING event through events with the failure and the path.
@@ -67,7 +32,7 @@ public:
 
     // Writes a whiteout of the given type at rename.oldNorm. When the write
     // fails, undoes the rename with MoveBack and returns the write error.
-    // When the entry cannot move back, the result's renameStayed is true,
+    // When the entry cannot move back, the result's newNameOccupied is true,
     // and the call removes the whiteout at rename.newNorm so the moved entry
     // stays visible.
     RenameStepResult WhiteOutSource(const UpperRename& rename, WhiteoutType type);
@@ -77,7 +42,7 @@ public:
     // the removal fails, the rename moves its entry back with MoveBack,
     // removes the whiteout at rename.oldNorm, and fails with the error of
     // the removal. When the entry cannot move back, the result's
-    // renameStayed is true.
+    // newNameOccupied is true.
     RenameStepResult RemoveDestinationWhiteoutOrUndo(const UpperRename& rename);
 
     // Moves the upper entry at rename.newNorm back to rename.oldUpperPath

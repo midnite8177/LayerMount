@@ -257,7 +257,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::IsTrue(env.FileExists(env.Upper(), L"moved\\sparse.bin"));
         Assert::IsFalse(HasSparseAttribute(env.Upper() + L"\\moved\\sparse.bin"),
@@ -277,7 +277,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::IsTrue(HasSparseAttribute(env.Upper() + L"\\moved\\sparse.bin"),
             L"With the sparse capability the tree copy keeps FILE_ATTRIBUTE_SPARSE_FILE");
@@ -300,7 +300,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::IsTrue(HasAttribute(env.Upper() + L"\\moved\\cmp.bin", FILE_ATTRIBUTE_COMPRESSED),
             L"The tree copy keeps FILE_ATTRIBUTE_COMPRESSED on a compressed child");
@@ -325,7 +325,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         const std::wstring movedTree = env.Upper() + L"\\moved";
         Assert::IsFalse(HasAttribute(movedTree + L"\\plain.bin", FILE_ATTRIBUTE_COMPRESSED),
@@ -353,7 +353,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved\\sub", FILE_ATTRIBUTE_COMPRESSED),
             L"The tree copy keeps an uncompressed subdirectory uncompressed");
@@ -376,7 +376,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::IsFalse(HasAttribute(env.Upper() + L"\\moved\\plain.txt", FILE_ATTRIBUTE_ENCRYPTED),
             L"The tree copy keeps an unencrypted child unencrypted");
@@ -535,7 +535,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::AreEqual(std::string("user notes"),
                          ReadADS(env.Upper(), L"moved\\notes.txt", L"overlayNotes"),
@@ -590,7 +590,7 @@ public:
 
         Assert::IsTrue(NT_SUCCESS(rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No)));
+            EntryKind::Directory, ReplaceExisting::No).status));
 
         Assert::AreEqual(std::string("tree notes"),
                          ReadADS(env.Upper(), L"moved", L"notes"),
@@ -615,7 +615,7 @@ public:
 
         AssertStatus(STATUS_SUCCESS, rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"tree"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No),
+            EntryKind::Directory, ReplaceExisting::No).status,
             L"The rename of a tree with extended attributes must succeed");
 
         AssertHasExtendedAttributes(env.Upper() + L"\\moved", directoryAttributes);
@@ -640,7 +640,7 @@ public:
 
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"ro"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No).status;
         const std::wstring upperDir = env.Upper() + L"\\moved";
         const std::wstring upperFile = upperDir + L"\\file.txt";
         const DWORD upperDirAttrs = ::GetFileAttributesW(upperDir.c_str());
@@ -673,7 +673,7 @@ public:
 
         const NTSTATUS status = rig.directoryRename.RenameLowerDirectory(
             {CallerPath(L"ro"), CallerPath(L"moved")},
-            EntryKind::Directory, ReplaceExisting::No);
+            EntryKind::Directory, ReplaceExisting::No).status;
         const std::wstring upperDir = env.Upper() + L"\\moved";
         const DWORD upperAttrs = ::GetFileAttributesW(upperDir.c_str());
         const std::string notes = ReadADS(env.Upper(), L"moved", L"notes");

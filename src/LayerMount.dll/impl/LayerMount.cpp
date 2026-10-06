@@ -2125,7 +2125,7 @@ MovedSource LayerMount::RenameFileEntry(const RenameRequest& request, RenameCopy
     const RenameStepResult whiteout =
         renameRollback_->WhiteOutSource(result.rename, WhiteoutType::File);
     result.status = whiteout.status;
-    result.renameStayed = whiteout.renameStayed;
+    result.newNameOccupied = whiteout.newNameOccupied;
     return result;
 }
 
@@ -2277,7 +2277,7 @@ LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldR
         MoveRenameSource(RenameRequest{oldRelativePath, newRelativePath, replaceIfExists},
                          kinds.source, route, copyUpMode);
     if (!NT_SUCCESS(moved.status)) {
-        if (moved.renameStayed) destinationAside.Release();
+        if (moved.newNameOccupied) destinationAside.Release();
         return failure(moved.status);
     }
 
@@ -2285,7 +2285,7 @@ LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldR
         const RenameStepResult removed =
             renameRollback_->RemoveDestinationWhiteoutOrUndo(moved.rename);
         if (!NT_SUCCESS(removed.status)) {
-            if (removed.renameStayed) destinationAside.Release();
+            if (removed.newNameOccupied) destinationAside.Release();
             return failure(removed.status);
         }
     }
@@ -2321,7 +2321,7 @@ MovedSource LayerMount::MoveRenameSource(const RenameRequest& request,
         return {status, false, false, std::move(rename)};
     }
     const RenameStepResult moved = RenameDirectoryEntry(request, sourceKind, route, rename);
-    return {moved.status, false, moved.renameStayed, std::move(rename)};
+    return {moved.status, false, moved.newNameOccupied, std::move(rename)};
 }
 
 RenameStepResult LayerMount::RenameDirectoryEntry(const RenameRequest& request,
@@ -2333,14 +2333,11 @@ RenameStepResult LayerMount::RenameDirectoryEntry(const RenameRequest& request,
     const DirectoryRename::RenameCallerPaths callerPaths{oldCallerPath, newCallerPath};
     const ReplaceExisting replace =
         request.replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No;
-    if (route == DirectoryRenameRoute::MoveUpper) {
-        return {directoryRename_->RenameUpperDirectory(callerPaths, sourceKind, replace), false};
-    }
-
-    const NTSTATUS status = route == DirectoryRenameRoute::MergeLower
+    const RenameStepResult moved = route == DirectoryRenameRoute::MergeLower
         ? directoryRename_->RenameLowerDirectory(callerPaths, sourceKind, replace)
-        : directoryRename_->RenameUpperDirectory(callerPaths, sourceKind, replace);
-    if (!NT_SUCCESS(status)) return {status, false};
+        : RenameStepResult{
+              directoryRename_->RenameUpperDirectory(callerPaths, sourceKind, replace), false};
+    if (route == DirectoryRenameRoute::MoveUpper || !NT_SUCCESS(moved.status)) return moved;
     return renameRollback_->WhiteOutSource(rename, WhiteoutType::Directory);
 }
 

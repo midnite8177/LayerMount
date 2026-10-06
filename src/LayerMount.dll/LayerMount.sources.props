@@ -75,6 +75,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\PathResolver.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\ProcessTracker.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\RenameLinkBoundary.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\RenameResult.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\RenameRollback.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\SecurityPolicy.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.h" />
