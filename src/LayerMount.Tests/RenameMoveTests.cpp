@@ -1961,7 +1961,7 @@ public:
     TEST_METHOD(Rename_LowerDirectoryHoldingPartlyDehydratedCloudPlaceholderFile_CopiesTheProvidersData) {
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"d\\x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"d\\x.bin", kSize, ByteRange{64 * 1024, 128 * 1024}, CloudFetch::Serve)) {
             return;
         }
         TempLayerEnvironment& env = layers.env;

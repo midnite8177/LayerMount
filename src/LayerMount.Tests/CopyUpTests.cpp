@@ -340,7 +340,7 @@ public:
     TEST_METHOD(CopyUpFile_DehydratedCloudPlaceholderFile_CopiesUpTheProvidersData) {
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{0, kSize})) {
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{0, kSize}, CloudFetch::Serve)) {
             return;
         }
         TempLayerEnvironment& env = layers.env;
@@ -359,7 +359,7 @@ public:
     TEST_METHOD(CopyUpFile_PartlyDehydratedCloudPlaceholderFile_CopiesUpTheProvidersData) {
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{64 * 1024, 128 * 1024}, CloudFetch::Serve)) {
             return;
         }
         TempLayerEnvironment& env = layers.env;
@@ -375,11 +375,14 @@ public:
     TEST_METHOD(CopyUpFile_PartlyDehydratedCloudPlaceholderFileWithoutProvider_FailsAndLeavesNoUpperFile) {
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 256 * 1024;
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, ByteRange{64 * 1024, 128 * 1024})) {
+        constexpr ByteRange kDropped{64 * 1024, 128 * 1024};
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"x.bin", kSize, kDropped, CloudFetch::Refuse)) {
             return;
         }
-        layers.syncRoot.DisconnectProvider();
         TempLayerEnvironment& env = layers.env;
+        // With a serving provider, this read hydrates the range and the copy-up succeeds.
+        TryHydrate(env.Lower(0) + L"\\x.bin", kDropped);
+        layers.syncRoot.DisconnectProvider();
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         AssertStatus(STATUS_CLOUD_FILE_ACCESS_DENIED, rig.copyUp.CopyUpFile(L"x.bin"),
@@ -910,7 +913,7 @@ public:
     TEST_METHOD(CompleteLazyCopyUp_PartlyDehydratedCloudPlaceholderFile_FillsTheShellWithTheProvidersData) {
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 2 * 1024 * 1024;
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, ByteRange{512 * 1024, 1024 * 1024})) {
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, ByteRange{512 * 1024, 1024 * 1024}, CloudFetch::Serve)) {
             return;
         }
         TempLayerEnvironment& env = layers.env;
@@ -928,10 +931,13 @@ public:
     TEST_METHOD(CompleteLazyCopyUp_PartlyDehydratedCloudPlaceholderFileWithoutProvider_FailsAndKeepsTheMetacopyShell) {
         CloudPlaceholderLayers layers{SyncRootLayer::Lower};
         constexpr size_t kSize = 2 * 1024 * 1024;
-        if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, ByteRange{512 * 1024, 1024 * 1024})) {
+        constexpr ByteRange kDropped{512 * 1024, 1024 * 1024};
+        if (!layers.DehydratedPlaceholderFileOrSkipped(L"big.bin", kSize, kDropped, CloudFetch::Refuse)) {
             return;
         }
         TempLayerEnvironment& env = layers.env;
+        // With a serving provider, this read hydrates the range and the fill succeeds.
+        TryHydrate(env.Lower(0) + L"\\big.bin", kDropped);
         CopyUpAndRenameRig rig(env.MakeConfig());
         AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin").status,
             L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");

@@ -739,9 +739,20 @@ inline std::wstring HresultText(HRESULT result) {
     return code;
 }
 
+// What the test sync provider does with each data fetch.
+enum class CloudFetch {
+    // Transfers CloudProviderData for the fetched range.
+    Serve,
+    // Fails the fetch with STATUS_CLOUD_FILE_UNSUCCESSFUL and transfers no data.
+    // With this provider connected, a test can dehydrate a placeholder file and
+    // no read can hydrate it again. With no provider connected, the platform
+    // refuses a dehydration with ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING.
+    Refuse,
+};
+
 // A test sync provider connected to a Windows Cloud Files sync root. It
-// answers each data fetch with CloudProviderData for the fetched range. The
-// destructor disconnects it.
+// serves or refuses each data fetch, as the CloudFetch passed to Connect
+// says. The destructor disconnects it.
 class CloudProviderConnection {
 public:
     // Takes ownership of key, a connection that CfConnectSyncRoot made.
@@ -756,15 +767,20 @@ public:
 
     // Connects a provider to the sync root at root and puts it in
     // connection. Returns the HRESULT of the connect and logs nothing.
-    static HRESULT Connect(const std::wstring& root,
+    static HRESULT Connect(const std::wstring& root, CloudFetch fetch,
                            std::optional<CloudProviderConnection>& connection) {
-        static const CF_CALLBACK_REGISTRATION callbacks[] = {
+        static const CF_CALLBACK_REGISTRATION serving[] = {
             {CF_CALLBACK_TYPE_FETCH_DATA, &CloudProviderConnection::ServeFetchData},
             CF_CALLBACK_REGISTRATION_END,
         };
+        static const CF_CALLBACK_REGISTRATION refusing[] = {
+            {CF_CALLBACK_TYPE_FETCH_DATA, &CloudProviderConnection::RefuseFetchData},
+            CF_CALLBACK_REGISTRATION_END,
+        };
         CF_CONNECTION_KEY key{};
-        const HRESULT result = ::CfConnectSyncRoot(root.c_str(), callbacks, nullptr,
-                                                   CF_CONNECT_FLAG_NONE, &key);
+        const HRESULT result = ::CfConnectSyncRoot(
+            root.c_str(), fetch == CloudFetch::Serve ? serving : refusing, nullptr,
+            CF_CONNECT_FLAG_NONE, &key);
         if (SUCCEEDED(result)) {
             connection.emplace(key);
         }
@@ -772,15 +788,37 @@ public:
     }
 
 private:
-    static void CALLBACK ServeFetchData(const CF_CALLBACK_INFO* info,
-                                        const CF_CALLBACK_PARAMETERS* parameters) {
-        constexpr LONGLONG kChunk = 1024 * 1024;
-        const LONGLONG fileSize = info->FileSize.QuadPart;
-        LONGLONG offset = parameters->FetchData.RequiredFileOffset.QuadPart;
-        const LONGLONG required = parameters->FetchData.RequiredLength.QuadPart;
+    // The range a data fetch requires, cut at the end of the file.
+    static ByteRange FetchedRange(const CF_CALLBACK_INFO& info,
+                                  const CF_CALLBACK_PARAMETERS& parameters) {
+        const LONGLONG fileSize = info.FileSize.QuadPart;
+        const LONGLONG offset = parameters.FetchData.RequiredFileOffset.QuadPart;
+        const LONGLONG required = parameters.FetchData.RequiredLength.QuadPart;
         // CF_CALLBACK_PARAMETERS documents a fetch length of CF_EOF as "to end of file".
         const LONGLONG end =
             required == CF_EOF ? fileSize : (std::min)(fileSize, offset + required);
+        return ByteRange{offset, end - offset};
+    }
+
+    static void CALLBACK RefuseFetchData(const CF_CALLBACK_INFO* info,
+                                         const CF_CALLBACK_PARAMETERS* parameters) {
+        const ByteRange fetched = FetchedRange(*info, *parameters);
+        const HRESULT result =
+            TransferData(*info, STATUS_CLOUD_FILE_UNSUCCESSFUL, nullptr, fetched);
+        if (FAILED(result)) {
+            Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+                (L"The test provider could not refuse the fetch at offset " +
+                 std::to_wstring(fetched.offset) + L" (HRESULT " + HresultText(result) +
+                 L")").c_str());
+        }
+    }
+
+    static void CALLBACK ServeFetchData(const CF_CALLBACK_INFO* info,
+                                        const CF_CALLBACK_PARAMETERS* parameters) {
+        constexpr LONGLONG kChunk = 1024 * 1024;
+        const ByteRange fetched = FetchedRange(*info, *parameters);
+        LONGLONG offset = fetched.offset;
+        const LONGLONG end = fetched.offset + fetched.length;
         while (offset < end) {
             const LONGLONG length = (std::min)(kChunk, end - offset);
             const std::string data = CloudProviderData(offset, static_cast<size_t>(length));
@@ -917,9 +955,9 @@ public:
     // Connects a CloudProviderConnection to the sync root. Logs a skip and
     // returns false when the platform refuses the sync root or the
     // connection.
-    bool ProviderConnectedOrSkipped() {
+    bool ProviderConnectedOrSkipped(CloudFetch fetch) {
         const HRESULT result = SUCCEEDED(registerResult_)
-            ? CloudProviderConnection::Connect(root_, provider_)
+            ? CloudProviderConnection::Connect(root_, fetch, provider_)
             : registerResult_;
         if (FAILED(result)) {
             LogSkip(L"the test could not connect a sync provider to " + root_, result);
@@ -1044,12 +1082,13 @@ struct CloudPlaceholderLayers {
 
     // Writes size bytes of CloudProviderData to the file at file, relative
     // to the sync root layer, makes that file an in-sync placeholder,
-    // connects the test provider and drops the local data in dropped. Logs
-    // a skip and returns false when the platform refuses.
+    // connects a test provider and drops the local data in dropped. The
+    // provider stays connected. Logs a skip and returns false when the
+    // platform refuses.
     bool DehydratedPlaceholderFileOrSkipped(const std::wstring& file, size_t size,
-                                            ByteRange dropped) {
+                                            ByteRange dropped, CloudFetch fetch) {
         return PlaceholderFileOrSkipped(file, CloudProviderData(0, size)) &&
-               syncRoot.ProviderConnectedOrSkipped() &&
+               syncRoot.ProviderConnectedOrSkipped(fetch) &&
                syncRoot.DehydratedOrSkipped(syncRootPath + L"\\" + file, dropped);
     }
 };
@@ -1070,6 +1109,25 @@ inline std::string ReadRange(const std::wstring& path, LONGLONG offset, DWORD le
     ::CloseHandle(h);
     buf.resize(r);
     return buf;
+}
+
+// Reads range of the file at path. The read hydrates that range of a
+// placeholder file when a serving provider is connected, and fails when the
+// provider refuses or no provider is connected. Asserts the open and the
+// seek and ignores the result of the read.
+inline void TryHydrate(const std::wstring& path, ByteRange range) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    const ::LayerMount::ScopedHandle handle(::CreateFileW(
+        path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, 0, nullptr));
+    Assert::IsTrue(handle.IsValid(), (L"The test must open " + path + L" to read it").c_str());
+    LARGE_INTEGER position{};
+    position.QuadPart = range.offset;
+    Assert::IsTrue(::SetFilePointerEx(handle.Get(), position, nullptr, FILE_BEGIN) != FALSE,
+        (L"The test must seek to the range it reads in " + path).c_str());
+    std::string buffer(static_cast<size_t>(range.length), '\0');
+    DWORD read = 0;
+    ::ReadFile(handle.Get(), buffer.data(), static_cast<DWORD>(range.length), &read, nullptr);
 }
 
 inline constexpr UINT32 kNoCreateOptions = 0u;
