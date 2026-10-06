@@ -1092,28 +1092,52 @@ inline NTSTATUS OpenThroughMount(::LayerMount::LayerMount& mount,
     return status;
 }
 
-// Creates path through the mount with full access, closes the handle, and
-// returns the create's status. FILE_DIRECTORY_FILE in createOptions
-// creates a directory.
+// A create of path with full access and the default security.
+// FILE_DIRECTORY_FILE in createOptions creates a directory.
+inline ::LayerMount::LayerMount::CreateRequest MakeFullAccessCreateRequest(
+    const std::wstring& path,
+    UINT32 createOptions) {
+    ::LayerMount::LayerMount::CreateRequest request{};
+    request.relativePath = path;
+    request.createOptions = createOptions;
+    request.grantedAccess = FILE_ALL_ACCESS;
+    request.fileAttributes = (createOptions & FILE_DIRECTORY_FILE) != 0
+        ? FILE_ATTRIBUTE_DIRECTORY
+        : FILE_ATTRIBUTE_NORMAL;
+    request.securityDescriptor = kDefaultSecurity;
+    request.allocationSize = kNoAllocationSize;
+    request.callerPid = kNoCallerPid;
+    return request;
+}
+
+// Creates path through the mount with MakeFullAccessCreateRequest, closes
+// the handle, and returns the create's status.
 inline NTSTATUS CreateThroughMount(::LayerMount::LayerMount& mount,
                                    const std::wstring& path,
                                    UINT32 createOptions) {
     std::unique_ptr<::LayerMount::FileContext> ctx;
     ::LayerMount::InternalFileInfo info{};
-    const UINT32 attributes = (createOptions & FILE_DIRECTORY_FILE) != 0
-        ? FILE_ATTRIBUTE_DIRECTORY
-        : FILE_ATTRIBUTE_NORMAL;
-    ::LayerMount::LayerMount::CreateRequest request{};
-    request.relativePath = path;
-    request.createOptions = createOptions;
-    request.grantedAccess = FILE_ALL_ACCESS;
-    request.fileAttributes = attributes;
-    request.securityDescriptor = kDefaultSecurity;
-    request.allocationSize = kNoAllocationSize;
-    request.callerPid = kNoCallerPid;
-    const NTSTATUS status = mount.Create(request, &ctx, &info);
+    const NTSTATUS status =
+        mount.Create(MakeFullAccessCreateRequest(path, createOptions), &ctx, &info);
     if (ctx) mount.Close(ctx.get());
     return status;
+}
+
+// Asserts that a failed create at name, in a root that holds nothing else,
+// left the name whited out: no upper entry, the whiteout still in place,
+// and nothing at the name or in the root listing through the mount.
+inline void AssertNameStaysWhitedOutInEmptyRoot(TempLayerEnvironment& env,
+                                                ::LayerMount::LayerMount& mount,
+                                                const std::wstring& name) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    Assert::IsFalse(env.FileExists(env.Upper(), name),
+        L"The failed create must leave no upper entry at the name");
+    Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(name)),
+        L"The failed create must keep the whiteout at the name");
+    AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, name),
+        L"An open of the name after the failed create must find nothing");
+    Assert::IsTrue(mount.MergeDirectoryEntries(L"").entries.empty(),
+        L"The listing of the root after the failed create must show nothing");
 }
 
 inline constexpr ULONG kReadThroughMountBytes = 64;

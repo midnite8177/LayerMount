@@ -37,14 +37,12 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)abi\CapabilityGate.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)abi\EventEmitter.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)abi\ErrorTls.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)abi\FileHandleOpen.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)abi\HandleTable.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)abi\HandleTypes.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)abi\ErrorTls.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)abi\FileHandleOpen.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)abi\HandleTable.cpp" />
-    <!-- abi/AbiStubs.cpp is DLL-only (it defines the `.def` exports as
-         LM_API-stubs). Added directly in LayerMount.dll.vcxproj so the
-         static-lib flavor, which has no LAYERMOUNT_EXPORTS define, is
-         not asked to compile `__declspec(dllimport)` definitions. -->
   </ItemGroup>
 
   <!-- Core engine. NtStatusUtil.{h,cpp} lets the engine map Win32 errors

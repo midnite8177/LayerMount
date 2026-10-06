@@ -1,6 +1,7 @@
 #include "../public/LayerMount.h"
 #include "AbiGuard.h"
 #include "ErrorTls.h"
+#include "FileHandleOpen.h"
 #include "HandleTable.h"
 #include "HandleTypes.h"
 #include "../impl/LayerMount.h"
@@ -163,30 +164,18 @@ LM_API HRESULT LM_CALL LayerMountOpenFile(LM_HANDLE       handle,
         return E_HANDLE;
     }
 
-    const DWORD pid = originatorPid != 0 ? originatorPid : ::GetCurrentProcessId();
-    std::unique_ptr<::LayerMount::FileContext> ctx;
+    OpenRequest request{};
+    request.relativePath = relativePath;
+    request.grantedAccess = grantedAccess;
+    request.createOptions = createOptions;
+    request.callerPid = originatorPid != 0 ? originatorPid : ::GetCurrentProcessId();
     ::LayerMount::InternalFileInfo internalInfo{};
-    NTSTATUS status = mountHolder->core->Open(
-        relativePath, grantedAccess, createOptions,
-        pid, &ctx, &internalInfo);
-    if (!NT_SUCCESS(status)) {
-        return HresultFromNtStatus(status);
+    std::uint64_t encodedFile = 0;
+    const HRESULT hr = OpenFileHandle(Handles().file, mountHolder, request,
+                                      &encodedFile, &internalInfo);
+    if (FAILED(hr)) {
+        return hr;
     }
-
-    auto fileHolder = std::make_shared<FileHolder>();
-    fileHolder->parentOwner = mountHolder;
-    fileHolder->mount     = mountHolder->core.get();
-
-    const std::uint64_t encodedFile = Handles().file.Allocate(fileHolder);
-    if (encodedFile == 0) {
-        mountHolder->core->Close(ctx.get());
-        ctx.reset();
-        ErrorTls::Set(E_OUTOFMEMORY, L"LayerMountOpenFile: file handle table exhausted.");
-        return E_OUTOFMEMORY;
-    }
-
-    fileHolder->ctx = std::move(ctx);
-    mountHolder->childCount.fetch_add(1, std::memory_order_acq_rel);
 
     ToPublicFileInfo(internalInfo, *outInfo);
     *outFile = reinterpret_cast<LM_FILE_HANDLE>(static_cast<uintptr_t>(encodedFile));
@@ -236,7 +225,6 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
     (void)securityDescriptorBytes;
 
     const DWORD pid = originatorPid != 0 ? originatorPid : ::GetCurrentProcessId();
-    std::unique_ptr<::LayerMount::FileContext> ctx;
     ::LayerMount::InternalFileInfo internalInfo{};
     ::LayerMount::LayerMount::CreateRequest request{};
     request.relativePath = relativePath;
@@ -246,25 +234,12 @@ LM_API HRESULT LM_CALL LayerMountCreateFile(LM_HANDLE       handle,
     request.securityDescriptor = sd;
     request.allocationSize = allocationSize;
     request.callerPid = pid;
-    NTSTATUS status = mountHolder->core->Create(request, &ctx, &internalInfo);
-    if (!NT_SUCCESS(status)) {
-        return HresultFromNtStatus(status);
+    std::uint64_t encodedFile = 0;
+    const HRESULT hr = CreateFileHandle(Handles().file, mountHolder, request,
+                                        &encodedFile, &internalInfo);
+    if (FAILED(hr)) {
+        return hr;
     }
-
-    auto fileHolder = std::make_shared<FileHolder>();
-    fileHolder->parentOwner = mountHolder;
-    fileHolder->mount     = mountHolder->core.get();
-
-    const std::uint64_t encodedFile = Handles().file.Allocate(fileHolder);
-    if (encodedFile == 0) {
-        mountHolder->core->Close(ctx.get());
-        ctx.reset();
-        ErrorTls::Set(E_OUTOFMEMORY, L"LayerMountCreateFile: file handle table exhausted.");
-        return E_OUTOFMEMORY;
-    }
-
-    fileHolder->ctx = std::move(ctx);
-    mountHolder->childCount.fetch_add(1, std::memory_order_acq_rel);
 
     ToPublicFileInfo(internalInfo, *outInfo);
     *outFile = reinterpret_cast<LM_FILE_HANDLE>(static_cast<uintptr_t>(encodedFile));

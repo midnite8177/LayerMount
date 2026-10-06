@@ -91,6 +91,7 @@
     <ClCompile Include="CreateCollisionTests.cpp" />
     <ClCompile Include="CreateOverWhiteoutTests.cpp" />
     <ClCompile Include="DeleteTests.cpp" />
+    <ClCompile Include="FileHandleTableFullTests.cpp" />
     <ClCompile Include="LazyMetacopyFidelityTests.cpp" />
     <ClCompile Include="MaximumAllowedTests.cpp" />
     <ClCompile Include="MetadataStoreTests.cpp" />

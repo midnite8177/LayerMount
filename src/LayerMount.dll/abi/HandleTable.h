@@ -20,6 +20,7 @@
 #include "../public/LayerMount.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -65,25 +66,25 @@ inline std::uint32_t DecodeSlot(std::uint64_t value) noexcept
     return static_cast<std::uint32_t>(value & kSlotMask);
 }
 
-} // namespace detail
+}
 
-// -------------------------------------------------------------------------
-// HandleTable<T, Magic>
-//
 // Owns shared_ptr<T> payloads. Allocate returns a 64-bit opaque value
 // the caller reinterpret_casts to its public handle type. Resolve takes
 // a shared lock and returns a shared_ptr that pins the payload for the
-// duration of the caller's use; Allocate and Free take an exclusive
-// lock. The shared_ptr payload means a concurrent Free cannot destroy a
+// duration of the caller's use; every call that changes a slot takes an
+// exclusive lock. The shared_ptr payload means a concurrent Free cannot destroy a
 // payload while another thread still holds a Resolve result -- the slot
 // is marked dead but the payload outlives the slot until the last
 // observed reference drops. Payload-internal synchronization remains
 // each impl type's responsibility.
-// -------------------------------------------------------------------------
 template <typename T, std::uint16_t Magic>
 class HandleTable {
 public:
-    HandleTable() = default;
+    // Hands out slots 1 through maxSlot and no more. A maxSlot above
+    // detail::kMaxSlot is clamped to it.
+    explicit HandleTable(std::uint32_t maxSlot)
+        : maxSlot_(std::min(maxSlot, detail::kMaxSlot)) {}
+
     HandleTable(const HandleTable&) = delete;
     HandleTable& operator=(const HandleTable&) = delete;
 
@@ -99,15 +100,58 @@ public:
         return AllocateShared(std::move(shared));
     }
 
-    // Overload that takes a shared_ptr directly, for call sites that
-    // already hold shared ownership (e.g. LayerMountOpenFile pins the parent
-    // LayerMountHolder via its shared_ptr from the handle table).
     std::uint64_t Allocate(std::shared_ptr<T> payload)
     {
         if (!payload) {
             return 0;
         }
         return AllocateShared(std::move(payload));
+    }
+
+    // Takes a slot without a payload, for a caller that must know it has a
+    // handle before work it cannot undo. Returns 0 when no slot is free.
+    // Resolve and Free reject the value until Install fills the slot;
+    // Release gives the slot back instead.
+    std::uint64_t Reserve()
+    {
+        std::unique_lock lock(mutex_);
+        const std::uint32_t slotIndex = TakeSlot();
+        if (slotIndex == 0) {
+            return 0;
+        }
+        slots_[slotIndex].reserved = true;
+        return detail::Encode(Magic, slots_[slotIndex].generation, slotIndex);
+    }
+
+    // Fills a slot that Reserve returned and makes it resolvable. Returns
+    // false, and keeps nothing, when the value is not a pending reservation
+    // or the payload is null.
+    bool Install(std::uint64_t reservedValue, std::shared_ptr<T> payload) noexcept
+    {
+        if (!payload) {
+            return false;
+        }
+        std::unique_lock lock(mutex_);
+        Slot* slot = FindSlot(reservedValue);
+        if (slot == nullptr || !slot->reserved) {
+            return false;
+        }
+        slot->reserved = false;
+        slot->payload = std::move(payload);
+        slot->live = true;
+        return true;
+    }
+
+    // Gives back a slot that Reserve returned and Install did not fill.
+    void Release(std::uint64_t reservedValue) noexcept
+    {
+        std::unique_lock lock(mutex_);
+        Slot* slot = FindSlot(reservedValue);
+        if (slot == nullptr || !slot->reserved) {
+            return;
+        }
+        slot->reserved = false;
+        Recycle(detail::DecodeSlot(reservedValue));
     }
 
     // Returns a shared_ptr copy of the payload (pinned for the caller's
@@ -159,72 +203,93 @@ public:
         }
         std::shared_ptr<T> payload = std::move(slot.payload);
         slot.live = false;
-        if (slot.generation >= detail::kMaxGeneration) {
-            // Retire the slot rather than wrapping the generation counter.
-            slot.generation = detail::kMaxGeneration;
-        } else {
-            slot.generation += 1;
-            try {
-                freeSlots_.push_back(slotIndex);
-            } catch (...) {
-                // If we cannot recycle the slot, leak it (finite but
-                // rare). Do not propagate from noexcept.
-                slot.generation = detail::kMaxGeneration;
-            }
-        }
+        Recycle(slotIndex);
         return payload;
     }
 
 private:
-    std::uint64_t AllocateShared(std::shared_ptr<T> payload)
-    {
-        std::unique_lock lock(mutex_);
-
-        std::uint32_t slotIndex;
-        if (!freeSlots_.empty()) {
-            slotIndex = freeSlots_.back();
-            freeSlots_.pop_back();
-            slots_[slotIndex].payload = std::move(payload);
-            slots_[slotIndex].live = true;
-        } else {
-            // kMaxSlot is the largest valid slot index (24-bit max value).
-            // Slot 0 is reserved for "invalid", so the live range is
-            // [1, kMaxSlot]. The next slot index handed out below is
-            // slots_.size() (after lazy-pushing slot 0); reject only when
-            // that index would exceed kMaxSlot. The previous bound
-            // (slots_.size() >= kMaxSlot) lost the very last valid slot.
-            if (slots_.size() > detail::kMaxSlot) {
-                return 0; // slot space exhausted
-            }
-            // Slot 0 is reserved so a zeroed handle never resolves.
-            if (slots_.empty()) {
-                slots_.emplace_back();
-                slots_.back().live = false;
-            }
-            slotIndex = static_cast<std::uint32_t>(slots_.size());
-            slots_.emplace_back();
-            slots_.back().payload = std::move(payload);
-            slots_.back().generation = 1;
-            slots_.back().live = true;
-        }
-
-        return detail::Encode(Magic, slots_[slotIndex].generation, slotIndex);
-    }
-
     struct Slot {
         std::shared_ptr<T> payload;
         std::uint32_t      generation = 1;
         bool               live = false;
+        bool               reserved = false;
     };
 
+    std::uint64_t AllocateShared(std::shared_ptr<T> payload)
+    {
+        std::unique_lock lock(mutex_);
+        const std::uint32_t slotIndex = TakeSlot();
+        if (slotIndex == 0) {
+            return 0;
+        }
+        slots_[slotIndex].payload = std::move(payload);
+        slots_[slotIndex].live = true;
+        return detail::Encode(Magic, slots_[slotIndex].generation, slotIndex);
+    }
+
+    // Returns a slot that is neither live nor reserved, or 0 when the table
+    // is full. The caller holds the exclusive lock.
+    std::uint32_t TakeSlot()
+    {
+        if (!freeSlots_.empty()) {
+            const std::uint32_t slotIndex = freeSlots_.back();
+            freeSlots_.pop_back();
+            return slotIndex;
+        }
+        if (slots_.empty()) {
+            slots_.emplace_back();
+        }
+        const std::size_t nextSlot = slots_.size();
+        if (nextSlot > maxSlot_) {
+            return 0;
+        }
+        slots_.emplace_back();
+        return static_cast<std::uint32_t>(nextSlot);
+    }
+
+    // The caller holds the exclusive lock.
+    Slot* FindSlot(std::uint64_t handleValue) noexcept
+    {
+        if (handleValue == 0 || detail::DecodeMagic(handleValue) != Magic) {
+            return nullptr;
+        }
+        const std::uint32_t slotIndex = detail::DecodeSlot(handleValue);
+        if (slotIndex == 0 || slotIndex >= slots_.size()) {
+            return nullptr;
+        }
+        Slot& slot = slots_[slotIndex];
+        if (slot.generation != detail::DecodeGeneration(handleValue)) {
+            return nullptr;
+        }
+        return &slot;
+    }
+
+    // Bumps the generation so old values of the slot stop resolving, then
+    // puts the slot on the free list. The caller holds the exclusive lock.
+    void Recycle(std::uint32_t slotIndex) noexcept
+    {
+        Slot& slot = slots_[slotIndex];
+        if (slot.generation >= detail::kMaxGeneration) {
+            // Retire the slot rather than wrapping the generation counter.
+            slot.generation = detail::kMaxGeneration;
+            return;
+        }
+        slot.generation += 1;
+        try {
+            freeSlots_.push_back(slotIndex);
+        } catch (...) {
+            // If we cannot recycle the slot, leak it (finite but
+            // rare). Do not propagate from noexcept.
+            slot.generation = detail::kMaxGeneration;
+        }
+    }
+
+    const std::uint32_t       maxSlot_;
     mutable std::shared_mutex mutex_;
     std::vector<Slot>         slots_;
     std::vector<std::uint32_t> freeSlots_;
 };
 
-// -------------------------------------------------------------------------
-// Per-kind table typedefs and the registry accessor.
-// -------------------------------------------------------------------------
 using LayerMountTable      = HandleTable<LayerMountPayload,     kMagicLayerMount>;
 using FileTable         = HandleTable<FilePayload,        kMagicFile>;
 using VhdTable          = HandleTable<VhdPayload,         kMagicVhd>;
@@ -232,15 +297,15 @@ using VssSnapshotTable  = HandleTable<VssSnapshotPayload, kMagicVssSnapshot>;
 using ImageTable        = HandleTable<ImagePayload,       kMagicImage>;
 
 struct HandleRegistry {
-    LayerMountTable  mount;
-    FileTable        file;
-    VhdTable         vhd;
-    VssSnapshotTable vssSnapshot;
-    ImageTable       image;
+    LayerMountTable  mount{detail::kMaxSlot};
+    FileTable        file{detail::kMaxSlot};
+    VhdTable         vhd{detail::kMaxSlot};
+    VssSnapshotTable vssSnapshot{detail::kMaxSlot};
+    ImageTable       image{detail::kMaxSlot};
 };
 
 // Lazy-init singleton. Lives for the DLL's lifetime; cleaned up at
 // process exit. No DllMain work required.
 HandleRegistry& Handles() noexcept;
 
-} // namespace LayerMount::abi
+}

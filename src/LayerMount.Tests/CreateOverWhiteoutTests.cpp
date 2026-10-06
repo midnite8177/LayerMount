@@ -405,19 +405,6 @@ private:
                      FILE_SHARE_READ | FILE_SHARE_WRITE);
         return CreateThroughMount(mount, name, createOptions);
     }
-
-    static void AssertNameStaysWhitedOutInEmptyRoot(TempLayerEnvironment& env,
-                                                    ::LayerMount::LayerMount& mount,
-                                                    const std::wstring& name) {
-        Assert::IsFalse(env.FileExists(env.Upper(), name),
-            L"The failed create must leave no upper entry at the name");
-        Assert::IsTrue(env.FileExists(env.Upper(), WhiteoutMarkerPath(name)),
-            L"The failed create must keep the whiteout at the name");
-        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, name),
-            L"An open of the name after the failed create must find nothing");
-        Assert::IsTrue(mount.MergeDirectoryEntries(L"").entries.empty(),
-            L"The listing of the root after the failed create must show nothing");
-    }
 };
 
 }
