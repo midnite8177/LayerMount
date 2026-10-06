@@ -1,4 +1,5 @@
 #include "../WindowsNtStatus.h"
+#include "../LayerMount.h"
 #include "LayerImageManager.h"
 
 #include "nlohmann/json.hpp"
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 
@@ -236,16 +238,9 @@ static bool IsValidUtf8(const char* data, size_t len) {
     return true;
 }
 
-// Component-aware containment check used by the zip-slip guard. Returns
-// true iff `canon` either equals `root` or sits strictly under `root`
-// at a path-component boundary.
-//
-// The previous guard collapsed to `canon.compare(0, root.size(), root) == 0`,
-// a raw prefix-string compare. That accepts sibling paths whose names
-// happen to start with the root's name (e.g., root = `C:\out`, canon =
-// `C:\out2\file`) and silently lets extraction escape the target. Walking
-// to the next character after the prefix and requiring a separator (or
-// allowing a trailing-separator root) closes that hole.
+// Returns true when `canon` equals `root` or is under `root` at a path
+// component boundary. A plain prefix compare would accept `C:\out2\file`
+// under the root `C:\out`.
 static bool IsPathContainedIn(const std::wstring& canon,
                               const std::wstring& root) {
     if (canon == root) return true;
@@ -263,12 +258,13 @@ static bool IsPathContainedIn(const std::wstring& canon,
     return boundary == L'\\' || boundary == L'/';
 }
 
-// Reject absolute paths, drive-qualified paths, and `..` traversal.
-// Paths use forward slashes. Trailing slashes are allowed (for directories).
+// Rejects an absolute path, a `.` or `..` component, and a colon anywhere.
+// A colon names a drive or an alternate data stream. Paths use forward
+// slashes. A trailing slash marks a directory.
 static bool IsValidArchivePath(const std::string& utf8Path) {
     if (utf8Path.empty()) return false;
     if (utf8Path.front() == '/' || utf8Path.front() == '\\') return false;
-    if (utf8Path.size() >= 2 && utf8Path[1] == ':') return false;  // drive qualified
+    if (utf8Path.find(':') != std::string::npos) return false;
 
     // Walk each path component, reject "." and ".."
     size_t start = 0;
@@ -362,6 +358,64 @@ static bool HasWhiteoutPrefix(const std::wstring& filename) {
     return filename.size() >= 4 && filename.compare(0, 4, L".wh.") == 0;
 }
 
+// The first segment of `relativePath` as Windows opens it: lowercase, and
+// without trailing dots and spaces.
+static std::wstring FirstSegmentAsOpened(const std::wstring& relativePath) {
+    std::wstring firstSegment = NormalizePath(relativePath);
+    const size_t separator = firstSegment.find(L'\\');
+    if (separator != std::wstring::npos) firstSegment.erase(separator);
+    firstSegment.erase(firstSegment.find_last_not_of(L". ") + 1);
+    return firstSegment;
+}
+
+static bool FirstSegmentOpensAsSidecar(const std::wstring& relativePath) {
+    return IsRootSidecarPath(FirstSegmentAsOpened(relativePath));
+}
+
+// The long name of the entry `name` directly under `directory`, or no value
+// when no such entry exists. A short name such as `OVERLA~1` resolves to
+// the long name of its entry.
+static std::optional<std::wstring> ExistingLongName(const fs::path& directory,
+                                                    const std::wstring& name) {
+    const std::wstring path = (directory / name).wstring();
+    const DWORD needed = ::GetLongPathNameW(path.c_str(), nullptr, 0);
+    if (needed == 0) return std::nullopt;
+    std::wstring longPath(needed, L'\0');
+    const DWORD written = ::GetLongPathNameW(path.c_str(), longPath.data(), needed);
+    if (written == 0 || written >= needed) return std::nullopt;
+    longPath.resize(written);
+    return fs::path(longPath).filename().wstring();
+}
+
+// An unpack writes no entry whose first segment opens as the root sidecar,
+// as the whiteout marker of the root sidecar, or as an existing entry in
+// the target whose long name is the root sidecar.
+static bool UnpackSkipsEntry(const std::wstring& relativePath,
+                             const fs::path& targetRoot) {
+    const std::wstring firstSegment = FirstSegmentAsOpened(relativePath);
+    if (firstSegment.empty()) return false;
+    if (IsRootSidecarPath(firstSegment)) return true;
+    if (HasWhiteoutPrefix(firstSegment) &&
+        IsRootSidecarPath(firstSegment.substr(std::wstring_view(kWhiteoutPrefix).size()))) {
+        return true;
+    }
+    const std::optional<std::wstring> longName = ExistingLongName(targetRoot, firstSegment);
+    return longName && FirstSegmentOpensAsSidecar(*longName);
+}
+
+// Moves `it` past the root sidecar and everything under it. Returns false
+// and leaves `it` unchanged when `it` is not on the root sidecar.
+static bool StepPastRootSidecar(fs::recursive_directory_iterator& it,
+                                std::error_code& ec) {
+    if (it.depth() != 0 ||
+        !FirstSegmentOpensAsSidecar(it->path().filename().wstring())) {
+        return false;
+    }
+    it.disable_recursion_pending();
+    it.increment(ec);
+    return true;
+}
+
 // Pack a single archive entry into the buffer: header + name + data.
 static DWORD AppendFileEntry(std::vector<uint8_t>& archive,
                              const std::string& utf8Name,
@@ -445,6 +499,10 @@ static DWORD BuildArchiveFromDirectory(const std::wstring& sourceDir,
 
     const auto end = fs::recursive_directory_iterator();
     while (it != end) {
+        if (StepPastRootSidecar(it, ec)) {
+            if (ec) return ERROR_ACCESS_DENIED;
+            continue;
+        }
         const auto& entry = *it;
 
         std::string utf8Name = NormalizeRelativePath(entry.path(), basePath);
@@ -520,7 +578,12 @@ static DWORD ScanDirectory(const std::wstring& dir,
 
     const auto end = fs::recursive_directory_iterator();
     while (it != end) {
+        if (StepPastRootSidecar(it, ec)) {
+            if (ec) return ERROR_ACCESS_DENIED;
+            continue;
+        }
         const auto& entry = *it;
+
         fs::path rel = fs::relative(entry.path(), base);
         std::wstring relStr = rel.wstring();
         std::replace(relStr.begin(), relStr.end(), L'\\', L'/');
@@ -733,6 +796,47 @@ static DWORD WriteImageFile(const std::wstring& outputPath,
 // Archive extraction
 // ===========================================================================
 
+// Writes the `entry.size` bytes at `fileData` to `target`, and then gives
+// the file the attributes and the last-write time from `entry`.
+static DWORD WriteExtractedFile(const fs::path& target,
+                                const FileEntryHeader& entry,
+                                const uint8_t* fileData) {
+    std::error_code ec;
+    if (target.has_parent_path()) {
+        fs::create_directories(target.parent_path(), ec);
+    }
+    std::ofstream out(target, std::ios::binary | std::ios::trunc);
+    if (!out) return ERROR_ACCESS_DENIED;
+    if (entry.size > 0) {
+        out.write(reinterpret_cast<const char*>(fileData),
+                  static_cast<std::streamsize>(entry.size));
+        if (!out) return ERROR_WRITE_FAULT;
+    }
+    out.close();
+
+    if (!::SetFileAttributesW(target.c_str(), entry.attributes)) {
+        return ::GetLastError();
+    }
+    HANDLE hFile = ::CreateFileW(
+        target.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return ::GetLastError();
+    }
+    FILETIME ft;
+    ft.dwHighDateTime = static_cast<DWORD>(entry.modified >> 32);
+    ft.dwLowDateTime  = static_cast<DWORD>(entry.modified & 0xFFFFFFFF);
+    if (!::SetFileTime(hFile, nullptr, nullptr, &ft)) {
+        const DWORD err = ::GetLastError();
+        ::CloseHandle(hFile);
+        return err;
+    }
+    if (!::CloseHandle(hFile)) {
+        return ::GetLastError();
+    }
+    return ERROR_SUCCESS;
+}
+
 static DWORD ExtractArchive(const uint8_t* data, size_t dataSize,
                             const std::wstring& targetDir,
                             std::vector<std::wstring>& extractedWhiteouts) {
@@ -760,14 +864,19 @@ static DWORD ExtractArchive(const uint8_t* data, size_t dataSize,
         pos += entry.nameLength;
 
         if (!IsValidArchivePath(utf8Name)) return ERROR_BAD_PATHNAME;
+        if (entry.size > dataSize - pos) return ERROR_INVALID_DATA;
 
-        fs::path rel = fs::path(Utf8ToWide(utf8Name));
-        fs::path target = targetRoot / rel;
+        const std::wstring name = Utf8ToWide(utf8Name);
+        if (UnpackSkipsEntry(name, targetRoot)) {
+            if (!entry.isDirectory) pos += entry.size;
+            continue;
+        }
 
-        // Zip-slip guard: verify extraction stays within targetDir using
-        // component-aware containment so a sibling whose name extends
-        // targetCanonical's name (e.g., `C:\out` vs `C:\out2`) cannot
-        // bypass the check.
+        fs::path target = targetRoot / fs::path(name);
+
+        // The containment check compares whole path components, so a
+        // sibling whose name extends the target's name, such as `C:\out2`
+        // next to `C:\out`, does not pass.
         fs::path canon = fs::weakly_canonical(target, ec);
         if (ec) return ERROR_BAD_PATHNAME;
         if (!IsPathContainedIn(canon.wstring(), targetCanonical.wstring())) {
@@ -775,59 +884,57 @@ static DWORD ExtractArchive(const uint8_t* data, size_t dataSize,
         }
 
         if (entry.isDirectory) {
-            if (pos + entry.size > dataSize) return ERROR_INVALID_DATA;
             fs::create_directories(target, ec);
         } else {
-            if (pos + entry.size > dataSize) return ERROR_INVALID_DATA;
-            // Ensure parent exists
-            if (target.has_parent_path()) {
-                fs::create_directories(target.parent_path(), ec);
-            }
-            std::ofstream out(target, std::ios::binary | std::ios::trunc);
-            if (!out) return ERROR_ACCESS_DENIED;
-            if (entry.size > 0) {
-                out.write(reinterpret_cast<const char*>(data + pos),
-                          static_cast<std::streamsize>(entry.size));
-                if (!out) return ERROR_WRITE_FAULT;
-            }
-            out.close();
-
-            // Restore attributes and timestamps. Previously all four calls
-            // were fire-and-forget; a failure to apply readonly/hidden/
-            // system bits or to set the modified time was indistinguishable
-            // from a faithful extraction. Surface errors so callers don't
-            // make cache/conflict decisions based on wrong metadata.
-            if (!::SetFileAttributesW(target.c_str(), entry.attributes)) {
-                return ::GetLastError();
-            }
-            HANDLE hFile = ::CreateFileW(
-                target.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ,
-                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (hFile == INVALID_HANDLE_VALUE) {
-                return ::GetLastError();
-            }
-            FILETIME ft;
-            ft.dwHighDateTime = static_cast<DWORD>(entry.modified >> 32);
-            ft.dwLowDateTime  = static_cast<DWORD>(entry.modified & 0xFFFFFFFF);
-            if (!::SetFileTime(hFile, nullptr, nullptr, &ft)) {
-                const DWORD err = ::GetLastError();
-                ::CloseHandle(hFile);
-                return err;
-            }
-            if (!::CloseHandle(hFile)) {
-                return ::GetLastError();
-            }
-
-            if (entry.isWhiteout) {
-                // Track which archive paths we already wrote as whiteouts
-                extractedWhiteouts.push_back(Utf8ToWide(utf8Name));
-            }
-
+            const DWORD err = WriteExtractedFile(target, entry, data + pos);
+            if (err != ERROR_SUCCESS) return err;
+            if (entry.isWhiteout) extractedWhiteouts.push_back(name);
             pos += entry.size;
         }
     }
-    // Reached EOF without marker
     return ERROR_INVALID_DATA;
+}
+
+// Writes a whiteout marker for each path in `whiteouts` that the archive
+// did not already hold as a whiteout entry. A path in `whiteouts` gets the
+// same path check and containment check as an archive entry, so an image
+// that lists `../outside` writes no marker outside `targetDir`.
+static DWORD MaterializeMetadataWhiteouts(const std::vector<std::wstring>& whiteouts,
+                                          const std::vector<std::wstring>& extractedWhiteouts,
+                                          const std::wstring& targetDir) {
+    std::unordered_map<std::wstring, bool> already;
+    for (const auto& w : extractedWhiteouts) already[ToLower(w)] = true;
+
+    std::error_code targetEc;
+    fs::path targetRoot(targetDir);
+    fs::path targetCanonical = fs::weakly_canonical(targetRoot, targetEc);
+    if (targetEc) targetCanonical = targetRoot;
+    const std::wstring rootStr = targetCanonical.wstring();
+
+    for (const auto& logical : whiteouts) {
+        std::string utf8Logical = WideToUtf8(logical);
+        if (!IsValidArchivePath(utf8Logical)) return ERROR_BAD_PATHNAME;
+
+        std::wstring marker = MakeWhiteoutMarkerPath(logical);
+        if (already.count(ToLower(marker))) continue;
+        if (UnpackSkipsEntry(marker, targetRoot)) continue;
+
+        fs::path target = targetRoot / fs::path(marker);
+        std::error_code ec;
+        fs::path canon = fs::weakly_canonical(target, ec);
+        if (ec) return ERROR_BAD_PATHNAME;
+        if (!IsPathContainedIn(canon.wstring(), rootStr)) {
+            return ERROR_BAD_PATHNAME;
+        }
+
+        if (target.has_parent_path()) {
+            fs::create_directories(target.parent_path(), ec);
+        }
+        std::ofstream whFile(target, std::ios::binary | std::ios::trunc);
+        if (!whFile) return ERROR_ACCESS_DENIED;
+        whFile.close();
+    }
+    return ERROR_SUCCESS;
 }
 
 // ===========================================================================
@@ -956,50 +1063,7 @@ DWORD LayerImageManager::ExtractImage(const std::wstring& imagePath,
                          targetDir, extractedWhiteouts);
     if (err != ERROR_SUCCESS) return err;
 
-    // Materialize metadata.whiteouts that weren't archived explicitly.
-    // Apply the same validation + containment check ExtractArchive uses for
-    // archived entries. A malicious image can list `..\outside` or `C:\esc`
-    // in metadata.whiteouts, and `MakeWhiteoutMarkerPath` will happily
-    // produce a path that resolves outside `targetDir` when concatenated.
-    {
-        std::unordered_map<std::wstring, bool> already;
-        for (const auto& w : extractedWhiteouts) already[ToLower(w)] = true;
-
-        std::error_code targetEc;
-        fs::path targetRoot(targetDir);
-        fs::path targetCanonical = fs::weakly_canonical(targetRoot, targetEc);
-        if (targetEc) targetCanonical = targetRoot;
-        const std::wstring rootStr = targetCanonical.wstring();
-
-        for (const auto& logical : metadata.whiteouts) {
-            std::string utf8Logical = WideToUtf8(logical);
-            if (!IsValidArchivePath(utf8Logical)) return ERROR_BAD_PATHNAME;
-
-            std::wstring marker = MakeWhiteoutMarkerPath(logical);
-            if (already.count(ToLower(marker))) continue;
-
-            fs::path target = fs::path(targetDir) / fs::path(marker);
-            std::error_code ec;
-            fs::path canon = fs::weakly_canonical(target, ec);
-            if (ec) return ERROR_BAD_PATHNAME;
-            // Component-aware containment (see IsPathContainedIn). A
-            // malicious image listing `..\outside` or a sibling whose
-            // name extends rootStr cannot land its whiteout marker
-            // outside targetDir.
-            if (!IsPathContainedIn(canon.wstring(), rootStr)) {
-                return ERROR_BAD_PATHNAME;
-            }
-
-            if (target.has_parent_path()) {
-                fs::create_directories(target.parent_path(), ec);
-            }
-            std::ofstream whFile(target, std::ios::binary | std::ios::trunc);
-            if (!whFile) return ERROR_ACCESS_DENIED;
-            whFile.close();
-        }
-    }
-
-    return ERROR_SUCCESS;
+    return MaterializeMetadataWhiteouts(metadata.whiteouts, extractedWhiteouts, targetDir);
 }
 
 DWORD LayerImageManager::GetImageInfo(const std::wstring& imagePath,

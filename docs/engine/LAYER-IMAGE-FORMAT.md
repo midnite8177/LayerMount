@@ -164,10 +164,11 @@ A path in the archive is UTF-8 text with forward slashes. A backslash
 in a source path converts to a forward slash before the writer stores
 it.
 
-A path does not start with a slash. A path does not carry a drive
-letter, such as `C:`. A path does not contain a `.` component or a
-`..` component. A path can end with a slash; a directory entry uses
-this form.
+A path does not start with a slash. A path does not contain a colon,
+so it carries no drive letter, such as `C:`, and no stream name, such
+as `file:stream`. A path does not contain a `.` component or a `..`
+component. A path can end with a slash; a directory entry uses this
+form. An unpack fails on a path that breaks one of these rules.
 
 ### Whiteout entries
 
@@ -180,15 +181,43 @@ A whiteout entry carries `isDirectory = 0`, `size = 0`, and
 `isWhiteout = 1`. It is a zero-size file entry at the marker path.
 
 The whiteout marker is the only deletion marker that the layer image
-format defines. A directory-level opaque marker is a separate,
-overlay-mount concept, and it does not appear in a layer image.
+format defines. An opaque directory in an overlay's upper holds the
+file `.wh..wh..opq`. A pack copies that file like any other `.wh.`
+file, as a zero-size entry with `isWhiteout = 1`, so the opaque
+directory stays opaque in the image. A pack reads only the main data of
+each file. The `:overlay.opaque` stream and every other alternate data
+stream stay out of the image.
+
+### The root `.overlay` directory
+
+An overlay keeps its sidecar store in `.overlay` at the root of its
+upper. A live overlay also holds its lock files there, and a transient
+overlay keeps its work directory there. The engine owns this directory,
+and the sidecar records use the absolute path of the upper as a key,
+so they have no meaning in another directory.
+
+A pack takes nothing from a `.overlay` at the root of the source. An
+unpack writes no entry and no whiteout marker whose first path
+component is `.overlay` or `.wh..overlay`, so a whiteout of `.overlay`
+itself does not land either. The unpack compares that component without
+case and without trailing dots or spaces, the way Windows opens it.
+When the component names an entry that already exists in the target,
+the unpack also compares the long name of that entry, so a short name
+such as `OVERLA~1` does not reach `.overlay`. An image from an older
+writer, or a crafted image, can hold such entries. The unpack skips
+them and writes the other entries.
+
+A `.overlay` below the root, such as `sub/.overlay`, is user data. Pack
+and unpack treat it like any other directory.
 
 ---
 
 ## Differential layer images
 
 A differential layer image compares a source directory against a base
-directory, path by path.
+directory, path by path. The comparison does not see a `.overlay` at
+the root of the source or of the base, so no entry and no whiteout
+comes from either one. See "The root `.overlay` directory" above.
 
 A path that exists in the source but not in the base is new. The
 writer archives it.

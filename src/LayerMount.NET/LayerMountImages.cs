@@ -19,6 +19,9 @@ public sealed class ImagesApi
     /// <summary>
     /// Packs <paramref name="sourceDir"/> into a <c>.lmnt</c> layer image at
     /// <paramref name="outputPath"/>, stamped per <paramref name="stampOptions"/>.
+    /// The image leaves out a <c>.overlay</c> directory at the root of
+    /// <paramref name="sourceDir"/>, so the upper of a live overlay packs
+    /// without its lock files, staging area and sidecar records.
     /// </summary>
     /// <param name="sourceDir">Directory tree to pack.</param>
     /// <param name="outputPath">Destination path for the <c>.lmnt</c> file.</param>
@@ -48,7 +51,8 @@ public sealed class ImagesApi
     /// <paramref name="sourceDir"/> that are new or modified relative to
     /// <paramref name="baseDir"/>. Files deleted in <paramref name="sourceDir"/>
     /// relative to <paramref name="baseDir"/> get whiteout entries in the
-    /// image metadata.
+    /// image metadata. The comparison leaves out a <c>.overlay</c> directory
+    /// at the root of <paramref name="sourceDir"/> and of <paramref name="baseDir"/>.
     /// </summary>
     /// <param name="sourceDir">Directory tree to pack.</param>
     /// <param name="baseDir">Directory tree the differential is computed against.</param>
@@ -183,7 +187,9 @@ public sealed class ImagesApi
     /// Extracts the layer image at <paramref name="imagePath"/> into
     /// <paramref name="targetDir"/>, overwriting a file already there at
     /// the same relative path. Rejects the image if the data section's
-    /// SHA-256 does not match the header's checksum.
+    /// SHA-256 does not match the header's checksum. The unpack writes
+    /// nothing at a <c>.overlay</c> directory at the root of
+    /// <paramref name="targetDir"/>, even when the image holds such entries.
     /// </summary>
     /// <param name="imagePath">Path of the <c>.lmnt</c> image to extract.</param>
     /// <param name="targetDir">Directory to extract into.</param>
@@ -203,7 +209,8 @@ public sealed class ImagesApi
     /// the same relative path, without checking the data section's SHA-256
     /// against the header's checksum. Use only when the caller has already
     /// established the image's integrity by other means; a corrupted or
-    /// tampered image extracts with no signal.
+    /// tampered image extracts with no signal. The unpack writes nothing at
+    /// a <c>.overlay</c> directory at the root of <paramref name="targetDir"/>.
     /// </summary>
     /// <param name="imagePath">Path of the <c>.lmnt</c> image to extract.</param>
     /// <param name="targetDir">Directory to extract into.</param>

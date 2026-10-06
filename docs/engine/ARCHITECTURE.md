@@ -1239,9 +1239,11 @@ image from a source directory. `Unpack` reverses the process and
 verifies the checksum, unless the caller turns verification off.
 `PackDifferential` builds an image that records only the entries that
 changed against a base directory, with a whiteout entry for each
-deletion. A manifest lists an ordered set of images for distribution.
-See [LAYER-IMAGE-FORMAT.md](LAYER-IMAGE-FORMAT.md) for the byte-level
-format.
+deletion. All three leave out the `.overlay` directory at the root of
+the tree, so the upper of a live overlay packs without its lock files,
+its staging area and its sidecar records. A manifest lists an ordered
+set of images for distribution. See
+[LAYER-IMAGE-FORMAT.md](LAYER-IMAGE-FORMAT.md) for the byte-level format.
 
 ---
 

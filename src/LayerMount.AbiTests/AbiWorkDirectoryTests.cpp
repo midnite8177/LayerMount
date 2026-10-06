@@ -16,15 +16,6 @@ bool Exists(const std::wstring& path) {
     return ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-std::vector<std::wstring> NamesIn(const std::wstring& directory) {
-    std::vector<std::wstring> names;
-    std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
-        names.push_back(entry.path().filename().wstring());
-    }
-    return names;
-}
-
 std::wstring LastErrorMessage(HRESULT hr) {
     std::vector<wchar_t> message(4096);
     SIZE_T required = 0;
@@ -85,7 +76,7 @@ public:
 
         Assert::IsTrue(std::filesystem::is_directory(staging),
             L"The staging area exists after the create");
-        Assert::IsTrue(NamesIn(staging).empty(),
+        Assert::IsTrue(SortedNamesIn(staging).empty(),
             L"The create deletes every leftover in the staging area");
     }
 
@@ -273,7 +264,7 @@ public:
             L"A transient overlay stages in <workDir>\\.overlay\\work");
         Assert::AreEqual<HRESULT>(HRESULT_FROM_WIN32(ERROR_BUSY), secondHr,
             L"A second transient overlay on a held directory fails as busy");
-        const std::vector<std::wstring> rootNames = NamesIn(workDir);
+        const std::vector<std::wstring> rootNames = SortedNamesIn(workDir);
         Assert::IsTrue(rootNames == std::vector<std::wstring>{L".overlay"},
             L"The root of a transient overlay's upper holds only .overlay");
     }

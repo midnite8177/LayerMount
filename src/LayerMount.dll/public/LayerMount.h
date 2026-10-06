@@ -1434,7 +1434,10 @@ LM_API HRESULT LM_CALL LayerMountVssCloseSnapshot(LM_VSS_SNAPSHOT_HANDLE snapsho
 /* Packs `sourceDir` into a `.lmnt` layer image at `outputPath` with the
  * given zstd `compressionLevel`, stamping `options`' author and
  * description when non-NULL. Returns a receipt handle in *outImage when
- * non-NULL; the handle carries no long-lived state beyond the path. */
+ * non-NULL; the handle carries no long-lived state beyond the path. The
+ * image leaves out a `.overlay` directory at the root of `sourceDir`, so
+ * the upper of a live overlay packs without its lock files, staging area
+ * and sidecar records. */
 LM_API HRESULT LM_CALL LayerMountImagePack(
     LM_HANDLE                    mount,
     PCWSTR                        sourceDir,
@@ -1447,7 +1450,8 @@ LM_API HRESULT LM_CALL LayerMountImagePack(
  * Create a differential image that records only files in sourceDir that
  * are new or modified relative to baseDir. Deleted-in-source files get
  * whiteout entries in the metadata. Identical shape + lifetime as
- * LayerMountImagePack.
+ * LayerMountImagePack. The comparison leaves out a `.overlay` directory at
+ * the root of sourceDir and of baseDir.
  */
 LM_API HRESULT LM_CALL LayerMountImagePackDifferential(
     LM_HANDLE                    mount,
@@ -1471,7 +1475,8 @@ LM_API HRESULT LM_CALL LayerMountImageCreateManifest(
 
 /* Extracts the layer image at `imagePath` into `targetDir`.
  * `verifyChecksum` rejects the image if the data section's SHA-256 does
- * not match the header. */
+ * not match the header. The unpack writes nothing at a `.overlay` directory
+ * at the root of `targetDir`, even when the image holds such entries. */
 LM_API HRESULT LM_CALL LayerMountImageUnpack(
     LM_HANDLE mount,
     PCWSTR     imagePath,

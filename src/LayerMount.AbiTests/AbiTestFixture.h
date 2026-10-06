@@ -8,6 +8,7 @@
 
 #include "AclTestHelpers.h"
 
+#include <algorithm>
 #include <iterator>
 
 namespace LayerMountAbiTests {
@@ -107,6 +108,16 @@ inline std::string ReadAllBytes(const std::wstring& path) {
     std::ifstream f(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(f),
                        std::istreambuf_iterator<char>());
+}
+
+// The names of the entries directly in `directory`, in sorted order.
+inline std::vector<std::wstring> SortedNamesIn(const std::wstring& directory) {
+    std::vector<std::wstring> names;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        names.push_back(entry.path().filename().wstring());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 constexpr DWORD kCurrentProcessOriginator = 0u;
