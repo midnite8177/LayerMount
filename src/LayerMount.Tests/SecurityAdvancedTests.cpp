@@ -285,7 +285,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             {CallerPath(L"src-secured"), CallerPath(L"dst-secured")},

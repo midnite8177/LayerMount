@@ -16,14 +16,16 @@ class CopyUp;
 
 // Renames a directory or a directory link in the merged view. Builds a copy
 // of a lower source in the work directory and moves it to the new upper
-// path, and moves an upper source there.
+// path, and moves an upper source there. A sidecar record that does not
+// move with its entry emits an LM_EVT_WARNING event through events.
 class DirectoryRename {
 public:
     DirectoryRename(ConfigRef config,
                     PathResolver& pathResolver,
                     WhiteoutManager& whiteoutMgr,
                     Cache& cache,
-                    CopyUp& copyUp);
+                    CopyUp& copyUp,
+                    const abi::EventEmitter& events);
 
     // The old and new paths of a rename, as the caller gives them.
     struct RenameCallerPaths {
@@ -123,6 +125,7 @@ private:
     WhiteoutManager& whiteoutMgr_;
     Cache& cache_;
     CopyUp& copyUp_;
+    const abi::EventEmitter& events_;
 };
 
 }

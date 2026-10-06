@@ -9,6 +9,16 @@
 
 namespace LayerMount {
 
+void WarnRecordLeftBehind(const abi::EventEmitter& events,
+                          const UpperEntryMove& move,
+                          const std::wstring& relativePath) {
+    if (NT_SUCCESS(move.recordLeftBehind)) {
+        return;
+    }
+    events.Emit(LM_EVT_WARNING, HresultFromNtStatus(move.recordLeftBehind),
+                relativePath.c_str(), L"A sidecar record did not move with its entry");
+}
+
 RenameRollback::RenameRollback(ConfigRef config,
                                PathResolver& pathResolver,
                                WhiteoutManager& whiteoutMgr,
@@ -62,8 +72,10 @@ NTSTATUS RenameRollback::RemoveDestinationWhiteoutOrUndo(
 }
 
 NTSTATUS RenameRollback::MoveBack(const UpperRename& rename) {
-    const NTSTATUS moveBack = MoveUpperEntry(pathResolver_.GetStoredUpperPath(rename.newNorm),
-                                             rename.oldUpperPath, ReplaceExisting::No, config_);
+    const UpperEntryMove move = MoveUpperEntry(pathResolver_.GetStoredUpperPath(rename.newNorm),
+                                               rename.oldUpperPath, ReplaceExisting::No, config_);
+    const NTSTATUS moveBack = move.status;
+    WarnRecordLeftBehind(events_, move, NT_SUCCESS(moveBack) ? rename.oldNorm : rename.newNorm);
     if (NT_SUCCESS(moveBack) && rename.opaqueMarker == UndoOpaqueMarker::Remove &&
         !whiteoutMgr_.RemoveOpaque(rename.oldNorm)) {
         WarnUndoFailed(E_FAIL, rename.oldNorm,

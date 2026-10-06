@@ -1,5 +1,6 @@
 #include "SidecarMetadata.h"
 #include "LayerPath.h"
+#include "NtStatusUtil.h"
 
 #include <bcrypt.h>
 #include <nlohmann/json.hpp>
@@ -110,6 +111,27 @@ std::wstring SidecarBase(const std::wstring& filePath, const std::wstring& upper
     std::wstring hash = Sha1Hex(WideToUtf8(keyed));
     if (hash.empty()) return {};
     return JoinDirPath(upperRoot, kSidecarDirName) + L"\\" + hash;
+}
+
+// Moves the record file at `from` to `to`, over a record already at `to`.
+// When no record is at `from`, deletes the record at `to`. Returns the Win32 error
+// of the failed move or delete, or ERROR_SUCCESS.
+DWORD MoveRecordFile(const std::wstring& from, const std::wstring& to) {
+    if (::MoveFileExW(from.c_str(), to.c_str(),
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return ERROR_SUCCESS;
+    }
+    const DWORD moveErr = ::GetLastError();
+    if (moveErr != ERROR_FILE_NOT_FOUND && moveErr != ERROR_PATH_NOT_FOUND) {
+        return moveErr;
+    }
+    if (::DeleteFileW(to.c_str())) {
+        return ERROR_SUCCESS;
+    }
+    const DWORD deleteErr = ::GetLastError();
+    return deleteErr == ERROR_FILE_NOT_FOUND || deleteErr == ERROR_PATH_NOT_FOUND
+        ? ERROR_SUCCESS
+        : deleteErr;
 }
 
 bool EnsureSidecarDir(const std::wstring& upperRoot) {
@@ -239,25 +261,23 @@ bool SidecarMetadata::Remove(const std::wstring& filePath,
     return ::GetLastError() == ERROR_FILE_NOT_FOUND;
 }
 
-void SidecarMetadata::Move(const std::wstring& fromPath,
-                           const std::wstring& toPath,
-                           const std::wstring& upperRoot) {
+NTSTATUS SidecarMetadata::Move(const std::wstring& fromPath,
+                               const std::wstring& toPath,
+                               const std::wstring& upperRoot) {
     const std::wstring fromBase = SidecarBase(fromPath, upperRoot);
     const std::wstring toBase = SidecarBase(toPath, upperRoot);
-    if (fromBase.empty() || toBase.empty() || fromBase == toBase) return;
+    if (fromBase.empty() || toBase.empty() || fromBase == toBase) return STATUS_SUCCESS;
 
-    for (const wchar_t* suffix : {kMetaSuffix, kOpaqueSuffix}) {
-        const std::wstring from = fromBase + suffix;
-        const std::wstring to = toBase + suffix;
-        if (::MoveFileExW(from.c_str(), to.c_str(),
-                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            continue;
-        }
-        const DWORD moveErr = ::GetLastError();
-        if (moveErr == ERROR_FILE_NOT_FOUND || moveErr == ERROR_PATH_NOT_FOUND) {
-            ::DeleteFileW(to.c_str());
-        }
+    const DWORD metaErr = MoveRecordFile(fromBase + kMetaSuffix, toBase + kMetaSuffix);
+    if (metaErr != ERROR_SUCCESS) {
+        return NtStatusFromWin32(metaErr);
     }
+    const DWORD opaqueErr = MoveRecordFile(fromBase + kOpaqueSuffix, toBase + kOpaqueSuffix);
+    if (opaqueErr != ERROR_SUCCESS) {
+        MoveRecordFile(toBase + kMetaSuffix, fromBase + kMetaSuffix);
+        return NtStatusFromWin32(opaqueErr);
+    }
+    return STATUS_SUCCESS;
 }
 
 bool SidecarMetadata::HasOpaque(const std::wstring& dirPath,

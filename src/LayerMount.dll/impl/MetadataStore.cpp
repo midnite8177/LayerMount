@@ -1,5 +1,6 @@
 #include "MetadataStore.h"
 #include "LayerPath.h"
+#include "NtStatusUtil.h"
 #include "SidecarMetadata.h"
 
 #include <nlohmann/json.hpp>
@@ -324,29 +325,59 @@ bool MetadataStore::RemoveLayerMountMetadata(const std::wstring& filePath,
 
 namespace {
 
-// Calls visit with the path of each entry below dirPath. Enters a
-// subdirectory, but not a junction or a directory symbolic link, whose
-// sidecar records are its own and not those of its target's entries. The
-// find data carries the reparse tag, so the walk reads no tag of its own.
-void ForEachEntryBelow(const std::wstring& dirPath,
-                       const std::function<void(const std::wstring&)>& visit) {
+// Calls visit with the path of each entry below dirPath, as
+// ForEachEntryBelow does. Returns the error of the first visit that fails,
+// and stops there. Sets *listingError to the error of the first directory
+// that it cannot list, if *listingError is STATUS_SUCCESS, and continues
+// with the next entry.
+NTSTATUS VisitEntriesBelow(const std::wstring& dirPath,
+                           const std::function<NTSTATUS(const std::wstring&)>& visit,
+                           NTSTATUS* listingError) {
+    const auto keepFirstListingError = [listingError](NTSTATUS status) {
+        if (NT_SUCCESS(*listingError)) {
+            *listingError = status;
+        }
+    };
     WIN32_FIND_DATAW fd{};
     HANDLE find = ::FindFirstFileW(JoinDirPath(dirPath, L"*").c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) {
-        return;
+        keepFirstListingError(StatusOfFailedCall(ERROR_READ_FAULT));
+        return STATUS_SUCCESS;
     }
+    NTSTATUS status = STATUS_SUCCESS;
     do {
         const std::wstring name = fd.cFileName;
         if (name == L"." || name == L"..") continue;
         const std::wstring childPath = JoinDirPath(dirPath, name);
-        visit(childPath);
+        status = visit(childPath);
+        if (!NT_SUCCESS(status)) break;
         const bool isLink = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
                             IsReparseTagNameSurrogate(fd.dwReserved0);
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && !isLink) {
-            ForEachEntryBelow(childPath, visit);
+            status = VisitEntriesBelow(childPath, visit, listingError);
+            if (!NT_SUCCESS(status)) break;
         }
     } while (::FindNextFileW(find, &fd));
+    if (NT_SUCCESS(status) && ::GetLastError() != ERROR_NO_MORE_FILES) {
+        keepFirstListingError(StatusOfFailedCall(ERROR_READ_FAULT));
+    }
     ::FindClose(find);
+    return status;
+}
+
+// Calls visit with the path of each entry below dirPath. Enters a
+// subdirectory, but not a junction or a directory symbolic link, whose
+// sidecar records are its own and not those of its target's entries.
+// WIN32_FIND_DATAW.dwReserved0 holds the reparse tag when
+// FILE_ATTRIBUTE_REPARSE_POINT is set, so the walk reads no tag of its own.
+// Stops at the first visit that fails and returns its error. A directory
+// that the walk cannot list does not stop it. The walk continues with the
+// next entry and returns the first listing error at the end.
+NTSTATUS ForEachEntryBelow(const std::wstring& dirPath,
+                           const std::function<NTSTATUS(const std::wstring&)>& visit) {
+    NTSTATUS listingError = STATUS_SUCCESS;
+    const NTSTATUS visitStatus = VisitEntriesBelow(dirPath, visit, &listingError);
+    return NT_SUCCESS(visitStatus) ? listingError : visitStatus;
 }
 
 // Whether the entry at path is a directory that is not a junction or a
@@ -361,22 +392,70 @@ bool IsDirectoryButNotLink(const std::wstring& path) {
     return NT_SUCCESS(IsDirectoryLink(path, attrs, &isLink)) && !isLink;
 }
 
+// Calls visit with the old and the new path of the entry that moved from
+// `from` to `to`, and of each entry below it, as ForEachEntryBelow walks
+// them. Returns as ForEachEntryBelow does.
+NTSTATUS ForEachMovedEntry(
+    const std::wstring& from,
+    const std::wstring& to,
+    const std::function<NTSTATUS(const std::wstring&, const std::wstring&)>& visit) {
+    const NTSTATUS status = visit(from, to);
+    if (!NT_SUCCESS(status) || !IsDirectoryButNotLink(to)) {
+        return status;
+    }
+    return ForEachEntryBelow(to, [&](const std::wstring& movedPath) {
+        return visit(from + movedPath.substr(to.size()), movedPath);
+    });
 }
 
-void MetadataStore::MoveSidecarRecords(const std::wstring& from,
-                                       const std::wstring& to,
-                                       const LayerConfig& config) {
+}
+
+NTSTATUS MetadataStore::MoveSidecarRecords(const std::wstring& from,
+                                           const std::wstring& to,
+                                           const LayerConfig& config,
+                                           std::vector<MovedSidecarRecord>* moved) {
     if (!UseSidecarFor(&config)) {
-        return;
+        return STATUS_SUCCESS;
     }
-    SidecarMetadata::Move(from, to, config.upperPath);
-    if (!IsDirectoryButNotLink(to)) {
-        return;
-    }
-    ForEachEntryBelow(to, [&](const std::wstring& movedPath) {
-        SidecarMetadata::Move(from + movedPath.substr(to.size()), movedPath,
-                              config.upperPath);
+    return ForEachMovedEntry(from, to, [&](const std::wstring& fromPath,
+                                           const std::wstring& toPath) {
+        const NTSTATUS status = SidecarMetadata::Move(fromPath, toPath, config.upperPath);
+        if (NT_SUCCESS(status)) {
+            moved->push_back({fromPath, toPath});
+        }
+        return status;
     });
+}
+
+NTSTATUS MetadataStore::MoveSidecarRecordsLeavingStuckOnes(const std::wstring& from,
+                                                           const std::wstring& to,
+                                                           const LayerConfig& config) {
+    if (!UseSidecarFor(&config)) {
+        return STATUS_SUCCESS;
+    }
+    NTSTATUS firstError = STATUS_SUCCESS;
+    const NTSTATUS walkStatus = ForEachMovedEntry(from, to, [&](const std::wstring& fromPath,
+                                                                const std::wstring& toPath) {
+        const NTSTATUS status = SidecarMetadata::Move(fromPath, toPath, config.upperPath);
+        if (!NT_SUCCESS(status) && NT_SUCCESS(firstError)) {
+            firstError = status;
+        }
+        return STATUS_SUCCESS;
+    });
+    return NT_SUCCESS(firstError) ? walkStatus : firstError;
+}
+
+NTSTATUS MetadataStore::MoveSidecarRecordsBack(const std::vector<MovedSidecarRecord>& moved,
+                                               const LayerConfig& config) {
+    NTSTATUS firstError = STATUS_SUCCESS;
+    for (auto record = moved.rbegin(); record != moved.rend(); ++record) {
+        const NTSTATUS status =
+            SidecarMetadata::Move(record->toPath, record->fromPath, config.upperPath);
+        if (!NT_SUCCESS(status) && NT_SUCCESS(firstError)) {
+            firstError = status;
+        }
+    }
+    return firstError;
 }
 
 std::vector<std::wstring> MetadataStore::ListSidecarKeyedEntries(const std::wstring& path,
@@ -389,6 +468,7 @@ std::vector<std::wstring> MetadataStore::ListSidecarKeyedEntries(const std::wstr
     if (IsDirectoryButNotLink(path)) {
         ForEachEntryBelow(path, [&](const std::wstring& entryPath) {
             entries.push_back(entryPath);
+            return STATUS_SUCCESS;
         });
     }
     return entries;

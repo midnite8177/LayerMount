@@ -1,15 +1,20 @@
 #include "FileRename.h"
 #include "CopyUp.h"
 #include "PathResolver.h"
+#include "RenameRollback.h"
 
 #include <utility>
 
 namespace LayerMount {
 
-FileRename::FileRename(ConfigRef config, PathResolver& pathResolver, CopyUp& copyUp)
+FileRename::FileRename(ConfigRef config,
+                       PathResolver& pathResolver,
+                       CopyUp& copyUp,
+                       const abi::EventEmitter& events)
     : config_(config.Get())
     , pathResolver_(pathResolver)
-    , copyUp_(copyUp) {
+    , copyUp_(copyUp)
+    , events_(events) {
 }
 
 MovedFile FileRename::MoveToUpper(const std::wstring& oldRelativePath,
@@ -38,8 +43,9 @@ MovedFile FileRename::MoveToUpper(const std::wstring& oldRelativePath,
     std::wstring oldUpperPath = pathResolver_.GetStoredUpperPath(oldRelativePath);
     const std::wstring newUpperPath =
         pathResolver_.GetUpperPathForNewEntry(CallerPath(newRelativePath));
-    status = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);
-    return {status, stagedShell, std::move(oldUpperPath)};
+    const UpperEntryMove move = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);
+    WarnRecordLeftBehind(events_, move, NT_SUCCESS(move.status) ? newNorm : oldNorm);
+    return {move.status, stagedShell, std::move(oldUpperPath)};
 }
 
 }

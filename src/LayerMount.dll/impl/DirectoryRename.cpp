@@ -3,6 +3,7 @@
 #include "DirectoryMerge.h"
 #include "LayerPath.h"
 #include "PathResolver.h"
+#include "RenameRollback.h"
 #include "WhiteoutManager.h"
 #include "Cache.h"
 #include "MetadataStore.h"
@@ -308,12 +309,14 @@ DirectoryRename::DirectoryRename(ConfigRef config,
                                  PathResolver& pathResolver,
                                  WhiteoutManager& whiteoutMgr,
                                  Cache& cache,
-                                 CopyUp& copyUp)
+                                 CopyUp& copyUp,
+                                 const abi::EventEmitter& events)
     : config_(config.Get())
     , pathResolver_(pathResolver)
     , whiteoutMgr_(whiteoutMgr)
     , cache_(cache)
-    , copyUp_(copyUp) {
+    , copyUp_(copyUp)
+    , events_(events) {
 }
 
 bool DirectoryRename::DestinationExistsInMerged(const std::wstring& normalizedPath) const {
@@ -417,8 +420,10 @@ NTSTATUS DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& paths,
     }
 
     std::wstring asidePath;
-    const NTSTATUS asideStatus = MoveUpperEntryToWork(
+    const UpperEntryMove aside = MoveUpperEntryToWork(
         oldUpperPath, [this]() { return copyUp_.GenerateWorkPath(); }, config_, &asidePath);
+    WarnRecordLeftBehind(events_, aside, oldNorm);
+    const NTSTATUS asideStatus = aside.status;
     if (!NT_SUCCESS(asideStatus)) {
         RemoveUpperEntry(newUpperPath, config_);
     } else if (!asidePath.empty()) {
@@ -455,7 +460,9 @@ NTSTATUS DirectoryRename::RenameUpperDirectory(const RenameCallerPaths& paths,
         }
     }
 
-    const NTSTATUS moveStatus = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);
+    const UpperEntryMove move = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);
+    WarnRecordLeftBehind(events_, move, NT_SUCCESS(move.status) ? newNorm : oldNorm);
+    const NTSTATUS moveStatus = move.status;
     if (!NT_SUCCESS(moveStatus)) {
         if (marksSource) {
             cache_.InvalidateWithAncestors(oldNorm);

@@ -28,10 +28,15 @@ struct MovedFile {
     std::wstring oldUpperPath;
 };
 
-// Moves a file of the merged view to a new name in the upper.
+// Moves a file of the merged view to a new name in the upper. A sidecar
+// record that does not move with the file emits an LM_EVT_WARNING event
+// through events.
 class FileRename {
 public:
-    FileRename(ConfigRef config, PathResolver& pathResolver, CopyUp& copyUp);
+    FileRename(ConfigRef config,
+               PathResolver& pathResolver,
+               CopyUp& copyUp,
+               const abi::EventEmitter& events);
 
     // Fails with STATUS_OBJECT_PATH_NOT_FOUND and writes nothing when
     // CopyUp::EnsureUpperParent refuses the new parent. Then copies a
@@ -55,6 +60,7 @@ private:
     const LayerConfig& config_;
     PathResolver& pathResolver_;
     CopyUp& copyUp_;
+    const abi::EventEmitter& events_;
 };
 
 }

@@ -72,17 +72,44 @@ public:
         const std::wstring& directoryPath,
         const LayerConfig* config);
 
+    // The sidecar record and opaque marker of one entry that
+    // MoveSidecarRecords moved from the key of fromPath to the key of toPath.
+    struct MovedSidecarRecord {
+        std::wstring fromPath;
+        std::wstring toPath;
+    };
+
     // Call after a rename moved the entry at `from` to `to`. When the
     // config's host lacks LM_CAP_ADS, moves the sidecar record and opaque
     // marker of the entry, and of each entry below it, without a walk into
     // a junction or a directory symbolic link, to the new path. The move
     // deletes a record already at a new path, so the moved entry never
-    // takes the record of the entry it replaced. A failed sidecar move does
-    // not undo the rename. On such a host, the move of a directory walks
+    // takes the record of the entry it replaced. Adds each entry whose
+    // records moved to *moved, in order. Stops at the first entry whose
+    // records cannot move and returns that error. A directory that the walk
+    // cannot list does not stop the move, but the call then returns the
+    // first listing error. On such a host, the move of a directory walks
     // its whole tree.
-    static void MoveSidecarRecords(
+    static NTSTATUS MoveSidecarRecords(
         const std::wstring& from,
         const std::wstring& to,
+        const LayerConfig& config,
+        std::vector<MovedSidecarRecord>* moved);
+
+    // Moves the records as MoveSidecarRecords does, but an entry whose
+    // records cannot move does not stop the move. Its records stay at the
+    // key of its old path. Returns the first error of a record move or of a
+    // listing.
+    static NTSTATUS MoveSidecarRecordsLeavingStuckOnes(
+        const std::wstring& from,
+        const std::wstring& to,
+        const LayerConfig& config);
+
+    // Moves the records in moved back to their old paths, in reverse order.
+    // A record that cannot move back stays at its new path, and the call
+    // continues with the next one. Returns the first error.
+    static NTSTATUS MoveSidecarRecordsBack(
+        const std::vector<MovedSidecarRecord>& moved,
         const LayerConfig& config);
 
     // Call before a delete of the entry at `path`. When the config's host

@@ -432,8 +432,8 @@ LayerMount::LayerMount(LayerConfig config)
     , stats_()
     , copyUp_(std::make_unique<CopyUp>(config_, *pathResolver_, *whiteoutMgr_, *cache_, stats_))
     , directoryRename_(std::make_unique<DirectoryRename>(
-          config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_))
-    , fileRename_(std::make_unique<FileRename>(config_, *pathResolver_, *copyUp_))
+          config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_, events_))
+    , fileRename_(std::make_unique<FileRename>(config_, *pathResolver_, *copyUp_, events_))
     , renameRollback_(std::make_unique<RenameRollback>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_, events_))
     , upperEntryRemover_(std::make_unique<UpperEntryRemover>(
@@ -2262,7 +2262,7 @@ LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldR
         if (!NT_SUCCESS(status)) return failure(status);
     }
 
-    RenameDestinationAside destinationAside(config_, *cache_);
+    RenameDestinationAside destinationAside(config_, *cache_, events_);
     if (replaceIfExists && kinds.destination.has_value()) {
         status = copyUp_->SetRenameDestinationAside(newNorm, *kinds.destination,
                                                     &destinationAside);

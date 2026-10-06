@@ -108,27 +108,53 @@ ReparseLink ReadReparseLink(const std::wstring& path, std::wstring* relativeTarg
 
 enum class ReplaceExisting { No, Yes };
 
+// The result of MoveUpperEntry. status is the result of the move.
+// recordLeftBehind is the error of the first sidecar record that the call
+// left at the key of a path where the entry is not, or STATUS_SUCCESS.
+struct UpperEntryMove {
+    NTSTATUS status;
+    NTSTATUS recordLeftBehind;
+};
+
 // Renames an upper file or directory within its volume. A junction or a
 // symbolic link moves as a link, and its target stays. With
 // ReplaceExisting::No, an entry at `to` fails the rename with
 // STATUS_OBJECT_NAME_COLLISION and stays as it was. An inherited deny-write
 // ACE on the upper parent fails the rename with STATUS_ACCESS_DENIED unless
 // the process holds SE_RESTORE_NAME. The sidecar records of the moved
-// entries follow them; see MetadataStore::MoveSidecarRecords.
-NTSTATUS MoveUpperEntry(const std::wstring& from,
-                        const std::wstring& to,
-                        ReplaceExisting replace,
-                        const LayerConfig& config);
+// entries follow them; see MetadataStore::MoveSidecarRecords. When a record
+// cannot move, the entry moves back to `from`, the records that moved go
+// back, and the status is the record error. If the entry cannot move back,
+// it stays at `to`, the records that can move follow it, and the status is
+// STATUS_SUCCESS, because a failed status tells the caller that the entry
+// is still at `from`. In both cases, a record that stays at the key of the
+// other path sets recordLeftBehind.
+// Warning: the undo cannot restore an entry that a move with
+// ReplaceExisting::Yes replaced. With ReplaceExisting::Yes, `to` must hold
+// no entry.
+UpperEntryMove MoveUpperEntry(const std::wstring& from,
+                              const std::wstring& to,
+                              ReplaceExisting replace,
+                              const LayerConfig& config);
+
+// Moves the upper entry as MoveUpperEntry does with ReplaceExisting::No,
+// but a sidecar record that cannot move does not stop the move. That record
+// stays at the key of its old path, and the other records move. The status
+// is the error of the move on disk only. The first record that stays sets
+// recordLeftBehind.
+UpperEntryMove MoveUpperEntryLeavingStuckRecords(const std::wstring& from,
+                                           const std::wstring& to,
+                                           const LayerConfig& config);
 
 // Moves the upper entry at path, as MoveUpperEntry does, to the new path
 // in the work directory that newWorkPath gives, and sets *workPath to that
 // path. When no entry is at path, does not call newWorkPath, sets
 // *workPath empty and returns STATUS_SUCCESS. A failed probe or move
 // returns its error, leaves the entry at path, and sets *workPath empty.
-NTSTATUS MoveUpperEntryToWork(const std::wstring& path,
-                              const std::function<std::wstring()>& newWorkPath,
-                              const LayerConfig& config,
-                              std::wstring* workPath);
+UpperEntryMove MoveUpperEntryToWork(const std::wstring& path,
+                                    const std::function<std::wstring()>& newWorkPath,
+                                    const LayerConfig& config,
+                                    std::wstring* workPath);
 
 // Sets *kind to the kind of the upper entry at path, as EntryKindOf reads
 // it, and sets *exists to true. When no entry is at path, also when the

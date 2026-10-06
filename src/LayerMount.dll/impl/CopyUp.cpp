@@ -1,6 +1,7 @@
 #include "CopyUp.h"
 #include "LayerPath.h"
 #include "PathResolver.h"
+#include "RenameRollback.h"
 #include "WhiteoutManager.h"
 #include "MetadataStore.h"
 #include "Cache.h"
@@ -241,7 +242,7 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
     }
 
     const NTSTATUS status =
-        MoveUpperEntry(workPath, finalUpperPath, ReplaceExisting::No, config_);
+        MoveUpperEntry(workPath, finalUpperPath, ReplaceExisting::No, config_).status;
     if (!NT_SUCCESS(status)) {
         RemoveStagedFile(workPath, config_);
     }
@@ -795,7 +796,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         // The attributes go on after the streams, because NTFS refuses a
         // new stream on a read-only directory.
         basicInfo.Restore();
-        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config_);
+        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config_).status;
     }
     if (!NT_SUCCESS(status)) {
         RemoveUpperEntry(stagedPath, config_);
@@ -835,8 +836,10 @@ NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
     return STATUS_SUCCESS;
 }
 
-RenameDestinationAside::RenameDestinationAside(ConfigRef config, Cache& cache)
-    : config_(config.Get()), cache_(cache) {}
+RenameDestinationAside::RenameDestinationAside(ConfigRef config,
+                                               Cache& cache,
+                                               const abi::EventEmitter& events)
+    : config_(config.Get()), cache_(cache), events_(events) {}
 
 RenameDestinationAside::~RenameDestinationAside() {
     if (asidePath_.empty()) {
@@ -845,7 +848,9 @@ RenameDestinationAside::~RenameDestinationAside() {
     if (::GetFileAttributesW(upperPath_.c_str()) != INVALID_FILE_ATTRIBUTES) {
         RemoveUpperEntry(asidePath_, config_);
     } else {
-        MoveUpperEntry(asidePath_, upperPath_, ReplaceExisting::No, config_);
+        WarnRecordLeftBehind(events_,
+                             MoveUpperEntryLeavingStuckRecords(asidePath_, upperPath_, config_),
+                             normalizedPath_);
     }
     cache_.InvalidateWithAncestors(normalizedPath_);
 }
@@ -884,10 +889,13 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
     }
 
     std::wstring asidePath;
-    const NTSTATUS moveStatus = MoveUpperEntryToWork(
+    const UpperEntryMove move = MoveUpperEntryToWork(
         upperPath, [this]() { return GenerateWorkPath(); }, config_, &asidePath);
-    if (!NT_SUCCESS(moveStatus) || asidePath.empty()) {
-        return moveStatus;
+    if (events_ != nullptr) {
+        WarnRecordLeftBehind(*events_, move, newNorm);
+    }
+    if (!NT_SUCCESS(move.status) || asidePath.empty()) {
+        return move.status;
     }
     cache_.InvalidateWithAncestors(newNorm);
 
@@ -925,7 +933,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
     }
 
     status = MoveUpperEntry(pathResolver_.GetStoredUpperPath(oldCallerPath.Text()),
-                            newUpperPath, ReplaceExisting::No, config_);
+                            newUpperPath, ReplaceExisting::No, config_).status;
     cache_.InvalidateWithAncestors(normalized);
     return status;
 }

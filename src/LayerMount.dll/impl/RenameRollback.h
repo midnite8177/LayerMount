@@ -10,6 +10,14 @@ class PathResolver;
 class WhiteoutManager;
 class Cache;
 class RenameDestinationAside;
+struct UpperEntryMove;
+
+// Emits an LM_EVT_WARNING event at relativePath when move left a sidecar
+// record at the key of a path where its entry is not. relativePath is the
+// path of the entry after the move.
+void WarnRecordLeftBehind(const abi::EventEmitter& events,
+                          const UpperEntryMove& move,
+                          const std::wstring& relativePath);
 
 // What an undo of a rename does with the opaque marker of the entry it
 // moves back.
@@ -67,8 +75,9 @@ public:
     // Moves the upper entry at rename.newNorm back to rename.oldUpperPath
     // and returns the status of that move. When it moves back and
     // rename.opaqueMarker is UndoOpaqueMarker::Remove, also removes the
-    // opaque marker at rename.oldNorm. A failure of that removal emits a
-    // warning and does not change the returned status.
+    // opaque marker at rename.oldNorm. A failure of that removal, and a
+    // sidecar record that does not move with the entry, emit a warning and
+    // do not change the returned status.
     NTSTATUS MoveBack(const UpperRename& rename);
 
 private:

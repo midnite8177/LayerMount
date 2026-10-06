@@ -45,13 +45,14 @@ public:
     // names of toPath. For each kind that fromPath lacks, deletes toPath's,
     // so an entry moved onto toPath never takes the record of the entry that
     // was there. Two paths that differ only in case share a sidecar, which
-    // stays.
-    static void Move(const std::wstring& fromPath,
-                     const std::wstring& toPath,
-                     const std::wstring& upperRoot);
+    // stays. A failed move or delete returns its error. When the opaque
+    // marker cannot move after the per-file sidecar moved, the sidecar moves
+    // back to fromPath. If that move back fails, the sidecar stays at toPath.
+    // A failed call can still have deleted the record at toPath.
+    static NTSTATUS Move(const std::wstring& fromPath,
+                         const std::wstring& toPath,
+                         const std::wstring& upperRoot);
 
-    // Opaque-marker variants. Marker is a separate zero-byte file
-    // (`<sha1(dirPath)>.opaque`) so detection is a single GetFileAttributes.
     static bool HasOpaque(const std::wstring& dirPath,
                           const std::wstring& upperRoot);
 

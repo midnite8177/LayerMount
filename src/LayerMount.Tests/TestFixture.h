@@ -1246,7 +1246,8 @@ struct CopyUpAndRenameRig {
           resolver(config, whiteouts, cache),
           stats(),
           copyUp(config, resolver, whiteouts, cache, stats),
-          directoryRename(config, resolver, whiteouts, cache, copyUp) {}
+          events(),
+          directoryRename(config, resolver, whiteouts, cache, copyUp, events) {}
 
     LayerMount::LayerConfig      config;
     LayerMount::Cache            cache;
@@ -1254,6 +1255,7 @@ struct CopyUpAndRenameRig {
     LayerMount::PathResolver     resolver;
     LayerMount::LayerMountStats  stats;
     LayerMount::CopyUp           copyUp;
+    LayerMount::abi::EventEmitter events;
     LayerMount::DirectoryRename  directoryRename;
 };
 

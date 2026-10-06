@@ -42,7 +42,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             {CallerPath(L"src"), CallerPath(L"dst")},
@@ -67,7 +68,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameUpperDirectory(
             {CallerPath(L"src"), CallerPath(L"dst")},
@@ -90,7 +92,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         AssertStatus(STATUS_SUCCESS, wm.SetOpaque(L"src"), L"SetOpaque must mark the upper directory");
         Assert::IsTrue(wm.IsOpaque(L"src"));
@@ -117,7 +120,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         Assert::IsTrue(NT_SUCCESS(dirRename.RenameLowerDirectory(
             {CallerPath(L"ld"), CallerPath(L"newdir")},
@@ -166,7 +170,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             {CallerPath(L"src"), CallerPath(L"dst")},
@@ -194,7 +199,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         const NTSTATUS st = dirRename.RenameLowerDirectory(
             {CallerPath(L"src"), CallerPath(L"dst")},
@@ -222,7 +228,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         const NTSTATUS st = dirRename.RenameUpperDirectory(
             {CallerPath(L"src"), CallerPath(L"dst")},
@@ -244,7 +251,8 @@ public:
         PathResolver resolver(config, wm, cache);
         LayerMountStats stats;
         CopyUp cu(config, resolver, wm, cache, stats);
-        DirectoryRename dirRename(config, resolver, wm, cache, cu);
+        abi::EventEmitter events;
+        DirectoryRename dirRename(config, resolver, wm, cache, cu, events);
 
         // ReplaceExisting::Yes skips the merged-view collision check, so the
         // call reaches the move while dst is still in the upper.
@@ -574,6 +582,56 @@ void LM_CALL CollectWarning(const LM_EVENT* evt, void* context) {
     auto* warnings = static_cast<EmittedWarnings*>(context);
     warnings->results.push_back(evt->hr);
     warnings->paths.push_back(evt->relativePath != nullptr ? evt->relativePath : L"");
+}
+
+// The names of the files in directory that match pattern.
+std::vector<std::wstring> FileNamesMatching(const std::wstring& directory,
+                                            const std::wstring& pattern) {
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = ::FindFirstFileW((directory + L"\\" + pattern).c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) {
+        return names;
+    }
+    do {
+        names.push_back(fd.cFileName);
+    } while (::FindNextFileW(find, &fd));
+    ::FindClose(find);
+    return names;
+}
+
+// Writes a record with stableIndexNumber for the upper entry at path.
+void WriteStableIndexRecord(const std::wstring& path, uint64_t stableIndexNumber,
+                            const LayerConfig& config) {
+    LayerMountMetadata record;
+    record.hasStableIndexNumber = true;
+    record.stableIndexNumber = stableIndexNumber;
+    Assert::IsTrue(MetadataStore::WriteLayerMountMetadata(path, record, &config),
+        (L"WriteLayerMountMetadata must write the record of " + path).c_str());
+}
+
+// The sidecar record that HoldRecordAtFirstWhiteout holds open.
+struct RecordHeldAtWhiteout {
+    std::wstring sidecarDir;
+    std::wstring heldName;
+    ScopedHandle held;
+    EmittedWarnings warnings;
+};
+
+// At the first LM_EVT_WHITEOUT_CREATED event, opens the first .meta.json
+// file in hold->sidecarDir without FILE_SHARE_DELETE, so that record cannot
+// move. Collects each LM_EVT_WARNING event in hold->warnings. Does not
+// assert, because the engine calls it.
+void LM_CALL HoldRecordAtFirstWhiteout(const LM_EVENT* evt, void* context) {
+    auto* hold = static_cast<RecordHeldAtWhiteout*>(context);
+    CollectWarning(evt, &hold->warnings);
+    if (evt->type != LM_EVT_WHITEOUT_CREATED || !hold->heldName.empty()) {
+        return;
+    }
+    hold->heldName = StoredLeafName(hold->sidecarDir + L"\\*.meta.json");
+    hold->held.Reset(::CreateFileW((hold->sidecarDir + L"\\" + hold->heldName).c_str(),
+                                   GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
 }
 
 // Returns the explicit allow and deny ACEs in the DACL of path, in order,
@@ -3623,6 +3681,308 @@ public:
             AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"dst"),
                 L"An open of dst after the failed rename must find nothing");
         });
+    }
+
+    TEST_METHOD(Rename_OpaqueUpperDirectoryOntoWhitedOutLowerDirectoryWhenTheMarkerCannotMove_KeepsTheOldName) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Upper(), L"src\\a.txt", "upper");
+            env.WriteFile(env.Lower(0), L"dst\\old.txt", "lower");
+            env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst"), "");
+            env.CreateDir(env.Upper(), kSidecarDirName);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\src", &config),
+                L"The opaque metadata must mark the upper src");
+            ::LayerMount::LayerMount mount(config);
+            const LayerSnapshot upperBefore(env.Upper());
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const DirectoryRefusesNewEntries sidecarRefusesNewFiles(
+                    env.Upper() + L"\\" + kSidecarDirName, FILE_ADD_FILE);
+                status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+            }
+
+            if (capabilities != kHostCapabilitiesWithoutAds) {
+                AssertStatus(STATUS_SUCCESS, status,
+                    L"The rename must succeed, because the opaque stream moves with the directory");
+                AssertOnlyEntryShownAs(mount, L"dst", L"a.txt");
+                return;
+            }
+            AssertStatus(STATUS_ACCESS_DENIED, status,
+                L"The rename must fail when the opaque marker cannot move");
+            upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+            Assert::IsTrue(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\src", &config),
+                L"The upper src must keep its opaque marker");
+            AssertListedDirectoryWithChild(mount, L"src", L"a.txt");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"dst"),
+                L"The whiteout at dst must still hide the lower dst");
+        });
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryWhoseChildRecordCannotMove_LeavesTheUpperAsItWas) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\src", &config),
+            L"The opaque metadata must mark the upper src");
+        LayerMountMetadata childRecord;
+        childRecord.hasStableIndexNumber = true;
+        childRecord.stableIndexNumber = 42;
+        Assert::IsTrue(MetadataStore::WriteLayerMountMetadata(env.Upper() + L"\\src\\a.txt",
+                                                              childRecord, &config),
+            L"WriteLayerMountMetadata must write the record of src\\a.txt");
+        ::LayerMount::LayerMount mount(config);
+        const LayerSnapshot upperBefore(env.Upper());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const std::wstring sidecar = env.Upper() + L"\\" + kSidecarDirName;
+            Assert::AreEqual(size_t{1}, FileNamesMatching(sidecar, L"*.meta.json").size(),
+                L"The sidecar directory must hold only the record of src\\a.txt");
+            const ScopedHandle childRecordHeldAgainstMove = HoldOpen(
+                sidecar + L"\\" + StoredLeafName(sidecar + L"\\*.meta.json"),
+                FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_SHARING_VIOLATION, status,
+            L"The rename must fail when the record of a child cannot move");
+        upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+        Assert::IsTrue(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\src", &config),
+            L"The upper src must keep its opaque marker");
+        Assert::AreEqual(uint64_t{42},
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\src\\a.txt", &config)
+                .stableIndexNumber,
+            L"The upper src\\a.txt must keep its record");
+        AssertListedDirectoryWithChild(mount, L"src", L"a.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"dst"),
+            L"An open of dst after the failed rename must find nothing");
+    }
+
+    TEST_METHOD(Rename_CopiedUpFileWhoseRecordCannotMove_KeepsItsRecordAtTheOldName) {
+        ForEachMetadataStore([](UINT32 capabilities) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Lower(0), L"a.txt", "lower");
+            env.CreateDir(env.Upper(), kSidecarDirName);
+            LayerConfig config = env.MakeConfig();
+            config.hostCapabilities = capabilities;
+            ::LayerMount::LayerMount mount(config);
+            AssertStatus(STATUS_SUCCESS, mount.EnsureInUpperLayer(L"a.txt"),
+                L"The copy-up of the lower file must succeed");
+            const UINT64 copiedUpId = IndexNumberThroughMount(mount, L"a.txt", kNoCreateOptions);
+            const LayerSnapshot upperBefore(env.Upper());
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                const DirectoryRefusesNewEntries sidecarRefusesNewFiles(
+                    env.Upper() + L"\\" + kSidecarDirName, FILE_ADD_FILE);
+                status = mount.Rename(L"a.txt", L"b.txt", kFailIfExists, kNoCallerPid);
+            }
+
+            if (capabilities != kHostCapabilitiesWithoutAds) {
+                AssertStatus(STATUS_SUCCESS, status,
+                    L"The rename must succeed, because the record stream moves with the file");
+                Assert::AreEqual(copiedUpId,
+                    IndexNumberThroughMount(mount, L"b.txt", kNoCreateOptions),
+                    L"The renamed file must keep its ID");
+                return;
+            }
+            AssertStatus(STATUS_ACCESS_DENIED, status,
+                L"The rename must fail when the record cannot move");
+            upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+            Assert::AreEqual(copiedUpId, IndexNumberThroughMount(mount, L"a.txt", kNoCreateOptions),
+                L"The file must keep its ID at the old name");
+            AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"b.txt"),
+                L"An open of b.txt after the failed rename must find nothing");
+        });
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryWhoseOpaqueMarkerCannotMove_KeepsItsRecordAtTheOldName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\src", &config),
+            L"The opaque metadata must mark the upper src");
+        WriteStableIndexRecord(env.Upper() + L"\\src", 42, config);
+        ::LayerMount::LayerMount mount(config);
+        const LayerSnapshot upperBefore(env.Upper());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const std::wstring sidecar = env.Upper() + L"\\" + kSidecarDirName;
+            Assert::AreEqual(size_t{1}, FileNamesMatching(sidecar, L"*.opaque").size(),
+                L"The sidecar directory must hold only the opaque marker of src");
+            const ScopedHandle markerHeldAgainstMove = HoldOpen(
+                sidecar + L"\\" + StoredLeafName(sidecar + L"\\*.opaque"),
+                FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_SHARING_VIOLATION, status,
+            L"The rename must fail when the opaque marker of src cannot move");
+        upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+        Assert::AreEqual(uint64_t{42},
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\src", &config)
+                .stableIndexNumber,
+            L"The upper src must keep its record");
+        Assert::IsTrue(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\src", &config),
+            L"The upper src must keep its opaque marker");
+        AssertListedDirectoryWithChild(mount, L"src", L"a.txt");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryThatCannotMoveBackAfterAChildRecordStuck_MovesTheOtherRecords) {
+        TempLayerEnvironment env(1);
+        for (const wchar_t* child : {L"a.txt", L"b.txt", L"c.txt"}) {
+            env.WriteFile(env.Upper(), std::wstring(L"d\\s\\") + child, "child");
+        }
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        const std::wstring sidecar = env.Upper() + L"\\" + kSidecarDirName;
+        WriteStableIndexRecord(env.Upper() + L"\\d\\s\\b.txt", 2, config);
+        const std::wstring stuckRecord = StoredLeafName(sidecar + L"\\*.meta.json");
+        WriteStableIndexRecord(env.Upper() + L"\\d\\s\\a.txt", 1, config);
+        WriteStableIndexRecord(env.Upper() + L"\\d\\s\\c.txt", 3, config);
+        ::LayerMount::LayerMount mount(config);
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const DirectoryRefusesNewEntries oldParentRefusesNewEntries(
+                env.Upper() + L"\\d", FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+            const ScopedHandle recordHeldAgainstMove =
+                HoldOpen(sidecar + L"\\" + stuckRecord, FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"d\\s", L"s2", kFailIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The rename must stand when the directory cannot move back");
+        const MergedDirectory children = mount.MergeDirectoryEntries(L"s2");
+        AssertStatus(STATUS_SUCCESS, children.status, L"The listing of s2 must succeed");
+        Assert::AreEqual(size_t{3}, children.entries.size(), L"s2 must show its three children");
+        Assert::AreEqual(uint64_t{1},
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\s2\\a.txt", &config)
+                .stableIndexNumber,
+            L"The record of a.txt, which moved before the stuck record, must stay with it");
+        Assert::AreEqual(uint64_t{3},
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\s2\\c.txt", &config)
+                .stableIndexNumber,
+            L"The record of c.txt, which comes after the stuck record, must move with it");
+        Assert::IsTrue(env.FileExists(sidecar, stuckRecord),
+            L"The record that cannot move must stay keyed to the old path of b.txt");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryThatCannotMoveBackAfterAChildRecordStuck_EmitsAWarningAtTheNewName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"d\\s\\a.txt", "a");
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        const std::wstring sidecar = env.Upper() + L"\\" + kSidecarDirName;
+        WriteStableIndexRecord(env.Upper() + L"\\d\\s\\a.txt", 1, config);
+        EmittedWarnings warnings;
+        ::LayerMount::LayerMount mount(config);
+        mount.Events().Set(&CollectWarning, &warnings);
+
+        {
+            const DirectoryRefusesNewEntries oldParentRefusesNewEntries(
+                env.Upper() + L"\\d", FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+            const ScopedHandle recordHeldAgainstMove = HoldOpen(
+                sidecar + L"\\" + StoredLeafName(sidecar + L"\\*.meta.json"),
+                FILE_SHARE_READ | FILE_SHARE_WRITE);
+            AssertStatus(STATUS_SUCCESS,
+                mount.Rename(L"d\\s", L"s2", kFailIfExists, kNoCallerPid),
+                L"The rename must stand when the directory cannot move back");
+        }
+
+        Assert::AreEqual<size_t>(1, warnings.results.size(),
+            L"The record that did not move with the directory must emit one warning");
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_SHARING_VIOLATION), warnings.results[0],
+            L"The warning must carry the failure of the record move");
+        Assert::AreEqual(std::wstring(L"s2"), warnings.paths[0],
+            L"The warning must name the path where the directory stays");
+    }
+
+    TEST_METHOD(Rename_UpperDirectoryWithAChildDirectoryThatCannotBeListed_LeavesTheUpperAsItWas) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"src\\a\\x.txt", "x");
+        env.WriteFile(env.Upper(), L"src\\b.txt", "b");
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        WriteStableIndexRecord(env.Upper() + L"\\src\\b.txt", 42, config);
+        ::LayerMount::LayerMount mount(config);
+        const LayerSnapshot upperBefore(env.Upper());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const DirectoryListingDenied listingDenied(env.Upper() + L"\\src\\a");
+            const BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            AssertListingDenied(env.Upper() + L"\\src\\a");
+            status = mount.Rename(L"src", L"dst", kFailIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_ACCESS_DENIED, status,
+            L"The rename must fail when the walk cannot list a directory below src");
+        upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
+        Assert::AreEqual(uint64_t{42},
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\src\\b.txt", &config)
+                .stableIndexNumber,
+            L"The upper src\\b.txt must keep its record");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"dst"),
+            L"An open of dst after the failed rename must find nothing");
+    }
+
+    TEST_METHOD(ReplaceRename_WhenARecordOfTheDestinationCannotComeBack_BringsBackTheDestinationWithoutIt) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+        env.WriteFile(env.Lower(0), L"src", "lower file");
+        env.CreateDir(env.Upper(), L"dst");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst"), "");
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        Assert::IsTrue(MetadataStore::SetOpaqueMetadata(env.Upper() + L"\\dst", &config),
+            L"The opaque metadata must mark the upper dst");
+        WriteStableIndexRecord(env.Upper() + L"\\dst", 42, config);
+        const std::wstring sidecar = env.Upper() + L"\\" + kSidecarDirName;
+        const std::wstring recordAtDestination = StoredLeafName(sidecar + L"\\*.meta.json");
+        RecordHeldAtWhiteout hold{sidecar, {}, ScopedHandle(), {}};
+        ::LayerMount::LayerMount mount(config);
+        mount.Events().Set(&HoldRecordAtFirstWhiteout, &hold);
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            // The whiteout at the old name is the last step that succeeds,
+            // and the held whiteout at the new name then fails the rename.
+            const ScopedHandle heldDestinationWhiteout =
+                HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"dst"),
+                         FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid);
+            hold.held.Reset();
+        }
+        mount.Events().Clear();
+
+        AssertStatus(STATUS_SHARING_VIOLATION, status,
+            L"The rename must fail when the whiteout at the new name cannot go");
+        Assert::IsFalse(hold.heldName.empty(),
+            L"The test must hold the record of dst after the engine moved it aside");
+        Assert::AreNotEqual(recordAtDestination, hold.heldName,
+            L"The held record must be keyed to the path of dst in the work directory");
+        Assert::IsTrue(env.FileExists(env.Upper(), L"dst"),
+            L"The upper dst must come back");
+        const MergedDirectory listing = mount.MergeDirectoryEntries(L"dst");
+        AssertStatus(STATUS_SUCCESS, listing.status, L"The listing of dst must succeed");
+        Assert::IsTrue(env.FileExists(sidecar, hold.heldName),
+            L"The record that cannot come back must stay keyed to the path in the work directory");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(env.Upper() + L"\\dst", &config),
+            L"dst must come back without the marker that stayed with the stuck record");
+        AssertOnlyEntryShownAs(mount, L"src", L"a.txt");
+        Assert::AreEqual(size_t{1}, hold.warnings.paths.size(),
+            L"The record that cannot come back must emit one warning");
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_SHARING_VIOLATION),
+            hold.warnings.results[0], L"The warning must carry the error of the record move");
+        Assert::AreEqual(std::wstring(L"dst"), hold.warnings.paths[0],
+            L"The warning must name dst");
     }
 
     TEST_METHOD(Rename_LowerDirectoryWhenTheWhiteoutFails_KeepsTheOldName) {

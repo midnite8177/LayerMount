@@ -300,35 +300,62 @@ NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path, EntryKind kind) {
 
 }
 
-NTSTATUS MoveUpperEntry(const std::wstring& from,
-                        const std::wstring& to,
-                        ReplaceExisting replace,
-                        const LayerConfig& config) {
+UpperEntryMove MoveUpperEntry(const std::wstring& from,
+                              const std::wstring& to,
+                              ReplaceExisting replace,
+                              const LayerConfig& config) {
     const NTSTATUS status = MoveUpperEntryOnDisk(from, to, replace);
-    if (NT_SUCCESS(status)) {
-        MetadataStore::MoveSidecarRecords(from, to, config);
+    if (!NT_SUCCESS(status)) {
+        return {status, STATUS_SUCCESS};
     }
-    return status;
+    std::vector<MetadataStore::MovedSidecarRecord> moved;
+    const NTSTATUS recordStatus = MetadataStore::MoveSidecarRecords(from, to, config, &moved);
+    if (NT_SUCCESS(recordStatus)) {
+        return {STATUS_SUCCESS, STATUS_SUCCESS};
+    }
+    const NTSTATUS entryBack = MoveUpperEntryOnDisk(to, from, ReplaceExisting::No);
+    const NTSTATUS recordsBack = MetadataStore::MoveSidecarRecordsBack(moved, config);
+    if (NT_SUCCESS(entryBack)) {
+        return {recordStatus, recordsBack};
+    }
+    if (!NT_SUCCESS(recordsBack)) {
+        return {STATUS_SUCCESS, recordsBack};
+    }
+    // The move that leaves stuck records walks the whole tree again, and it
+    // deletes the record at the new key of an entry with none at its old
+    // key. So the records that moved go back first, and then move again.
+    return {STATUS_SUCCESS,
+            MetadataStore::MoveSidecarRecordsLeavingStuckOnes(from, to, config)};
 }
 
-NTSTATUS MoveUpperEntryToWork(const std::wstring& path,
-                              const std::function<std::wstring()>& newWorkPath,
-                              const LayerConfig& config,
-                              std::wstring* workPath) {
+UpperEntryMove MoveUpperEntryLeavingStuckRecords(const std::wstring& from,
+                                                 const std::wstring& to,
+                                                 const LayerConfig& config) {
+    const NTSTATUS status = MoveUpperEntryOnDisk(from, to, ReplaceExisting::No);
+    if (!NT_SUCCESS(status)) {
+        return {status, STATUS_SUCCESS};
+    }
+    return {STATUS_SUCCESS, MetadataStore::MoveSidecarRecordsLeavingStuckOnes(from, to, config)};
+}
+
+UpperEntryMove MoveUpperEntryToWork(const std::wstring& path,
+                                    const std::function<std::wstring()>& newWorkPath,
+                                    const LayerConfig& config,
+                                    std::wstring* workPath) {
     workPath->clear();
     if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
         if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
-            return STATUS_SUCCESS;
+            return {STATUS_SUCCESS, STATUS_SUCCESS};
         }
-        return NtStatusFromWin32(probeErr);
+        return {NtStatusFromWin32(probeErr), STATUS_SUCCESS};
     }
     std::wstring target = newWorkPath();
-    const NTSTATUS moveStatus = MoveUpperEntry(path, target, ReplaceExisting::No, config);
-    if (NT_SUCCESS(moveStatus)) {
+    const UpperEntryMove move = MoveUpperEntry(path, target, ReplaceExisting::No, config);
+    if (NT_SUCCESS(move.status)) {
         *workPath = std::move(target);
     }
-    return moveStatus;
+    return move;
 }
 
 NTSTATUS ProbeUpperEntry(const std::wstring& path, bool* exists, EntryKind* kind) {
@@ -665,7 +692,7 @@ NTSTATUS BuildInContainerAndMove(const std::wstring& containerPath,
         status = build(stagedPath);
     }
     if (NT_SUCCESS(status)) {
-        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config);
+        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config).status;
     }
     RemoveUpperEntry(containerPath, config);
     return status;
