@@ -535,6 +535,74 @@ public:
             L"A work directory on another volume than the upper fails the prepare");
         Assert::IsFalse(error.empty(), L"The failed prepare says why");
     }
+
+    TEST_METHOD(ReplaceRename_WithinLinkTargetOnAnotherVolume_ReplacesTheEntriesInTheTarget) {
+        UNIT_SKIP_IF_NOT_ADMIN();
+
+        const std::wstring root = MakeVhdWorkspace();
+        const std::wstring vhd = root + L"\\vhd\\target.vhdx";
+        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VhdHandle handle;
+        std::wstring volumeGuid;
+        MakeVolume(mgr, vhd, L"NTFS", handle, volumeGuid);
+
+        const std::vector<std::wstring> expectedTarget = {L"b", L"dst", L"dst\\inside.txt"};
+        std::vector<std::wstring> failures;
+        size_t linksMade = 0;
+        for (const LayerMount::LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                const std::wstring target = volumeGuid + L"target" + std::to_wstring(linksMade);
+                TempLayerEnvironment env(1);
+                env.WriteFile(target, L"a", "a");
+                env.WriteFile(target, L"b", "replaced");
+                env.WriteFile(target, L"src\\inside.txt", "inside");
+                env.CreateDir(target, L"dst");
+                if (!LinkCreatedOrSkipped(createLink, LinkLayerPath(env, linkSource) + L"\\link",
+                                          target)) {
+                    continue;
+                }
+                ++linksMade;
+                const std::wstring link = target + L" through " +
+                    (linkSource == LayerMount::LayerSource::Upper ? L"an upper" : L"a lower") +
+                    L" link";
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                const std::vector<std::wstring> workBefore = EntriesUnder(env.Work());
+
+                const NTSTATUS fileStatus =
+                    mount.Rename(L"link\\a", L"link\\b", kReplaceIfExists, kNoCallerPid);
+                const NTSTATUS directoryStatus =
+                    mount.Rename(L"link\\src", L"link\\dst", kReplaceIfExists, kNoCallerPid);
+
+                if (!NT_SUCCESS(fileStatus)) {
+                    failures.push_back(L"The file rename in " + link + L" failed");
+                }
+                if (!NT_SUCCESS(directoryStatus)) {
+                    failures.push_back(L"The directory rename in " + link + L" failed");
+                }
+                if (EntriesUnder(target) != expectedTarget) {
+                    failures.push_back(link + L" does not hold only b and the moved dst");
+                }
+                if (env.ReadFile(target, L"b") != "a") {
+                    failures.push_back(L"b in " + link + L" does not hold the moved file's data");
+                }
+                if (EntriesUnder(env.Work()) != workBefore) {
+                    failures.push_back(L"The renames in " + link + L" changed the work directory");
+                }
+            }
+        }
+
+        mgr.DetachVHD(vhd);
+        handle.Close();
+        CleanupWorkspace(root);
+
+        Assert::IsTrue(linksMade > 0, L"The test must make a link to a directory on the VHD");
+        for (const std::wstring& failure : failures) {
+            Logger::WriteMessage(failure.c_str());
+        }
+        Assert::IsTrue(failures.empty(),
+            L"A replace-rename of a file and of a directory within a link target on another "
+            L"volume must replace the entries in the target and stage nothing in the work directory");
+    }
 };
 
 TEST_CLASS(ManifestPathTests) {

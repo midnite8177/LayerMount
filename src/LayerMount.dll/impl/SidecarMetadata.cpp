@@ -280,6 +280,14 @@ NTSTATUS SidecarMetadata::Move(const std::wstring& fromPath,
     return STATUS_SUCCESS;
 }
 
+bool SidecarMetadata::HasRecord(const std::wstring& filePath,
+                                const std::wstring& upperRoot) {
+    std::wstring base = SidecarBase(filePath, upperRoot);
+    if (base.empty()) return false;
+    std::wstring path = base + kMetaSuffix;
+    return ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
 bool SidecarMetadata::HasOpaque(const std::wstring& dirPath,
                                 const std::wstring& upperRoot) {
     std::wstring base = SidecarBase(dirPath, upperRoot);

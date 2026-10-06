@@ -226,6 +226,7 @@ struct UpperRename;
 struct MovedSource;
 struct RenameStepResult;
 enum class RenameCopyUp;
+enum class FileRenameReplace;
 class UpperEntryRemover;
 namespace VHD { class VHDLayerManager; }
 namespace VSS { class VSSManager; }
@@ -599,9 +600,12 @@ public:
     // it, is a non-directory on either side of a rename. With
     // replaceIfExists TRUE, a file or a link replaces a link, and a link
     // replaces a file. The link moves as a link, and its target stays
-    // unchanged. Before the move, Rename moves the upper destination into the
-    // work directory. It puts the destination back when the move fails and
-    // removes it when the move succeeds. A replace of a read-only upper file
+    // unchanged. Before the move, Rename moves an upper destination outside
+    // a link target into the work directory. It puts the destination back
+    // when the move fails and removes it when the move succeeds. Within a
+    // link target, a file replaces a file in one step, and any other
+    // destination moves to a hidden name in its own directory instead of
+    // the work directory. A replace of a read-only upper file
     // fails with STATUS_ACCESS_DENIED before any side effects. A failure to
     // read the reparse tag of a source or destination fails the rename with
     // that status before any change. The FileContext overload makes these
@@ -951,19 +955,21 @@ private:
     // lower holds copies up. When the upper has a whiteout at the new name
     // that cannot go, the rename moves its entry back and fails with the
     // error of that removal. When a whiteout step fails and the entry
-    // cannot move back, a replaced destination stays in the work directory.
+    // cannot move back, a replaced destination stays where it moved aside.
     RenameResult RenameCheckedEntry(const std::wstring& oldRelativePath,
                                     const std::wstring& newRelativePath,
                                     BOOLEAN replaceIfExists,
                                     const CheckedRename& checked,
                                     RenameCopyUp copyUpMode);
 
-    // The caller paths of a rename that passed its checks, and whether it
-    // replaces an existing destination.
+    // The caller paths of a rename that passed its checks, whether it
+    // replaces an existing destination, and how the move of a file source
+    // treats an entry at the new upper path.
     struct RenameRequest {
         const std::wstring& oldRelativePath;
         const std::wstring& newRelativePath;
         BOOLEAN replaceIfExists;
+        FileRenameReplace fileReplace;
     };
 
     // Moves the source to request.newRelativePath with RenameFileEntry,

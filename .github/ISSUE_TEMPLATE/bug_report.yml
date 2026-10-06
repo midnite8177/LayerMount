@@ -60,8 +60,8 @@ body:
     id: host
     attributes:
       label: Host adapter
-      description: Which adapter is on top of the engine (if any) and which userspace-filesystem driver does it target (WinFsp / ProjFS / CBFS Connect / none)?
-      placeholder: my-adapter (WinFsp)
+      description: Which host adapter is on top of the engine (if any), and which filesystem host does it target?
+      placeholder: my-adapter (filesystem host name and version)
   - type: input
     id: windows
     attributes:

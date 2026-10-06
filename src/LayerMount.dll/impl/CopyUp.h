@@ -19,15 +19,17 @@ class Cache;
 class FileBasicInfoGuard;
 
 // An upper destination entry that CopyUp::SetRenameDestinationAside moved
-// into the work directory, with its opaque marker. Until Commit or Release
-// runs, the destructor acts on a failed rename. When the destination path
-// is free, it moves the entry back, and the marker moves back with it. In
-// the sidecar store, a record or a marker that cannot move back stays keyed
-// to the path in the work directory, the entry moves back without it, and
-// an LM_EVT_WARNING event goes through events.
-// When the rename placed an entry at the path, it removes the copy in the
-// work directory. Commit removes that copy. Release leaves the copy in the
-// work directory, for a failed rename that the engine could not undo. An
+// aside, with its opaque marker. Until Commit or Release runs, the
+// destructor acts on a failed rename. When the destination path is free,
+// it moves the entry back, and the marker moves back with it. In the
+// sidecar store, a record or a marker that cannot move back stays keyed to
+// the aside path, the entry moves back without it, and an LM_EVT_WARNING
+// event goes through events. An entry that moved back and was hidden
+// while aside gets its attributes back, and a failure to write them emits
+// an LM_EVT_WARNING event.
+// When the rename placed an entry at the path, it removes the copy at the
+// aside path. Commit removes that copy. Release leaves the copy at the
+// aside path, for a failed rename that the engine could not undo. An
 // object that holds no entry does nothing.
 class RenameDestinationAside {
 public:
@@ -40,9 +42,13 @@ public:
     RenameDestinationAside& operator=(const RenameDestinationAside&) = delete;
 
     // Takes the entry that moved from upperPath to asidePath.
+    // attributesToRestore holds the attributes of an entry that
+    // CopyUp::SetRenameDestinationAside hid, and is empty for one it did
+    // not hide.
     void Hold(std::wstring normalizedPath,
               std::wstring upperPath,
-              std::wstring asidePath);
+              std::wstring asidePath,
+              std::optional<DWORD> attributesToRestore);
 
     void Commit();
     void Release();
@@ -54,6 +60,17 @@ private:
     std::wstring normalizedPath_;
     std::wstring upperPath_;
     std::wstring asidePath_;
+    std::optional<DWORD> attributesToRestore_;
+};
+
+// Where CopyUp::SetRenameDestinationAside moves a replace-rename's
+// destination.
+enum class DestinationAside {
+    WorkDirectory,
+    // A new name in the destination's own directory, so the entry stays on
+    // its volume. The entry is hidden there, in the link target, and the
+    // engine does not sweep one that a crash or a Release leaves.
+    NextToDestination,
 };
 
 // The result of CopyUp::CopyUpMetadataOnly and CopyUp::CopyUpFileOrShell.
@@ -179,21 +196,31 @@ public:
     // cannot read, returns STATUS_SUCCESS and writes nothing.
     NTSTATUS CopyUpLowerLinkAbove(const std::wstring& normalizedPath);
 
-    // Moves the upper entry at newNorm into the work directory, so a
-    // replace-rename can put its source at the path. destinationKind is
-    // the kind of the merged view's entry at newNorm. A Directory takes
-    // its opaque marker along. In the sidecar store, a record that cannot
-    // move fails the call, and the entry stays at newNorm with its records.
-    // If the entry then cannot move back to newNorm, the call succeeds, and
+    // Fails with STATUS_ACCESS_DENIED when destinationKind is File and the
+    // upper entry at newNorm is read-only, as NTFS refuses to replace a
+    // read-only file. destinationKind is the kind of the merged view's
+    // entry at newNorm. Changes nothing.
+    NTSTATUS CheckDestinationReplaceable(const std::wstring& newNorm,
+                                         EntryKind destinationKind);
+
+    // Moves the upper entry at newNorm aside to where `where` names, so a
+    // replace-rename can put its source at the path. A name next to the
+    // destination starts with ".layermount#", and the entry there is hidden.
+    // A failure to hide it does not fail the call. destinationKind is the
+    // kind of the merged view's entry at newNorm. A Directory takes its
+    // opaque marker along. In the sidecar store, a record that cannot move
+    // fails the call, and the entry stays at newNorm with its records. If
+    // the entry then cannot move back to newNorm, the call succeeds, and
     // the records that can move go with the entry. A failed rename brings
-    // the entry back from the work directory without a record that cannot
-    // move; see RenameDestinationAside.
+    // the entry back without a record that cannot move; see
+    // RenameDestinationAside.
     // A Link moves as a link, and its target keeps its markers. Nothing
     // moves and aside stays empty when the upper has no entry at newNorm,
-    // and when the move fails. A read-only File destination fails with
-    // STATUS_ACCESS_DENIED, and nothing moves. aside must be empty.
+    // and when the move fails. CheckDestinationReplaceable runs first, and
+    // its failure moves nothing. aside must be empty.
     NTSTATUS SetRenameDestinationAside(const std::wstring& newNorm,
                                        EntryKind destinationKind,
+                                       DestinationAside where,
                                        RenameDestinationAside* aside);
 
     // Renames a directory whose old and new paths differ only in case.
@@ -207,6 +234,12 @@ public:
                                  EntryKind sourceKind);
 
 private:
+    // A new name for an entry the engine stages:
+    // #<pid>.<tid>.<counter>.<timestamp>.tmp.
+    std::wstring UniqueEntryName();
+
+    std::wstring GenerateAsidePathNextTo(const std::wstring& path);
+
     bool CopySecurityDescriptor(const std::wstring& srcPath, const std::wstring& dstPath);
 
     bool CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle);

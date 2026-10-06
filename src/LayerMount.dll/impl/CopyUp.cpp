@@ -54,6 +54,8 @@ namespace LayerMount {
 
 namespace {
 
+constexpr const wchar_t* kAsideNamePrefix = L".layermount";
+
 DWORD WithoutReadOnly(DWORD attributes) {
     return attributes & ~FILE_ATTRIBUTE_READONLY;
 }
@@ -91,6 +93,17 @@ void RemoveStagedFile(const std::wstring& workPath, const LayerConfig& config) {
         ClearReadOnly(workPath, attributes);
     }
     RemoveUpperEntry(workPath, config);
+}
+
+// Hides the entry at path, a link itself and not its target. Returns the
+// attributes it had before, or none when the read or the write fails.
+std::optional<DWORD> HideEntry(const std::wstring& path) {
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        !WriteOwnAttributes(path, attributes | FILE_ATTRIBUTE_HIDDEN)) {
+        return std::nullopt;
+    }
+    return attributes;
 }
 
 // A rename sets FILE_ATTRIBUTE_ARCHIVE on a file. The staged file gets the
@@ -204,6 +217,15 @@ void CopyUp::RecordCopyUp(const std::wstring& relativePath) {
 }
 
 std::wstring CopyUp::GenerateWorkPath() {
+    return JoinDirPath(config_.workDirPath, UniqueEntryName());
+}
+
+std::wstring CopyUp::GenerateAsidePathNextTo(const std::wstring& path) {
+    const std::wstring directory = path.substr(0, path.find_last_of(L'\\'));
+    return JoinDirPath(directory, kAsideNamePrefix + UniqueEntryName());
+}
+
+std::wstring CopyUp::UniqueEntryName() {
     uint64_t counter = workCounter_.fetch_add(1, std::memory_order_relaxed);
     DWORD pid = GetCurrentProcessId();
     DWORD tid = GetCurrentThreadId();
@@ -214,9 +236,8 @@ std::wstring CopyUp::GenerateWorkPath() {
 
     // pid, tid and counter make the name unique. Two calls can get the
     // same timestamp.
-    return JoinDirPath(config_.workDirPath,
-                       L"#" + std::to_wstring(pid) + L"." + std::to_wstring(tid) + L"." +
-                       std::to_wstring(counter) + L"." + std::to_wstring(timestamp) + L".tmp");
+    return L"#" + std::to_wstring(pid) + L"." + std::to_wstring(tid) + L"." +
+           std::to_wstring(counter) + L"." + std::to_wstring(timestamp) + L".tmp";
 }
 
 void CopyUp::CleanWorkDirectory() {
@@ -848,19 +869,27 @@ RenameDestinationAside::~RenameDestinationAside() {
     if (::GetFileAttributesW(upperPath_.c_str()) != INVALID_FILE_ATTRIBUTES) {
         RemoveUpperEntry(asidePath_, config_);
     } else {
-        WarnRecordLeftBehind(events_,
-                             MoveUpperEntryLeavingStuckRecords(asidePath_, upperPath_, config_),
-                             normalizedPath_);
+        const UpperEntryMove moveBack = MoveUpperEntryLeavingStuckRecords(
+            asidePath_, upperPath_, ReplaceExisting::No, config_);
+        WarnRecordLeftBehind(events_, moveBack, normalizedPath_);
+        if (NT_SUCCESS(moveBack.status) && attributesToRestore_.has_value() &&
+            !WriteOwnAttributes(upperPath_, *attributesToRestore_)) {
+            events_.Emit(LM_EVT_WARNING, HRESULT_FROM_WIN32(::GetLastError()),
+                         normalizedPath_.c_str(),
+                         L"The destination that a failed rename moved back stays hidden");
+        }
     }
     cache_.InvalidateWithAncestors(normalizedPath_);
 }
 
 void RenameDestinationAside::Hold(std::wstring normalizedPath,
                                   std::wstring upperPath,
-                                  std::wstring asidePath) {
+                                  std::wstring asidePath,
+                                  std::optional<DWORD> attributesToRestore) {
     normalizedPath_ = std::move(normalizedPath);
     upperPath_ = std::move(upperPath);
     asidePath_ = std::move(asidePath);
+    attributesToRestore_ = attributesToRestore;
 }
 
 void RenameDestinationAside::Commit() {
@@ -875,22 +904,38 @@ void RenameDestinationAside::Release() {
     asidePath_.clear();
 }
 
+NTSTATUS CopyUp::CheckDestinationReplaceable(const std::wstring& newNorm,
+                                             EntryKind destinationKind) {
+    if (destinationKind != EntryKind::File) {
+        return STATUS_SUCCESS;
+    }
+    const DWORD attributes =
+        ::GetFileAttributesW(pathResolver_.GetStoredUpperPath(newNorm).c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
+        return STATUS_ACCESS_DENIED;
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
                                            EntryKind destinationKind,
+                                           DestinationAside where,
                                            RenameDestinationAside* aside) {
-    const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
-    // NTFS refuses a replace of a read-only file, but not a move of one into
-    // the work directory.
-    if (destinationKind == EntryKind::File) {
-        const DWORD attributes = ::GetFileAttributesW(upperPath.c_str());
-        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
-            return STATUS_ACCESS_DENIED;
-        }
+    // NTFS refuses a replace of a read-only file, but not a move of one
+    // aside, so the check runs before any move.
+    const NTSTATUS replaceable = CheckDestinationReplaceable(newNorm, destinationKind);
+    if (!NT_SUCCESS(replaceable)) {
+        return replaceable;
     }
 
+    const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
+    const std::function<std::wstring()> newAsidePath =
+        where == DestinationAside::WorkDirectory
+            ? std::function<std::wstring()>([this]() { return GenerateWorkPath(); })
+            : std::function<std::wstring()>(
+                  [this, &upperPath]() { return GenerateAsidePathNextTo(upperPath); });
     std::wstring asidePath;
-    const UpperEntryMove move = MoveUpperEntryToWork(
-        upperPath, [this]() { return GenerateWorkPath(); }, config_, &asidePath);
+    const UpperEntryMove move = MoveUpperEntryAside(upperPath, newAsidePath, config_, &asidePath);
     if (events_ != nullptr) {
         WarnRecordLeftBehind(*events_, move, newNorm);
     }
@@ -899,7 +944,9 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
     }
     cache_.InvalidateWithAncestors(newNorm);
 
-    aside->Hold(newNorm, upperPath, asidePath);
+    const std::optional<DWORD> attributesToRestore =
+        where == DestinationAside::NextToDestination ? HideEntry(asidePath) : std::nullopt;
+    aside->Hold(newNorm, upperPath, asidePath, attributesToRestore);
     return STATUS_SUCCESS;
 }
 

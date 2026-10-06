@@ -49,8 +49,7 @@ Out of scope (report to the corresponding maintainers instead):
 
 - Host adapters that consume this engine — they live in their own
   repositories.
-- Userspace filesystem drivers (WinFsp, ProjFS, CBFS Connect) that host
-  adapters target.
+- Filesystem hosts that host adapters target.
 - Vulnerabilities in the vendored third-party components themselves — file
   upstream with [zstd](https://github.com/facebook/zstd/security) or
   [nlohmann/json](https://github.com/nlohmann/json/security). If a vendored

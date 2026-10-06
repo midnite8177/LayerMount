@@ -420,7 +420,7 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
     }
 
     std::wstring asidePath;
-    const UpperEntryMove aside = MoveUpperEntryToWork(
+    const UpperEntryMove aside = MoveUpperEntryAside(
         oldUpperPath, [this]() { return copyUp_.GenerateWorkPath(); }, config_, &asidePath);
     WarnRecordLeftBehind(events_, aside, oldNorm);
     const NTSTATUS asideStatus = aside.status;

@@ -437,7 +437,17 @@ NTSTATUS MetadataStore::MoveSidecarRecordsLeavingStuckOnes(const std::wstring& f
     const NTSTATUS walkStatus = ForEachMovedEntry(from, to, [&](const std::wstring& fromPath,
                                                                 const std::wstring& toPath) {
         const NTSTATUS status = SidecarMetadata::Move(fromPath, toPath, config.upperPath);
-        if (!NT_SUCCESS(status) && NT_SUCCESS(firstError)) {
+        if (NT_SUCCESS(status)) {
+            return STATUS_SUCCESS;
+        }
+        // The moved entry is at toPath now, so a record at that key is one
+        // of an entry that the move replaced. A failed Move can leave the
+        // moved entry's own record at toPath, and then none is at fromPath.
+        if (SidecarMetadata::HasRecord(fromPath, config.upperPath)) {
+            SidecarMetadata::Remove(toPath, config.upperPath);
+        }
+        SidecarMetadata::RemoveOpaque(toPath, config.upperPath);
+        if (NT_SUCCESS(firstError)) {
             firstError = status;
         }
         return STATUS_SUCCESS;

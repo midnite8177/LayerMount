@@ -16,6 +16,9 @@ struct RenameLinks {
     // The source is under a link, in the upper or in a lower. A rename that
     // passed the check moves the entry within that link's target.
     bool sourceInLinkTarget;
+    // The destination is under a link, in the upper or in a lower. A
+    // destination that is the link entry itself is not.
+    bool destinationInLinkTarget;
     // The lower link above both the source and the destination, when the
     // merged view shows the destination's parent as a directory. The rename
     // copies it up as a link before it moves the entry, so the move acts on

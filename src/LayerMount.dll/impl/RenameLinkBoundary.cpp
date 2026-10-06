@@ -33,6 +33,7 @@ NTSTATUS CheckRenameLinkBoundary(const LayerConfig& config,
     }
 
     links->sourceInLinkTarget = source.stop == LinkStop::Link;
+    links->destinationInLinkTarget = destination.stop == LinkStop::Link;
     links->lowerLinkToCopyUp.reset();
     const bool sameLink = source.stop == destination.stop && source.path == destination.path;
     if (!sameLink) {

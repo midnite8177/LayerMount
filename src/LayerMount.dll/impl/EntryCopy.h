@@ -123,6 +123,13 @@ bool WriteEntryTimes(const std::wstring& path,
                      const EntryTimes& times,
                      std::optional<DWORD> attributes);
 
+// Writes attributes to the entry at path and keeps its times. Only the bits
+// a FileBasicInfo write can set go through, the pin and offline bits
+// included. The open uses FILE_FLAG_OPEN_REPARSE_POINT, so a junction or a
+// symbolic link takes the bits itself, and its target keeps its own.
+// Returns false with the Win32 error in GetLastError.
+bool WriteOwnAttributes(const std::wstring& path, DWORD attributes);
+
 // Writes metadata as the copy-up record of the new entry at upperPath. When
 // the write fails, removes the entry and returns the write's error.
 NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,

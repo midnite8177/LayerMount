@@ -19,7 +19,7 @@ FileRename::FileRename(ConfigRef config,
 
 MovedFile FileRename::MoveToUpper(const std::wstring& oldRelativePath,
                                   const std::wstring& newRelativePath,
-                                  ReplaceExisting replace,
+                                  FileRenameReplace replace,
                                   RenameCopyUp copyUpMode) {
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
@@ -43,7 +43,13 @@ MovedFile FileRename::MoveToUpper(const std::wstring& oldRelativePath,
     std::wstring oldUpperPath = pathResolver_.GetStoredUpperPath(oldRelativePath);
     const std::wstring newUpperPath =
         pathResolver_.GetUpperPathForNewEntry(CallerPath(newRelativePath));
-    const UpperEntryMove move = MoveUpperEntry(oldUpperPath, newUpperPath, replace, config_);
+    const UpperEntryMove move = replace == FileRenameReplace::InPlace
+        ? MoveUpperEntryLeavingStuckRecords(oldUpperPath, newUpperPath, ReplaceExisting::Yes,
+                                            config_)
+        : MoveUpperEntry(oldUpperPath, newUpperPath,
+                         replace == FileRenameReplace::No ? ReplaceExisting::No
+                                                          : ReplaceExisting::Yes,
+                         config_);
     WarnRecordLeftBehind(events_, move, NT_SUCCESS(move.status) ? newNorm : oldNorm);
     return {move.status, stagedShell, std::move(oldUpperPath)};
 }

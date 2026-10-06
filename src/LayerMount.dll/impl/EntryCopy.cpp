@@ -698,6 +698,33 @@ bool WriteEntryTimes(const std::wstring& path,
     return true;
 }
 
+bool WriteOwnAttributes(const std::wstring& path, DWORD attributes) {
+    ScopedHandle handle(::CreateFileW(
+        path.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!handle.IsValid()) {
+        return false;
+    }
+    constexpr DWORD settable = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN |
+                               FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE |
+                               FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE |
+                               FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
+                               FILE_ATTRIBUTE_NO_SCRUB_DATA | FILE_ATTRIBUTE_PINNED |
+                               FILE_ATTRIBUTE_UNPINNED | FILE_ATTRIBUTE_DIRECTORY;
+    const DWORD kept = attributes & settable;
+    FILE_BASIC_INFO basic{};
+    // Zero times keep the stored values, and NORMAL clears the bits.
+    basic.FileAttributes = kept != 0 ? kept : FILE_ATTRIBUTE_NORMAL;
+    if (!::SetFileInformationByHandle(handle.Get(), FileBasicInfo, &basic, sizeof(basic))) {
+        const DWORD err = ::GetLastError();
+        handle.Reset();
+        ::SetLastError(err);
+        return false;
+    }
+    return true;
+}
+
 NTSTATUS WriteCopyUpRecordOrRemoveEntry(const std::wstring& upperPath,
                                         const LayerMountMetadata& metadata,
                                         NewUpperEntryKind kind,

@@ -137,24 +137,27 @@ UpperEntryMove MoveUpperEntry(const std::wstring& from,
                               ReplaceExisting replace,
                               const LayerConfig& config);
 
-// Moves the upper entry as MoveUpperEntry does with ReplaceExisting::No,
-// but a sidecar record that cannot move does not stop the move. That record
-// stays at the key of its old path, and the other records move. The status
-// is the error of the move on disk only. The first record that stays sets
-// recordLeftBehind.
+// Moves the upper entry as MoveUpperEntry does, but a sidecar record that
+// cannot move neither stops nor undoes the move. That record stays at the
+// key of its old path, and the other records move. The status is the error
+// of the move on disk only. The first record that stays sets
+// recordLeftBehind. With ReplaceExisting::Yes, the move replaces a file at
+// `to` in one step.
 UpperEntryMove MoveUpperEntryLeavingStuckRecords(const std::wstring& from,
-                                           const std::wstring& to,
-                                           const LayerConfig& config);
+                                                 const std::wstring& to,
+                                                 ReplaceExisting replace,
+                                                 const LayerConfig& config);
 
 // Moves the upper entry at path, as MoveUpperEntry does, to the new path
-// in the work directory that newWorkPath gives, and sets *workPath to that
-// path. When no entry is at path, does not call newWorkPath, sets
-// *workPath empty and returns STATUS_SUCCESS. A failed probe or move
-// returns its error, leaves the entry at path, and sets *workPath empty.
-UpperEntryMove MoveUpperEntryToWork(const std::wstring& path,
-                                    const std::function<std::wstring()>& newWorkPath,
-                                    const LayerConfig& config,
-                                    std::wstring* workPath);
+// that newAsidePath gives, and sets *asidePath to that path. The new path
+// must be on the volume of the entry. When no entry is at path, does not
+// call newAsidePath, sets *asidePath empty and returns STATUS_SUCCESS. A
+// failed probe or move returns its error, leaves the entry at path, and
+// sets *asidePath empty.
+UpperEntryMove MoveUpperEntryAside(const std::wstring& path,
+                                   const std::function<std::wstring()>& newAsidePath,
+                                   const LayerConfig& config,
+                                   std::wstring* asidePath);
 
 // Sets *kind to the kind of the upper entry at path, as EntryKindOf reads
 // it, and sets *exists to true. When no entry is at path, also when the

@@ -330,19 +330,20 @@ UpperEntryMove MoveUpperEntry(const std::wstring& from,
 
 UpperEntryMove MoveUpperEntryLeavingStuckRecords(const std::wstring& from,
                                                  const std::wstring& to,
+                                                 ReplaceExisting replace,
                                                  const LayerConfig& config) {
-    const NTSTATUS status = MoveUpperEntryOnDisk(from, to, ReplaceExisting::No);
+    const NTSTATUS status = MoveUpperEntryOnDisk(from, to, replace);
     if (!NT_SUCCESS(status)) {
         return {status, STATUS_SUCCESS};
     }
     return {STATUS_SUCCESS, MetadataStore::MoveSidecarRecordsLeavingStuckOnes(from, to, config)};
 }
 
-UpperEntryMove MoveUpperEntryToWork(const std::wstring& path,
-                                    const std::function<std::wstring()>& newWorkPath,
-                                    const LayerConfig& config,
-                                    std::wstring* workPath) {
-    workPath->clear();
+UpperEntryMove MoveUpperEntryAside(const std::wstring& path,
+                                   const std::function<std::wstring()>& newAsidePath,
+                                   const LayerConfig& config,
+                                   std::wstring* asidePath) {
+    asidePath->clear();
     if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
         if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
@@ -350,10 +351,10 @@ UpperEntryMove MoveUpperEntryToWork(const std::wstring& path,
         }
         return {NtStatusFromWin32(probeErr), STATUS_SUCCESS};
     }
-    std::wstring target = newWorkPath();
+    std::wstring target = newAsidePath();
     const UpperEntryMove move = MoveUpperEntry(path, target, ReplaceExisting::No, config);
     if (NT_SUCCESS(move.status)) {
-        *workPath = std::move(target);
+        *asidePath = std::move(target);
     }
     return move;
 }

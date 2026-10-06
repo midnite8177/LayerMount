@@ -420,6 +420,25 @@ destination's parent as a directory. A rename into a missing directory
 there fails with `STATUS_OBJECT_PATH_NOT_FOUND` and leaves no link copy
 in the upper.
 
+A replace-rename within a link target puts nothing in the work
+directory, because the target can be on another volume, and overlayfs
+stages nothing for a rename outside the overlay. A file replaces a
+file, or a file symlink, in one step. Once it has, a sidecar record
+that cannot move stays at the key of the old path, the record of the
+replaced file goes, and an `LM_EVT_WARNING` event goes out, because the
+replaced file cannot come back. Windows cannot replace a directory, a
+junction or a directory symlink in one step, so any other
+replace-rename first moves its destination to a new name in the same
+directory. That name starts with `.layermount#`, and the entry there is
+hidden. The engine removes the entry there when the rename succeeds.
+When the rename fails and the destination name is still free, the
+engine moves the entry back and restores its attributes. A crash, or a
+failed rename that the engine cannot undo, leaves the hidden entry in
+the link target, and the engine does not sweep it. A
+read-only destination file still fails the rename with
+`STATUS_ACCESS_DENIED`. A rename onto the link entry itself is not
+within the target, and its destination moves into the work directory.
+
 ### Resurrection windows and ordering
 
 A whiteout that lingers after a successful `Create` would hide the
@@ -910,15 +929,16 @@ The engine handles ten cases. The last three also apply to a file source:
   effects. This applies to an upper source and to a lower source.
 - **replace=true, dest is a directory with no visible children**: an
   upper directory that holds only whiteouts or an opaque marker is
-  empty. The engine moves the upper destination into the work
-  directory, and its opaque marker moves with it, as overlayfs leaves
-  the opaque xattr on the destination. In the sidecar store, the record
-  follows on a best-effort basis. Then it does the rename as for a
-  destination that is not present. When the rename fails, the engine
-  moves the destination back with its marker. When the rename succeeds,
-  the engine removes the copy in the work directory. The new directory
-  is opaque when a lower layer has the destination path, so no lower
-  child of the old destination shows.
+  empty. Outside a link target, the engine moves the upper destination
+  into the work directory, and its opaque marker moves with it, as
+  overlayfs leaves the opaque xattr on the destination. A destination
+  within a link target stays on its volume; see "Links in a layer". In
+  the sidecar store, the record follows on a best-effort basis. Then it
+  does the rename as for a destination that is not present. When the
+  rename fails, the engine moves the destination back with its marker.
+  When the rename succeeds, the engine removes the copy in the work
+  directory. The new directory is opaque when a lower layer has the
+  destination path, so no lower child of the old destination shows.
 - **rename to a destination that already exists in the merged view
   (with replace=false)**: the engine rejects the rename with
   `STATUS_OBJECT_NAME_COLLISION` before any side effects.
@@ -953,13 +973,15 @@ The engine handles ten cases. The last three also apply to a file source:
   moves as a link. A lower link copies up as a link and leaves a
   whiteout at its old path. The link target and its entries stay
   unchanged, and no opaque marker goes into the target. An upper
-  destination moves into the work directory before the rename, as an
-  empty directory does, and comes back when the rename fails.
+  destination outside a link target moves into the work directory
+  before the rename, as an empty directory does, and comes back when
+  the rename fails.
 
 With replace=true, an upper file that a file replaces also moves into
 the work directory before the rename. It comes back when the rename
-fails. A read-only upper file stops the rename with
-`STATUS_ACCESS_DENIED` before any side effects, as NTFS refuses to
+fails. A destination within a link target never moves into the work
+directory; see "Links in a layer". A read-only upper file stops the
+rename with `STATUS_ACCESS_DENIED` before any side effects, as NTFS refuses to
 replace a read-only file. Overlayfs also gives this decision to the
 upper file system.
 

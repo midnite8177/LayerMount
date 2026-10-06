@@ -53,6 +53,10 @@ public:
                          const std::wstring& toPath,
                          const std::wstring& upperRoot);
 
+    // True when the per-file sidecar of filePath exists.
+    static bool HasRecord(const std::wstring& filePath,
+                          const std::wstring& upperRoot);
+
     static bool HasOpaque(const std::wstring& dirPath,
                           const std::wstring& upperRoot);
 

@@ -98,8 +98,9 @@ public:
 
     // Moves the records as MoveSidecarRecords does, but an entry whose
     // records cannot move does not stop the move. Its records stay at the
-    // key of its old path. Returns the first error of a record move or of a
-    // listing.
+    // key of its old path, and the records at the key of its new path go,
+    // so the entry does not take the records of an entry it replaced.
+    // Returns the first error of a record move or of a listing.
     static NTSTATUS MoveSidecarRecordsLeavingStuckOnes(
         const std::wstring& from,
         const std::wstring& to,

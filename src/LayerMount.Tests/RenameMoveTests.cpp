@@ -751,6 +751,71 @@ void AssertZoneStreamShown(::LayerMount::LayerMount& mount, const std::wstring& 
         (L"The stream listing of " + name + L" must show the lower file's stream").c_str());
 }
 
+bool LinkToPrimedTargetCreatedOrSkipped(const TempLayerEnvironment& env,
+                                        LayerSource linkSource,
+                                        LinkCreator createLink) {
+    env.WriteFile(env.Root(), L"target\\primer", "");
+    return LinkCreatedOrSkipped(createLink, LinkLayerPath(env, linkSource) + L"\\link",
+                                env.Root() + L"\\target");
+}
+
+void RenamePrimerToCopyLowerLinkUp(::LayerMount::LayerMount& mount, LayerSource linkSource) {
+    if (linkSource == LayerSource::Upper) {
+        return;
+    }
+    AssertStatus(STATUS_SUCCESS,
+        mount.Rename(L"link\\primer", L"link\\primed", kFailIfExists, kNoCallerPid),
+        L"Preconditions: a rename within the lower link must copy the link up");
+}
+
+std::vector<std::wstring> TargetEntriesBesidesPrimerAndPrimed(const TempLayerEnvironment& env) {
+    std::vector<std::wstring> entries = EntriesUnder(env.Root() + L"\\target");
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                 [](const std::wstring& entry) {
+                                     return entry == L"primer" || entry == L"primed";
+                                 }),
+                  entries.end());
+    return entries;
+}
+
+void AssertTargetHolds(const TempLayerEnvironment& env,
+                       const std::vector<std::wstring>& expected,
+                       const wchar_t* message) {
+    Assert::IsTrue(TargetEntriesBesidesPrimerAndPrimed(env) == expected, message);
+}
+
+// A replace-rename of from onto to while the work directory refuses new
+// entries.
+NTSTATUS RenameWhileWorkRefusesEntries(const TempLayerEnvironment& env,
+                                       ::LayerMount::LayerMount& mount,
+                                       const std::wstring& from,
+                                       const std::wstring& to) {
+    const DirectoryRefusesNewEntries workRefusesNewEntries(
+        env.Work(), FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+    return mount.Rename(from, to, kReplaceIfExists, kNoCallerPid);
+}
+
+// A replace-rename of the open file in ctx onto to while the work directory
+// refuses new entries.
+NTSTATUS RenameWhileWorkRefusesEntries(const TempLayerEnvironment& env,
+                                       ::LayerMount::LayerMount& mount,
+                                       FileContext* ctx,
+                                       const std::wstring& to) {
+    const DirectoryRefusesNewEntries workRefusesNewEntries(
+        env.Work(), FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+    return mount.Rename(ctx, to, kReplaceIfExists, kNoCallerPid);
+}
+
+// The attributes of the entry that handle holds open, or
+// INVALID_FILE_ATTRIBUTES when the read fails.
+DWORD AttributesOfHeld(const ScopedHandle& handle) {
+    FILE_BASIC_INFO info{};
+    if (!::GetFileInformationByHandleEx(handle.Get(), FileBasicInfo, &info, sizeof(info))) {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+    return info.FileAttributes;
+}
+
 }
 
 TEST_CLASS(MountDirectoryRenameTests) {
@@ -2650,6 +2715,321 @@ public:
             Assert::AreEqual(std::string("a"), ReadThroughMount(mount, L"link\\b"),
                 L"The mount must show the renamed file");
             AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoFileInLinkTargetWhenTheWorkDirectoryRefusesEntries_ReplacesTheFile) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\a", "a");
+                env.WriteFile(env.Root(), L"target\\b", "replaced");
+                if (!LinkToPrimedTargetCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+                const LayerSnapshot workBefore(env.Work());
+
+                const NTSTATUS status =
+                    RenameWhileWorkRefusesEntries(env, mount, L"link\\a", L"link\\b");
+
+                AssertStatus(STATUS_SUCCESS, status,
+                    L"A replace-rename of a file onto a file in a link target must succeed");
+                AssertTargetHolds(env, {L"b"},
+                    L"The link target must hold only b, and no copy of the replaced file");
+                Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\b"),
+                    L"b in the link target must hold the moved file's data");
+                workBefore.AssertUnchanged(L"The rename must put nothing in the work directory");
+                Assert::AreEqual(std::string("a"), ReadThroughMount(mount, L"link\\b"),
+                    L"The mount must show the moved file at link\\b");
+            }
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoFileSymlinkInLinkTargetWhenTheWorkDirectoryRefusesEntries_ReplacesTheSymlink) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\a", "a");
+        env.WriteFile(env.Root(), L"other.txt", "other");
+        if (!LinkCreatedOrSkipped(CreateFileSymlink, env.Root() + L"\\target\\b",
+                                  env.Root() + L"\\other.txt") ||
+            !LinkToPrimedTargetCreatedOrSkipped(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const LayerSnapshot workBefore(env.Work());
+
+        const NTSTATUS status = RenameWhileWorkRefusesEntries(env, mount, L"link\\a", L"link\\b");
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"A replace-rename of a file onto a file symlink in a link target must succeed");
+        AssertTargetHolds(env, {L"b"}, L"The link target must hold only b");
+        Assert::AreEqual(static_cast<DWORD>(0), ReparseTagOf(env.Root() + L"\\target\\b"),
+            L"b in the link target must be the moved file, not the symlink");
+        Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\b"),
+            L"b in the link target must hold the moved file's data");
+        Assert::AreEqual(std::string("other"), env.ReadFile(env.Root(), L"other.txt"),
+            L"The rename must leave the symlink's target");
+        workBefore.AssertUnchanged(L"The rename must put nothing in the work directory");
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoEmptyDirectoryInLinkTargetWhenTheWorkDirectoryRefusesEntries_ReplacesTheDirectory) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\src\\inside.txt", "inside");
+                env.CreateDir(env.Root(), L"target\\dst");
+                if (!LinkToPrimedTargetCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+                const LayerSnapshot workBefore(env.Work());
+
+                const NTSTATUS status =
+                    RenameWhileWorkRefusesEntries(env, mount, L"link\\src", L"link\\dst");
+
+                AssertStatus(STATUS_SUCCESS, status,
+                    L"A replace-rename of a directory onto an empty directory in a link target must succeed");
+                AssertTargetHolds(env, {L"dst", L"dst\\inside.txt"},
+                    L"The link target must hold only the moved directory, and no copy of the replaced one");
+                workBefore.AssertUnchanged(L"The rename must put nothing in the work directory");
+                AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+            }
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoJunctionInLinkTargetWhenTheWorkDirectoryRefusesEntries_ReplacesTheJunction) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Root(), L"target\\a", "a");
+            env.WriteFile(env.Root(), L"inner\\inside.txt", "inside");
+            if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Root() + L"\\target\\j",
+                                      env.Root() + L"\\inner") ||
+                !LinkToPrimedTargetCreatedOrSkipped(env, linkSource, CreateDirectoryJunction)) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+            const LayerSnapshot workBefore(env.Work());
+            const LayerSnapshot innerBefore(env.Root() + L"\\inner");
+
+            const NTSTATUS status =
+                RenameWhileWorkRefusesEntries(env, mount, L"link\\a", L"link\\j");
+
+            AssertStatus(STATUS_SUCCESS, status,
+                L"A replace-rename of a file onto a junction in a link target must succeed");
+            AssertTargetHolds(env, {L"j"},
+                L"The link target must hold only j, and no copy of the replaced junction");
+            Assert::AreEqual(static_cast<DWORD>(0), ReparseTagOf(env.Root() + L"\\target\\j"),
+                L"j in the link target must be the moved file, not the junction");
+            Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\j"),
+                L"j in the link target must hold the moved file's data");
+            innerBefore.AssertUnchanged(L"The rename must leave the replaced junction's target");
+            workBefore.AssertUnchanged(L"The rename must put nothing in the work directory");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryOntoDirectoryInLinkTargetWhenTheMoveFails_KeepsTheDestination) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Root(), L"target\\src\\inside.txt", "inside");
+            env.CreateDir(env.Root(), L"target\\dst");
+            if (!LinkToPrimedTargetCreatedOrSkipped(env, linkSource, CreateDirectoryJunction)) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+            const LayerSnapshot workBefore(env.Work());
+
+            NTSTATUS status = STATUS_SUCCESS;
+            {
+                // An open child without FILE_SHARE_DELETE blocks the move of src.
+                const ScopedHandle heldChild = HoldOpen(
+                    env.Root() + L"\\target\\src\\inside.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
+                status = RenameWhileWorkRefusesEntries(env, mount, L"link\\src", L"link\\dst");
+            }
+
+            Assert::IsFalse(NT_SUCCESS(status), L"The rename must fail while a child of src is open");
+            AssertTargetHolds(env, {L"dst", L"src", L"src\\inside.txt"},
+                L"The failed rename must leave the link target as it was");
+            Assert::IsFalse(HasAttribute(env.Root() + L"\\target\\dst", FILE_ATTRIBUTE_HIDDEN),
+                L"dst must not be hidden once it is back");
+            workBefore.AssertUnchanged(L"The failed rename must put nothing in the work directory");
+            AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoJunctionInLinkTarget_HidesTheJunctionWhileItIsAside) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\a", "a");
+        env.CreateDir(env.Root(), L"inner");
+        if (!LinkCreatedOrSkipped(CreateDirectoryJunction, env.Root() + L"\\target\\j",
+                                  env.Root() + L"\\inner") ||
+            !LinkToPrimedTargetCreatedOrSkipped(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        // The handle stays on the junction itself when it moves aside and
+        // after the rename removes it.
+        const ScopedHandle heldJunction(::CreateFileW(
+            (env.Root() + L"\\target\\j").c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        Assert::IsTrue(heldJunction.IsValid(), L"The test must hold the junction j open");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link\\a", L"link\\j", kReplaceIfExists, kNoCallerPid),
+            L"A replace-rename of a file onto a junction in a link target must succeed");
+
+        const DWORD attributes = AttributesOfHeld(heldJunction);
+        Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, attributes,
+            L"The test must read the attributes of the held junction");
+        Assert::IsTrue((attributes & FILE_ATTRIBUTE_HIDDEN) != 0,
+            L"The replaced junction must be hidden once it moved aside");
+        Assert::IsFalse(HasAttribute(env.Root() + L"\\inner", FILE_ATTRIBUTE_HIDDEN),
+            L"The junction's target must not be hidden");
+    }
+
+    TEST_METHOD(ReplaceRename_LinkOntoLinkInLinkTargetWhenTheWorkDirectoryRefusesEntries_ReplacesTheLink) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.CreateDir(env.Root(), L"target");
+                env.WriteFile(env.Root(), L"moved\\moved.txt", "moved");
+                env.WriteFile(env.Root(), L"replaced\\replaced.txt", "replaced");
+                if (!LinkCreatedOrSkipped(createLink, env.Root() + L"\\target\\s",
+                                          env.Root() + L"\\moved") ||
+                    !LinkCreatedOrSkipped(createLink, env.Root() + L"\\target\\d",
+                                          env.Root() + L"\\replaced") ||
+                    !LinkToPrimedTargetCreatedOrSkipped(env, linkSource, CreateDirectoryJunction)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+                const LayerSnapshot workBefore(env.Work());
+                const LayerSnapshot replacedBefore(env.Root() + L"\\replaced");
+
+                const NTSTATUS status =
+                    RenameWhileWorkRefusesEntries(env, mount, L"link\\s", L"link\\d");
+
+                AssertStatus(STATUS_SUCCESS, status,
+                    L"A replace-rename of a link onto a link in a link target must succeed");
+                Assert::IsFalse(env.FileExists(env.Root(), L"target\\s"),
+                    L"The rename must remove s from the link target");
+                Assert::AreNotEqual(static_cast<DWORD>(0), ReparseTagOf(env.Root() + L"\\target\\d"),
+                    L"d in the link target must be a link");
+                Assert::AreEqual(std::string("moved"), env.ReadFile(env.Root(), L"target\\d\\moved.txt"),
+                    L"d in the link target must be the moved link");
+                Assert::IsTrue(FileNamesMatching(env.Root() + L"\\target", L".layermount#*").empty(),
+                    L"The rename must leave no copy of the replaced link in the link target");
+                replacedBefore.AssertUnchanged(L"The rename must leave the replaced link's target");
+                Assert::AreEqual(std::string("replaced"),
+                    env.ReadFile(env.Root(), L"replaced\\replaced.txt"),
+                    L"The replaced link's target must keep its file");
+                workBefore.AssertUnchanged(L"The rename must put nothing in the work directory");
+            }
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoReadOnlyFileInLinkTarget_FailsWithAccessDeniedAndKeepsBoth) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            TempLayerEnvironment env(1);
+            env.WriteFile(env.Root(), L"target\\a", "a");
+            env.WriteFile(env.Root(), L"target\\b", "keep");
+            Assert::IsTrue(::SetFileAttributesW((env.Root() + L"\\target\\b").c_str(),
+                                                FILE_ATTRIBUTE_READONLY) != FALSE,
+                L"The test must make b in the link target read-only");
+            if (!LinkToPrimedTargetCreatedOrSkipped(env, linkSource, CreateDirectoryJunction)) {
+                continue;
+            }
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+            const LayerSnapshot workBefore(env.Work());
+
+            AssertStatus(STATUS_ACCESS_DENIED,
+                mount.Rename(L"link\\a", L"link\\b", kReplaceIfExists, kNoCallerPid),
+                L"A replace-rename onto a read-only file in a link target must fail");
+            AssertTargetHolds(env, {L"a", L"b"}, L"The refused rename must keep a and b");
+            Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\a"),
+                L"a in the link target must keep its data");
+            Assert::AreEqual(std::string("keep"), env.ReadFile(env.Root(), L"target\\b"),
+                L"b in the link target must keep its data");
+            workBefore.AssertUnchanged(L"The refused rename must put nothing in the work directory");
+        }
+    }
+
+    TEST_METHOD(ReplaceRename_FileOntoFileInLinkTargetWhoseRecordCannotMove_ReplacesTheFileAndWarns) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Root(), L"target\\a", "a");
+        env.WriteFile(env.Root(), L"target\\b", "replaced");
+        if (!LinkToPrimedTargetCreatedOrSkipped(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        LayerConfig config = env.MakeConfig();
+        config.hostCapabilities = kHostCapabilitiesWithoutAds;
+        const std::wstring sidecar = env.Upper() + L"\\" + kSidecarDirName;
+        WriteStableIndexRecord(env.Upper() + L"\\link\\a", 42, config);
+        const std::wstring recordOfA = StoredLeafName(sidecar + L"\\*.meta.json");
+        WriteStableIndexRecord(env.Upper() + L"\\link\\b", 7, config);
+        EmittedWarnings warnings;
+        ::LayerMount::LayerMount mount(config);
+        mount.Events().Set(&CollectWarning, &warnings);
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const ScopedHandle recordHeldAgainstMove =
+                HoldOpen(sidecar + L"\\" + recordOfA, FILE_SHARE_READ | FILE_SHARE_WRITE);
+            status = mount.Rename(L"link\\a", L"link\\b", kReplaceIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The rename must stand once the move replaced b, though the record of a cannot move");
+        AssertTargetHolds(env, {L"b"}, L"The link target must hold only b");
+        Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\b"),
+            L"b in the link target must hold the moved file's data");
+        Assert::AreEqual<size_t>(1, warnings.results.size(),
+            L"The record that did not move with the file must emit one warning");
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_SHARING_VIOLATION), warnings.results[0],
+            L"The warning must carry the failure of the record move");
+        Assert::AreEqual(std::wstring(L"link\\b"), warnings.paths[0],
+            L"The warning must name the path where the file stays");
+        Assert::AreNotEqual(uint64_t{7},
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\link\\b", &config)
+                .stableIndexNumber,
+            L"b must not carry the record of the file it replaced");
+    }
+
+    TEST_METHOD(ReplaceRenameOpenFile_OntoFileInLinkTargetWhenTheWorkDirectoryRefusesEntries_ReplacesTheFile) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(1);
+                env.WriteFile(env.Root(), L"target\\a", "a");
+                env.WriteFile(env.Root(), L"target\\b", "replaced");
+                if (!LinkToPrimedTargetCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+                const LayerSnapshot workBefore(env.Work());
+                std::unique_ptr<FileContext> ctx;
+                InternalFileInfo info{};
+                Assert::IsTrue(NT_SUCCESS(mount.Open(L"link\\a", FILE_READ_ATTRIBUTES | DELETE,
+                                                     kNoCreateOptions, kNoCallerPid, &ctx, &info)),
+                    L"Preconditions: the file in the link target must open");
+
+                const NTSTATUS status =
+                    RenameWhileWorkRefusesEntries(env, mount, ctx.get(), L"link\\b");
+                mount.Close(ctx.get());
+
+                AssertStatus(STATUS_SUCCESS, status,
+                    L"A replace-rename of an open file onto a file in a link target must succeed");
+                AssertTargetHolds(env, {L"b"},
+                    L"The link target must hold only b, and no copy of the replaced file");
+                Assert::AreEqual(std::string("a"), env.ReadFile(env.Root(), L"target\\b"),
+                    L"b in the link target must hold the moved file's data");
+                workBefore.AssertUnchanged(L"The rename must put nothing in the work directory");
+            }
         }
     }
 

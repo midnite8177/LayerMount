@@ -18,6 +18,22 @@ enum class RenameCopyUp {
     FullCopy,
 };
 
+// What FileRename::MoveToUpper does with an entry at the new upper path.
+enum class FileRenameReplace {
+    // The entry fails the rename with STATUS_OBJECT_NAME_COLLISION.
+    No,
+    // The caller moved the upper destination aside, or the upper had none.
+    // The move replaces an entry at the new upper path, as MoveUpperEntry
+    // does with ReplaceExisting::Yes.
+    AfterAside,
+    // The destination file stays at the new upper path, and the move
+    // replaces it in one step. Once it has, a sidecar record that cannot
+    // move stays at the key of the old path, the replaced file's record
+    // goes, the file stays at the new path, and an LM_EVT_WARNING event
+    // goes out, because the replaced file cannot come back.
+    InPlace,
+};
+
 // The result of FileRename::MoveToUpper.
 struct MovedFile {
     NTSTATUS status;
@@ -48,12 +64,11 @@ public:
     // for a reparse point that a copy-up clones, such as a file symbolic
     // link, and for a file with a user alternate data stream. A source in
     // no layer fails with STATUS_OBJECT_NAME_NOT_FOUND.
-    // ReplaceExisting::No fails with STATUS_OBJECT_NAME_COLLISION when an
-    // entry holds the new upper path. When a lower holds the source, the
-    // caller writes the whiteout at the old name.
+    // When a lower holds the source, the caller writes the whiteout at the
+    // old name.
     MovedFile MoveToUpper(const std::wstring& oldRelativePath,
                           const std::wstring& newRelativePath,
-                          ReplaceExisting replace,
+                          FileRenameReplace replace,
                           RenameCopyUp copyUpMode);
 
 private:

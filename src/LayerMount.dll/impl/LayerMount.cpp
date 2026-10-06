@@ -2113,9 +2113,8 @@ MovedSource LayerMount::RenameFileEntry(const RenameRequest& request, RenameCopy
     std::wstring newNorm = NormalizePath(request.newRelativePath);
     const bool lowerHoldsSource = pathResolver_->ResolveLowerPath(oldNorm).Found();
 
-    MovedFile moved = fileRename_->MoveToUpper(
-        request.oldRelativePath, request.newRelativePath,
-        request.replaceIfExists ? ReplaceExisting::Yes : ReplaceExisting::No, copyUpMode);
+    MovedFile moved = fileRename_->MoveToUpper(request.oldRelativePath, request.newRelativePath,
+                                               request.fileReplace, copyUpMode);
     MovedSource result{moved.status, moved.stagedShell, false,
                        UpperRename{std::move(oldNorm), std::move(newNorm),
                                    std::move(moved.oldUpperPath), UndoOpaqueMarker::Keep}};
@@ -2181,6 +2180,30 @@ NTSTATUS LayerMount::CheckRenameRequest(const RenamePaths& paths, DWORD callerPi
 struct LayerMount::CheckedRename {
     RenameKinds kinds;
     RenameLinks links;
+
+    // A link target can be on another volume than the work directory, so a
+    // destination there moves nothing into the work directory, as overlayfs
+    // stages nothing for a rename outside the overlay. Windows replaces a
+    // file with a file in one step, so a file destination there stays until
+    // the move replaces it.
+    FileRenameReplace FileReplace(BOOLEAN replaceIfExists) const {
+        if (!replaceIfExists) {
+            return FileRenameReplace::No;
+        }
+        const bool fileOntoFileInLinkTarget = links.destinationInLinkTarget &&
+                                              kinds.source == EntryKind::File &&
+                                              kinds.destination == EntryKind::File;
+        return fileOntoFileInLinkTarget ? FileRenameReplace::InPlace
+                                        : FileRenameReplace::AfterAside;
+    }
+
+    // Where a replace-rename moves a destination that it does not replace
+    // in place. Windows cannot replace a directory or a directory link in
+    // one step, so one in a link target moves to a new name next to itself.
+    DestinationAside Aside() const {
+        return links.destinationInLinkTarget ? DestinationAside::NextToDestination
+                                             : DestinationAside::WorkDirectory;
+    }
 };
 
 NTSTATUS LayerMount::CheckRename(const RenamePaths& paths,
@@ -2228,7 +2251,7 @@ NTSTATUS LayerMount::RenameViewPaths(const std::wstring& oldRelativePath,
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
     CheckedRename checked{RenameKinds{EntryKind::File, std::nullopt},
-                          RenameLinks{false, std::nullopt}};
+                          RenameLinks{false, false, std::nullopt}};
     const NTSTATUS status =
         CheckRename(RenamePaths{oldNorm, newNorm}, replaceIfExists, callerPid, &checked);
     if (!NT_SUCCESS(status)) return status;
@@ -2263,18 +2286,22 @@ LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldR
         if (!NT_SUCCESS(status)) return failure(status);
     }
 
+    const FileRenameReplace fileReplace = checked.FileReplace(replaceIfExists);
     RenameDestinationAside destinationAside(config_, *cache_, events_);
-    if (replaceIfExists && kinds.destination.has_value()) {
-        status = copyUp_->SetRenameDestinationAside(newNorm, *kinds.destination,
+    if (fileReplace == FileRenameReplace::InPlace) {
+        status = copyUp_->CheckDestinationReplaceable(newNorm, *kinds.destination);
+    } else if (replaceIfExists && kinds.destination.has_value()) {
+        status = copyUp_->SetRenameDestinationAside(newNorm, *kinds.destination, checked.Aside(),
                                                     &destinationAside);
-        if (!NT_SUCCESS(status)) return failure(status);
     }
+    if (!NT_SUCCESS(status)) return failure(status);
 
     const bool destHadWhiteout =
         whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath);
 
     const MovedSource moved =
-        MoveRenameSource(RenameRequest{oldRelativePath, newRelativePath, replaceIfExists},
+        MoveRenameSource(RenameRequest{oldRelativePath, newRelativePath, replaceIfExists,
+                                       fileReplace},
                          kinds.source, route, copyUpMode);
     if (!NT_SUCCESS(moved.status)) {
         if (moved.newNameOccupied) destinationAside.Release();
@@ -2362,7 +2389,7 @@ NTSTATUS LayerMount::Rename(FileContext* ctx,
     const std::wstring oldNorm = NormalizePath(oldRelativePath);
     const std::wstring newNorm = NormalizePath(newRelativePath);
     CheckedRename checked{RenameKinds{EntryKind::File, std::nullopt},
-                          RenameLinks{false, std::nullopt}};
+                          RenameLinks{false, false, std::nullopt}};
     const NTSTATUS status =
         CheckRename(RenamePaths{oldNorm, newNorm}, replaceIfExists, callerPid, &checked);
     if (!NT_SUCCESS(status)) return status;
