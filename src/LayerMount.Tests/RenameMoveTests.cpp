@@ -2656,6 +2656,29 @@ public:
         AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
     }
 
+    TEST_METHOD(Rename_DirectoryInLinkTargetOntoNameALowerHoldsUnderTheLink_WritesNoOpaqueMarkerIntoTheTarget) {
+        for (const LayerSource linkSource : kLinkLayerSources) {
+            for (const LinkCreator createLink : kDirectoryLinkCreators) {
+                TempLayerEnvironment env(2);
+                env.WriteFile(env.Root(), L"target\\src\\a.txt", "a");
+                env.WriteFile(env.Lower(1), L"link\\dst\\old.txt", "old");
+                if (!LinkToPrimedTargetCreatedOrSkipped(env, linkSource, createLink)) {
+                    continue;
+                }
+                ::LayerMount::LayerMount mount(env.MakeConfig());
+                RenamePrimerToCopyLowerLinkUp(mount, linkSource);
+
+                AssertStatus(STATUS_SUCCESS,
+                    mount.Rename(L"link\\src", L"link\\dst", kFailIfExists, kNoCallerPid),
+                    L"A rename of a directory in a link target onto a name a lower holds under the link must succeed");
+                AssertNoOpaqueMarkerIn(env.Root() + L"\\target\\dst");
+                AssertTargetHolds(env, {L"dst", L"dst\\a.txt"},
+                    L"The link target must hold only the moved directory and its file");
+                AssertUpperLinkListsWholeTarget(env, mount, L"link", env.Root() + L"\\target");
+            }
+        }
+    }
+
     TEST_METHOD(Rename_AcrossLinkBoundary_FailsWithNotSameDeviceAndChangesNothing) {
         struct CrossingRename {
             const wchar_t* from;
