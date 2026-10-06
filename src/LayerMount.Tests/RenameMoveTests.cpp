@@ -600,6 +600,26 @@ std::vector<std::wstring> FileNamesMatching(const std::wstring& directory,
     return names;
 }
 
+template <typename Predicate>
+bool WorkHoldsEntryWhere(const TempLayerEnvironment& env, Predicate matches) {
+    const fs::recursive_directory_iterator entries(env.Work());
+    return std::any_of(fs::begin(entries), fs::end(entries), matches);
+}
+
+bool WorkHoldsFileWithContent(const TempLayerEnvironment& env, const std::string& content) {
+    return WorkHoldsEntryWhere(env, [&](const fs::directory_entry& entry) {
+        return entry.is_regular_file() &&
+               env.ReadFile(env.Work(), fs::relative(entry.path(), env.Work()).wstring()) ==
+                   content;
+    });
+}
+
+bool WorkHoldsFileNamed(const TempLayerEnvironment& env, const std::wstring& fileName) {
+    return WorkHoldsEntryWhere(env, [&](const fs::directory_entry& entry) {
+        return entry.is_regular_file() && entry.path().filename() == fileName;
+    });
+}
+
 // Writes a record with stableIndexNumber for the upper entry at path.
 void WriteStableIndexRecord(const std::wstring& path, uint64_t stableIndexNumber,
                             const LayerConfig& config) {
@@ -3640,7 +3660,7 @@ public:
         }
 
         AssertStatus(STATUS_ACCESS_DENIED, status,
-            L"The rename must fail when the whiteout at the old name cannot be written");
+            L"The rename must fail when the engine cannot write the whiteout at the old name");
         upperBefore.AssertUnchanged(L"The failed rename must leave the upper as it was");
         Assert::IsTrue(HasAttribute(env.Upper() + L"\\link", FILE_ATTRIBUTE_REPARSE_POINT),
             L"The upper link must be the junction again");
@@ -3998,7 +4018,7 @@ public:
         }
 
         AssertStatus(STATUS_ACCESS_DENIED, status,
-            L"The rename must fail when the whiteout at the old name cannot be written");
+            L"The rename must fail when the engine cannot write the whiteout at the old name");
         Assert::IsFalse(env.FileExists(env.Upper(), L"moved"),
             L"The failed rename must leave no upper entry at the new name");
         Assert::IsFalse(env.FileExists(env.Upper(), WhiteoutMarkerPath(L"d")),
@@ -4114,15 +4134,50 @@ public:
 
         AssertStatus(STATUS_SHARING_VIOLATION, status,
             L"The rename must fail when the whiteout at the new name cannot go");
-        bool workHoldsReplacedFile = false;
-        for (const auto& entry : fs::recursive_directory_iterator(env.Work())) {
-            workHoldsReplacedFile = workHoldsReplacedFile ||
-                (entry.is_regular_file() &&
-                 env.ReadFile(env.Work(), fs::relative(entry.path(), env.Work()).wstring()) ==
-                     "keep");
-        }
-        Assert::IsTrue(workHoldsReplacedFile,
+        Assert::IsTrue(WorkHoldsFileWithContent(env, "keep"),
             L"The work directory must keep the replaced b.txt");
+    }
+
+    TEST_METHOD(ReplaceRename_WhenTheOldNameWhiteoutCannotBeWrittenAndTheFileCannotMoveBack_KeepsTheReplacedFileInTheWorkDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\a.txt", "lower");
+        env.WriteFile(env.Upper(), L"d\\a.txt", "source");
+        env.WriteFile(env.Upper(), L"b.txt", "keep");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const DirectoryRefusesNewEntries sourceParentRefusesWhiteoutAndMoveBack(
+                env.Upper() + L"\\d", FILE_ADD_FILE);
+            status = mount.Rename(L"d\\a.txt", L"b.txt", kReplaceIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_ACCESS_DENIED, status,
+            L"The rename must fail when the engine cannot write the whiteout at the old name");
+        Assert::IsTrue(WorkHoldsFileWithContent(env, "keep"),
+            L"The work directory must keep the replaced b.txt");
+    }
+
+    TEST_METHOD(ReplaceRename_DirectoryWhenTheOldNameWhiteoutCannotBeWrittenAndItCannotMoveBack_KeepsTheReplacedDirectoryInTheWorkDirectory) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\s\\old.txt", "old");
+        env.WriteFile(env.Upper(), L"d\\s\\a.txt", "a");
+        env.WriteFile(env.Upper(), OpaqueMarkerPath(L"d\\s"), "");
+        env.WriteFile(env.Lower(0), L"dst\\gone.txt", "gone");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst\\gone.txt"), "");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const DirectoryRefusesNewEntries sourceParentRefusesWhiteoutAndMoveBack(
+                env.Upper() + L"\\d", FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+            status = mount.Rename(L"d\\s", L"dst", kReplaceIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_ACCESS_DENIED, status,
+            L"The rename must fail when the engine cannot write the whiteout at the old name");
+        Assert::IsTrue(WorkHoldsFileNamed(env, WhiteoutMarkerPath(L"gone.txt")),
+            L"The work directory must keep the replaced dst with its whiteout marker");
     }
 
     TEST_METHOD(ReplaceRename_WhenTheWhiteoutCannotGoAndTheFileCannotMoveBack_EmitsAWarningAtTheNewName) {

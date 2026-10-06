@@ -224,8 +224,8 @@ class FileRename;
 class RenameRollback;
 struct UpperRename;
 struct MovedSource;
+struct RenameStepResult;
 enum class RenameCopyUp;
-struct MovedFile;
 class UpperEntryRemover;
 namespace VHD { class VHDLayerManager; }
 namespace VSS { class VSSManager; }
@@ -950,43 +950,47 @@ private:
     // that checked names first. copyUpMode chooses how a file that only a
     // lower holds copies up. When the upper has a whiteout at the new name
     // that cannot go, the rename moves its entry back and fails with the
-    // error of that removal.
+    // error of that removal. When a whiteout step fails and the entry
+    // cannot move back, a replaced destination stays in the work directory.
     RenameResult RenameCheckedEntry(const std::wstring& oldRelativePath,
                                     const std::wstring& newRelativePath,
                                     BOOLEAN replaceIfExists,
                                     const CheckedRename& checked,
                                     RenameCopyUp copyUpMode);
 
-    // Moves the source to newRelativePath with RenameFileEntry,
+    // The caller paths of a rename that passed its checks, and whether it
+    // replaces an existing destination.
+    struct RenameRequest {
+        const std::wstring& oldRelativePath;
+        const std::wstring& newRelativePath;
+        BOOLEAN replaceIfExists;
+    };
+
+    // Moves the source to request.newRelativePath with RenameFileEntry,
     // RenameDirectoryEntry or, when the paths differ only in case,
     // CopyUp::RenameDirectoryCase. route applies to a Directory or a Link
     // sourceKind. The result's rename names the source's upper path before
     // the move.
-    MovedSource MoveRenameSource(const std::wstring& oldRelativePath,
-                                 const std::wstring& newRelativePath,
-                                 BOOLEAN replaceIfExists,
+    MovedSource MoveRenameSource(const RenameRequest& request,
                                  EntryKind sourceKind,
                                  DirectoryRenameRoute route,
                                  RenameCopyUp copyUpMode);
 
-    // Moves a file to newRelativePath in the upper. When a lower holds the
-    // source, a whiteout then hides it at the old name. The result's status
-    // is that of the whiteout write when the move succeeded.
-    MovedFile RenameFileEntry(const std::wstring& oldRelativePath,
-                              const std::wstring& newRelativePath,
-                              BOOLEAN replaceIfExists,
-                              RenameCopyUp copyUpMode);
+    // Moves a file to request.newRelativePath in the upper. When a lower
+    // holds the source, a whiteout then hides it at the old name. When that
+    // write fails, undoes the move as RenameRollback::WhiteOutSource
+    // describes. The result's status is that of the whiteout write when the
+    // move succeeded.
+    MovedSource RenameFileEntry(const RenameRequest& request, RenameCopyUp copyUpMode);
 
     // Moves a directory or a link along route, then writes the whiteout at
     // the old name for the MergeLower and MoveUpperAndWhiteout routes. When
-    // that write fails, RenameRollback::WhiteOutSource moves the entry back
-    // as rename describes.
-    NTSTATUS RenameDirectoryEntry(const std::wstring& oldRelativePath,
-                                  const std::wstring& newRelativePath,
-                                  EntryKind sourceKind,
-                                  DirectoryRenameRoute route,
-                                  BOOLEAN replaceIfExists,
-                                  const UpperRename& rename);
+    // that write fails, undoes the rename as RenameRollback::WhiteOutSource
+    // describes.
+    RenameStepResult RenameDirectoryEntry(const RenameRequest& request,
+                                          EntryKind sourceKind,
+                                          DirectoryRenameRoute route,
+                                          const UpperRename& rename);
 
     LayerConfig config_;
     // The final path of config_.upperPath, read once at mount, in the

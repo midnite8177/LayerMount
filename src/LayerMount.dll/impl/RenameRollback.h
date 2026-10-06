@@ -9,7 +9,6 @@ namespace LayerMount {
 class PathResolver;
 class WhiteoutManager;
 class Cache;
-class RenameDestinationAside;
 struct UpperEntryMove;
 
 // Emits an LM_EVT_WARNING event at relativePath when move left a sidecar
@@ -37,11 +36,21 @@ struct UpperRename {
     UndoOpaqueMarker opaqueMarker;
 };
 
+// The result of a step of a rename that runs after its entry moved.
+struct RenameStepResult {
+    NTSTATUS status;
+    // True when the step failed and its undo could not move the entry
+    // back, so the rename stays in effect.
+    bool renameStayed;
+};
+
 // The result of a rename's move of its source: its status, whether it left
-// a metacopy shell at the new name, and what an undo of the move needs.
+// a metacopy shell at the new name, whether a failed move stays in effect,
+// and what an undo of the move needs.
 struct MovedSource {
     NTSTATUS status;
     bool stagedShell;
+    bool renameStayed;
     UpperRename rename;
 };
 
@@ -58,19 +67,18 @@ public:
 
     // Writes a whiteout of the given type at rename.oldNorm. When the write
     // fails, undoes the rename with MoveBack and returns the write error.
-    // When the entry cannot move back, removes the whiteout at
-    // rename.newNorm, so the moved entry stays visible.
-    NTSTATUS WhiteOutSource(const UpperRename& rename, WhiteoutType type);
+    // When the entry cannot move back, the result's renameStayed is true,
+    // and the call removes the whiteout at rename.newNorm so the moved entry
+    // stays visible.
+    RenameStepResult WhiteOutSource(const UpperRename& rename, WhiteoutType type);
 
     // Removes the upper whiteout at rename.newNorm. A whiteout left beside
     // the renamed entry hides it once this upper serves as a lower. When
     // the removal fails, the rename moves its entry back with MoveBack,
     // removes the whiteout at rename.oldNorm, and fails with the error of
-    // the removal. When the entry cannot move back, the rename stays in
-    // effect, and destinationAside keeps the replaced destination in the
-    // work directory.
-    NTSTATUS RemoveDestinationWhiteoutOrUndo(const UpperRename& rename,
-                                             RenameDestinationAside* destinationAside);
+    // the removal. When the entry cannot move back, the result's
+    // renameStayed is true.
+    RenameStepResult RemoveDestinationWhiteoutOrUndo(const UpperRename& rename);
 
     // Moves the upper entry at rename.newNorm back to rename.oldUpperPath
     // and returns the status of that move. When it moves back and

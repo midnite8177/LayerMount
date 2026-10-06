@@ -31,14 +31,14 @@ RenameRollback::RenameRollback(ConfigRef config,
     , events_(events) {
 }
 
-NTSTATUS RenameRollback::WhiteOutSource(const UpperRename& rename, WhiteoutType type) {
+RenameStepResult RenameRollback::WhiteOutSource(const UpperRename& rename, WhiteoutType type) {
     const NTSTATUS whiteout = whiteoutMgr_.CreateWhiteout(rename.oldNorm, type);
     if (NT_SUCCESS(whiteout)) {
-        return STATUS_SUCCESS;
+        return {STATUS_SUCCESS, false};
     }
     const NTSTATUS moveBack = MoveBack(rename);
     if (NT_SUCCESS(moveBack)) {
-        return whiteout;
+        return {whiteout, false};
     }
     WarnUndoFailed(HresultFromNtStatus(moveBack), rename.newNorm,
                    L"The undo of a failed rename could not move the entry back");
@@ -47,28 +47,26 @@ NTSTATUS RenameRollback::WhiteOutSource(const UpperRename& rename, WhiteoutType 
         WarnUndoFailed(HresultFromNtStatus(destinationWhiteout), rename.newNorm,
                        L"The undo of a failed rename could not remove the whiteout at the new name");
     }
-    return whiteout;
+    return {whiteout, true};
 }
 
-NTSTATUS RenameRollback::RemoveDestinationWhiteoutOrUndo(
-    const UpperRename& rename, RenameDestinationAside* destinationAside) {
+RenameStepResult RenameRollback::RemoveDestinationWhiteoutOrUndo(const UpperRename& rename) {
     const NTSTATUS removeStatus = whiteoutMgr_.RemoveWhiteout(rename.newNorm);
     if (NT_SUCCESS(removeStatus)) {
-        return STATUS_SUCCESS;
+        return {STATUS_SUCCESS, false};
     }
     const NTSTATUS moveBack = MoveBack(rename);
     if (!NT_SUCCESS(moveBack)) {
         WarnUndoFailed(HresultFromNtStatus(moveBack), rename.newNorm,
                        L"The undo of a failed rename could not move the entry back");
-        destinationAside->Release();
-        return removeStatus;
+        return {removeStatus, true};
     }
     const NTSTATUS sourceWhiteout = whiteoutMgr_.RemoveWhiteout(rename.oldNorm);
     if (!NT_SUCCESS(sourceWhiteout)) {
         WarnUndoFailed(HresultFromNtStatus(sourceWhiteout), rename.oldNorm,
                        L"The undo of a failed rename could not remove the whiteout at the old name");
     }
-    return removeStatus;
+    return {removeStatus, false};
 }
 
 NTSTATUS RenameRollback::MoveBack(const UpperRename& rename) {
