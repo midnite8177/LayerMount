@@ -620,6 +620,28 @@ bool WorkHoldsFileNamed(const TempLayerEnvironment& env, const std::wstring& fil
     });
 }
 
+// Writes a merged src with a lower file, an upper file and an upper
+// subdirectory.
+void WriteMergedSrc(const TempLayerEnvironment& env) {
+    env.WriteFile(env.Lower(0), L"src\\old.txt", "old");
+    env.WriteFile(env.Upper(), L"src\\a.txt", "a");
+    env.CreateDir(env.Upper(), L"src\\sub");
+}
+
+// Renames the src that WriteMergedSrc wrote to dst. An open child keeps the
+// upper src from moving aside, and the deny ACEs that the merged copy takes
+// from src keep the copy at dst from being removed.
+NTSTATUS RenameSrcToDstWhenItsUpperCannotMoveAsideAndItsCopyCannotGo(
+    const TempLayerEnvironment& env, ::LayerMount::LayerMount& mount, BOOLEAN replace) {
+    const AccessDenied copyOfSubRefusesDelete(env.Upper() + L"\\src\\sub", DELETE);
+    const AccessDenied copyOfSrcRefusesChildDelete(env.Upper() + L"\\src", FILE_DELETE_CHILD);
+    const BackupPrivilegeDisabledOnThread noBackupPrivilege;
+    DisableRestorePrivilegeOnThread();
+    const ScopedHandle openChildBlocksMoveOfSrc =
+        HoldOpen(env.Upper() + L"\\src\\a.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
+    return mount.Rename(L"src", L"dst", replace, kNoCallerPid);
+}
+
 // Writes a record with stableIndexNumber for the upper entry at path.
 void WriteStableIndexRecord(const std::wstring& path, uint64_t stableIndexNumber,
                             const LayerConfig& config) {
@@ -4182,30 +4204,38 @@ public:
 
     TEST_METHOD(ReplaceRename_MergedDirectoryWhenItsUpperCannotMoveAsideAndItsCopyCannotGo_KeepsTheReplacedDirectoryInTheWorkDirectory) {
         TempLayerEnvironment env(1);
-        env.WriteFile(env.Lower(0), L"src\\old.txt", "old");
-        env.WriteFile(env.Upper(), L"src\\a.txt", "a");
-        env.CreateDir(env.Upper(), L"src\\sub");
+        WriteMergedSrc(env);
         env.WriteFile(env.Lower(0), L"dst\\gone.txt", "gone");
         env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"dst\\gone.txt"), "");
         ::LayerMount::LayerMount mount(env.MakeConfig());
 
-        NTSTATUS status = STATUS_SUCCESS;
-        {
-            const AccessDenied copyOfSubRefusesDelete(env.Upper() + L"\\src\\sub", DELETE);
-            const AccessDenied copyOfSrcRefusesChildDelete(env.Upper() + L"\\src", FILE_DELETE_CHILD);
-            const BackupPrivilegeDisabledOnThread noBackupPrivilege;
-            DisableRestorePrivilegeOnThread();
-            const ScopedHandle openChildBlocksMoveOfSrc =
-                HoldOpen(env.Upper() + L"\\src\\a.txt", FILE_SHARE_READ | FILE_SHARE_WRITE);
-            status = mount.Rename(L"src", L"dst", kReplaceIfExists, kNoCallerPid);
-        }
-
-        AssertStatus(STATUS_ACCESS_DENIED, status,
+        AssertStatus(STATUS_ACCESS_DENIED,
+            RenameSrcToDstWhenItsUpperCannotMoveAsideAndItsCopyCannotGo(env, mount, kReplaceIfExists),
             L"The rename must fail when the upper src cannot move aside");
         Assert::IsTrue(env.FileExists(env.Upper(), L"dst\\sub"),
             L"The merged copy of src must stay at dst when its removal fails");
         Assert::IsTrue(WorkHoldsFileNamed(env, WhiteoutMarkerPath(L"gone.txt")),
             L"The work directory must keep the replaced dst with its whiteout marker");
+    }
+
+    TEST_METHOD(Rename_MergedDirectoryWhenItsUpperCannotMoveAsideAndItsCopyCannotGo_EmitsAWarningAtTheNewName) {
+        for (const BOOLEAN replace : {kFailIfExists, kReplaceIfExists}) {
+            TempLayerEnvironment env(1);
+            WriteMergedSrc(env);
+            EmittedWarnings warnings;
+            ::LayerMount::LayerMount mount(env.MakeConfig());
+            mount.Events().Set(&CollectWarning, &warnings);
+
+            AssertStatus(STATUS_ACCESS_DENIED,
+                RenameSrcToDstWhenItsUpperCannotMoveAsideAndItsCopyCannotGo(env, mount, replace),
+                L"The rename must fail when the upper src cannot move aside");
+            Assert::AreEqual<size_t>(1, warnings.results.size(),
+                L"The copy that stays at the new name must emit one warning");
+            Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED), warnings.results[0],
+                L"The warning must carry the failure of the removal of the copy");
+            Assert::AreEqual(std::wstring(L"dst"), warnings.paths[0],
+                L"The warning must name the path where the copy stays");
+        }
     }
 
     TEST_METHOD(ReplaceRename_WhenTheWhiteoutCannotGoAndTheFileCannotMoveBack_EmitsAWarningAtTheNewName) {

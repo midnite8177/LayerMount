@@ -426,7 +426,12 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
     const NTSTATUS asideStatus = aside.status;
     bool newNameOccupied = false;
     if (!NT_SUCCESS(asideStatus)) {
-        newNameOccupied = !NT_SUCCESS(RemoveUpperEntry(newUpperPath, config_));
+        const NTSTATUS removal = RemoveUpperEntry(newUpperPath, config_);
+        newNameOccupied = !NT_SUCCESS(removal);
+        if (newNameOccupied) {
+            events_.Emit(LM_EVT_WARNING, HresultFromNtStatus(removal), newNorm.c_str(),
+                         L"The undo of a failed rename could not remove the copy at the new name");
+        }
     } else if (!asidePath.empty()) {
         RemoveUpperEntry(asidePath, config_);
     }

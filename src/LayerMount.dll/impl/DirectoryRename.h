@@ -18,7 +18,8 @@ class CopyUp;
 // Renames a directory or a directory link in the merged view. Builds a copy
 // of a lower source in the work directory and moves it to the new upper
 // path, and moves an upper source there. A sidecar record that does not
-// move with its entry emits an LM_EVT_WARNING event through events.
+// move with its entry, and a copy that stays at the new path after a failed
+// rename, each emit an LM_EVT_WARNING event through events.
 class DirectoryRename {
 public:
     DirectoryRename(ConfigRef config,
@@ -48,8 +49,9 @@ public:
     // into the work directory in one step, and the call tries to remove it there.
     // When it cannot be probed or moved, the call returns that error,
     // removes the new upper entry, and leaves the old upper entry whole.
-    // When that removal fails, the new upper entry stays, and the result's
-    // newNameOccupied is true. Any other failure leaves the old tree as it was
+    // When that removal fails, the new upper entry stays, the result's
+    // newNameOccupied is true, and the call emits an LM_EVT_WARNING event
+    // with the new path. Any other failure leaves the old tree as it was
     // and tries to remove the copy in the work directory.
     // Warning: this call never replaces an entry. With ReplaceExisting::Yes,
     // the caller must first move the destination aside with
