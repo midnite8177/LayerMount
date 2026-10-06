@@ -4,7 +4,9 @@
 #include "HandleTable.h"
 #include "HandleTypes.h"
 #include "../impl/LayerMount.h"
+#include "../impl/LayerPath.h"
 #include "../impl/NtStatusUtil.h"
+#include "../impl/WorkDirectory.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -123,6 +125,11 @@ LM_API HRESULT LM_CALL LayerMountCreate(const LM_CONFIG* config,
     }
 
     auto holder = std::make_unique<LayerMountHolder>();
+    const HRESULT opened =
+        ::LayerMount::WorkDirectory::Open(layerCfg, &holder->workDirectory, err);
+    if (FAILED(opened)) {
+        throw LayerMountAbiException(opened, std::move(err));
+    }
     holder->core = std::make_unique<::LayerMount::LayerMount>(std::move(layerCfg));
     const std::uint64_t encoded = Handles().mount.Allocate(std::move(holder));
     if (encoded == 0) {
@@ -144,10 +151,15 @@ LM_API HRESULT LM_CALL LayerMountCreateTransient(PCWSTR workDir,
     if (workDir   == nullptr) return E_INVALIDARG;
     if (outHandle == nullptr) return E_POINTER;
 
+    LM_ABI_BEGIN();
+
     // Best-effort create: if the path can't be made, LayerMountCreate below
     // surfaces the precise Win32 error via LayerMountGetLastErrorMessage.
     std::error_code ec;
     std::filesystem::create_directories(workDir, ec);
+
+    const std::wstring hiddenWorkDir =
+        ::LayerMount::JoinDirPath(workDir, ::LayerMount::kSidecarDirName);
 
     LM_CONFIG cfg{};
     cfg.structSize            = sizeof(cfg);
@@ -157,12 +169,14 @@ LM_API HRESULT LM_CALL LayerMountCreateTransient(PCWSTR workDir,
     cfg.lowerPathCount        = 0;
     cfg.lowerPaths            = nullptr;
     cfg.upperPath             = workDir;
-    cfg.workDirPath           = workDir;
+    cfg.workDirPath           = hiddenWorkDir.c_str();
     cfg.processRulesPath      = nullptr;
     cfg.accessLogCapacity     = 0;
     cfg.pathCacheCapacity     = 0;
 
     return LayerMountCreate(&cfg, outHandle);
+
+    LM_ABI_END();
 }
 
 LM_API HRESULT LM_CALL LayerMountDestroy(LM_HANDLE handle)

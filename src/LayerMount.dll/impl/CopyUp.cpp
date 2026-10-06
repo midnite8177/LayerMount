@@ -8,6 +8,7 @@
 #include "NtStatusUtil.h"
 #include "ElevationUtil.h"
 #include "EntryCopy.h"
+#include "WorkDirectory.h"
 #include "../abi/ErrorTls.h"
 
 #include <winioctl.h>
@@ -56,10 +57,6 @@ namespace {
 
 constexpr const wchar_t* kAsideNamePrefix = L".layermount";
 
-DWORD WithoutReadOnly(DWORD attributes) {
-    return attributes & ~FILE_ATTRIBUTE_READONLY;
-}
-
 // The source attributes that CreateFileW gives the metacopy shell. In the
 // flags of CreateFileW, a bit above 0xFFFF is a FILE_FLAG_* value, and a
 // source attribute such as FILE_ATTRIBUTE_PINNED uses such a bit. Thus
@@ -78,11 +75,26 @@ DWORD MetacopyShellCreateAttributes(DWORD sourceAttributes) {
     return sourceAttributes & kCreatable;
 }
 
-// attributes must be the current attributes of the file at path. Writes
-// them without FILE_ATTRIBUTE_READONLY and keeps the stored times.
+// Opens the entry at path and calls ClearReadOnly on it. Returns false with
+// the Win32 error in GetLastError.
 bool ClearReadOnly(const std::wstring& path, DWORD attributes) {
-    return (attributes & FILE_ATTRIBUTE_READONLY) == 0 ||
-           WriteEntryTimes(path, EntryTimes{}, WithoutReadOnly(attributes));
+    if ((attributes & FILE_ATTRIBUTE_READONLY) == 0) {
+        return true;
+    }
+    ScopedHandle entry(::CreateFileW(
+        path.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!entry.IsValid()) {
+        return false;
+    }
+    if (::LayerMount::ClearReadOnly(entry.Get(), attributes)) {
+        return true;
+    }
+    const DWORD error = ::GetLastError();
+    entry.Reset();
+    ::SetLastError(error);
+    return false;
 }
 
 // A delete refuses a read-only file, and a staged file is read-only once
@@ -216,8 +228,8 @@ void CopyUp::RecordCopyUp(const std::wstring& relativePath) {
     }
 }
 
-std::wstring CopyUp::GenerateWorkPath() {
-    return JoinDirPath(config_.workDirPath, UniqueEntryName());
+std::wstring CopyUp::GenerateStagingPath() {
+    return JoinDirPath(StagingAreaPath(config_.workDirPath), UniqueEntryName());
 }
 
 std::wstring CopyUp::GenerateAsidePathNextTo(const std::wstring& path) {
@@ -240,21 +252,6 @@ std::wstring CopyUp::UniqueEntryName() {
            std::to_wstring(counter) + L"." + std::to_wstring(timestamp) + L".tmp";
 }
 
-void CopyUp::CleanWorkDirectory() {
-    std::wstring searchPath = JoinDirPath(config_.workDirPath, L"#*.tmp");
-    WIN32_FIND_DATAW findData;
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        return;
-    }
-
-    do {
-        RemoveStagedFile(JoinDirPath(config_.workDirPath, findData.cFileName), config_);
-    } while (FindNextFileW(hFind, &findData));
-
-    FindClose(hFind);
-}
-
 NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
                                     const std::wstring& finalUpperPath) {
     std::filesystem::path parentDir = std::filesystem::path(finalUpperPath).parent_path();
@@ -273,7 +270,7 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
 NTSTATUS CopyUp::CopyUpReparseCloneAndCount(const std::wstring& normalized,
                                             const CopyUpTarget& target) {
     const NTSTATUS status = CloneReparsePointThroughWorkDir(
-        {target.source.absolutePath, target.source.attributes}, GenerateWorkPath(),
+        {target.source.absolutePath, target.source.attributes}, GenerateStagingPath(),
         target.upperPath, {CopiedEntryRecord::NewFromSource, config_});
     if (!NT_SUCCESS(status)) {
         return status;
@@ -442,7 +439,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     }
 
     DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
-    const std::wstring workPath = GenerateWorkPath();
+    const std::wstring workPath = GenerateStagingPath();
     FileBasicInfoGuard basicInfo(srcHandle.Get(), StagedFileAttributes(srcAttrs), workPath);
 
     status = StageFileInWorkDir(source.absolutePath, srcHandle, srcAttrs, workPath);
@@ -583,7 +580,7 @@ FileCopyUpResult CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return {status, false};
     }
 
-    const std::wstring workPath = GenerateWorkPath();
+    const std::wstring workPath = GenerateStagingPath();
     status = BuildMetacopyShell(target->source.absolutePath, workPath);
     if (!NT_SUCCESS(status)) {
         return {status, false};
@@ -809,7 +806,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         nullptr));
-    const std::wstring stagedPath = GenerateWorkPath();
+    const std::wstring stagedPath = GenerateStagingPath();
     FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), stagedPath);
     srcHandle.Reset();
 
@@ -932,7 +929,7 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
     const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
     const std::function<std::wstring()> newAsidePath =
         where == DestinationAside::WorkDirectory
-            ? std::function<std::wstring()>([this]() { return GenerateWorkPath(); })
+            ? std::function<std::wstring()>([this]() { return GenerateStagingPath(); })
             : std::function<std::wstring()>(
                   [this, &upperPath]() { return GenerateAsidePathNextTo(upperPath); });
     std::wstring asidePath;
@@ -965,7 +962,7 @@ NTSTATUS CopyUp::RenameDirectoryCase(const CallerPath& oldCallerPath,
                 return status;
             }
             status = CloneReparsePointThroughWorkDir(
-                {source.absolutePath, source.attributes}, GenerateWorkPath(), newUpperPath,
+                {source.absolutePath, source.attributes}, GenerateStagingPath(), newUpperPath,
                 {CopiedEntryRecord::NewFromSource, config_});
             if (!NT_SUCCESS(status)) {
                 return status;

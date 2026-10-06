@@ -487,6 +487,7 @@ public:
         config.hostCapabilities &= ~LM_CAP_ADS;
         ::CreateDirectoryW(config.upperPath.c_str(), nullptr);
         ::CreateDirectoryW(config.workDirPath.c_str(), nullptr);
+        ::CreateDirectoryW(LayerMount::StagingAreaPath(config.workDirPath).c_str(), nullptr);
         NTSTATUS copyUpStatus = STATUS_UNSUCCESSFUL;
         std::string upperContent;
         {
@@ -566,7 +567,7 @@ public:
                     (linkSource == LayerMount::LayerSource::Upper ? L"an upper" : L"a lower") +
                     L" link";
                 ::LayerMount::LayerMount mount(env.MakeConfig());
-                const std::vector<std::wstring> workBefore = EntriesUnder(env.Work());
+                const std::vector<std::wstring> workBefore = EntriesUnder(env.Staging());
 
                 const NTSTATUS fileStatus =
                     mount.Rename(L"link\\a", L"link\\b", kReplaceIfExists, kNoCallerPid);
@@ -585,7 +586,7 @@ public:
                 if (env.ReadFile(target, L"b") != "a") {
                     failures.push_back(L"b in " + link + L" does not hold the moved file's data");
                 }
-                if (EntriesUnder(env.Work()) != workBefore) {
+                if (EntriesUnder(env.Staging()) != workBefore) {
                     failures.push_back(L"The renames in " + link + L" changed the work directory");
                 }
             }

@@ -22,6 +22,12 @@ NTSTATUS StatusFromWin32Error(DWORD err, DWORD fallback) noexcept;
 // StatusFromWin32Error for the last error of the call that just failed.
 NTSTATUS StatusOfFailedCall(DWORD fallback) noexcept;
 
+// Whether a Win32 error says that no entry is at the path: the entry is
+// gone, or a directory on the path is.
+inline bool IsGone(DWORD error) noexcept {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
 // The HRESULT the C ABI returns for an engine NTSTATUS: S_OK for success,
 // HRESULT_FROM_NT for everything else. A failed fill stores its message
 // under this value, so LayerMountGetLastErrorMessage finds it with the

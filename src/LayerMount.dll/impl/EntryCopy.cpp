@@ -654,6 +654,20 @@ DWORD AttributesFileBasicInfoCanSet(DWORD attributes) {
 
 }
 
+bool ClearReadOnly(HANDLE entry, DWORD attributes) {
+    if ((attributes & FILE_ATTRIBUTE_READONLY) == 0) {
+        return true;
+    }
+    // Zero times keep the stored times, and a ChangeTime of -1 keeps the
+    // stored value. A FileAttributes of zero would keep the stored
+    // attributes, the read-only bit with them, so a set left empty goes
+    // out as FILE_ATTRIBUTE_NORMAL.
+    FILE_BASIC_INFO basic{};
+    basic.ChangeTime.QuadPart = -1;
+    basic.FileAttributes = AttributesFileBasicInfoCanSet(attributes & ~FILE_ATTRIBUTE_READONLY);
+    return ::SetFileInformationByHandle(entry, FileBasicInfo, &basic, sizeof(basic)) != FALSE;
+}
+
 EntryTimes EntryTimesOf(const WIN32_FILE_ATTRIBUTE_DATA& data) {
     return {data.ftCreationTime, data.ftLastAccessTime, data.ftLastWriteTime};
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LayerMount.h"
+#include "ScopedHandle.h"
 
 #include <functional>
 #include <string>
@@ -45,6 +46,26 @@ private:
 // separator. Unlike NormalizePath, it keeps the case of path.
 std::wstring NormalizePathPreserveCase(const std::wstring& path);
 
+// Returns path without its extended-form prefix: \\?\UNC\server\share
+// becomes \\server\share and \\?\C:\dir becomes C:\dir. Any other
+// extended path, such as \\?\Volume{...}\dir, comes back unchanged.
+std::wstring WithoutExtendedPrefix(const std::wstring& path);
+
+// Returns path as a full path in lowercase, with backslash separators, no
+// trailing separator, and the prefix that WithoutExtendedPrefix strips gone.
+// A path through a link, a short name or a substituted drive keeps its own
+// form.
+std::wstring ComparablePath(const std::wstring& path);
+
+// The path that GetFinalPathNameByHandleW gives for handle, in extended
+// form. Returns an empty path when the path cannot be read.
+std::wstring FinalPathNameOf(HANDLE handle);
+
+// The final path of the directory at path. The open follows a junction or a
+// directory symbolic link anywhere in path. Returns an empty path when the
+// directory cannot be opened or its final path cannot be read.
+std::wstring FinalPathOfDirectory(const std::wstring& path);
+
 // Whether pathNorm names an entry below dirNorm, at a separator boundary,
 // so "a\b" is inside "a" and "ab" is not. Both paths are in the same
 // NormalizePath or NormalizePathPreserveCase form. A path is not inside
@@ -62,6 +83,12 @@ std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
 // entryPath's parent, and a failed lookup must not fail a copy-up.
 std::wstring WithStoredLeafName(const std::wstring& targetPath,
                                 const std::wstring& entryPath);
+
+// Opens the entry at path itself, not the target of a link, with access.
+// Opens a file or a directory, and shares read, write and delete. With
+// SE_BACKUP_NAME and SE_RESTORE_NAME enabled, the backup semantics of the
+// open pass a DACL that denies the access.
+ScopedHandle OpenReparseEntry(const std::wstring& path, DWORD access);
 
 // Sets *isLink to whether the entry at path is a junction or a directory
 // symbolic link. Such a link is a directory reparse point whose reparse

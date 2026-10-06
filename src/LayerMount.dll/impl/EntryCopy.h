@@ -123,6 +123,13 @@ bool WriteEntryTimes(const std::wstring& path,
                      const EntryTimes& times,
                      std::optional<DWORD> attributes);
 
+// Writes attributes without FILE_ATTRIBUTE_READONLY through entry, a handle
+// with FILE_WRITE_ATTRIBUTES access, and keeps the entry's times. attributes
+// must be the entry's current attributes. Only the bits that
+// WriteEntryTimes writes go through. Does nothing when attributes lack the
+// read-only bit. Returns false with the Win32 error in GetLastError.
+bool ClearReadOnly(HANDLE entry, DWORD attributes);
+
 // Writes attributes to the entry at path and keeps its times. Only the bits
 // a FileBasicInfo write can set go through, the pin and offline bits
 // included. The open uses FILE_FLAG_OPEN_REPARSE_POINT, so a junction or a

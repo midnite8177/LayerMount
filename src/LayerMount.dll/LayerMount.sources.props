@@ -77,6 +77,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\RenameRollback.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\SecurityPolicy.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\WorkDirectory.h" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\Cache.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\CopyUp.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\DirectoryMerge.cpp" />
@@ -94,6 +95,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\RenameRollback.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\SecurityPolicy.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\WhiteoutManager.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\WorkDirectory.cpp" />
   </ItemGroup>
 
   <!-- Host helpers. Pure Win32 mount-point plumbing exposed via the

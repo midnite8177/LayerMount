@@ -408,10 +408,10 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
     const std::wstring oldUpperPath = pathResolver_.GetUpperPath(oldNorm);
     const NTSTATUS status = sourceKind == EntryKind::Link
         ? CloneReparsePointThroughWorkDir({source.absolutePath, source.attributes},
-                                          copyUp_.GenerateWorkPath(), newUpperPath,
+                                          copyUp_.GenerateStagingPath(), newUpperPath,
                                           {CopiedEntryRecord::NewFromSource, config_})
         : BuildInContainerAndMove(
-              copyUp_.GenerateWorkPath(), newUpperPath, config_,
+              copyUp_.GenerateStagingPath(), newUpperPath, config_,
               [&](const std::wstring& stagedPath) {
                   return CopyMergedDirectory(source, {oldNorm, oldUpperPath}, stagedPath);
               });
@@ -421,7 +421,7 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
 
     std::wstring asidePath;
     const UpperEntryMove aside = MoveUpperEntryAside(
-        oldUpperPath, [this]() { return copyUp_.GenerateWorkPath(); }, config_, &asidePath);
+        oldUpperPath, [this]() { return copyUp_.GenerateStagingPath(); }, config_, &asidePath);
     WarnRecordLeftBehind(events_, aside, oldNorm);
     const NTSTATUS asideStatus = aside.status;
     bool newNameOccupied = false;

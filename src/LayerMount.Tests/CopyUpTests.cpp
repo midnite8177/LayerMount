@@ -106,15 +106,16 @@ public:
         AssertTempIsNTFS();
     }
 
-    TEST_METHOD(GenerateWorkPath_ReturnsUniquePathInWorkDir) {
+    TEST_METHOD(GenerateStagingPath_ReturnsUniquePathInStagingArea) {
         TempLayerEnvironment env(1);
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        std::wstring a = rig.copyUp.GenerateWorkPath();
-        std::wstring b = rig.copyUp.GenerateWorkPath();
+        std::wstring a = rig.copyUp.GenerateStagingPath();
+        std::wstring b = rig.copyUp.GenerateStagingPath();
 
         Assert::AreNotEqual(a, b, L"Two calls should return different paths");
-        Assert::IsTrue(a.find(env.Work()) == 0, L"Path should be under work dir");
+        Assert::IsTrue(a.find(env.Staging() + L"\\#") == 0,
+            L"Path should be in the staging area of the work directory");
         Assert::IsTrue(a.find(L".tmp") != std::wstring::npos, L"Path should end with .tmp");
     }
 
@@ -129,13 +130,9 @@ public:
         Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW(config.workDirPath.c_str()),
             L"The prepare creates a missing work directory");
-
-        config.workDirPath = config.upperPath;
-        Assert::AreEqual<HRESULT>(S_OK, config.Prepare(error),
-            L"The upper as its own work directory passes the prepare");
     }
 
-     TEST_METHOD(GenerateWorkPath_LongWorkDirPath_StillUniqueNoTruncation) {
+     TEST_METHOD(GenerateStagingPath_LongWorkDirPath_StillUniqueNoTruncation) {
          TempLayerEnvironment env(1);
          LayerConfig config = env.MakeConfig();
 
@@ -158,7 +155,7 @@ public:
          constexpr int kCount = 32;
          paths.reserve(kCount);
          for (int i = 0; i < kCount; ++i) {
-             paths.push_back(rig.copyUp.GenerateWorkPath());
+             paths.push_back(rig.copyUp.GenerateStagingPath());
          }
 
          for (const auto& p : paths) {
@@ -177,61 +174,6 @@ public:
                     kCount, uniq.size());
          Assert::IsTrue(uniq.size() == static_cast<size_t>(kCount), msg);
      }
-
-    TEST_METHOD(CleanWorkDirectory_RemovesHashTempFiles_LeavesOthers) {
-        TempLayerEnvironment env(1);
-        CopyUpAndRenameRig rig(env.MakeConfig());
-
-        std::wstring tempFile = env.Work() + L"\\#abc.tmp";
-        HANDLE h1 = ::CreateFileW(tempFile.c_str(), GENERIC_WRITE, 0, nullptr,
-                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        ::CloseHandle(h1);
-
-        std::wstring otherFile = env.Work() + L"\\other.txt";
-        HANDLE h2 = ::CreateFileW(otherFile.c_str(), GENERIC_WRITE, 0, nullptr,
-                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        ::CloseHandle(h2);
-
-        rig.copyUp.CleanWorkDirectory();
-
-        Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
-            ::GetFileAttributesW(tempFile.c_str()),
-            L"Hash-prefixed .tmp file should be removed");
-        Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
-            ::GetFileAttributesW(otherFile.c_str()),
-            L"Non-matching file should remain");
-    }
-
-    TEST_METHOD(CleanWorkDirectory_ReadOnlyHashTempFile_RemovesIt) {
-        TempLayerEnvironment env(1);
-        CopyUpAndRenameRig rig(env.MakeConfig());
-
-        env.WriteFile(env.Work(), L"#abc.tmp", "staged");
-        const std::wstring tempFile = env.Work() + L"\\#abc.tmp";
-        Assert::IsTrue(::SetFileAttributesW(tempFile.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE,
-            L"The test must make the staged file read-only");
-
-        rig.copyUp.CleanWorkDirectory();
-
-        Assert::AreEqual(INVALID_FILE_ATTRIBUTES, ::GetFileAttributesW(tempFile.c_str()),
-            L"CleanWorkDirectory removes a read-only staged file");
-    }
-
-    TEST_METHOD(CleanWorkDirectory_ExtendedWorkDirWithTrailingSeparator_RemovesHashTempFiles) {
-        TempLayerEnvironment env(1);
-        LayerConfig config = env.MakeConfig();
-        config.workDirPath = ExtendedDirWithSeparator(env.Work());
-        CopyUpAndRenameRig rig(config);
-
-        std::wstring tempFile = env.Work() + L"\\#abc.tmp";
-        env.WriteFile(env.Work(), L"#abc.tmp", "staged");
-
-        rig.copyUp.CleanWorkDirectory();
-
-        Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
-            ::GetFileAttributesW(tempFile.c_str()),
-            L"CleanWorkDirectory must delete the #abc.tmp file");
-    }
 
     TEST_METHOD(CommitFromWorkDir_MovesFileFromWorkToFinalPath) {
         TempLayerEnvironment env(1);
@@ -461,7 +403,7 @@ public:
 
         Assert::IsFalse(fs::exists(env.Upper() + L"\\x.txt"),
             L"The failed copy-up must leave no upper entry");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The failed copy-up must leave nothing in the work directory");
     }
 

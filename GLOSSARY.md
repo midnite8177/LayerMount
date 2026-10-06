@@ -39,7 +39,7 @@ A read-only layer. Lowers have a priority order; the first lower that has a path
 _Avoid_: base, base layer
 
 **Work directory**:
-The scratch directory the engine uses for atomic copy-up.
+The directory an overlay holds for its life, on the upper's volume. The engine builds each copy-up in its staging area, `work`, and one rename moves the result into the upper.
 _Avoid_: work dir, scratch
 
 **Layer source**:

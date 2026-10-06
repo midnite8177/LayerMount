@@ -2,6 +2,7 @@
 #include "TestFixture.h"
 
 #include "MetadataStore.h"
+#include "WorkDirectory.h"
 #include "../abi/FileHandleOpen.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;

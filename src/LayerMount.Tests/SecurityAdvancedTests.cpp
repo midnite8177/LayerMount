@@ -432,7 +432,7 @@ public:
         AssertInheritsOnlyFromTheNewParent(moved, setup);
         AssertInheritsOnlyFromTheNewParent(moved + L"\\sub", setup);
         AssertInheritsOnlyFromTheNewParent(moved + L"\\sub\\x.txt", setup);
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The rename leaves nothing in the work directory");
     }
 
@@ -452,7 +452,7 @@ public:
             L"The rename of the lower junction succeeds");
 
         AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\moved", setup);
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The rename leaves nothing in the work directory");
     }
 
@@ -468,7 +468,7 @@ public:
             L"The copy-up of the lower junction succeeds");
 
         AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\link", setup);
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The copy-up leaves nothing in the work directory");
     }
 
@@ -485,7 +485,7 @@ public:
             L"The case-only rename of the lower junction succeeds");
 
         AssertInheritsOnlyFromTheNewParent(env.Upper() + L"\\p\\LINK", setup);
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The rename leaves nothing in the work directory");
     }
 
@@ -503,7 +503,7 @@ public:
 
         Assert::IsTrue(HasAttribute(env.Upper() + L"\\p\\link", FILE_ATTRIBUTE_REPARSE_POINT),
             L"The upper entry is a link");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The copy-up leaves nothing in the work directory");
     }
 
@@ -521,7 +521,7 @@ public:
 
         Assert::AreEqual(std::string("x"), env.ReadFile(env.Upper(), L"p\\moved\\sub\\x.txt"),
             L"The tree arrives at the new name");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The rename leaves nothing in the work directory");
     }
 };

@@ -155,7 +155,47 @@ both file systems report them, and the 32-bit ones otherwise, as on
 FAT32. It reads them
 through an open that follows a mounted folder, so a work directory
 under a mounted folder counts as being on the mounted volume.
-A transient overlay uses the upper layer as its own work directory.
+Before it creates the work directory, `Prepare` calls
+`WorkDirectory::CheckLayout` (`impl/WorkDirectory.h`), which owns the
+layout rule. It fails with `E_INVALIDARG` when the work directory and
+the upper are the same directory or one contains the other, as overlayfs
+requires separate subtrees. The one exception is `<upper>\.overlay`,
+which the merged view never shows. A transient overlay uses it as its
+work directory. The same rule holds between the work directory and
+each lower, with no exception, and the message names the lower. This
+check compares the paths as `ComparablePath` (`impl/LayerPath.h`) gives
+them: full, lowercase, without a trailing separator or the `\\?\`
+prefix of a drive or UNC path. It needs no directory to exist, so a
+layout it refuses creates nothing. It does not resolve links or short
+names.
+
+`WorkDirectory::Open` runs next in `LayerMountCreate`, as overlayfs
+cleans `workdir/work` at mount. It first checks the layout again on the
+final paths that `GetFinalPathNameByHandleW` gives, so a work directory
+that reaches the upper or a lower through a junction, a substituted
+drive or a short name fails with `E_INVALIDARG` before anything is
+deleted. A pair with a directory that cannot be opened keeps the result
+of the first check. Then it opens the lock file `.layermount.lock` in
+the work directory, and the lock file `.layermount.upper.lock` in
+`<upper>\.overlay`, which it creates when missing. Both open with no
+sharing and delete-on-close, and the overlay's handle keeps them until
+`LayerMountDestroy`. The names differ so that a transient overlay,
+whose work directory is `<upper>\.overlay`, does not block itself. A
+second create on a held work directory or a held upper fails with
+`HRESULT_FROM_WIN32(ERROR_BUSY)` and a message that names the
+directory, as overlayfs fails a second mount on a work directory in
+use, and with `index=on` on an upper in use. The kernel closes the locks when the
+process dies. Then it deletes the staging area `<workDirPath>\work`
+and everything a crash left in it, and creates it empty. Every copy-up
+and rename builds its entries in the staging area. The delete uses backup
+semantics, clears the read-only attribute, and deletes a link or a
+mounted folder itself without entering it. It removes the sidecar
+records of the entries it deletes. A leftover it cannot delete fails
+the create with the delete's error and a message that names the entry.
+Overlayfs mounts read-only in that case, and the engine has no
+read-only mode.
+The rest of the work directory, such as the VHD `temp_mounts` and the
+files a host keeps there, stays.
 
 A *root* path resolves directly to the upper layer's directory: every
 overlay always shows at least the upper layer's contents, even with no
@@ -681,8 +721,8 @@ the fallback when sparse files are unavailable. Steps:
 3. Ensure parent directories exist in the upper layer. Each missing
    parent triggers `CopyUpDirectory` so security descriptors and
    timestamps propagate.
-4. Generate a unique work-dir path under `workDirPath`. Steps 5 to 8
-   build the file at that path.
+4. Generate a unique path in the staging area `<workDirPath>\work`.
+   Steps 5 to 8 build the file at that path.
 5. Stream data from the lower handle into the work-dir handle in 64 KB
    chunks. Open the source with `FILE_FLAG_BACKUP_SEMANTICS` so
    `SE_BACKUP_NAME` can read past restrictive DACLs. With the sparse
@@ -857,7 +897,9 @@ after a failure.
 When an entry that the engine did not make holds the upper path at the
 rename, the copy-up fails with `STATUS_OBJECT_NAME_COLLISION` and
 leaves that entry as it was. A failed copy-up removes the copy in the
-work directory and leaves no entry of its own at the upper path.
+work directory and leaves no entry of its own at the upper path. The
+next `LayerMountCreate` on that work directory deletes a copy that a
+crash left there.
 
 ### Cross-layer directory rename (`RenameLowerDirectory`, `RenameUpperDirectory`)
 
@@ -1075,7 +1117,10 @@ The engine reserves three namespaces:
   CREATE_ALWAYS semantics and deletes the user ADS streams only.
 - The `<upper>\.overlay\` directory. `IsReservedRelativePath` rejects
   every read and write that targets it, and `MergeDirectoryEntries`
-  filters it out of root listings.
+  filters it out of root listings. Besides the sidecar records, it holds
+  the lock file of the upper while an overlay lives, and it can hold the
+  work directory of the overlay, with its lock file and its `work`
+  staging area.
 - Names that start with `.wh.`, in every directory and every layer,
   outside a link target (see "Links in a layer").
   `IsReservedRelativePath` rejects a path with such a segment, so the

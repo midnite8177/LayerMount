@@ -31,6 +31,7 @@
 // the compiler from resolving `LayerMount` to the inner class.
 namespace LayerMount {
     class LayerMount;
+    class WorkDirectory;
     struct FileContext;
     namespace VHD { class VHDLayerManager; class VhdHandle; }
     namespace VSS { class VSSManager; struct SnapshotInfo; }
@@ -67,8 +68,12 @@ constexpr std::uint16_t kMagicImage        = 0xFE05;
 // still outstanding (backstops the lifecycle contract against caller
 // misuse). File holders additionally pin the parent via a shared_ptr,
 // so a premature LayerMountDestroy cannot be bypassed to cause
-// use-after-free even if the child-count check is skipped.
+// use-after-free even if the child-count check is skipped. The holder also
+// owns the work directory, with the locks on it and on the upper.
 struct LayerMountHolder {
+    ~LayerMountHolder();
+
+    std::unique_ptr<::LayerMount::WorkDirectory> workDirectory;
     std::unique_ptr<::LayerMount::LayerMount> core;
     std::atomic<bool>                       hostAttached{false};
     std::atomic<std::uint32_t>              childCount{0};

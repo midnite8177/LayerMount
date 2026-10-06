@@ -541,33 +541,60 @@ LM_API HRESULT LM_CALL LayerMountGetLastFailureWasFill(BOOL* wasFill);
  * lower path exists, then creates the work directory if it is missing and
  * checks that it is on the same volume as the upper layer. A copy-up
  * creates the file, directory or link in the work directory and renames
- * it into the upper layer, and a rename cannot cross volumes.
+ * it into the upper layer, and a rename cannot cross volumes. The work
+ * directory and the upper layer must not be the same directory, and
+ * neither can contain the other. The one exception is a work directory at
+ * <upperPath>\.overlay, which the overlay never shows. The same holds
+ * between the work directory and each lower layer, with no exception. The
+ * create checks the paths as written before it creates the work directory,
+ * and then the final paths, so a junction, a substituted drive or a short
+ * name cannot hide an overlap.
+ *
+ * The overlay holds the work directory and the upper layer until
+ * LayerMountDestroy, through a lock file in the work directory and one in
+ * <upperPath>\.overlay, which the system releases when the process ends.
+ * It creates <upperPath>\.overlay when it is missing, then deletes the
+ * staging area <workDirPath>\work with everything that an
+ * earlier overlay left in it, and creates it empty. The other entries of
+ * the work directory stay.
  *
  * Returns:
  *   S_OK          -- overlay created
  *   E_POINTER     -- config or outHandle is NULL
  *   E_INVALIDARG  -- structSize too small, abiVersion does not match
  *                    LM_ABI_VERSION, a required path is NULL, layer
- *                    validation failed, or the work directory is on another
- *                    volume than the upper layer (see
+ *                    validation failed, the work directory is on another
+ *                    volume than the upper layer, or the work directory
+ *                    and the upper layer or a lower layer are the same
+ *                    directory or contain one another (see
  *                    LayerMountGetLastErrorMessage)
  *   E_FAIL        -- workDirPath is an empty string, the work directory
  *                    could not be created, or the volume of the work
  *                    directory or the upper layer could not be read
  *   E_OUTOFMEMORY -- the overlay handle table is exhausted
+ *   HRESULT_FROM_WIN32(ERROR_BUSY)
+ *                 -- another overlay holds the work directory or the upper
+ *                    layer. LayerMountGetLastErrorMessage names it.
  *   HRESULT_FROM_WIN32(ERROR_INVALID_DATA)
  *                 -- enableProcessTracking is set and the processRulesPath
  *                    file is missing or does not parse
+ *   Another HRESULT_FROM_WIN32 code
+ *                 -- a lock could not be taken, an entry in the staging
+ *                    area could not be deleted, or the staging area could
+ *                    not be created. LayerMountGetLastErrorMessage names
+ *                    the directory or the entry.
  */
 LM_API HRESULT LM_CALL LayerMountCreate(
     const LM_CONFIG* config, LM_HANDLE* outHandle);
 
 /* Convenience for short-lived overlays used by CLI subcommands that need a
  * valid LM_HANDLE to drive VHD/VSS/Image primitives without mounting a
- * filesystem. Equivalent to LayerMountCreate with: upperPath = workDir, no
- * lower layers, no process tracking. Creates `workDir` (and missing
- * parents) on demand. If creation fails, LayerMountGetLastErrorMessage
- * gives the reason. */
+ * filesystem. Equivalent to LayerMountCreate with: upperPath = workDir,
+ * workDirPath = workDir\.overlay, no lower layers, no process tracking.
+ * Creates `workDir` (and missing parents) on demand. While the overlay
+ * lives, a second transient overlay on the same `workDir` fails with
+ * HRESULT_FROM_WIN32(ERROR_BUSY). If creation fails,
+ * LayerMountGetLastErrorMessage gives the reason. */
 LM_API HRESULT LM_CALL LayerMountCreateTransient(
     PCWSTR workDir, UINT32 hostCapabilities, LM_HANDLE* outHandle);
 

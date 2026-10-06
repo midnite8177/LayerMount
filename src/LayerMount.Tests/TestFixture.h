@@ -8,6 +8,7 @@
 #include "DirectoryRename.h"
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
+#include "WorkDirectory.h"
 
 #include "AclTestHelpers.h"
 #include "FileIdTestHelpers.h"
@@ -154,18 +155,19 @@ inline void ForEachMetadataStore(const std::function<void(UINT32 hostCapabilitie
     }
 }
 
-// Creates upper, work and lowerN directories under a unique %TEMP%
-// subdirectory, and deletes the tree on destruction.
+// Creates upper, work, the staging area work\work and lowerN directories
+// under a unique %TEMP% subdirectory, and deletes the tree on destruction.
 class TempLayerEnvironment {
 public:
     explicit TempLayerEnvironment(size_t lowerCount = 1)
         : root_(MakeUniqueTempRoot()) {
         upper_ = root_ + L"\\upper";
         work_  = root_ + L"\\work";
+        staging_ = LayerMount::StagingAreaPath(work_);
 
         std::error_code ec;
         fs::create_directories(upper_, ec);
-        fs::create_directories(work_, ec);
+        fs::create_directories(staging_, ec);
 
         for (size_t i = 0; i < lowerCount; ++i) {
             std::wstring lower = root_ + L"\\lower" + std::to_wstring(i);
@@ -185,6 +187,7 @@ public:
     const std::wstring& Root()  const { return root_; }
     const std::wstring& Upper() const { return upper_; }
     const std::wstring& Work()  const { return work_; }
+    const std::wstring& Staging() const { return staging_; }
     const std::wstring& Lower(size_t i = 0) const { return lowers_.at(i); }
     size_t LowerCount() const { return lowers_.size(); }
 
@@ -250,6 +253,7 @@ private:
     std::wstring root_;
     std::wstring upper_;
     std::wstring work_;
+    std::wstring staging_;
     std::vector<std::wstring> lowers_;
 };
 

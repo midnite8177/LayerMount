@@ -15,6 +15,7 @@
 #include "ProcessTracker.h"
 #include "NtStatusUtil.h"
 #include "NtdllExport.h"
+#include "WorkDirectory.h"
 #include "vhd/VHDLayerManager.h"
 #include "vss/VSSManager.h"
 #include "image/LayerImageManager.h"
@@ -185,6 +186,11 @@ HRESULT LayerConfig::Prepare(std::wstring& error) {
     if (workDirPath.empty()) {
         error = L"Work directory path is empty";
         return E_FAIL;
+    }
+
+    const HRESULT layout = WorkDirectory::CheckLayout(*this, error);
+    if (FAILED(layout)) {
+        return layout;
     }
 
     if (!EnsureDirectoryExists(workDirPath)) {
@@ -385,42 +391,6 @@ bool EnsureDirectoryExists(const std::wstring& path) {
         return false;
     }
     return true;
-}
-
-namespace {
-
-// The path that GetFinalPathNameByHandleW gives for handle, in extended
-// form. Returns an empty path when the path cannot be read.
-std::wstring FinalPathNameOf(HANDLE handle) {
-    constexpr DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
-    const DWORD size = ::GetFinalPathNameByHandleW(handle, nullptr, 0, flags);
-    if (size == 0) {
-        return {};
-    }
-    std::wstring path(size, L'\0');
-    const DWORD length = ::GetFinalPathNameByHandleW(handle, path.data(), size, flags);
-    if (length == 0 || length >= size) {
-        return {};
-    }
-    path.resize(length);
-    return path;
-}
-
-// The final path of the directory at path. The open follows a junction or a
-// directory symbolic link anywhere in path. Returns an empty path when the
-// directory cannot be opened or its final path cannot be read.
-std::wstring FinalPathOfDirectory(const std::wstring& path) {
-    const HANDLE directory = ::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (directory == INVALID_HANDLE_VALUE) {
-        return {};
-    }
-    std::wstring finalPath = FinalPathNameOf(directory);
-    ::CloseHandle(directory);
-    return finalPath;
-}
-
 }
 
 LayerMount::LayerMount(LayerConfig config)
@@ -679,8 +649,8 @@ bool IsAtOrBelow(const std::wstring& path, const std::wstring& root) {
 // sidecar lookup finds a record keyed by that path. A final path at or below
 // upperFinalPath, the final path of the upper root, goes onto upperPath, so
 // an 8.3 name, a substituted drive or a junction in upperPath still matches.
-// Any other final path only loses its extended-form prefix when upperPath
-// has none. Returns an empty path when the handle's path cannot be read.
+// Any other final path goes through WithoutExtendedPrefix when upperPath
+// has no extended-form prefix. Returns an empty path when the handle's path cannot be read.
 std::wstring FinalPathOf(HANDLE handle,
                          const std::wstring& upperPath,
                          const std::wstring& upperFinalPath) {
@@ -699,17 +669,10 @@ std::wstring FinalPathOf(HANDLE handle,
     }
 
     constexpr std::wstring_view kExtendedPrefix = L"\\\\?\\";
-    constexpr std::wstring_view kExtendedUncPrefix = L"\\\\?\\UNC\\";
     if (upperPath.rfind(kExtendedPrefix, 0) == 0) {
         return path;
     }
-    if (path.rfind(kExtendedUncPrefix, 0) == 0) {
-        return L"\\\\" + path.substr(kExtendedUncPrefix.size());
-    }
-    if (path.rfind(kExtendedPrefix, 0) == 0) {
-        return path.substr(kExtendedPrefix.size());
-    }
-    return path;
+    return WithoutExtendedPrefix(path);
 }
 
 // The path whose copy-up record gives the stable ID of a handle opened at

@@ -101,11 +101,7 @@ public:
     // callback when one is installed.
     void RecordCopyUp(const std::wstring& relativePath);
 
-    std::wstring GenerateWorkPath();
-
-    // Deletes every #*.tmp file in the work directory. Call it only when no
-    // copy-up is in flight.
-    void CleanWorkDirectory();
+    std::wstring GenerateStagingPath();
 
     // Moves the file at workPath to finalUpperPath with one rename. workPath
     // must be on the upper's volume. An entry at finalUpperPath fails the

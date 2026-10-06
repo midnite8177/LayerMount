@@ -52,6 +52,64 @@ std::wstring NormalizePathPreserveCase(const std::wstring& path) {
     return result;
 }
 
+std::wstring WithoutExtendedPrefix(const std::wstring& path) {
+    constexpr std::wstring_view kExtendedUnc = L"\\\\?\\UNC\\";
+    constexpr std::wstring_view kExtended = L"\\\\?\\";
+    if (path.rfind(kExtendedUnc, 0) == 0) {
+        return L"\\\\" + path.substr(kExtendedUnc.size());
+    }
+    if (path.rfind(kExtended, 0) == 0 && path.size() >= kExtended.size() + 2 &&
+        path[kExtended.size() + 1] == L':') {
+        return path.substr(kExtended.size());
+    }
+    return path;
+}
+
+std::wstring ComparablePath(const std::wstring& path) {
+    std::wstring plain = path;
+    std::replace(plain.begin(), plain.end(), L'/', L'\\');
+    plain = WithoutExtendedPrefix(plain);
+    const DWORD size = ::GetFullPathNameW(plain.c_str(), 0, nullptr, nullptr);
+    if (size != 0) {
+        std::wstring full(size, L'\0');
+        const DWORD written = ::GetFullPathNameW(plain.c_str(), size, full.data(), nullptr);
+        if (written != 0 && written < size) {
+            full.resize(written);
+            plain = std::move(full);
+        }
+    }
+    while (!plain.empty() && plain.back() == L'\\') {
+        plain.pop_back();
+    }
+    CharLowerBuffW(plain.data(), static_cast<DWORD>(plain.size()));
+    return plain;
+}
+
+std::wstring FinalPathNameOf(HANDLE handle) {
+    constexpr DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    const DWORD size = ::GetFinalPathNameByHandleW(handle, nullptr, 0, flags);
+    if (size == 0) {
+        return {};
+    }
+    std::wstring path(size, L'\0');
+    const DWORD length = ::GetFinalPathNameByHandleW(handle, path.data(), size, flags);
+    if (length == 0 || length >= size) {
+        return {};
+    }
+    path.resize(length);
+    return path;
+}
+
+std::wstring FinalPathOfDirectory(const std::wstring& path) {
+    const ScopedHandle directory(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!directory.IsValid()) {
+        return {};
+    }
+    return FinalPathNameOf(directory.Get());
+}
+
 bool IsInsideDirectory(std::wstring_view pathNorm, std::wstring_view dirNorm) {
     return pathNorm.size() > dirNorm.size() &&
            pathNorm.compare(0, dirNorm.size(), dirNorm) == 0 &&
@@ -76,20 +134,18 @@ std::wstring WithStoredLeafName(const std::wstring& targetPath,
     return targetPath.substr(0, targetPath.find_last_of(L'\\') + 1) + fd.cFileName;
 }
 
-namespace {
-
-// Opens the entry at path, not its target, to read its attributes. Opens a
-// file or a directory.
-ScopedHandle OpenReparseEntry(const std::wstring& path) {
-    return ScopedHandle(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+ScopedHandle OpenReparseEntry(const std::wstring& path, DWORD access) {
+    return ScopedHandle(::CreateFileW(path.c_str(), access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
 }
 
+namespace {
+
 // Reads the tag of the entry at path, not of its target.
 NTSTATUS ReadReparseTag(const std::wstring& path, DWORD* tag) {
-    const ScopedHandle entry = OpenReparseEntry(path);
+    const ScopedHandle entry = OpenReparseEntry(path, FILE_READ_ATTRIBUTES);
     if (!entry.IsValid()) {
         return NtStatusFromWin32(::GetLastError());
     }
@@ -198,7 +254,7 @@ constexpr ULONG kSymlinkFlagRelative = 0x1;
 
 ReparseLink ReadReparseLink(const std::wstring& path, std::wstring* relativeTarget) {
     relativeTarget->clear();
-    const ScopedHandle entry = OpenReparseEntry(path);
+    const ScopedHandle entry = OpenReparseEntry(path, FILE_READ_ATTRIBUTES);
     if (!entry.IsValid()) {
         return ReparseLink::OtherLink;
     }

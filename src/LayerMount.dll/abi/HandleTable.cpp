@@ -6,11 +6,19 @@
 // keep the ABI layer header-lean; the singleton lives here, so here
 // is where we pay the full-include cost.
 #include "../impl/LayerMount.h"
+#include "../impl/WorkDirectory.h"
 #include "../impl/vhd/VHDLayerManager.h"
 #include "../impl/vss/VSSManager.h"
 #include "../impl/image/LayerImageManager.h"
 
 namespace LayerMount::abi {
+
+LayerMountHolder::~LayerMountHolder()
+{
+    // The engine goes before the locks. Released first, the locks would let
+    // a second create empty the staging area under a live engine.
+    core.reset();
+}
 
 HandleRegistry& Handles() noexcept
 {

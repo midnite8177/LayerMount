@@ -57,8 +57,10 @@ struct LayerConfig {
     // Creates workDirPath if it doesn't exist and checks that it is on the
     // volume of upperPath. Call after Validate(). Returns E_FAIL when
     // workDirPath is empty, the work directory cannot be created or either
-    // volume cannot be read, and E_INVALIDARG when the volumes differ, with
-    // the reason in error.
+    // volume cannot be read. Returns E_INVALIDARG when the volumes differ,
+    // and when WorkDirectory::CheckLayout refuses the layout. That check
+    // runs before the create, so a refused layout creates no directory.
+    // The reason goes in error.
     HRESULT Prepare(std::wstring& error);
 };
 

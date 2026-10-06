@@ -273,7 +273,7 @@ public:
         Assert::IsFalse(env.FileExists(env.Upper(), L"dst\\sub\\inner.txt"));
         Assert::IsFalse(wm.IsOpaque(L"dst"));
         Assert::IsFalse(wm.HasWhiteout(L"src", env.Upper()));
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The failed rename leaves nothing in the work directory");
     }
 
@@ -609,14 +609,14 @@ std::vector<std::wstring> FileNamesMatching(const std::wstring& directory,
 
 template <typename Predicate>
 bool WorkHoldsEntryWhere(const TempLayerEnvironment& env, Predicate matches) {
-    const fs::recursive_directory_iterator entries(env.Work());
+    const fs::recursive_directory_iterator entries(env.Staging());
     return std::any_of(fs::begin(entries), fs::end(entries), matches);
 }
 
 bool WorkHoldsFileWithContent(const TempLayerEnvironment& env, const std::string& content) {
     return WorkHoldsEntryWhere(env, [&](const fs::directory_entry& entry) {
         return entry.is_regular_file() &&
-               env.ReadFile(env.Work(), fs::relative(entry.path(), env.Work()).wstring()) ==
+               env.ReadFile(env.Staging(), fs::relative(entry.path(), env.Staging()).wstring()) ==
                    content;
     });
 }
@@ -834,7 +834,7 @@ NTSTATUS RenameWhileWorkRefusesEntries(const TempLayerEnvironment& env,
                                        const std::wstring& from,
                                        const std::wstring& to) {
     const DirectoryRefusesNewEntries workRefusesNewEntries(
-        env.Work(), FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+        env.Staging(), FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
     return mount.Rename(from, to, kReplaceIfExists, kNoCallerPid);
 }
 
@@ -845,7 +845,7 @@ NTSTATUS RenameWhileWorkRefusesEntries(const TempLayerEnvironment& env,
                                        FileContext* ctx,
                                        const std::wstring& to) {
     const DirectoryRefusesNewEntries workRefusesNewEntries(
-        env.Work(), FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
+        env.Staging(), FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY);
     return mount.Rename(ctx, to, kReplaceIfExists, kNoCallerPid);
 }
 
@@ -1845,7 +1845,7 @@ public:
                 MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\e", &config)
                     .originLayer.c_str()),
                 L"The copy-up record of the new name must name the lower d");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The rename must leave nothing in the work directory");
         });
     }
@@ -2795,7 +2795,7 @@ public:
                 }
                 ::LayerMount::LayerMount mount(env.MakeConfig());
                 RenamePrimerToCopyLowerLinkUp(mount, linkSource);
-                const LayerSnapshot workBefore(env.Work());
+                const LayerSnapshot workBefore(env.Staging());
 
                 const NTSTATUS status =
                     RenameWhileWorkRefusesEntries(env, mount, L"link\\a", L"link\\b");
@@ -2823,7 +2823,7 @@ public:
             return;
         }
         ::LayerMount::LayerMount mount(env.MakeConfig());
-        const LayerSnapshot workBefore(env.Work());
+        const LayerSnapshot workBefore(env.Staging());
 
         const NTSTATUS status = RenameWhileWorkRefusesEntries(env, mount, L"link\\a", L"link\\b");
 
@@ -2850,7 +2850,7 @@ public:
                 }
                 ::LayerMount::LayerMount mount(env.MakeConfig());
                 RenamePrimerToCopyLowerLinkUp(mount, linkSource);
-                const LayerSnapshot workBefore(env.Work());
+                const LayerSnapshot workBefore(env.Staging());
 
                 const NTSTATUS status =
                     RenameWhileWorkRefusesEntries(env, mount, L"link\\src", L"link\\dst");
@@ -2877,7 +2877,7 @@ public:
             }
             ::LayerMount::LayerMount mount(env.MakeConfig());
             RenamePrimerToCopyLowerLinkUp(mount, linkSource);
-            const LayerSnapshot workBefore(env.Work());
+            const LayerSnapshot workBefore(env.Staging());
             const LayerSnapshot innerBefore(env.Root() + L"\\inner");
 
             const NTSTATUS status =
@@ -2906,7 +2906,7 @@ public:
             }
             ::LayerMount::LayerMount mount(env.MakeConfig());
             RenamePrimerToCopyLowerLinkUp(mount, linkSource);
-            const LayerSnapshot workBefore(env.Work());
+            const LayerSnapshot workBefore(env.Staging());
 
             NTSTATUS status = STATUS_SUCCESS;
             {
@@ -2973,7 +2973,7 @@ public:
                 }
                 ::LayerMount::LayerMount mount(env.MakeConfig());
                 RenamePrimerToCopyLowerLinkUp(mount, linkSource);
-                const LayerSnapshot workBefore(env.Work());
+                const LayerSnapshot workBefore(env.Staging());
                 const LayerSnapshot replacedBefore(env.Root() + L"\\replaced");
 
                 const NTSTATUS status =
@@ -3011,7 +3011,7 @@ public:
             }
             ::LayerMount::LayerMount mount(env.MakeConfig());
             RenamePrimerToCopyLowerLinkUp(mount, linkSource);
-            const LayerSnapshot workBefore(env.Work());
+            const LayerSnapshot workBefore(env.Staging());
 
             AssertStatus(STATUS_ACCESS_DENIED,
                 mount.Rename(L"link\\a", L"link\\b", kReplaceIfExists, kNoCallerPid),
@@ -3077,7 +3077,7 @@ public:
                 }
                 ::LayerMount::LayerMount mount(env.MakeConfig());
                 RenamePrimerToCopyLowerLinkUp(mount, linkSource);
-                const LayerSnapshot workBefore(env.Work());
+                const LayerSnapshot workBefore(env.Staging());
                 std::unique_ptr<FileContext> ctx;
                 InternalFileInfo info{};
                 Assert::IsTrue(NT_SUCCESS(mount.Open(L"link\\a", FILE_READ_ATTRIBUTES | DELETE,
@@ -4944,7 +4944,7 @@ public:
             L"The test must make the upper b.txt read-only");
         ::LayerMount::LayerMount mount(env.MakeConfig());
         const LayerSnapshot upperBefore(env.Upper());
-        const LayerSnapshot workBefore(env.Work());
+        const LayerSnapshot workBefore(env.Staging());
 
         AssertStatus(STATUS_ACCESS_DENIED,
             mount.Rename(L"a.txt", L"b.txt", kReplaceIfExists, kNoCallerPid),
@@ -5035,7 +5035,7 @@ public:
 
         Assert::IsFalse(env.FileExists(env.Upper(), L"d"),
             L"The failed copy-up must leave nothing at d in the upper");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The failed copy-up must leave nothing in the work directory");
     }
 

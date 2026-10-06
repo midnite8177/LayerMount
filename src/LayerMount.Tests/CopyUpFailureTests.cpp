@@ -25,8 +25,8 @@ namespace LayerMountTests {
 
 namespace {
 
-size_t CountWorkTempFiles(const std::wstring& workDir) {
-    const std::wstring pattern = workDir + L"\\#*.tmp";
+size_t CountStagedTempFiles(const std::wstring& stagingArea) {
+    const std::wstring pattern = stagingArea + L"\\#*.tmp";
     WIN32_FIND_DATAW fd{};
     HANDLE h = ::FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
@@ -428,7 +428,7 @@ public:
     // EnsureDirectoryExists call at commit time silently no-ops, and
     // MoveFileExW then fails because the parent is not a directory.
     //
-    // A failed commit removes the work file, so the work directory has no
+    // A failed commit removes the staged file, so the staging area has no
     // #*.tmp file left.
     // ------------------------------------------------------------------------
     TEST_METHOD(CopyUpFile_UpperParentIsFile_CommitFailsAndCleansWorkTemp) {
@@ -456,8 +456,8 @@ public:
         Assert::IsFalse(env.FileExists(env.Upper(), L"sub\\doc.txt"),
             L"Failed commit must not land a file at the target path");
 
-        Assert::AreEqual<size_t>(0, CountWorkTempFiles(env.Work()),
-            L"Work dir must be empty after failed commit");
+        Assert::AreEqual<size_t>(0, CountStagedTempFiles(env.Staging()),
+            L"The staging area must be empty after a failed commit");
     }
 
     // ------------------------------------------------------------------------
@@ -485,9 +485,7 @@ public:
         Assert::IsFalse(NT_SUCCESS(cu.CopyUpFile(L"retry.txt")),
             L"Preconditions: first attempt must fail");
 
-        // Restore work dir and retry. The second call must produce a faithful
-        // upper copy (exact content, no staleness, no orphan).
-        std::filesystem::create_directories(env.Work(), ec);
+        std::filesystem::create_directories(env.Staging(), ec);
         const NTSTATUS retry = cu.CopyUpFile(L"retry.txt");
         Assert::IsTrue(NT_SUCCESS(retry),
             L"Retry after transient failure must succeed");
@@ -496,8 +494,8 @@ public:
             env.ReadFile(env.Upper(), L"retry.txt"),
             L"Upper must reflect source content exactly after retry");
 
-        Assert::AreEqual<size_t>(0, CountWorkTempFiles(env.Work()),
-            L"Successful retry must not leave work-dir orphans");
+        Assert::AreEqual<size_t>(0, CountStagedTempFiles(env.Staging()),
+            L"Successful retry must not leave orphans in the staging area");
     }
 
     // ------------------------------------------------------------------------
@@ -539,8 +537,8 @@ public:
         Assert::AreEqual(payload, env.ReadFile(env.Upper(), L"hot.bin"),
             L"Upper content must exactly match the lower source");
 
-        Assert::AreEqual<size_t>(0, CountWorkTempFiles(env.Work()),
-            L"Concurrent copy-ups must not leave orphan work-dir temps");
+        Assert::AreEqual<size_t>(0, CountStagedTempFiles(env.Staging()),
+            L"Concurrent copy-ups must not leave orphan temps in the staging area");
     }
 
     // ------------------------------------------------------------------------
@@ -690,8 +688,8 @@ public:
             }
         }
 
-        // Invariant regardless: no stale work-dir temps.
-        const std::wstring pattern = env.Work() + L"\\#*.tmp";
+        // Invariant regardless: no stale temps in the staging area.
+        const std::wstring pattern = env.Staging() + L"\\#*.tmp";
         WIN32_FIND_DATAW fd{};
         HANDLE h = ::FindFirstFileW(pattern.c_str(), &fd);
         size_t leftover = 0;
@@ -700,7 +698,7 @@ public:
             ::FindClose(h);
         }
         Assert::AreEqual<size_t>(0, leftover,
-            L"Copy-up under contention must leave no work-dir temp orphans");
+            L"Copy-up under contention must leave no temp orphans in the staging area");
     }
 
     TEST_METHOD(CopyUserAlternateDataStreams_MissingSource_ReturnsNotFound) {
@@ -767,7 +765,7 @@ public:
             Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\f.txt").c_str(),
                 MetadataStore::ReadLayerMountMetadata(upperFile, &rig.config).originLayer.c_str()),
                 L"The upper file's copy-up record names the lower file");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The copy-up leaves nothing in the work directory");
         });
     }
@@ -790,7 +788,7 @@ public:
         Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW((env.Upper() + L"\\f.txt").c_str()),
             L"A failed file copy-up leaves no upper file");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"A failed file copy-up leaves nothing in the work directory");
     }
 
@@ -810,7 +808,7 @@ public:
             Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
                 L"The copy-up fails when an entry it did not make holds the upper path");
             AssertForeignFileUntouched(env, L"p\\f.txt", armed.foreign, rig.config);
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The failed copy-up removes its read-only copy from the work directory");
         });
     }
@@ -845,7 +843,7 @@ public:
             Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\f.txt").c_str(),
                 md.originLayer.c_str()),
                 L"The shell's copy-up record names the lower file");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The metacopy leaves nothing in the work directory");
         });
     }
@@ -893,7 +891,7 @@ public:
             Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
                 L"The metacopy fails when an entry it did not make holds the upper path");
             AssertForeignFileUntouched(env, L"p\\f.txt", armed.foreign, rig.config);
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The failed metacopy removes its read-only shell from the work directory");
         });
     }
@@ -913,7 +911,7 @@ public:
         Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW((env.Upper() + L"\\dir").c_str()),
             L"A failed directory copy-up leaves no upper directory");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"A failed directory copy-up leaves nothing in the work directory");
     }
 
@@ -944,7 +942,7 @@ public:
         Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW((env.Upper() + L"\\d:s").c_str()),
             L"The directory arrives with the lower directory's stream");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The copy-up leaves nothing in the work directory");
     }
 
@@ -964,7 +962,7 @@ public:
                 MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\d", &rig.config);
             Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\d").c_str(), md.originLayer.c_str()),
                 L"The upper directory's copy-up record names the lower directory");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The copy-up leaves nothing in the work directory");
         });
     }
@@ -987,7 +985,7 @@ public:
             Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
                 L"The copy-up fails when an entry it did not make holds the upper path");
             AssertForeignDirectoryUntouched(armed.foreign, rig.config);
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The failed copy-up leaves nothing in the work directory");
         });
     }
@@ -1011,7 +1009,7 @@ public:
         Assert::AreEqual<NTSTATUS>(STATUS_SHARING_VIOLATION, status,
             L"The copy-up fails at the held stream");
         AssertForeignDirectoryUntouched(armed.foreign, rig.config);
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The failed copy-up leaves nothing in the work directory");
     }
 
@@ -1037,7 +1035,7 @@ public:
             Assert::AreEqual(0,
                 _wcsicmp((env.Lower(0) + L"\\p\\link").c_str(), md.originLayer.c_str()),
                 L"The upper link's copy-up record names the lower junction");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The copy-up leaves nothing in the work directory");
         });
     }
@@ -1062,7 +1060,7 @@ public:
             Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
                 L"The copy-up fails when an entry it did not make holds the upper path");
             AssertForeignDirectoryUntouched(armed.foreign, rig.config);
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The failed copy-up leaves nothing in the work directory");
         });
     }
@@ -1078,7 +1076,7 @@ public:
             L"The copy-up of a directory whose DACL denies listing and delete succeeds");
         Assert::IsTrue(HasAttribute(env.Upper() + L"\\p\\d", FILE_ATTRIBUTE_DIRECTORY),
             L"The directory moves to its upper path");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The copy-up leaves nothing in the work directory");
     }
 
@@ -1097,7 +1095,7 @@ public:
             L"The test makes the foreign directory at the upper path");
         Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
             L"The copy-up fails when an entry it did not make holds the upper path");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The failed copy-up removes its copy, which carries the denying DACL");
     }
 
@@ -1164,7 +1162,7 @@ public:
         Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW((env.Upper() + L"\\moved").c_str()),
             L"A failed rename leaves no copy at the new name");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"A failed rename leaves nothing in the work directory");
     }
 
@@ -1199,7 +1197,7 @@ public:
         Assert::AreEqual(std::string("a"), env.ReadFile(env.Upper(), L"moved\\a.txt"),
             L"The directory arrives with its child");
         Assert::IsTrue(rig.whiteouts.IsOpaque(L"moved"), L"The directory arrives opaque");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"The rename leaves nothing in the work directory");
     }
 
@@ -1227,7 +1225,7 @@ public:
                 MetadataStore::ReadLayerMountMetadata(moved + L"\\sub", &rig.config)
                     .originLayer.c_str()),
                 L"The copy-up record of the child directory names the lower child");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The rename leaves nothing in the work directory");
         });
     }
@@ -1253,7 +1251,7 @@ public:
         Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
             ::GetFileAttributesW((env.Upper() + L"\\moved").c_str()),
             L"A failed rename leaves no copy at the new name");
-        Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+        Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
             L"A failed rename leaves nothing in the work directory");
     }
 
@@ -1282,7 +1280,7 @@ public:
                 L"The foreign directory does not take the renamed directory's child");
             Assert::IsFalse(rig.whiteouts.IsOpaque(L"p\\moved"),
                 L"The foreign directory does not become opaque");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The failed rename leaves nothing in the work directory");
         });
     }
@@ -1309,7 +1307,7 @@ public:
             Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
                 L"The rename fails when an entry it did not make holds the new name");
             AssertForeignDirectoryUntouched(armed.foreign, rig.config);
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The failed rename leaves nothing in the work directory");
         });
     }
@@ -1335,7 +1333,7 @@ public:
             Assert::AreEqual<NTSTATUS>(STATUS_OBJECT_NAME_COLLISION, status,
                 L"The rename fails when an entry it did not make holds the new name");
             AssertForeignDirectoryUntouched(armed.foreign, rig.config);
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The failed rename leaves nothing in the work directory");
         });
     }
@@ -1366,7 +1364,7 @@ public:
                 L"The upper link's copy-up record names the lower junction");
             Assert::AreEqual<uint64_t>(copyUpsBefore + 1, rig.stats.copyUpCount.load(),
                 L"Only the copy-up of the parent p counts, not the rename of the link");
-            Assert::IsTrue(EntriesUnder(env.Work()).empty(),
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
                 L"The rename leaves nothing in the work directory");
         });
     }

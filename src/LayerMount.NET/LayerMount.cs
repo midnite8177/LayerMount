@@ -153,7 +153,9 @@ public sealed partial class LayerMount : IDisposable
     /// Short-lived overlay for CLI subcommands (vhd / vss / layer / image)
     /// that need a valid <c>LM_HANDLE</c> to drive the engine's primitives
     /// without mounting a filesystem. Equivalent to <see cref="Create"/>
-    /// with upperPath = workDir, no lower layers, no process tracking.
+    /// with upperPath = workDir, workDirPath = workDir\.overlay, no lower
+    /// layers, no process tracking. A second transient overlay on the same
+    /// <paramref name="workDir"/> fails while this one lives.
     /// The default capability set covers the features typical host adapters
     /// expose; callers can override per call.
     /// </summary>
@@ -187,7 +189,17 @@ public sealed partial class LayerMount : IDisposable
     /// Creates an overlay from <paramref name="config"/>. Validates that
     /// the upper layer exists and is writable and that every lower path
     /// exists, then creates the work directory if it is missing and checks
-    /// that it is on the same volume as the upper layer.
+    /// that it is on the same volume as the upper layer. The work directory
+    /// and the upper layer must not be the same directory, and neither can
+    /// contain the other, except a work directory at
+    /// <c>&lt;upperPath&gt;\.overlay</c>, which the overlay never shows.
+    /// The same holds between the work directory and each lower layer,
+    /// with no exception. The check compares the paths as written and
+    /// then their final paths, so a junction, a substituted drive or a
+    /// short name cannot hide an overlap. The overlay holds the work
+    /// directory and the upper layer until it is disposed, through lock
+    /// files in the work directory and in <c>&lt;upperPath&gt;\.overlay</c>,
+    /// and the create empties the work directory's staging area.
     /// </summary>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="config"/> is null.
@@ -200,8 +212,11 @@ public sealed partial class LayerMount : IDisposable
     /// The native call returns a non-success HRESULT: the ABI version
     /// does not match the loaded DLL, a required path failed layer
     /// validation, the work directory is on another volume than the upper
-    /// layer, the work directory could not be created, or the overlay
-    /// handle table is exhausted.
+    /// layer, the work directory and the upper layer or a lower layer are
+    /// the same directory or contain one another, the work directory could
+    /// not be created, another overlay holds the work directory or the
+    /// upper layer, an entry left in its staging area could not be
+    /// deleted, or the overlay handle table is exhausted.
     /// </exception>
     public static unsafe LayerMount Create(LayerMountConfig config)
     {
