@@ -486,6 +486,9 @@ std::vector<std::wstring> MetadataStore::ListSidecarKeyedEntries(const std::wstr
 
 void MetadataStore::RemoveSidecarRecordsOfGoneEntries(const std::vector<std::wstring>& entries,
                                                       const LayerConfig& config) {
+    if (!UseSidecarFor(&config)) {
+        return;
+    }
     for (const std::wstring& entryPath : entries) {
         if (::GetFileAttributesW(entryPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
             continue;

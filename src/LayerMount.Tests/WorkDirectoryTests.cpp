@@ -7,6 +7,7 @@
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
 using LayerMountTestShared::AccessDenied;
+using LayerMountTestShared::BackupPrivilegeDisabledOnThread;
 using LayerMountTestShared::DirectoryListingDenied;
 
 namespace LayerMountTests {
@@ -55,6 +56,42 @@ public:
         const auto workDirectory = OpenWorkDirectory(env.MakeConfig());
 
         AssertStagingAreaEmpty(env, L"The open deletes every leftover in the staging area");
+    }
+
+    TEST_METHOD(Open_LeftoverStagedTreeThatRefusesDeleteAndListingWithoutPrivileges_LeavesTheStagingAreaEmpty) {
+        TempLayerEnvironment env(0);
+        const std::wstring container = env.Staging() + L"\\#1.2.3.4.tmp";
+        const std::wstring entry = container + L"\\entry";
+        const std::wstring file = entry + L"\\sub\\data.txt";
+        env.WriteFile(entry, L"sub\\data.txt", "staged");
+        const AccessDenied fileDeniesDelete(file, DELETE);
+        const AccessDenied subDeniesChildDelete(entry + L"\\sub", FILE_DELETE_CHILD);
+        const AccessDenied entryDeniesDelete(entry, DELETE);
+        const DirectoryListingDenied entryDeniesListing(entry);
+        const AccessDenied containerDeniesChildDelete(container, FILE_DELETE_CHILD);
+        std::unique_ptr<WorkDirectory> workDirectory;
+        {
+            const BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            DisableRestorePrivilegeOnThread();
+            workDirectory = OpenWorkDirectory(env.MakeConfig());
+        }
+
+        AssertStagingAreaEmpty(env, L"The open deletes a leftover whose DACL refuses the engine");
+    }
+
+    TEST_METHOD(Open_LeftoverCloudPlaceholderDirectoryWithAChild_LeavesTheStagingAreaEmpty) {
+        TempLayerEnvironment env(0);
+        const CloudSyncRoot syncRoot(env.Work());
+        const std::wstring placeholder = env.Staging() + L"\\#1.2.3.4.tmp";
+        env.WriteFile(placeholder, L"child.txt", "staged");
+        if (!syncRoot.PlaceholderMadeOrSkipped(placeholder)) {
+            return;
+        }
+
+        const auto workDirectory = OpenWorkDirectory(env.MakeConfig());
+
+        AssertStagingAreaEmpty(env,
+            L"The open enters a placeholder directory and deletes it with its child");
     }
 
     TEST_METHOD(Open_KeepsTheOtherEntriesOfTheWorkDirectory) {

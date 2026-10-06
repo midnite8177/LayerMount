@@ -433,7 +433,7 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
                          L"The undo of a failed rename could not remove the copy at the new name");
         }
     } else if (!asidePath.empty()) {
-        RemoveUpperEntry(asidePath, config_);
+        RemoveStagedEntry(asidePath, config_);
     }
 
     cache_.InvalidateWithAncestors(oldNorm);

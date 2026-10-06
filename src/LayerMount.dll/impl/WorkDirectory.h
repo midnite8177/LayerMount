@@ -36,9 +36,12 @@ public:
     // <upperPath>\.overlay when it is missing. Then deletes the staging
     // area with everything in it and creates it empty. The delete uses
     // backup semantics, clears the read-only attribute, and deletes a link
-    // or a mounted folder itself without entering it. It removes the
-    // sidecar records of each entry it deletes. The other entries of the
-    // work directory stay. The work directory must exist.
+    // or a mounted folder itself without entering it. It enters a directory
+    // reparse point that is not a link, such as a cloud placeholder. It
+    // deletes an entry whose DACL refuses the delete or the listing when
+    // the entry's owner is in the thread's token. It removes the sidecar
+    // records of each entry it deletes. The other entries of the work
+    // directory stay. The work directory must exist.
     //
     // Fails with E_INVALIDARG when the layout is refused. Fails with
     // HRESULT_FROM_WIN32(ERROR_BUSY) when another overlay holds either

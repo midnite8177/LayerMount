@@ -7,6 +7,7 @@
 
 #include <winioctl.h>
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
@@ -456,6 +457,193 @@ NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config) {
     return RemoveUpperEntryOfKind(path, kind, config);
 }
 
+namespace {
+
+constexpr DWORD kDeleteEntryAccess =
+    DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+constexpr DWORD kListDirectoryAccess = FILE_LIST_DIRECTORY | SYNCHRONIZE;
+constexpr DWORD kTreeDeleteAccess = kDeleteEntryAccess | kListDirectoryAccess;
+
+// Replaces the DACL of the entry at path with a protected DACL that grants
+// kTreeDeleteAccess to the user of the thread's token. The owner of an
+// entry gets WRITE_DAC with no privilege, unless an OWNER RIGHTS ACE takes
+// that right away. So the write works only on an entry whose owner is in
+// the thread's token. It goes on the entry alone and does not pass to its
+// children. Returns ERROR_SUCCESS, or the Win32 error of the step that
+// failed.
+DWORD GrantTreeDeleteAccess(const std::wstring& path) {
+    const ScopedHandle entry = OpenReparseEntry(path, WRITE_DAC);
+    if (!entry.IsValid()) {
+        return ::GetLastError();
+    }
+    const HANDLE token = ::GetCurrentThreadEffectiveToken();
+    DWORD userBytes = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &userBytes);
+    std::vector<std::uint64_t> user((userBytes + sizeof(std::uint64_t) - 1) /
+                                    sizeof(std::uint64_t));
+    if (!::GetTokenInformation(token, TokenUser, user.data(), userBytes, &userBytes)) {
+        return ::GetLastError();
+    }
+    const PSID userSid = reinterpret_cast<const TOKEN_USER*>(user.data())->User.Sid;
+    const DWORD aclBytes = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) +
+                           ::GetLengthSid(userSid);
+    std::vector<std::uint64_t> acl((aclBytes + sizeof(std::uint64_t) - 1) /
+                                   sizeof(std::uint64_t));
+    const PACL dacl = reinterpret_cast<PACL>(acl.data());
+    SECURITY_DESCRIPTOR descriptor{};
+    if (!::InitializeAcl(dacl, aclBytes, ACL_REVISION) ||
+        !::AddAccessAllowedAce(dacl, ACL_REVISION, kTreeDeleteAccess, userSid) ||
+        !::InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) ||
+        !::SetSecurityDescriptorDacl(&descriptor, TRUE, dacl, FALSE) ||
+        !::SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED) ||
+        !::SetKernelObjectSecurity(entry.Get(), DACL_SECURITY_INFORMATION, &descriptor)) {
+        return ::GetLastError();
+    }
+    return ERROR_SUCCESS;
+}
+
+// Opens the entry at path, not the target of a link, with access, into
+// *entry. When the entry's DACL refuses the open, writes the DACL of
+// GrantTreeDeleteAccess and opens the entry again, so a thread without the
+// backup and restore privileges can delete a tree whose copied DACLs
+// refuse delete or listing. Returns ERROR_SUCCESS or the Win32 error of
+// the open. When the grant fails, that error is the ERROR_ACCESS_DENIED of
+// the first open.
+DWORD OpenForTreeDelete(const std::wstring& path, DWORD access, ScopedHandle* entry) {
+    *entry = OpenReparseEntry(path, access);
+    if (entry->IsValid()) {
+        return ERROR_SUCCESS;
+    }
+    const DWORD openError = ::GetLastError();
+    if (openError != ERROR_ACCESS_DENIED || GrantTreeDeleteAccess(path) != ERROR_SUCCESS) {
+        return openError;
+    }
+    *entry = OpenReparseEntry(path, access);
+    return entry->IsValid() ? ERROR_SUCCESS : ::GetLastError();
+}
+
+// Lists the directory at path for DeleteTree and leaves out . and .. from
+// *names. When the directory's DACL refuses the listing, the open rewrites
+// that DACL as OpenForTreeDelete does. On a failure, *names holds the names
+// read before it.
+DWORD ListDirectoryForTreeDelete(const std::wstring& path, std::vector<std::wstring>* names) {
+    ScopedHandle directory;
+    const DWORD openError = OpenForTreeDelete(path, kListDirectoryAccess, &directory);
+    if (openError != ERROR_SUCCESS) {
+        return openError;
+    }
+    std::vector<std::uint64_t> buffer(64 * 1024 / sizeof(std::uint64_t));
+    const DWORD bufferBytes = static_cast<DWORD>(buffer.size() * sizeof(std::uint64_t));
+    while (::GetFileInformationByHandleEx(directory.Get(), FileFullDirectoryInfo,
+                                          buffer.data(), bufferBytes)) {
+        const BYTE* record = reinterpret_cast<const BYTE*>(buffer.data());
+        for (;;) {
+            const auto* info = reinterpret_cast<const FILE_FULL_DIR_INFO*>(record);
+            const std::wstring name(info->FileName, info->FileNameLength / sizeof(wchar_t));
+            if (name != L"." && name != L"..") {
+                names->push_back(name);
+            }
+            if (info->NextEntryOffset == 0) {
+                break;
+            }
+            record += info->NextEntryOffset;
+        }
+    }
+    const DWORD error = ::GetLastError();
+    return error == ERROR_NO_MORE_FILES ? ERROR_SUCCESS : error;
+}
+
+// The POSIX delete takes the name away at once, so the parent is empty for
+// its own delete even when another process still holds the entry open. A
+// file system without it gets the plain delete.
+bool MarkForDelete(HANDLE entry) {
+    FILE_DISPOSITION_INFO_EX posix{};
+    posix.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+    if (::SetFileInformationByHandle(entry, FileDispositionInfoEx, &posix, sizeof(posix))) {
+        return true;
+    }
+    FILE_DISPOSITION_INFO plain{};
+    plain.DeleteFile = TRUE;
+    return ::SetFileInformationByHandle(entry, FileDispositionInfo, &plain, sizeof(plain)) !=
+           FALSE;
+}
+
+// Whether DeleteTree enters the entry: a directory that is not a reparse
+// point, or a directory reparse point that is not a link, such as a cloud
+// placeholder. Empty when the reparse tag read fails, with that error in
+// GetLastError.
+std::optional<bool> EntersEntry(HANDLE entry, DWORD attributes) {
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return false;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+        return true;
+    }
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (!::GetFileInformationByHandleEx(entry, FileAttributeTagInfo, &tag, sizeof(tag))) {
+        return std::nullopt;
+    }
+    return !IsReparseTagNameSurrogate(tag.ReparseTag);
+}
+
+// Deletes the entry at path and everything below it. A link is a leaf, so
+// the delete never leaves the tree. An entry whose DACL refuses the delete
+// or the listing gets the DACL that GrantTreeDeleteAccess writes. Appends
+// the path of each deleted entry to *deleted. Stops at the first entry it
+// cannot delete and returns that entry.
+std::optional<StagedEntryDeleteFailure> DeleteTree(const std::wstring& path,
+                                                   std::vector<std::wstring>* deleted) {
+    ScopedHandle entry;
+    const DWORD openError = OpenForTreeDelete(path, kDeleteEntryAccess, &entry);
+    if (openError != ERROR_SUCCESS) {
+        if (IsGone(openError)) {
+            return std::nullopt;
+        }
+        return StagedEntryDeleteFailure{path, openError};
+    }
+    FILE_BASIC_INFO basic{};
+    if (!::GetFileInformationByHandleEx(entry.Get(), FileBasicInfo, &basic, sizeof(basic))) {
+        return StagedEntryDeleteFailure{path, ::GetLastError()};
+    }
+    const DWORD attributes = basic.FileAttributes;
+    const std::optional<bool> enters = EntersEntry(entry.Get(), attributes);
+    if (!enters.has_value()) {
+        return StagedEntryDeleteFailure{path, ::GetLastError()};
+    }
+    if (*enters) {
+        std::vector<std::wstring> names;
+        const DWORD listError = ListDirectoryForTreeDelete(path, &names);
+        if (listError != ERROR_SUCCESS) {
+            return StagedEntryDeleteFailure{path, listError};
+        }
+        for (const std::wstring& name : names) {
+            std::optional<StagedEntryDeleteFailure> failure =
+                DeleteTree(JoinDirPath(path, name), deleted);
+            if (failure.has_value()) {
+                return failure;
+            }
+        }
+    }
+    // A delete refuses a read-only entry.
+    if (!ClearReadOnly(entry.Get(), attributes) || !MarkForDelete(entry.Get())) {
+        return StagedEntryDeleteFailure{path, ::GetLastError()};
+    }
+    deleted->push_back(path);
+    return std::nullopt;
+}
+
+}
+
+std::optional<StagedEntryDeleteFailure> RemoveStagedEntry(const std::wstring& path,
+                                                          const LayerConfig& config) {
+    std::vector<std::wstring> deleted;
+    std::optional<StagedEntryDeleteFailure> failure = DeleteTree(path, &deleted);
+    // A delete that stops at an entry it cannot delete has deleted the
+    // entries before it, so their records go too.
+    MetadataStore::RemoveSidecarRecordsOfGoneEntries(deleted, config);
+    return failure;
+}
+
 NTSTATUS CreateDirectoryOrUseExisting(const std::wstring& path) {
     if (::CreateDirectoryW(path.c_str(), nullptr)) {
         return STATUS_SUCCESS;
@@ -751,7 +939,7 @@ NTSTATUS BuildInContainerAndMove(const std::wstring& containerPath,
     if (NT_SUCCESS(status)) {
         status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config).status;
     }
-    RemoveUpperEntry(containerPath, config);
+    RemoveStagedEntry(containerPath, config);
     return status;
 }
 

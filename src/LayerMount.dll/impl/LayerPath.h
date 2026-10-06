@@ -4,6 +4,7 @@
 #include "ScopedHandle.h"
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -206,6 +207,29 @@ NTSTATUS RemoveUpperEntryOfKind(const std::wstring& path,
 // RemoveUpperEntryOfKind. A path with no entry is success. A failed probe
 // returns its error and removes nothing.
 NTSTATUS RemoveUpperEntry(const std::wstring& path, const LayerConfig& config);
+
+// The first entry that RemoveStagedEntry could not delete, with the Win32
+// error of that delete.
+struct StagedEntryDeleteFailure {
+    std::wstring path;
+    DWORD error;
+};
+
+// Deletes the entry at path, the staging area or an entry in it, with
+// everything below it, and removes the sidecar records of each entry it
+// deletes. The delete opens each entry with backup semantics and clears
+// its read-only attribute. It deletes a link or a mounted folder itself
+// without entering it. It enters a directory reparse point that is not a
+// link, such as a cloud placeholder.
+// When an entry's DACL refuses the delete or the listing, the call uses the
+// owner's right to replace that DACL with one that grants the access to the
+// thread's user, and opens the entry again. That works only on an entry
+// whose owner is in the thread's token. A copy made with SeRestorePrivilege
+// can carry the owner of its source, and then the grant fails.
+// An entry that is already gone is success. Returns the first entry that
+// the call cannot delete, and the entries after it stay.
+std::optional<StagedEntryDeleteFailure> RemoveStagedEntry(const std::wstring& path,
+                                                          const LayerConfig& config);
 
 // Creates a container directory at containerPath, a new path in the work
 // directory, and calls build with the path of an entry in the container.

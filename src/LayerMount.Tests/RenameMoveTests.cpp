@@ -6,6 +6,7 @@
 #include "WhiteoutManager.h"
 #include "Cache.h"
 #include "MetadataStore.h"
+#include "WorkDirectory.h"
 
 #include "AclTestHelpers.h"
 
@@ -1659,6 +1660,39 @@ public:
             L"An open of the new name after the failed rename must find nothing");
         Assert::IsFalse(env.FileExists(env.Upper(), L"e"),
             L"The failed rename must leave no new name in the upper");
+    }
+
+    TEST_METHOD(Rename_LowerDirectoryWhosePartialCopyRefusesDeleteWithoutPrivileges_LeavesTheStagingAreaEmpty) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"d\\a\\x.txt", "lower");
+        env.WriteFile(env.Lower(0), L"d\\b\\y.txt", "lower");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        {
+            const AccessDenied fileRefusesDelete(env.Lower(0) + L"\\d\\a\\x.txt", DELETE);
+            const AccessDenied directoryRefusesChildDelete(env.Lower(0) + L"\\d\\a",
+                                                           FILE_DELETE_CHILD);
+            const DirectoryListingDenied laterChildRefusesListing(env.Lower(0) + L"\\d\\b");
+            const BackupPrivilegeDisabledOnThread noBackupPrivilege;
+            DisableRestorePrivilegeOnThread();
+
+            AssertStatus(STATUS_ACCESS_DENIED,
+                mount.Rename(L"d", L"e", kFailIfExists, kNoCallerPid),
+                L"A rename that cannot list a later child must fail");
+            Assert::IsTrue(EntriesUnder(env.Staging()).empty(),
+                L"The failed rename must leave nothing in the staging area");
+            std::unique_ptr<WorkDirectory> workDirectory;
+            std::wstring error;
+            Assert::AreEqual<HRESULT>(S_OK,
+                WorkDirectory::Open(env.MakeConfig(), &workDirectory, error),
+                (L"An open of the work directory after the failed rename must succeed: " +
+                 error).c_str());
+        }
+
+        AssertOnlyEntryShownAs(mount, L"d\\a", L"x.txt");
+        AssertOnlyEntryShownAs(mount, L"d\\b", L"y.txt");
+        AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(mount, L"e"),
+            L"An open of the new name after the failed rename must find nothing");
     }
 
     TEST_METHOD(Rename_LowerDirectoryWithInheritableAceOverSubdirectoryThatDeniesListing_CopiesTheTree) {

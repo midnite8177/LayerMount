@@ -121,9 +121,11 @@ public:
         const std::wstring& path,
         const LayerConfig& config);
 
-    // Call after the delete with the list from ListSidecarKeyedEntries.
-    // Removes the sidecar record and opaque marker of each listed entry that
-    // the delete removed, so a new entry at its path starts with none.
+    // Call after the delete with the list from ListSidecarKeyedEntries, or
+    // with the paths that the delete removed. Removes the sidecar record and
+    // opaque marker of each listed entry that the delete removed, so a new
+    // entry at its path starts with none. Does nothing when the sidecar
+    // store is not in use.
     static void RemoveSidecarRecordsOfGoneEntries(
         const std::vector<std::wstring>& entries,
         const LayerConfig& config);

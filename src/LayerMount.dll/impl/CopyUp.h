@@ -18,6 +18,37 @@ class WhiteoutManager;
 class Cache;
 class FileBasicInfoGuard;
 
+// Where CopyUp::SetRenameDestinationAside moves a replace-rename's
+// destination.
+enum class DestinationAside {
+    // A new name in the staging area. The next overlay create deletes a
+    // copy that a crash or a Release leaves there.
+    WorkDirectory,
+    // A new name in the destination's own directory, for a destination
+    // below a link in the merged view. The link target can be on another
+    // volume than the work directory, and the entry stays on its volume.
+    // The engine hides the entry there and does not sweep one that a crash
+    // or a Release leaves.
+    NextToDestination,
+};
+
+// Removes the entry at asidePath with its sidecar records.
+using RemoveAsideCopy = void (*)(const std::wstring& asidePath, const LayerConfig& config);
+
+// An upper destination entry that CopyUp::SetRenameDestinationAside moved
+// from upperPath to asidePath. normalizedPath is the destination's path in
+// the merged view. attributesToRestore holds the attributes of an entry
+// that SetRenameDestinationAside hid, and is empty for one it did not hide.
+// removeCopy is the removal that SetRenameDestinationAside chose for the
+// DestinationAside of the move.
+struct HeldAside {
+    std::wstring normalizedPath;
+    std::wstring upperPath;
+    std::wstring asidePath;
+    std::optional<DWORD> attributesToRestore;
+    RemoveAsideCopy removeCopy;
+};
+
 // An upper destination entry that CopyUp::SetRenameDestinationAside moved
 // aside, with its opaque marker. Until Commit or Release runs, the
 // destructor acts on a failed rename. When the destination path is free,
@@ -41,14 +72,8 @@ public:
     RenameDestinationAside(const RenameDestinationAside&) = delete;
     RenameDestinationAside& operator=(const RenameDestinationAside&) = delete;
 
-    // Takes the entry that moved from upperPath to asidePath.
-    // attributesToRestore holds the attributes of an entry that
-    // CopyUp::SetRenameDestinationAside hid, and is empty for one it did
-    // not hide.
-    void Hold(std::wstring normalizedPath,
-              std::wstring upperPath,
-              std::wstring asidePath,
-              std::optional<DWORD> attributesToRestore);
+    // Takes the entry that moved aside.
+    void Hold(HeldAside held);
 
     void Commit();
     void Release();
@@ -57,20 +82,7 @@ private:
     const LayerConfig& config_;
     Cache& cache_;
     const ::LayerMount::abi::EventEmitter& events_;
-    std::wstring normalizedPath_;
-    std::wstring upperPath_;
-    std::wstring asidePath_;
-    std::optional<DWORD> attributesToRestore_;
-};
-
-// Where CopyUp::SetRenameDestinationAside moves a replace-rename's
-// destination.
-enum class DestinationAside {
-    WorkDirectory,
-    // A new name in the destination's own directory, so the entry stays on
-    // its volume. The entry is hidden there, in the link target, and the
-    // engine does not sweep one that a crash or a Release leaves.
-    NextToDestination,
+    std::optional<HeldAside> held_;
 };
 
 // The result of CopyUp::CopyUpMetadataOnly and CopyUp::CopyUpFileOrShell.

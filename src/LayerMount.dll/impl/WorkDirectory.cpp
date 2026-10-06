@@ -1,13 +1,9 @@
 #include "WorkDirectory.h"
 #include "ElevationUtil.h"
-#include "EntryCopy.h"
 #include "LayerPath.h"
-#include "MetadataStore.h"
-#include "NtStatusUtil.h"
 
-#include <cstdint>
+#include <optional>
 #include <utility>
-#include <vector>
 
 namespace LayerMount {
 
@@ -78,99 +74,6 @@ HRESULT CheckLayoutWith(const LayerConfig& config, ReadLayoutPath read, std::wst
     return S_OK;
 }
 
-// Leaves out . and .. from *names. On a failure, *names holds the names
-// read before it.
-DWORD ListDirectory(const std::wstring& path, std::vector<std::wstring>* names) {
-    const ScopedHandle directory = OpenReparseEntry(path, FILE_LIST_DIRECTORY | SYNCHRONIZE);
-    if (!directory.IsValid()) {
-        return ::GetLastError();
-    }
-    std::vector<std::uint64_t> buffer(64 * 1024 / sizeof(std::uint64_t));
-    const DWORD bufferBytes = static_cast<DWORD>(buffer.size() * sizeof(std::uint64_t));
-    while (::GetFileInformationByHandleEx(directory.Get(), FileFullDirectoryInfo,
-                                          buffer.data(), bufferBytes)) {
-        const BYTE* record = reinterpret_cast<const BYTE*>(buffer.data());
-        for (;;) {
-            const auto* info = reinterpret_cast<const FILE_FULL_DIR_INFO*>(record);
-            const std::wstring name(info->FileName, info->FileNameLength / sizeof(wchar_t));
-            if (name != L"." && name != L"..") {
-                names->push_back(name);
-            }
-            if (info->NextEntryOffset == 0) {
-                break;
-            }
-            record += info->NextEntryOffset;
-        }
-    }
-    const DWORD error = ::GetLastError();
-    return error == ERROR_NO_MORE_FILES ? ERROR_SUCCESS : error;
-}
-
-// The POSIX delete takes the name away at once, so the parent is empty for
-// its own delete even when another process still holds the entry open. A
-// file system without it gets the plain delete.
-bool MarkForDelete(HANDLE entry) {
-    FILE_DISPOSITION_INFO_EX posix{};
-    posix.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
-    if (::SetFileInformationByHandle(entry, FileDispositionInfoEx, &posix, sizeof(posix))) {
-        return true;
-    }
-    FILE_DISPOSITION_INFO plain{};
-    plain.DeleteFile = TRUE;
-    return ::SetFileInformationByHandle(entry, FileDispositionInfo, &plain, sizeof(plain)) !=
-           FALSE;
-}
-
-struct DeleteFailure {
-    std::wstring path;
-    DWORD error = ERROR_SUCCESS;
-};
-
-// Deletes the entry at path and everything below it. A link or any other
-// reparse point is a leaf, so the delete never leaves the tree. Appends the
-// path of each deleted entry to *deleted. Stops at the first entry it
-// cannot delete.
-bool DeleteTree(const std::wstring& path, std::vector<std::wstring>* deleted,
-                DeleteFailure* failure) {
-    const ScopedHandle entry = OpenReparseEntry(
-        path, DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE);
-    if (!entry.IsValid()) {
-        const DWORD error = ::GetLastError();
-        if (IsGone(error)) {
-            return true;
-        }
-        *failure = {path, error};
-        return false;
-    }
-    FILE_BASIC_INFO basic{};
-    if (!::GetFileInformationByHandleEx(entry.Get(), FileBasicInfo, &basic, sizeof(basic))) {
-        *failure = {path, ::GetLastError()};
-        return false;
-    }
-    const DWORD attributes = basic.FileAttributes;
-    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
-        std::vector<std::wstring> names;
-        const DWORD listError = ListDirectory(path, &names);
-        if (listError != ERROR_SUCCESS) {
-            *failure = {path, listError};
-            return false;
-        }
-        for (const std::wstring& name : names) {
-            if (!DeleteTree(JoinDirPath(path, name), deleted, failure)) {
-                return false;
-            }
-        }
-    }
-    // A delete refuses a read-only entry.
-    if (!ClearReadOnly(entry.Get(), attributes) || !MarkForDelete(entry.Get())) {
-        *failure = {path, ::GetLastError()};
-        return false;
-    }
-    deleted->push_back(path);
-    return true;
-}
-
 // Opens the lock file lockName in lockDirectory. directory and role name the
 // directory that the lock holds, for the message in error.
 HRESULT TakeLock(const std::wstring& lockDirectory, const wchar_t* lockName,
@@ -202,15 +105,10 @@ HRESULT LockUpper(const std::wstring& upperPath, ScopedHandle* lock, std::wstrin
 
 HRESULT ResetStagingArea(const LayerConfig& config, std::wstring& error) {
     const std::wstring staging = StagingAreaPath(config.workDirPath);
-    std::vector<std::wstring> deleted;
-    DeleteFailure failure;
-    const bool cleaned = DeleteTree(staging, &deleted, &failure);
-    // A delete that stops at an entry it cannot delete has deleted the
-    // entries before it, so their records go before that failure returns.
-    MetadataStore::RemoveSidecarRecordsOfGoneEntries(deleted, config);
-    if (!cleaned) {
-        error = L"Failed to delete a leftover entry from the work directory: " + failure.path;
-        return HRESULT_FROM_WIN32(failure.error);
+    const std::optional<StagedEntryDeleteFailure> failure = RemoveStagedEntry(staging, config);
+    if (failure.has_value()) {
+        error = L"Failed to delete a leftover entry from the work directory: " + failure->path;
+        return HRESULT_FROM_WIN32(failure->error);
     }
     if (!::CreateDirectoryW(staging.c_str(), nullptr)) {
         const DWORD createError = ::GetLastError();
