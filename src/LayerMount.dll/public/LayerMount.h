@@ -1258,7 +1258,10 @@ LM_API HRESULT LM_CALL LayerMountVhdMerge(LM_VHD_HANDLE childVhd);
 
 /* Creates a VHD at `vhdPath` and copies the contents of `directoryPath`
  * into it. `sizeBytes` is the requested VHD capacity; 0 auto-sizes to
- * fit the source directory. */
+ * fit the source directory. The import leaves out an entry named
+ * `.overlay` at the root of `directoryPath`, in any case and with or
+ * without trailing dots or spaces, so the upper of a live overlay imports
+ * without its lock files, staging area and sidecar records. */
 LM_API HRESULT LM_CALL LayerMountVhdImport(
     LM_HANDLE mount,
     PCWSTR     directoryPath,
@@ -1267,8 +1270,10 @@ LM_API HRESULT LM_CALL LayerMountVhdImport(
 
 /* Attaches `vhdPath` read-only and copies its user-visible contents into
  * `directoryPath`, creating the directory if missing. Skips the NTFS
- * system entries at the volume root and tolerates a permission error on
- * an individual file so a restrictive ACL does not abort the export. */
+ * system entries and an entry named `.overlay` at the volume root, in any
+ * case and with or without trailing dots or spaces. Tolerates a permission
+ * error on an individual file so a restrictive ACL does not abort the
+ * export. */
 LM_API HRESULT LM_CALL LayerMountVhdExport(
     LM_HANDLE mount,
     PCWSTR     vhdPath,
@@ -1435,9 +1440,10 @@ LM_API HRESULT LM_CALL LayerMountVssCloseSnapshot(LM_VSS_SNAPSHOT_HANDLE snapsho
  * given zstd `compressionLevel`, stamping `options`' author and
  * description when non-NULL. Returns a receipt handle in *outImage when
  * non-NULL; the handle carries no long-lived state beyond the path. The
- * image leaves out a `.overlay` directory at the root of `sourceDir`, so
- * the upper of a live overlay packs without its lock files, staging area
- * and sidecar records. */
+ * image leaves out an entry named `.overlay` at the root of `sourceDir`,
+ * in any case and with or without trailing dots or spaces, so the upper of
+ * a live overlay packs without its lock files, staging area and sidecar
+ * records. */
 LM_API HRESULT LM_CALL LayerMountImagePack(
     LM_HANDLE                    mount,
     PCWSTR                        sourceDir,
@@ -1450,8 +1456,9 @@ LM_API HRESULT LM_CALL LayerMountImagePack(
  * Create a differential image that records only files in sourceDir that
  * are new or modified relative to baseDir. Deleted-in-source files get
  * whiteout entries in the metadata. Identical shape + lifetime as
- * LayerMountImagePack. The comparison leaves out a `.overlay` directory at
- * the root of sourceDir and of baseDir.
+ * LayerMountImagePack. The comparison leaves out an entry named `.overlay`
+ * at the root of sourceDir and of baseDir, in any case and with or without
+ * trailing dots or spaces.
  */
 LM_API HRESULT LM_CALL LayerMountImagePackDifferential(
     LM_HANDLE                    mount,
@@ -1475,8 +1482,10 @@ LM_API HRESULT LM_CALL LayerMountImageCreateManifest(
 
 /* Extracts the layer image at `imagePath` into `targetDir`.
  * `verifyChecksum` rejects the image if the data section's SHA-256 does
- * not match the header. The unpack writes nothing at a `.overlay` directory
- * at the root of `targetDir`, even when the image holds such entries. */
+ * not match the header. The unpack writes nothing at or under an entry
+ * named `.overlay` at the root of `targetDir`, in any case and with or
+ * without trailing dots or spaces, even when the image holds such
+ * entries. */
 LM_API HRESULT LM_CALL LayerMountImageUnpack(
     LM_HANDLE mount,
     PCWSTR     imagePath,

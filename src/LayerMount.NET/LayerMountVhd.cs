@@ -115,7 +115,11 @@ public sealed class VhdApi
     /// Creates a VHD at <paramref name="vhdPath"/> and copies the
     /// contents of <paramref name="directoryPath"/> into it.
     /// <paramref name="sizeBytes"/> is the requested VHD capacity; pass
-    /// 0 to size the VHD to fit the source directory.
+    /// 0 to size the VHD to fit the source directory. The import leaves
+    /// out an entry named <c>.overlay</c> at the root of
+    /// <paramref name="directoryPath"/>, in any case and with or without
+    /// trailing dots or spaces, so the upper of a live overlay imports
+    /// without its lock files, staging area and sidecar records.
     /// </summary>
     /// <exception cref="LayerMountException">
     /// The native call returns a non-success HRESULT.
@@ -134,9 +138,10 @@ public sealed class VhdApi
     /// Attaches the VHD at <paramref name="vhdPath"/> read-only and
     /// copies its user-visible content into
     /// <paramref name="directoryPath"/>, creating the directory if it
-    /// is missing. The call skips the NTFS system entries at the volume
-    /// root, and a permission error on one file does not stop the rest
-    /// of the export.
+    /// is missing. The call skips the NTFS system entries and an entry
+    /// named <c>.overlay</c> at the volume root, in any case and with or
+    /// without trailing dots or spaces. A permission error on one file
+    /// does not stop the rest of the export.
     /// </summary>
     /// <exception cref="LayerMountException">
     /// The native call returns a non-success HRESULT.

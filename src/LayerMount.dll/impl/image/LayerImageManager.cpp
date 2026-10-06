@@ -358,35 +358,6 @@ static bool HasWhiteoutPrefix(const std::wstring& filename) {
     return filename.size() >= 4 && filename.compare(0, 4, L".wh.") == 0;
 }
 
-// The first segment of `relativePath` as Windows opens it: lowercase, and
-// without trailing dots and spaces.
-static std::wstring FirstSegmentAsOpened(const std::wstring& relativePath) {
-    std::wstring firstSegment = NormalizePath(relativePath);
-    const size_t separator = firstSegment.find(L'\\');
-    if (separator != std::wstring::npos) firstSegment.erase(separator);
-    firstSegment.erase(firstSegment.find_last_not_of(L". ") + 1);
-    return firstSegment;
-}
-
-static bool FirstSegmentOpensAsSidecar(const std::wstring& relativePath) {
-    return IsRootSidecarPath(FirstSegmentAsOpened(relativePath));
-}
-
-// The long name of the entry `name` directly under `directory`, or no value
-// when no such entry exists. A short name such as `OVERLA~1` resolves to
-// the long name of its entry.
-static std::optional<std::wstring> ExistingLongName(const fs::path& directory,
-                                                    const std::wstring& name) {
-    const std::wstring path = (directory / name).wstring();
-    const DWORD needed = ::GetLongPathNameW(path.c_str(), nullptr, 0);
-    if (needed == 0) return std::nullopt;
-    std::wstring longPath(needed, L'\0');
-    const DWORD written = ::GetLongPathNameW(path.c_str(), longPath.data(), needed);
-    if (written == 0 || written >= needed) return std::nullopt;
-    longPath.resize(written);
-    return fs::path(longPath).filename().wstring();
-}
-
 // An unpack writes no entry whose first segment opens as the root sidecar,
 // as the whiteout marker of the root sidecar, or as an existing entry in
 // the target whose long name is the root sidecar.

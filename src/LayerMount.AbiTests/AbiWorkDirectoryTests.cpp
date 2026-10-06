@@ -45,12 +45,6 @@ HRESULT CreateWithLower(const TempLayerEnv& env, const std::wstring& lower,
     return ::LayerMountCreate(&config, handle);
 }
 
-void WriteText(const std::wstring& path, const std::string& text) {
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    file << text;
-}
-
 void MakeReadOnly(const std::wstring& path) {
     Assert::IsTrue(::SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE,
         (L"The test must make " + path + L" read-only").c_str());

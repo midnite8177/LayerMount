@@ -120,6 +120,90 @@ inline std::vector<std::wstring> SortedNamesIn(const std::wstring& directory) {
     return names;
 }
 
+// Writes `text` to the file at `path`. Makes the parent directories first.
+inline void WriteText(const std::wstring& path, const std::string& text) {
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << text;
+}
+
+inline std::wstring FileNameOf(const std::wstring& path) {
+    return std::filesystem::path(path).filename().wstring();
+}
+
+inline std::wstring ShortPathOf(const std::wstring& path) {
+    const DWORD needed = ::GetShortPathNameW(path.c_str(), nullptr, 0);
+    if (needed == 0) return path;
+    std::wstring shortPath(needed, L'\0');
+    const DWORD written = ::GetShortPathNameW(path.c_str(), shortPath.data(), needed);
+    shortPath.resize(written);
+    return shortPath;
+}
+
+// Enables SE_RESTORE_NAME for the life of the object, and then puts back the
+// state the token had before.
+class EnabledRestorePrivilege {
+public:
+    EnabledRestorePrivilege() {
+        if (!::OpenProcessToken(::GetCurrentProcess(),
+                                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token_)) {
+            token_ = nullptr;
+            return;
+        }
+        TOKEN_PRIVILEGES wanted{};
+        wanted.PrivilegeCount = 1;
+        wanted.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (!::LookupPrivilegeValueW(nullptr, SE_RESTORE_NAME, &wanted.Privileges[0].Luid)) {
+            return;
+        }
+        DWORD previousSize = 0;
+        held_ = ::AdjustTokenPrivileges(token_, FALSE, &wanted, sizeof(previous_), &previous_,
+                                        &previousSize) != FALSE
+             && ::GetLastError() == ERROR_SUCCESS;
+    }
+
+    ~EnabledRestorePrivilege() {
+        if (token_ == nullptr) return;
+        if (held_) ::AdjustTokenPrivileges(token_, FALSE, &previous_, 0, nullptr, nullptr);
+        ::CloseHandle(token_);
+    }
+
+    EnabledRestorePrivilege(const EnabledRestorePrivilege&) = delete;
+    EnabledRestorePrivilege& operator=(const EnabledRestorePrivilege&) = delete;
+
+    bool Held() const noexcept { return held_; }
+
+private:
+    HANDLE           token_ = nullptr;
+    TOKEN_PRIVILEGES previous_{};
+    bool             held_ = false;
+};
+
+inline bool GiveShortName(const std::wstring& path, PCWSTR shortName) {
+    const EnabledRestorePrivilege privilege;
+    if (!privilege.Held()) return false;
+    HANDLE handle = ::CreateFileW(path.c_str(), DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    const BOOL named = ::SetFileShortNameW(handle, shortName);
+    ::CloseHandle(handle);
+    return named != FALSE;
+}
+
+// The short name of the entry at `path`. A volume that makes no short names
+// gives the entry none, so the function then sets `OVRLAY~1`. It returns no
+// value when the volume refuses short names.
+inline std::optional<std::wstring> ShortNameOf(const std::wstring& path) {
+    const std::wstring longName = FileNameOf(path);
+    std::wstring shortName = FileNameOf(ShortPathOf(path));
+    if (_wcsicmp(shortName.c_str(), longName.c_str()) != 0) return shortName;
+    if (!GiveShortName(path, L"OVRLAY~1")) return std::nullopt;
+    shortName = FileNameOf(ShortPathOf(path));
+    if (_wcsicmp(shortName.c_str(), longName.c_str()) != 0) return shortName;
+    return std::nullopt;
+}
+
 constexpr DWORD kCurrentProcessOriginator = 0u;
 
 constexpr UINT32 kNoCreateOptions = 0u;
@@ -407,6 +491,84 @@ inline LayerMountHolder CreateLayerMount(const TempLayerEnv& env,
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsNotNull(
         h, L"LayerMountCreate should return a non-null handle");
     return LayerMountHolder(h);
+}
+
+inline LayerMountHolder CreateTransient(const std::wstring& upper) {
+    LM_HANDLE handle = nullptr;
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual<HRESULT>(S_OK,
+        ::LayerMountCreateTransient(upper.c_str(), LM_CAP_NONE, &handle),
+        L"LayerMountCreateTransient");
+    return LayerMountHolder(handle);
+}
+
+inline void WriteThroughOverlay(LM_HANDLE mount, PCWSTR relativePath, const std::string& text) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    OpenedFile created;
+    Assert::AreEqual<HRESULT>(S_OK,
+        CreateOverlayFile(mount, relativePath, GENERIC_READ | GENERIC_WRITE,
+                          kNoCreateOptions, FILE_ATTRIBUTE_NORMAL, created),
+        L"LayerMountCreateFile");
+    UINT32 written = 0;
+    LM_FILE_INFO info{};
+    Assert::AreEqual<HRESULT>(S_OK,
+        WriteFromStart(created.handle, text.data(), static_cast<UINT32>(text.size()),
+                       &written, &info),
+        L"LayerMountWriteFile");
+    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(created.handle));
+}
+
+inline LM_VHD_CONFIG ProcessScopedVhdConfig(const std::wstring& vhdPath) {
+    LM_VHD_CONFIG cfg{};
+    cfg.structSize          = sizeof(cfg);
+    cfg.kind                = LM_VHD_KIND_DYNAMIC;
+    cfg.path                = vhdPath.c_str();
+    cfg.suppressDriveLetter = TRUE;
+    cfg.lifetime            = LM_VHD_ATTACH_PROCESS_SCOPED;
+    return cfg;
+}
+
+// Opens the VHD that `cfg` names, attaches it and returns the root of its
+// volume, which ends in a backslash. The attach ends when *vhd closes.
+inline std::wstring AttachVhdVolumeWithConfig(LM_HANDLE mount, const LM_VHD_CONFIG& cfg,
+                                              LM_VHD_HANDLE* vhd) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdOpen(mount, &cfg, vhd),
+        L"LayerMountVhdOpen opens the VHD");
+    wchar_t physicalPath[MAX_PATH] = {};
+    SIZE_T required = 0;
+    Assert::AreEqual<HRESULT>(S_OK,
+        ::LayerMountVhdAttach(*vhd, physicalPath, MAX_PATH, &required),
+        L"LayerMountVhdAttach attaches the VHD");
+
+    // The volume can show up after the attach returns.
+    wchar_t volumeGuid[MAX_PATH] = {};
+    HRESULT hr = E_FAIL;
+    for (int attempt = 0; attempt < 40 && FAILED(hr); ++attempt) {
+        hr = ::LayerMountVhdGetVolumeGuid(*vhd, volumeGuid, MAX_PATH, &required);
+        if (FAILED(hr)) {
+            ::Sleep(250);
+        }
+    }
+    Assert::AreEqual<HRESULT>(S_OK, hr, L"LayerMountVhdGetVolumeGuid finds the VHD's volume");
+    std::wstring volumeRoot = volumeGuid;
+    if (volumeRoot.empty() || volumeRoot.back() != L'\\') {
+        volumeRoot += L'\\';
+    }
+    return volumeRoot;
+}
+
+inline std::wstring AttachVhdVolumeReadOnly(LM_HANDLE mount, const std::wstring& vhdPath,
+                                            LM_VHD_HANDLE* vhd) {
+    LM_VHD_CONFIG cfg = ProcessScopedVhdConfig(vhdPath);
+    cfg.readOnly = TRUE;
+    return AttachVhdVolumeWithConfig(mount, cfg, vhd);
+}
+
+inline std::wstring AttachVhdVolumeWritable(LM_HANDLE mount, const std::wstring& vhdPath,
+                                            LM_VHD_HANDLE* vhd) {
+    LM_VHD_CONFIG cfg = ProcessScopedVhdConfig(vhdPath);
+    cfg.readOnly = FALSE;
+    return AttachVhdVolumeWithConfig(mount, cfg, vhd);
 }
 
 // Mount, VHD attach and VSS need elevation. A skip macro below logs and

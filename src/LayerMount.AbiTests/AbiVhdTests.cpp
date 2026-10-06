@@ -5,10 +5,12 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace LayerMountAbiTests {
 
-// VHD primitives. Create + Attach + Detach require elevation;
-// each method early-returns when the test process isn't elevated. The
-// error-path test (Open on a nonexistent .vhdx) runs without admin because
-// it fails inside OpenVirtualDisk before any attach is attempted.
+namespace {
+
+constexpr UINT64 kAutoSize = 0;
+
+}
+
 TEST_CLASS(AbiVhdTests) {
 public:
     TEST_METHOD(VhdCreate_Open_Close_RoundTrip) {
@@ -38,6 +40,108 @@ public:
             ::LayerMountVhdOpen(mount.Get(), &cfg, &vhd));
         Assert::IsNotNull(vhd);
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdClose(vhd));
+    }
+
+    TEST_METHOD(ImportExport_LiveTransientOverlayUpper_LeavesOutTheSidecarStore) {
+        ABI_SKIP_IF_NOT_ADMIN();
+        TempLayerEnv env(0);
+        const std::wstring upper = env.Root() + L"\\transient";
+        LayerMountHolder overlay = CreateTransient(upper);
+        WriteThroughOverlay(overlay.Get(), L"\\file.txt", "payload");
+
+        const std::wstring vhdPath = env.Root() + L"\\live.vhdx";
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdImport(overlay.Get(), upper.c_str(), vhdPath.c_str(), kAutoSize),
+            L"An import of a live overlay's upper succeeds");
+
+        const std::wstring dstDir = env.Root() + L"\\dst";
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdExport(overlay.Get(), vhdPath.c_str(), dstDir.c_str()));
+        Assert::IsTrue(SortedNamesIn(dstDir) == std::vector<std::wstring>{L"file.txt"},
+            L"The exported tree holds file.txt and no .overlay");
+        Assert::AreEqual<std::string>("payload", ReadAllBytes(dstDir + L"\\file.txt"));
+    }
+
+    TEST_METHOD(Export_VolumeRootHoldingASidecarStore_WritesOnlyTheOtherEntries) {
+        ABI_SKIP_IF_NOT_ADMIN();
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring source = env.Root() + L"\\source";
+        std::filesystem::create_directories(source);
+        WriteText(source + L"\\keep.txt", "keep");
+        const std::wstring vhdPath = env.Root() + L"\\sidecar.vhdx";
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdImport(mount.Get(), source.c_str(), vhdPath.c_str(), kAutoSize),
+            L"LayerMountVhdImport makes the VHD");
+
+        LM_VHD_HANDLE vhd = nullptr;
+        const std::wstring volumeRoot = AttachVhdVolumeWritable(mount.Get(), vhdPath, &vhd);
+        std::filesystem::create_directories(volumeRoot + L".OVERLAY");
+        WriteText(volumeRoot + L".OVERLAY\\held.txt", "held");
+        Assert::IsTrue(::CreateDirectoryW((volumeRoot + L".overlay.").c_str(), nullptr) != FALSE,
+            L"The volume path takes a name with a trailing dot as written");
+        WriteText(volumeRoot + L".overlay.\\dotted.txt", "dot");
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdClose(vhd), L"LayerMountVhdClose ends the attach");
+
+        const std::wstring dstDir = env.Root() + L"\\dst";
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdExport(mount.Get(), vhdPath.c_str(), dstDir.c_str()),
+            L"LayerMountVhdExport");
+        Assert::IsTrue(SortedNamesIn(dstDir) == std::vector<std::wstring>{L"keep.txt"},
+            L"The export writes keep.txt and nothing from .OVERLAY or .overlay.");
+        Assert::AreEqual<std::string>("keep", ReadAllBytes(dstDir + L"\\keep.txt"));
+    }
+
+    TEST_METHOD(Export_EntryUnderTheShortNameOfAnExistingSidecar_WritesNothingInTheSidecar) {
+        ABI_SKIP_IF_NOT_ADMIN();
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring dstDir = env.Root() + L"\\dst";
+        const std::wstring sidecar = dstDir + L"\\.overlay";
+        std::filesystem::create_directories(sidecar);
+        const std::optional<std::wstring> shortName = ShortNameOf(sidecar);
+        if (!shortName) {
+            Logger::WriteMessage(L"[SKIP] The volume gave .overlay no short name");
+            return;
+        }
+
+        const std::wstring source = env.Root() + L"\\source";
+        WriteText(source + L"\\keep.txt", "keep");
+        const std::wstring vhdPath = env.Root() + L"\\short.vhdx";
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdImport(mount.Get(), source.c_str(), vhdPath.c_str(), kAutoSize),
+            L"LayerMountVhdImport makes the VHD");
+
+        LM_VHD_HANDLE vhd = nullptr;
+        const std::wstring volumeRoot = AttachVhdVolumeWritable(mount.Get(), vhdPath, &vhd);
+        WriteText(volumeRoot + *shortName + L"\\x.txt", "short");
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdClose(vhd), L"LayerMountVhdClose ends the attach");
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdExport(mount.Get(), vhdPath.c_str(), dstDir.c_str()),
+            L"LayerMountVhdExport");
+        Assert::IsTrue(SortedNamesIn(sidecar).empty(),
+            L"The export writes nothing in .overlay through its short name");
+        Assert::AreEqual<std::string>("keep", ReadAllBytes(dstDir + L"\\keep.txt"));
+    }
+
+    TEST_METHOD(ImportExport_OverlayDirectoryBelowTheRoot_RoundTrips) {
+        ABI_SKIP_IF_NOT_ADMIN();
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring source = env.Root() + L"\\source";
+        std::filesystem::create_directories(source + L"\\sub\\.overlay");
+        WriteText(source + L"\\sub\\.overlay\\data.txt", "nested");
+
+        const std::wstring vhdPath = env.Root() + L"\\nested.vhdx";
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdImport(mount.Get(), source.c_str(), vhdPath.c_str(), kAutoSize));
+        const std::wstring dstDir = env.Root() + L"\\dst";
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountVhdExport(mount.Get(), vhdPath.c_str(), dstDir.c_str()));
+        Assert::AreEqual<std::string>("nested",
+            ReadAllBytes(dstDir + L"\\sub\\.overlay\\data.txt"),
+            L"A .overlay below the root imports and exports as user data");
     }
 
     TEST_METHOD(VhdOpen_NonExistent_ReturnsFileNotFound) {

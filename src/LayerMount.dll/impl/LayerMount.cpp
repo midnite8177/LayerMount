@@ -365,6 +365,30 @@ bool IsRootSidecarPath(const std::wstring& normalized) {
     return normalized == kSidecarDirName || IsInsideDirectory(normalized, kSidecarDirName);
 }
 
+std::wstring FirstSegmentAsOpened(const std::wstring& relativePath) {
+    std::wstring firstSegment = NormalizePath(relativePath);
+    const size_t separator = firstSegment.find(L'\\');
+    if (separator != std::wstring::npos) firstSegment.erase(separator);
+    firstSegment.erase(firstSegment.find_last_not_of(L". ") + 1);
+    return firstSegment;
+}
+
+bool FirstSegmentOpensAsSidecar(const std::wstring& relativePath) {
+    return IsRootSidecarPath(FirstSegmentAsOpened(relativePath));
+}
+
+std::optional<std::wstring> ExistingLongName(const std::filesystem::path& directory,
+                                             const std::wstring& name) {
+    const std::wstring path = (directory / name).wstring();
+    const DWORD needed = ::GetLongPathNameW(path.c_str(), nullptr, 0);
+    if (needed == 0) return std::nullopt;
+    std::wstring longPath(needed, L'\0');
+    const DWORD written = ::GetLongPathNameW(path.c_str(), longPath.data(), needed);
+    if (written == 0 || written >= needed) return std::nullopt;
+    longPath.resize(written);
+    return std::filesystem::path(longPath).filename().wstring();
+}
+
 std::optional<std::wstring_view> ParentOfFirstMarkerSegment(std::wstring_view normalized) {
     size_t start = 0;
     while (true) {

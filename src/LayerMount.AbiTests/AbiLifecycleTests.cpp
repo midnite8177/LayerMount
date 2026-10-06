@@ -19,36 +19,7 @@ std::wstring AttachVhdWithWorkDirectory(LM_HANDLE mount, const std::wstring& roo
         ::LayerMountVhdImport(mount, source.c_str(), vhdPath.c_str(), 0),
         L"LayerMountVhdImport makes the VHD");
 
-    LM_VHD_CONFIG cfg{};
-    cfg.structSize          = sizeof(cfg);
-    cfg.kind                = LM_VHD_KIND_DYNAMIC;
-    cfg.path                = vhdPath.c_str();
-    cfg.readOnly            = TRUE;
-    cfg.suppressDriveLetter = TRUE;
-    cfg.lifetime            = LM_VHD_ATTACH_PROCESS_SCOPED;
-    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdOpen(mount, &cfg, vhd),
-        L"LayerMountVhdOpen opens the VHD");
-    wchar_t physicalPath[MAX_PATH] = {};
-    SIZE_T required = 0;
-    Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountVhdAttach(*vhd, physicalPath, MAX_PATH, &required),
-        L"LayerMountVhdAttach attaches the VHD");
-
-    // The volume can show up after the attach returns.
-    wchar_t volumeGuid[MAX_PATH] = {};
-    HRESULT hr = E_FAIL;
-    for (int attempt = 0; attempt < 40 && FAILED(hr); ++attempt) {
-        hr = ::LayerMountVhdGetVolumeGuid(*vhd, volumeGuid, MAX_PATH, &required);
-        if (FAILED(hr)) {
-            ::Sleep(250);
-        }
-    }
-    Assert::AreEqual<HRESULT>(S_OK, hr, L"LayerMountVhdGetVolumeGuid finds the VHD's volume");
-    std::wstring workDir = volumeGuid;
-    if (workDir.empty() || workDir.back() != L'\\') {
-        workDir += L'\\';
-    }
-    return workDir + L"work";
+    return AttachVhdVolumeReadOnly(mount, vhdPath, vhd) + L"work";
 }
 
 }

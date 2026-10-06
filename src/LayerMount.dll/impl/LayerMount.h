@@ -314,6 +314,21 @@ bool IsReservedRelativePath(const std::wstring& normalized);
 // or a path beneath it, as IsReservedRelativePath reads it.
 bool IsRootSidecarPath(const std::wstring& normalized);
 
+// The first segment of `relativePath`, folded to lowercase and without the
+// trailing dots and spaces that Win32 path normalization removes.
+std::wstring FirstSegmentAsOpened(const std::wstring& relativePath);
+
+// Whether the first segment of `relativePath` opens as the sidecar subtree
+// `.overlay` at the root. `relativePath` is in the caller's case, and a
+// `.OVERLAY` or a `.overlay.` counts.
+bool FirstSegmentOpensAsSidecar(const std::wstring& relativePath);
+
+// The long name of the entry `name` directly under `directory`, or no value
+// when no such entry exists. A short name such as `OVERLA~1` resolves to
+// the long name of its entry.
+std::optional<std::wstring> ExistingLongName(const std::filesystem::path& directory,
+                                             const std::wstring& name);
+
 // The directory that holds the first segment of `normalized` that starts
 // with `kWhiteoutPrefix` in any case, or no value when no segment does. An
 // empty view is the overlay root. The view points into `normalized`.

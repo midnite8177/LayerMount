@@ -1,6 +1,7 @@
 #include "VHDLayerManager.h"
 #include "VolumeGuid.h"
 #include "../ElevationUtil.h"
+#include "../LayerMount.h"
 #include "../LayerPath.h"
 #include "../PathUtil.h"
 
@@ -544,6 +545,57 @@ DWORD VHDLayerManager::InitializeVHDDiskpart(const std::wstring& vhdPath) {
     return (exitCode == 0) ? ERROR_SUCCESS : ERROR_UNRECOGNIZED_VOLUME;
 }
 
+// The entries directly under `directoryPath` that an import copies. The list
+// leaves out every entry whose name opens as `.overlay`, file or directory,
+// in any case and with or without trailing dots or spaces. On a listing
+// error the function sets `ec`.
+static std::vector<std::filesystem::directory_entry> ImportedRootEntries(
+        const std::wstring& directoryPath, std::error_code& ec) {
+    std::vector<std::filesystem::directory_entry> entries;
+    std::filesystem::directory_iterator it(directoryPath, ec);
+    for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (!FirstSegmentOpensAsSidecar(it->path().filename().wstring())) {
+            entries.push_back(*it);
+        }
+    }
+    return entries;
+}
+
+// Sets `sizeBytes` to a VHD capacity that fits the files in and under
+// `rootEntries`, plus a fifth for file system overhead, and at least
+// 100 MiB. A file whose size cannot be read counts as empty. Returns
+// ERROR_ARITHMETIC_OVERFLOW when the capacity does not fit in a ULONGLONG.
+static DWORD SizeToFit(const std::vector<std::filesystem::directory_entry>& rootEntries,
+                       ULONGLONG& sizeBytes) {
+    namespace fs = std::filesystem;
+    ULONGLONG totalSize = 0;
+    const auto addFileSize = [&totalSize](const fs::directory_entry& entry) {
+        std::error_code fsec;
+        if (!entry.is_regular_file(fsec)) return true;
+        const auto fsz = entry.file_size(fsec);
+        if (fsec) return true;
+        const ULONGLONG add = static_cast<ULONGLONG>(fsz);
+        if (add > (std::numeric_limits<ULONGLONG>::max)() - totalSize) return false;
+        totalSize += add;
+        return true;
+    };
+    for (const auto& rootEntry : rootEntries) {
+        if (!addFileSize(rootEntry)) return ERROR_ARITHMETIC_OVERFLOW;
+        std::error_code walkEc;
+        for (const auto& entry : fs::recursive_directory_iterator(rootEntry.path(), walkEc)) {
+            if (!addFileSize(entry)) return ERROR_ARITHMETIC_OVERFLOW;
+        }
+    }
+    const ULONGLONG overhead = totalSize / 5;
+    if (overhead > (std::numeric_limits<ULONGLONG>::max)() - totalSize) {
+        return ERROR_ARITHMETIC_OVERFLOW;
+    }
+    sizeBytes = totalSize + overhead;
+    constexpr ULONGLONG kMinSize = 100ULL * 1024 * 1024;
+    if (sizeBytes < kMinSize) sizeBytes = kMinSize;
+    return ERROR_SUCCESS;
+}
+
 DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
                                         const std::wstring& vhdPath,
                                         ULONGLONG sizeBytes) {
@@ -552,27 +604,14 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
 
     namespace fs = std::filesystem;
 
+    std::error_code listEc;
+    const std::vector<fs::directory_entry> rootEntries =
+        ImportedRootEntries(directoryPath, listEc);
+    if (listEc) return ERROR_WRITE_FAULT;
+
     if (sizeBytes == 0) {
-        ULONGLONG totalSize = 0;
-        std::error_code ec;
-        for (const auto& entry : fs::recursive_directory_iterator(directoryPath, ec)) {
-            if (!entry.is_regular_file(ec)) continue;
-            std::error_code fsec;
-            const auto fsz = entry.file_size(fsec);
-            if (fsec) continue;
-            const ULONGLONG add = static_cast<ULONGLONG>(fsz);
-            if (add > (std::numeric_limits<ULONGLONG>::max)() - totalSize) {
-                return ERROR_ARITHMETIC_OVERFLOW;
-            }
-            totalSize += add;
-        }
-        const ULONGLONG overhead = totalSize / 5;
-        if (overhead > (std::numeric_limits<ULONGLONG>::max)() - totalSize) {
-            return ERROR_ARITHMETIC_OVERFLOW;
-        }
-        sizeBytes = totalSize + overhead;
-        constexpr ULONGLONG kMinSize = 100ULL * 1024 * 1024;
-        if (sizeBytes < kMinSize) sizeBytes = kMinSize;
+        result = SizeToFit(rootEntries, sizeBytes);
+        if (result != ERROR_SUCCESS) return result;
     }
 
     VhdHandle createHandle;
@@ -621,8 +660,11 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
     }
 
     std::error_code ec;
-    fs::copy(directoryPath, tempMount,
-             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    for (const auto& rootEntry : rootEntries) {
+        fs::copy(rootEntry.path(), fs::path(tempMount) / rootEntry.path().filename(),
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        if (ec) break;
+    }
 
     DWORD copyResult = ec ? ERROR_WRITE_FAULT : ERROR_SUCCESS;
 
@@ -701,9 +743,15 @@ DWORD VHDLayerManager::ExportToDirectory(const std::wstring& vhdPath,
     size_t failedEntries = 0;
     std::error_code ec;
 
-    for (const auto& topEntry : fs::directory_iterator(srcRoot, ec)) {
+    fs::directory_iterator top(srcRoot, ec);
+    for (; !ec && top != fs::directory_iterator(); top.increment(ec)) {
+        const fs::directory_entry& topEntry = *top;
         const std::wstring name = topEntry.path().filename().wstring();
-        bool skip = false;
+        // A name such as `OVERLA~1` can be the short name of a `.overlay`
+        // already in the destination, and a copy under it would land inside.
+        const std::optional<std::wstring> dstLongName = ExistingLongName(dstRoot, name);
+        bool skip = FirstSegmentOpensAsSidecar(name) ||
+                    (dstLongName && FirstSegmentOpensAsSidecar(*dstLongName));
         for (const wchar_t* s : kSkipAtRoot) {
             if (_wcsicmp(name.c_str(), s) == 0) { skip = true; break; }
         }
