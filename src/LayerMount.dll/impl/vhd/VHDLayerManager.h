@@ -127,7 +127,10 @@ public:
                     VhdHandle& outHandle, std::wstring& outPhysicalPath,
                     AttachLifetime lifetime,
                     bool suppressDriveLetter);
+    // Opens the VHD again, which fails while this process holds an attach
+    // handle on it; use the handle overload then.
     DWORD DetachVHD(const std::wstring& path);
+    DWORD DetachVHD(const VhdHandle& attachHandle);
 
     // Create a differencing (child) VHDX whose parent is |parentPath|.
     DWORD CreateDifferencingVHD(const std::wstring& childPath,

@@ -197,12 +197,17 @@ DWORD VHDLayerManager::DetachVHD(const std::wstring& path) {
     result = OpenVHD(path, handle);
     if (result != ERROR_SUCCESS) return result;
 
-    result = ::DetachVirtualDisk(
-        handle.Get(),
+    return DetachVHD(handle);
+}
+
+DWORD VHDLayerManager::DetachVHD(const VhdHandle& attachHandle) {
+    const DWORD result = CheckElevation();
+    if (result != ERROR_SUCCESS) return result;
+
+    return ::DetachVirtualDisk(
+        attachHandle.Get(),
         DETACH_VIRTUAL_DISK_FLAG_NONE,
         0);
-
-    return result;
 }
 
 DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
@@ -631,8 +636,8 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
 
     result = InitializeVHD(physicalPath, vhdPath);
     if (result != ERROR_SUCCESS) {
+        DetachVHD(attachHandle);
         attachHandle.Close();
-        DetachVHD(vhdPath);
         fs::remove(vhdPath);
         return result;
     }
@@ -640,8 +645,8 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
     std::wstring volumeGuid;
     result = GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid);
     if (result != ERROR_SUCCESS) {
+        DetachVHD(attachHandle);
         attachHandle.Close();
-        DetachVHD(vhdPath);
         fs::remove(vhdPath);
         return result;
     }
@@ -653,8 +658,8 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
     if (!::SetVolumeMountPointW(tempMountSlash.c_str(), volumeGuid.c_str())) {
         DWORD err = ::GetLastError();
         fs::remove_all(tempMount);
+        DetachVHD(attachHandle);
         attachHandle.Close();
-        DetachVHD(vhdPath);
         fs::remove(vhdPath);
         return err;
     }
@@ -680,8 +685,8 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
     if (rmEc && cleanupErr == ERROR_SUCCESS) {
         cleanupErr = ERROR_DIR_NOT_EMPTY;
     }
+    DetachVHD(attachHandle);
     attachHandle.Close();
-    DetachVHD(vhdPath);
 
     if (copyResult != ERROR_SUCCESS) {
         fs::remove(vhdPath, rmEc);
@@ -707,8 +712,8 @@ DWORD VHDLayerManager::ExportToDirectory(const std::wstring& vhdPath,
     std::wstring volumeGuid;
     result = GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid);
     if (result != ERROR_SUCCESS) {
+        DetachVHD(attachHandle);
         attachHandle.Close();
-        DetachVHD(vhdPath);
         return result;
     }
 
@@ -720,8 +725,8 @@ DWORD VHDLayerManager::ExportToDirectory(const std::wstring& vhdPath,
         DWORD err = ::GetLastError();
         std::error_code ec;
         fs::remove_all(tempMount, ec);
+        DetachVHD(attachHandle);
         attachHandle.Close();
-        DetachVHD(vhdPath);
         return err;
     }
 
@@ -808,8 +813,8 @@ DWORD VHDLayerManager::ExportToDirectory(const std::wstring& vhdPath,
     if (cleanupEc && cleanupErr == ERROR_SUCCESS) {
         cleanupErr = ERROR_DIR_NOT_EMPTY;
     }
+    DetachVHD(attachHandle);
     attachHandle.Close();
-    DetachVHD(vhdPath);
 
     if (copyResult != ERROR_SUCCESS) return copyResult;
     return cleanupErr;

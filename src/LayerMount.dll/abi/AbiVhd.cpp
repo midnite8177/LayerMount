@@ -15,8 +15,9 @@
 //                   the two-call buffer pattern -- a short-buffer
 //                   follow-up call does NOT re-attach; it just re-emits
 //                   the cached path.
-//   Detach:         calls DetachVHD(path), releases the cached
-//                   VhdHandle, clears the physical path cache.
+//   Detach:         detaches through the held VhdHandle, or by path
+//                   when the holder has no attach; then releases the
+//                   handle and clears the cached physical path.
 //   Merge:          calls MergeVHD(path). Fails at the Win32 layer if
 //                   the VHD is currently attached -- the error bubbles
 //                   up unchanged.
@@ -272,9 +273,8 @@ LM_API HRESULT LM_CALL LayerMountVhdAttach(LM_VHD_HANDLE vhd,
         return HresultFromWin32Dword(dw);
     }
 
-    // Keep the attach alive for ProcessScoped lifetime (OS releases on
-    // last-handle-close); Permanent doesn't need the handle but holding
-    // it anyway keeps the Detach path uniform.
+    // Closing this handle ends a ProcessScoped attach at once, and
+    // LayerMountVhdDetach needs it to detach.
     holder->open                 = std::move(attachedHandle);
     holder->attachedPhysicalPath = std::move(physicalPath);
 
@@ -304,14 +304,17 @@ LM_API HRESULT LM_CALL LayerMountVhdDetach(LM_VHD_HANDLE vhd)
 
     std::lock_guard<std::mutex> stateLock(holder->stateMutex);
 
-    const DWORD dw = holder->manager->DetachVHD(holder->path);
-    if (dw != ERROR_SUCCESS) {
+    // A second open by path fails while this holder holds an attach.
+    // With no attach, detach by path takes an earlier process's Permanent attach offline.
+    const DWORD dw = holder->open
+        ? holder->manager->DetachVHD(*holder->open)
+        : holder->manager->DetachVHD(holder->path);
+    // The held handle gets ERROR_NOT_READY once another route detached the disk.
+    const bool alreadyDetached = holder->open && dw == ERROR_NOT_READY;
+    if (dw != ERROR_SUCCESS && !alreadyDetached) {
         return HresultFromWin32Dword(dw);
     }
 
-    // Order matters: drop the handle first (closes any ProcessScoped OS
-    // attach that is still held), then clear the cached path so a later
-    // Attach can populate fresh state.
     holder->open.reset();
     holder->attachedPhysicalPath.clear();
     return S_OK;

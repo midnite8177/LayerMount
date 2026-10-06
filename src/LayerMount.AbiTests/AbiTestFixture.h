@@ -447,6 +447,58 @@ private:
     LM_HANDLE handle_ = nullptr;
 };
 
+// -----------------------------------------------------------------------------
+// VhdHandleHolder -- RAII wrapper around LM_VHD_HANDLE.
+// -----------------------------------------------------------------------------
+class VhdHandleHolder {
+public:
+    VhdHandleHolder() = default;
+
+    explicit VhdHandleHolder(LM_VHD_HANDLE h) : handle_(h) {}
+
+    ~VhdHandleHolder() {
+        if (handle_) {
+            (void)::LayerMountVhdClose(handle_);
+        }
+    }
+
+    VhdHandleHolder(const VhdHandleHolder&)            = delete;
+    VhdHandleHolder& operator=(const VhdHandleHolder&) = delete;
+
+    VhdHandleHolder(VhdHandleHolder&& other) noexcept : handle_(other.handle_) {
+        other.handle_ = nullptr;
+    }
+    VhdHandleHolder& operator=(VhdHandleHolder&& other) noexcept {
+        if (this != &other) {
+            Reset();
+            handle_       = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+
+    LM_VHD_HANDLE  Get()     const noexcept { return handle_; }
+    LM_VHD_HANDLE* AddressOf()     noexcept { return &handle_; }
+
+    LM_VHD_HANDLE Release() noexcept {
+        LM_VHD_HANDLE h = handle_;
+        handle_         = nullptr;
+        return h;
+    }
+
+    void Reset() noexcept {
+        if (handle_) {
+            (void)::LayerMountVhdClose(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+    explicit operator bool() const noexcept { return handle_ != nullptr; }
+
+private:
+    LM_VHD_HANDLE handle_ = nullptr;
+};
+
 // mklink /J needs no symbolic-link privilege.
 inline bool CreateDirectoryJunction(const std::wstring& junction, const std::wstring& target) {
     const std::wstring command =
@@ -527,24 +579,15 @@ inline LM_VHD_CONFIG ProcessScopedVhdConfig(const std::wstring& vhdPath) {
     return cfg;
 }
 
-// Opens the VHD that `cfg` names, attaches it and returns the root of its
-// volume, which ends in a backslash. The attach ends when *vhd closes.
-inline std::wstring AttachVhdVolumeWithConfig(LM_HANDLE mount, const LM_VHD_CONFIG& cfg,
-                                              LM_VHD_HANDLE* vhd) {
+// Returns the root of the attached VHD's volume, which ends in a backslash.
+inline std::wstring AttachedVhdVolumeRoot(LM_VHD_HANDLE vhd) {
     using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
-    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdOpen(mount, &cfg, vhd),
-        L"LayerMountVhdOpen opens the VHD");
-    wchar_t physicalPath[MAX_PATH] = {};
-    SIZE_T required = 0;
-    Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountVhdAttach(*vhd, physicalPath, MAX_PATH, &required),
-        L"LayerMountVhdAttach attaches the VHD");
-
     // The volume can show up after the attach returns.
     wchar_t volumeGuid[MAX_PATH] = {};
+    SIZE_T required = 0;
     HRESULT hr = E_FAIL;
     for (int attempt = 0; attempt < 40 && FAILED(hr); ++attempt) {
-        hr = ::LayerMountVhdGetVolumeGuid(*vhd, volumeGuid, MAX_PATH, &required);
+        hr = ::LayerMountVhdGetVolumeGuid(vhd, volumeGuid, MAX_PATH, &required);
         if (FAILED(hr)) {
             ::Sleep(250);
         }
@@ -555,6 +598,22 @@ inline std::wstring AttachVhdVolumeWithConfig(LM_HANDLE mount, const LM_VHD_CONF
         volumeRoot += L'\\';
     }
     return volumeRoot;
+}
+
+// Opens the VHD that `cfg` names, attaches it and returns the root of its
+// volume, which ends in a backslash. A ProcessScoped attach ends when *vhd
+// closes.
+inline std::wstring AttachVhdVolumeWithConfig(LM_HANDLE mount, const LM_VHD_CONFIG& cfg,
+                                              LM_VHD_HANDLE* vhd) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountVhdOpen(mount, &cfg, vhd),
+        L"LayerMountVhdOpen opens the VHD");
+    wchar_t physicalPath[MAX_PATH] = {};
+    SIZE_T required = 0;
+    Assert::AreEqual<HRESULT>(S_OK,
+        ::LayerMountVhdAttach(*vhd, physicalPath, MAX_PATH, &required),
+        L"LayerMountVhdAttach attaches the VHD");
+    return AttachedVhdVolumeRoot(*vhd);
 }
 
 inline std::wstring AttachVhdVolumeReadOnly(LM_HANDLE mount, const std::wstring& vhdPath,

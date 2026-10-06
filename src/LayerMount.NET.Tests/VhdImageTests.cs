@@ -14,10 +14,6 @@ public sealed class VhdImageTests
         using var mount = LayerMount.Create(env.BuildConfig());
 
         string vhdPath = Path.Combine(env.Root, "probe.vhdx");
-        // ProcessScoped + VhdClose (via Dispose) handles detach at the end;
-        // calling Detach() explicitly here races against the caching layer
-        // and returns ERROR_SHARING_VIOLATION, which is out of scope for a
-        // wrapper-shape test.
         using var vhd = mount.Vhd.Create(
             vhdPath,
             sizeBytes: 32ul * 1024 * 1024,
@@ -30,6 +26,8 @@ public sealed class VhdImageTests
         string physical = vhd.Attach();
         Assert.False(string.IsNullOrEmpty(physical),
             "Attach must return a non-empty physical path");
+
+        vhd.Detach();
     }
 
     [Fact]

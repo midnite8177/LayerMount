@@ -105,8 +105,8 @@ using FilePayload = FileHolder;
 // matching LayerMountVhdDetach / LayerMountVhdClose. For
 // AttachLifetime::ProcessScoped the OS releases the attach when the last
 // handle closes, so the holder must keep the VhdHandle alive across the
-// Attach -> Detach window; for Permanent lifetime the VHD stays attached
-// regardless, but holding the handle keeps the semantics uniform.
+// Attach -> Detach window. LayerMountVhdDetach ends the attach through
+// `open` for both lifetimes.
 //
 // The readOnly / suppressDriveLetter / lifetime fields echo the values
 // captured from LM_VHD_CONFIG on Create/Open so the parameter-free
