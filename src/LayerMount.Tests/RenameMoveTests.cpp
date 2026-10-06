@@ -561,6 +561,21 @@ private:
     BackupPrivilegeDisabledOnThread noBackupPrivilege_;
 };
 
+// The LM_EVT_WARNING events a mount emits, each with its HRESULT and path.
+struct EmittedWarnings {
+    std::vector<HRESULT> results;
+    std::vector<std::wstring> paths;
+};
+
+void LM_CALL CollectWarning(const LM_EVENT* evt, void* context) {
+    if (evt->type != LM_EVT_WARNING) {
+        return;
+    }
+    auto* warnings = static_cast<EmittedWarnings*>(context);
+    warnings->results.push_back(evt->hr);
+    warnings->paths.push_back(evt->relativePath != nullptr ? evt->relativePath : L"");
+}
+
 // Returns the explicit allow and deny ACEs in the DACL of path, in order,
 // as one "(type;flags;mask;sid)" group each.
 std::wstring ExplicitAcesOf(const std::wstring& path) {
@@ -3748,6 +3763,34 @@ public:
         }
         Assert::IsTrue(workHoldsReplacedFile,
             L"The work directory must keep the replaced b.txt");
+    }
+
+    TEST_METHOD(ReplaceRename_WhenTheWhiteoutCannotGoAndTheFileCannotMoveBack_EmitsAWarningAtTheNewName) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"d\\a.txt", "source");
+        env.WriteFile(env.Upper(), L"b.txt", "keep");
+        env.WriteFile(env.Upper(), WhiteoutMarkerPath(L"b.txt"), "");
+        EmittedWarnings warnings;
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        mount.Events().Set(&CollectWarning, &warnings);
+
+        {
+            const DirectoryRefusesNewEntries sourceParentRefusesNewFiles(env.Upper() + L"\\d",
+                                                                         FILE_ADD_FILE);
+            const ScopedHandle heldMarker =
+                HoldOpen(env.Upper() + L"\\" + WhiteoutMarkerPath(L"b.txt"),
+                         FILE_SHARE_READ | FILE_SHARE_WRITE);
+            AssertStatus(STATUS_SHARING_VIOLATION,
+                mount.Rename(L"d\\a.txt", L"b.txt", kReplaceIfExists, kNoCallerPid),
+                L"The rename must fail when the whiteout at the new name cannot go");
+        }
+
+        Assert::AreEqual<size_t>(1, warnings.results.size(),
+            L"The undo that cannot move the file back must emit one warning");
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_ACCESS_DENIED), warnings.results[0],
+            L"The warning must carry the failure of the move back");
+        Assert::AreEqual(std::wstring(L"b.txt"), warnings.paths[0],
+            L"The warning must name the path where the file stays");
     }
 
     TEST_METHOD(Rename_DirectoryOntoWhitedOutNameWhenTheWhiteoutCannotGo_KeepsTheOldName) {

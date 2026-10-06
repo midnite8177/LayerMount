@@ -36,29 +36,6 @@ namespace LayerMount {
 namespace {
 NTSTATUS ReopenContextHandle(FileContext* ctx);
 
-// Removes the directory at `path` on scope exit while armed. A create
-// arms it after CreateDirectoryW makes the directory and disarms it once
-// the handle is open, so a failure in between removes only what the
-// create made.
-class DirectoryRollback {
-public:
-    explicit DirectoryRollback(const std::wstring& path) : path_(path) {}
-    ~DirectoryRollback() {
-        if (armed_) {
-            ::RemoveDirectoryW(path_.c_str());
-        }
-    }
-    DirectoryRollback(const DirectoryRollback&) = delete;
-    DirectoryRollback& operator=(const DirectoryRollback&) = delete;
-
-    void Arm() { armed_ = true; }
-    void Disarm() { armed_ = false; }
-
-private:
-    const std::wstring& path_;
-    bool armed_ = false;
-};
-
 // Opens a short-lived handle to a physical path. Returns an invalid
 // ScopedHandle on failure and leaves GetLastError set. The caller passes
 // the directory status, because a path-based query fails for a
@@ -458,7 +435,7 @@ LayerMount::LayerMount(LayerConfig config)
           config_, *pathResolver_, *whiteoutMgr_, *cache_, *copyUp_))
     , fileRename_(std::make_unique<FileRename>(config_, *pathResolver_, *copyUp_))
     , renameRollback_(std::make_unique<RenameRollback>(
-          config_, *pathResolver_, *whiteoutMgr_, *cache_))
+          config_, *pathResolver_, *whiteoutMgr_, *cache_, events_))
     , upperEntryRemover_(std::make_unique<UpperEntryRemover>(
           config_, *pathResolver_, *whiteoutMgr_, *cache_)) {
     copyUp_->SetEventEmitter(&events_);
@@ -1056,17 +1033,55 @@ NTSTATUS WriteSecurityToNewObject(const std::wstring& path, PSECURITY_DESCRIPTOR
     return STATUS_SUCCESS;
 }
 
-// Closes the context handle and deletes ctx->actualPath on scope exit while
-// armed. A file create arms it after CreateFileW makes the entry and
-// disarms it on success, so a failure in between removes only the new file
-// or stream. DeleteFileW on a file:stream path removes only the stream.
+// Deletes a file or a stream that a create made. A delete refuses a
+// read-only file, and a create can give its new file
+// FILE_ATTRIBUTE_READONLY, so a refused delete clears that attribute and
+// tries again. On failure, leaves the last error of the failed call.
+bool DeleteCreatedFile(const std::wstring& path) {
+    if (::DeleteFileW(path.c_str())) {
+        return true;
+    }
+    if (::GetLastError() != ERROR_ACCESS_DENIED) {
+        return false;
+    }
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_READONLY) == 0) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return false;
+    }
+    return ::SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY) &&
+           ::DeleteFileW(path.c_str());
+}
+
+// The HRESULT of the last error of the Win32 call that just failed, or
+// E_FAIL when that call left the last error at 0.
+HRESULT HresultOfFailedCall() {
+    const DWORD err = ::GetLastError();
+    return err == ERROR_SUCCESS ? E_FAIL : HRESULT_FROM_WIN32(err);
+}
+
+// Closes the context handle on scope exit while armed and removes what the
+// create made: the new file, or the new stream and the host file passed to
+// AlsoDeleteHost. A stream create that made its host file passes it,
+// because DeleteFileW on a file:stream path removes only the stream. A
+// step of the undo that fails emits an LM_EVT_WARNING event with
+// ctx->relativePath.
 class FileRollback {
 public:
-    explicit FileRollback(FileContext* ctx) : ctx_(ctx) {}
+    FileRollback(FileContext* ctx, const abi::EventEmitter& events)
+        : ctx_(ctx), events_(events) {}
     ~FileRollback() {
-        if (armed_) {
-            CloseContextHandle(ctx_);
-            ::DeleteFileW(ctx_->actualPath.c_str());
+        if (!armed_) {
+            return;
+        }
+        CloseContextHandle(ctx_);
+        if (!DeleteCreatedFile(ctx_->actualPath)) {
+            events_.Emit(LM_EVT_WARNING, HresultOfFailedCall(), ctx_->relativePath.c_str(),
+                         L"The undo of a failed create could not delete the new entry");
+        }
+        if (createdHostPath_ && !DeleteCreatedFile(*createdHostPath_)) {
+            events_.Emit(LM_EVT_WARNING, HresultOfFailedCall(), ctx_->relativePath.c_str(),
+                         L"The undo of a failed stream create could not delete its new host file");
         }
     }
     FileRollback(const FileRollback&) = delete;
@@ -1074,9 +1089,54 @@ public:
 
     void Arm() { armed_ = true; }
     void Disarm() { armed_ = false; }
+    void AlsoDeleteHost(const std::wstring& hostPath) { createdHostPath_ = hostPath; }
 
 private:
     FileContext* ctx_;
+    const abi::EventEmitter& events_;
+    std::optional<std::wstring> createdHostPath_;
+    bool armed_ = false;
+};
+
+// Closes the context handle on scope exit while armed and removes the new
+// directory at ctx->actualPath. A create that marks the directory opaque
+// calls AlsoRemoveOpaqueMarkers first. The undo removes the markers before
+// the directory, because RemoveDirectoryW fails on a directory that still
+// holds the opaque marker file. A step of the undo that fails emits an
+// LM_EVT_WARNING event with ctx->relativePath.
+class DirectoryRollback {
+public:
+    DirectoryRollback(FileContext* ctx, WhiteoutManager& markers, const abi::EventEmitter& events)
+        : ctx_(ctx), markers_(markers), events_(events) {}
+    ~DirectoryRollback() {
+        if (!armed_) {
+            return;
+        }
+        CloseContextHandle(ctx_);
+        if (opaqueDirectory_ && !markers_.RemoveOpaque(*opaqueDirectory_)) {
+            events_.Emit(LM_EVT_WARNING, E_FAIL, ctx_->relativePath.c_str(),
+                         L"The undo of a failed create could not remove the new directory's "
+                         L"opaque markers");
+        }
+        if (!::RemoveDirectoryW(ctx_->actualPath.c_str())) {
+            events_.Emit(LM_EVT_WARNING, HresultOfFailedCall(), ctx_->relativePath.c_str(),
+                         L"The undo of a failed create could not remove the new directory");
+        }
+    }
+    DirectoryRollback(const DirectoryRollback&) = delete;
+    DirectoryRollback& operator=(const DirectoryRollback&) = delete;
+
+    void Arm() { armed_ = true; }
+    void Disarm() { armed_ = false; }
+    void AlsoRemoveOpaqueMarkers(const std::wstring& dirRelativePath) {
+        opaqueDirectory_ = dirRelativePath;
+    }
+
+private:
+    FileContext* ctx_;
+    WhiteoutManager& markers_;
+    const abi::EventEmitter& events_;
+    std::optional<std::wstring> opaqueDirectory_;
     bool armed_ = false;
 };
 
@@ -1309,9 +1369,7 @@ NTSTATUS LayerMount::Create(const CreateRequest& callerRequest,
         return precondition;
     }
 
-    create.lowerIsDirectory = IsDirectoryHit(resolution.lower);
-    create.lowerIsVisible = resolution.overlayHit.Found() &&
-        resolution.overlayHit.source == LayerSource::Lower;
+    create.resolution = std::move(resolution);
 
     create.upperPath =
         pathResolver_->GetUpperPathForNewEntry(CallerPath(create.path.callerHost));
@@ -1328,12 +1386,6 @@ NTSTATUS LayerMount::Create(const CreateRequest& callerRequest,
         : CreateFileInUpper(create, ctx.get());
     if (!NT_SUCCESS(createStatus)) {
         return createStatus;
-    }
-
-    // The whiteout goes only after the create succeeds. Removing it
-    // earlier would show the lower entry again if the create failed.
-    if (resolution.whiteoutAtPath) {
-        whiteoutMgr_->RemoveWhiteout(create.path.hostNorm);
     }
 
     cache_->InvalidateWithAncestors(create.path.hostNorm);
@@ -1406,13 +1458,14 @@ NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
 
 NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
                                             FileContext* ctx) {
-    DirectoryRollback rollback(create.upperPath);
+    DirectoryRollback rollback(ctx, *whiteoutMgr_, events_);
     if (!::CreateDirectoryW(create.upperPath.c_str(), nullptr)) {
         return NtStatusFromWin32(::GetLastError());
     }
     rollback.Arm();
 
-    if (create.lowerIsDirectory) {
+    if (IsDirectoryHit(create.resolution.lower)) {
+        rollback.AlsoRemoveOpaqueMarkers(create.path.hostNorm);
         const NTSTATUS opaqueStatus = whiteoutMgr_->SetOpaque(create.path.hostNorm);
         if (!NT_SUCCESS(opaqueStatus)) {
             return opaqueStatus;
@@ -1436,6 +1489,10 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
     if (!NT_SUCCESS(resolveStatus)) {
         return resolveStatus;
     }
+    const NTSTATUS whiteoutStatus = RemoveWhiteoutAtCreatedName(create);
+    if (!NT_SUCCESS(whiteoutStatus)) {
+        return whiteoutStatus;
+    }
     rollback.Disarm();
     return STATUS_SUCCESS;
 }
@@ -1449,6 +1506,13 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
         }
     }
 
+    bool streamMakesHost = false;
+    if (!create.path.streamSuffix.empty() &&
+        ::GetFileAttributesW(create.upperPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const DWORD hostError = ::GetLastError();
+        streamMakesHost = hostError == ERROR_FILE_NOT_FOUND || hostError == ERROR_PATH_NOT_FOUND;
+    }
+
     const UINT32 fileAttributes =
         create.fileAttributes != 0 ? create.fileAttributes : FILE_ATTRIBUTE_NORMAL;
     ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
@@ -1458,7 +1522,10 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
     if (ctx->handle == INVALID_HANDLE_VALUE) {
         return NtStatusFromWin32(::GetLastError());
     }
-    FileRollback rollback(ctx);
+    FileRollback rollback(ctx, events_);
+    if (streamMakesHost) {
+        rollback.AlsoDeleteHost(create.upperPath);
+    }
     rollback.Arm();
 
     NTSTATUS resolveStatus = ResolveContextMaximumAllowed(ctx, create.grantedAccess);
@@ -1481,12 +1548,25 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
             }
         }
     }
+    const NTSTATUS whiteoutStatus = RemoveWhiteoutAtCreatedName(create);
+    if (!NT_SUCCESS(whiteoutStatus)) {
+        return whiteoutStatus;
+    }
     rollback.Disarm();
     return STATUS_SUCCESS;
 }
 
+NTSTATUS LayerMount::RemoveWhiteoutAtCreatedName(const UpperCreate& create) {
+    if (!create.resolution.whiteoutAtPath) {
+        return STATUS_SUCCESS;
+    }
+    return whiteoutMgr_->RemoveWhiteout(create.path.hostNorm);
+}
+
 NTSTATUS LayerMount::PrepareStreamHost(const UpperCreate& create) {
-    if (create.lowerIsVisible && !pathResolver_->ExistsInUpper(create.path.hostNorm)) {
+    const ResolvedPath& overlayHit = create.resolution.overlayHit;
+    const bool lowerIsVisible = overlayHit.Found() && overlayHit.source == LayerSource::Lower;
+    if (lowerIsVisible && !pathResolver_->ExistsInUpper(create.path.hostNorm)) {
         return copyUp_->CopyUpFile(create.path.hostNorm);
     }
     return STATUS_SUCCESS;

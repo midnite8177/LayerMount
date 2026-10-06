@@ -4,17 +4,21 @@
 #include "LayerPath.h"
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
+#include "NtStatusUtil.h"
+#include "../abi/EventEmitter.h"
 
 namespace LayerMount {
 
 RenameRollback::RenameRollback(ConfigRef config,
                                PathResolver& pathResolver,
                                WhiteoutManager& whiteoutMgr,
-                               Cache& cache)
+                               Cache& cache,
+                               const abi::EventEmitter& events)
     : config_(config.Get())
     , pathResolver_(pathResolver)
     , whiteoutMgr_(whiteoutMgr)
-    , cache_(cache) {
+    , cache_(cache)
+    , events_(events) {
 }
 
 NTSTATUS RenameRollback::WhiteOutSource(const UpperRename& rename, WhiteoutType type) {
@@ -22,8 +26,16 @@ NTSTATUS RenameRollback::WhiteOutSource(const UpperRename& rename, WhiteoutType 
     if (NT_SUCCESS(whiteout)) {
         return STATUS_SUCCESS;
     }
-    if (!NT_SUCCESS(MoveBack(rename))) {
-        whiteoutMgr_.RemoveWhiteout(rename.newNorm);
+    const NTSTATUS moveBack = MoveBack(rename);
+    if (NT_SUCCESS(moveBack)) {
+        return whiteout;
+    }
+    WarnUndoFailed(HresultFromNtStatus(moveBack), rename.newNorm,
+                   L"The undo of a failed rename could not move the entry back");
+    const NTSTATUS destinationWhiteout = whiteoutMgr_.RemoveWhiteout(rename.newNorm);
+    if (!NT_SUCCESS(destinationWhiteout)) {
+        WarnUndoFailed(HresultFromNtStatus(destinationWhiteout), rename.newNorm,
+                       L"The undo of a failed rename could not remove the whiteout at the new name");
     }
     return whiteout;
 }
@@ -34,10 +46,17 @@ NTSTATUS RenameRollback::RemoveDestinationWhiteoutOrUndo(
     if (NT_SUCCESS(removeStatus)) {
         return STATUS_SUCCESS;
     }
-    if (NT_SUCCESS(MoveBack(rename))) {
-        whiteoutMgr_.RemoveWhiteout(rename.oldNorm);
-    } else {
+    const NTSTATUS moveBack = MoveBack(rename);
+    if (!NT_SUCCESS(moveBack)) {
+        WarnUndoFailed(HresultFromNtStatus(moveBack), rename.newNorm,
+                       L"The undo of a failed rename could not move the entry back");
         destinationAside->Release();
+        return removeStatus;
+    }
+    const NTSTATUS sourceWhiteout = whiteoutMgr_.RemoveWhiteout(rename.oldNorm);
+    if (!NT_SUCCESS(sourceWhiteout)) {
+        WarnUndoFailed(HresultFromNtStatus(sourceWhiteout), rename.oldNorm,
+                       L"The undo of a failed rename could not remove the whiteout at the old name");
     }
     return removeStatus;
 }
@@ -45,12 +64,19 @@ NTSTATUS RenameRollback::RemoveDestinationWhiteoutOrUndo(
 NTSTATUS RenameRollback::MoveBack(const UpperRename& rename) {
     const NTSTATUS moveBack = MoveUpperEntry(pathResolver_.GetStoredUpperPath(rename.newNorm),
                                              rename.oldUpperPath, ReplaceExisting::No, config_);
-    if (NT_SUCCESS(moveBack) && rename.opaqueMarker == UndoOpaqueMarker::Remove) {
-        whiteoutMgr_.RemoveOpaque(rename.oldNorm);
+    if (NT_SUCCESS(moveBack) && rename.opaqueMarker == UndoOpaqueMarker::Remove &&
+        !whiteoutMgr_.RemoveOpaque(rename.oldNorm)) {
+        WarnUndoFailed(E_FAIL, rename.oldNorm,
+                       L"The undo of a failed rename could not remove the opaque marker it wrote");
     }
     cache_.InvalidateWithAncestors(rename.oldNorm);
     cache_.InvalidateWithAncestors(rename.newNorm);
     return moveBack;
+}
+
+void RenameRollback::WarnUndoFailed(HRESULT failure, const std::wstring& relativePath,
+                                    PCWSTR message) const {
+    events_.Emit(LM_EVT_WARNING, failure, relativePath.c_str(), message);
 }
 
 }

@@ -38,13 +38,15 @@ struct MovedSource {
 };
 
 // The steps of a rename that run after its entry moved, and the undo that
-// they share when one of them fails.
+// they share when one of them fails. A step of the undo that fails emits an
+// LM_EVT_WARNING event through events with the failure and the path.
 class RenameRollback {
 public:
     RenameRollback(ConfigRef config,
                    PathResolver& pathResolver,
                    WhiteoutManager& whiteoutMgr,
-                   Cache& cache);
+                   Cache& cache,
+                   const abi::EventEmitter& events);
 
     // Writes a whiteout of the given type at rename.oldNorm. When the write
     // fails, undoes the rename with MoveBack and returns the write error.
@@ -65,15 +67,21 @@ public:
     // Moves the upper entry at rename.newNorm back to rename.oldUpperPath
     // and returns the status of that move. When it moves back and
     // rename.opaqueMarker is UndoOpaqueMarker::Remove, also removes the
-    // opaque marker at rename.oldNorm and ignores the status of that
-    // removal.
+    // opaque marker at rename.oldNorm. A failure of that removal emits a
+    // warning and does not change the returned status.
     NTSTATUS MoveBack(const UpperRename& rename);
 
 private:
+    // Emits the LM_EVT_WARNING event of an undo step that failed with
+    // failure at relativePath.
+    void WarnUndoFailed(HRESULT failure, const std::wstring& relativePath,
+                        PCWSTR message) const;
+
     const LayerConfig& config_;
     PathResolver& pathResolver_;
     WhiteoutManager& whiteoutMgr_;
     Cache& cache_;
+    const abi::EventEmitter& events_;
 };
 
 }
