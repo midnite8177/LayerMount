@@ -189,12 +189,13 @@ public:
     // Returns success when the upper holds the parent of normalizedPath as
     // a directory or as a link that leads to a directory.
     // Copies the parent up when the overlay shows it as a lower directory,
-    // so the upper entry takes the lower's name. Returns
-    // STATUS_OBJECT_PATH_NOT_FOUND and writes nothing for every other
-    // parent. Overlayfs fails with ENOTDIR when the parent or an ancestor
-    // is a file or a link to a file, and with ENOENT when the overlay shows
-    // no parent or the parent is a dangling link. Any other failure to open
-    // the target of an upper link parent returns the status of that open.
+    // or as a lower link that leads to a directory, so the upper entry
+    // takes the lower's name. Returns STATUS_OBJECT_PATH_NOT_FOUND and
+    // writes nothing for every other parent. Overlayfs fails with ENOTDIR
+    // when the parent or an ancestor is a file or a link to a file, and
+    // with ENOENT when the overlay shows no parent or the parent is a
+    // dangling link. Any other failed open or read of the target of a link
+    // parent returns the status of that failure and writes nothing.
     // A lower link on the parent's path copies up as a link, so the upper
     // parent is then in the link target.
     NTSTATUS EnsureUpperParent(const std::wstring& normalizedPath);

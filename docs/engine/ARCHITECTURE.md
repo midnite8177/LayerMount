@@ -450,15 +450,17 @@ not under the same link fails with `STATUS_NOT_SAME_DEVICE` before any
 change, as overlayfs fails it with EXDEV. So a rename between the
 overlay and a link target, or between two link targets, fails.
 Overlayfs looks up both parents before that check, so a destination
-parent that the view does not show fails the rename with its own status
-instead. When either lookup cannot read a component of the path, the
-rename fails with `STATUS_ACCESS_DENIED` before any change, because
-that component can be a link. A rename within one link target, and a
-rename of the link entry itself, go through. A rename within a lower
-link target copies the link up only when the view shows the
-destination's parent as a directory. A rename into a missing directory
-there fails with `STATUS_OBJECT_PATH_NOT_FOUND` and leaves no link copy
-in the upper.
+parent that the view does not show, or that is a link that leads to no
+directory, fails the rename with its own status instead. When either
+lookup cannot read a component of the path, the rename fails with
+`STATUS_ACCESS_DENIED` before any change, because
+that component can be a link. A failed open or read of a link target
+fails the rename with the status of that failure. A rename within one
+link target, and a rename of the link entry itself, go through. A
+rename within a lower link target copies the link up only when the view
+shows the destination's parent as a directory or as a link that leads
+to one. A rename into a missing directory there fails with
+`STATUS_OBJECT_PATH_NOT_FOUND` and leaves no link copy in the upper.
 
 A replace-rename within a link target puts nothing in the work
 directory, because the target can be on another volume, and overlayfs
@@ -987,20 +989,32 @@ The engine handles eleven cases. The last six also apply to a file source:
 - **rename to a path inside the source's own tree** (`a` to `a\b` or
   `a\new\b`): the engine rejects the rename before any side effects. A
   directory source fails with `STATUS_INVALID_PARAMETER`, as overlayfs
-  returns `EINVAL`. A file source and a junction or directory symlink
-  source fail with `STATUS_OBJECT_PATH_NOT_FOUND`, as overlayfs returns
-  `ENOTDIR` for a non-directory. The collision check above runs first,
-  so replace=false onto an existing `a\b` still returns
-  `STATUS_OBJECT_NAME_COLLISION`. Replace=true onto a non-empty `a\b`
-  returns `STATUS_INVALID_PARAMETER`, not `STATUS_DIRECTORY_NOT_EMPTY`.
+  returns `EINVAL`. A file source fails with
+  `STATUS_OBJECT_PATH_NOT_FOUND`, as overlayfs returns `ENOTDIR` for a
+  non-directory. Overlayfs follows a symlink source in the lookup of the
+  destination. So a junction or directory symlink source that leads to a
+  directory would move into its own target, outside the overlay, and the rename
+  fails with `STATUS_NOT_SAME_DEVICE`, as overlayfs returns `EXDEV`. A
+  dangling link and a link to a file fail with
+  `STATUS_OBJECT_PATH_NOT_FOUND`, as overlayfs returns `ENOENT` and
+  `ENOTDIR`. For a directory or a file source, the collision check
+  above runs first, so replace=false onto an existing `a\b` still
+  returns `STATUS_OBJECT_NAME_COLLISION`. For a link source this check
+  runs before the collision check. Overlayfs looks up the destination's
+  parent through the link, and that lookup and the `EXDEV` check after
+  it come before the check for an existing name. Replace=true onto a
+  non-empty `a\b` returns `STATUS_INVALID_PARAMETER`, not
+  `STATUS_DIRECTORY_NOT_EMPTY`.
 - **rename to a path under a file** (`x` to `a\b`, where `a` is a file
   in a lower or in the upper): the engine rejects the rename with
   `STATUS_OBJECT_PATH_NOT_FOUND` before any side effects, as overlayfs
   returns `ENOTDIR`. This applies to every source kind. A destination
-  parent in the upper that is a junction or directory symlink must lead
-  to a directory. A dangling link and a link to a file also fail with
-  `STATUS_OBJECT_PATH_NOT_FOUND`, as overlayfs returns `ENOENT` and
-  `ENOTDIR`.
+  parent that is a junction or directory symlink, in the upper or in a
+  lower, must lead to a directory. A dangling link and a link to a file
+  also fail with `STATUS_OBJECT_PATH_NOT_FOUND`, as overlayfs returns
+  `ENOENT` and `ENOTDIR`, and the link boundary check passes them, so a
+  dangling link at the overlay root gives this status and not
+  `STATUS_NOT_SAME_DEVICE`.
 - **replace=true onto an ancestor of the source** (`a\f` onto `a`):
   the engine rejects the rename with `STATUS_DIRECTORY_NOT_EMPTY`
   before any side effects, as overlayfs returns `ENOTEMPTY`. This

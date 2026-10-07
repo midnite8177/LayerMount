@@ -3,19 +3,18 @@
 #include "LayerPath.h"
 #include "PathResolver.h"
 
-#include <filesystem>
-
 namespace LayerMount {
 
 namespace {
 
-bool ParentShowsAsDirectory(const PathResolver& pathResolver, const std::wstring& normalizedPath) {
-    const std::wstring parent = std::filesystem::path(normalizedPath).parent_path().wstring();
+// What the merged view shows at the parent of normalizedPath, with a link
+// followed. The overlay root is a directory.
+LinkTarget ShownParentTarget(const PathResolver& pathResolver, const std::wstring& normalizedPath) {
+    const std::wstring parent = ParentOfNormalizedPath(normalizedPath);
     if (parent.empty()) {
-        return true;
+        return LinkTarget{LinkTargetKind::Directory, STATUS_SUCCESS};
     }
-    const ResolvedPath shown = pathResolver.ResolvePath(parent);
-    return shown.Found() && (shown.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return ShownLinkTarget(pathResolver.ResolvePath(parent));
 }
 
 }
@@ -36,14 +35,24 @@ NTSTATUS CheckRenameLinkBoundary(const LayerConfig& config,
     links->destinationInLinkTarget = destination.stop == LinkStop::Link;
     links->lowerLinkToCopyUp.reset();
     const bool sameLink = source.stop == destination.stop && source.path == destination.path;
+    const bool withinLowerLink =
+        sameLink && source.stop == LinkStop::Link && source.source == LayerSource::Lower;
+    if (sameLink && !withinLowerLink) {
+        return STATUS_SUCCESS;
+    }
+    const LinkTarget parent = ShownParentTarget(pathResolver, newNorm);
+    switch (parent.kind) {
+    case LinkTargetKind::NoDirectory:
+        return STATUS_SUCCESS;
+    case LinkTargetKind::Failed:
+        return parent.failure;
+    case LinkTargetKind::Directory:
+        break;
+    }
     if (!sameLink) {
-        return ParentShowsAsDirectory(pathResolver, newNorm) ? STATUS_NOT_SAME_DEVICE
-                                                             : STATUS_SUCCESS;
+        return STATUS_NOT_SAME_DEVICE;
     }
-    if (source.stop == LinkStop::Link && source.source == LayerSource::Lower &&
-        ParentShowsAsDirectory(pathResolver, newNorm)) {
-        links->lowerLinkToCopyUp = source.path;
-    }
+    links->lowerLinkToCopyUp = source.path;
     return STATUS_SUCCESS;
 }
 

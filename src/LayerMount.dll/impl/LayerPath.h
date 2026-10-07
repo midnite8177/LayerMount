@@ -82,6 +82,39 @@ std::wstring FinalPathNameOf(HANDLE handle);
 // directory cannot be opened or its final path cannot be read.
 std::wstring FinalPathOfDirectory(const std::wstring& path);
 
+// What an entry leads to when a lookup follows a junction or a directory
+// symbolic link at it.
+enum class LinkTargetKind {
+    Directory,
+    // A dangling link, a link to a file, a file, or no entry. Overlayfs
+    // gives ENOENT or ENOTDIR for a lookup through one.
+    NoDirectory,
+    // The open or the read of the entry failed for another reason.
+    Failed,
+};
+
+struct LinkTarget {
+    LinkTargetKind kind;
+    // The status of the failure when kind is Failed, STATUS_SUCCESS
+    // otherwise.
+    NTSTATUS failure;
+};
+
+// What the entry at path leads to. The open follows a junction or a
+// directory symbolic link at path, as overlayfs follows a symlink in a
+// lookup.
+LinkTarget LinkTargetOf(const std::wstring& path);
+
+// What the merged view shows at shown, with a link at it followed. An entry
+// that the view does not show, and a file, lead to no directory.
+LinkTarget ShownLinkTarget(const ResolvedPath& shown);
+
+// The parent of normalizedPath, a path in NormalizePath form, or an empty
+// string for an entry at the overlay root. Only the last separator splits
+// the path, so the stream path "d:s" has no parent, though
+// std::filesystem::path reads "d:" as a drive.
+std::wstring ParentOfNormalizedPath(const std::wstring& normalizedPath);
+
 // Whether pathNorm names an entry below dirNorm, at a separator boundary,
 // so "a\b" is inside "a" and "ab" is not. Both paths are in the same
 // NormalizePath or NormalizePathPreserveCase form. A path is not inside

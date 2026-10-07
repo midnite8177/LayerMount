@@ -1924,6 +1924,38 @@ NTSTATUS LayerMount::Flush(FileContext* ctx,
     return STATUS_SUCCESS;
 }
 
+namespace {
+
+// The status of a rename of the source at sourceAbsolutePath to a path
+// under itself. Overlayfs gives EINVAL for a directory and ENOTDIR for a
+// file. It follows a link source in the lookup of the destination, so a
+// link that leads to a directory would move into its own target, outside
+// the overlay, and gets EXDEV. A dangling link gets ENOENT, and a link to a
+// file gets ENOTDIR. A failed open or read of the link target gives the
+// status of that failure.
+NTSTATUS UnderItselfStatus(EntryKind sourceKind, const std::wstring& sourceAbsolutePath) {
+    switch (sourceKind) {
+    case EntryKind::Directory:
+        return STATUS_INVALID_PARAMETER;
+    case EntryKind::Link:
+        break;
+    case EntryKind::File:
+        return STATUS_OBJECT_PATH_NOT_FOUND;
+    }
+    const LinkTarget target = LinkTargetOf(sourceAbsolutePath);
+    switch (target.kind) {
+    case LinkTargetKind::Directory:
+        return STATUS_NOT_SAME_DEVICE;
+    case LinkTargetKind::NoDirectory:
+        break;
+    case LinkTargetKind::Failed:
+        return target.failure;
+    }
+    return STATUS_OBJECT_PATH_NOT_FOUND;
+}
+
+}
+
 NTSTATUS LayerMount::DirectoryEmptinessStatus(const std::wstring& dirNorm) const {
     const MergedDirectory merged = MergeDirectoryAcrossLayers(config_, *whiteoutMgr_, dirNorm);
     if (!NT_SUCCESS(merged.status)) {
@@ -1936,16 +1968,23 @@ NTSTATUS LayerMount::DirectoryEmptinessStatus(const std::wstring& dirNorm) const
 }
 
 NTSTATUS LayerMount::CheckRenameDestination(const RenamePaths& paths,
+                                            const std::wstring& sourceAbsolutePath,
                                             BOOLEAN replaceIfExists,
                                             RenameKinds* kinds) const {
+    const bool underItself = IsInsideDirectory(paths.newNorm, paths.oldNorm);
+    // Overlayfs follows a link source in the lookup of the destination's
+    // parent. That lookup and the EXDEV check after it come before the check
+    // for an existing name.
+    if (underItself && kinds->source == EntryKind::Link) {
+        return UnderItselfStatus(kinds->source, sourceAbsolutePath);
+    }
     const ResolvedPath destResolved = pathResolver_->ResolvePath(paths.newNorm);
     if (destResolved.Found() && !replaceIfExists) {
         return STATUS_OBJECT_NAME_COLLISION;
     }
     const bool sourceIsDirectory = kinds->source == EntryKind::Directory;
-    // Overlayfs gives EINVAL for a directory and ENOTDIR for a non-directory.
-    if (IsInsideDirectory(paths.newNorm, paths.oldNorm)) {
-        return sourceIsDirectory ? STATUS_INVALID_PARAMETER : STATUS_OBJECT_PATH_NOT_FOUND;
+    if (underItself) {
+        return UnderItselfStatus(kinds->source, sourceAbsolutePath);
     }
     if (!destResolved.Found()) {
         return STATUS_SUCCESS;
@@ -2241,7 +2280,8 @@ NTSTATUS LayerMount::CheckRename(const RenamePaths& paths,
                          &checked->kinds.source);
     if (!NT_SUCCESS(status)) return status;
     if (paths.oldNorm != paths.newNorm) {
-        return CheckRenameDestination(paths, replaceIfExists, &checked->kinds);
+        return CheckRenameDestination(paths, sourceResolved.absolutePath, replaceIfExists,
+                                      &checked->kinds);
     }
     return STATUS_SUCCESS;
 }

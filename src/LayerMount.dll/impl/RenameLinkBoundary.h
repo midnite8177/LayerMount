@@ -20,9 +20,9 @@ struct RenameLinks {
     // destination that is the link entry itself is not.
     bool destinationInLinkTarget;
     // The lower link above both the source and the destination, when the
-    // merged view shows the destination's parent as a directory. The rename
-    // copies it up as a link before it moves the entry, so the move acts on
-    // the link target.
+    // merged view shows the destination's parent as a directory or as a
+    // link that leads to one. The rename copies it up as a link before it
+    // moves the entry, so the move acts on the link target.
     std::optional<std::wstring> lowerLinkToCopyUp;
 };
 
@@ -34,9 +34,13 @@ struct RenameLinks {
 // directory, the rename fails with STATUS_NOT_SAME_DEVICE, as overlayfs
 // fails a rename out of a symlink target with EXDEV. That covers a rename
 // between the overlay and a link target, and between two link targets.
-// Overlayfs looks up both parents before that check, so a missing
-// destination parent passes here and fails the rename later with its own
-// status.
+// A parent that is a link counts as a directory only when the link leads
+// to one. Overlayfs looks up both parents before that check, so a
+// destination parent that is missing, a file, or a link that leads to no
+// directory passes here and fails the rename later with its own status.
+// When the links differ, or both are the same lower link, a failed open
+// or read of the target of a parent link returns the status of that
+// failure.
 NTSTATUS CheckRenameLinkBoundary(const LayerConfig& config,
                                  const WhiteoutManager& whiteoutMgr,
                                  const PathResolver& pathResolver,

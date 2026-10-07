@@ -617,18 +617,25 @@ public:
     // the destination already exists. Otherwise the rename of a directory
     // to a path inside its own tree fails with STATUS_INVALID_PARAMETER,
     // even when the destination is a non-empty directory, and the rename
-    // of a file or a link to a path inside itself fails with
-    // STATUS_OBJECT_PATH_NOT_FOUND. A rename to a destination whose parent
-    // is a file, or a link that does not lead to a directory, fails with
-    // STATUS_OBJECT_PATH_NOT_FOUND. A directory rename with replaceIfExists
-    // TRUE onto a directory fails with STATUS_DIRECTORY_NOT_EMPTY when the
-    // merged view shows a child of the destination. A link, as EntryKind
-    // defines it, is a non-directory on either side of a rename. With
-    // replaceIfExists TRUE, a file or a link replaces a link, and a link
-    // replaces a file. The link moves as a link, and its target stays
-    // unchanged. Before the move, Rename moves an upper destination outside
-    // a link target into the work directory. It puts the destination back
-    // when the move fails and removes it when the move succeeds. Within a
+    // of a file to a path inside itself fails with
+    // STATUS_OBJECT_PATH_NOT_FOUND. The rename of a link to a path inside
+    // itself fails with STATUS_NOT_SAME_DEVICE when the link leads to a
+    // directory, and with STATUS_OBJECT_PATH_NOT_FOUND when it leads to no
+    // directory. That check comes before the collision check, so it gives
+    // these statuses with replaceIfExists FALSE onto an existing
+    // destination too. A rename to a destination whose parent is a file, or
+    // a link that does not lead to a directory, fails with
+    // STATUS_OBJECT_PATH_NOT_FOUND. A failed open or read of a link target
+    // fails the rename with the status of that failure. A directory rename
+    // with replaceIfExists TRUE onto a directory fails with
+    // STATUS_DIRECTORY_NOT_EMPTY when the merged view shows a child of the
+    // destination. A link, as EntryKind defines it, is a non-directory on
+    // either side of a rename. With replaceIfExists TRUE, a file or a link
+    // replaces a link, and a link replaces a file. The link moves as a
+    // link, and its target stays unchanged. Before the move, Rename moves
+    // an upper destination outside a link target into the work directory.
+    // It puts the destination back when the move fails and removes it when
+    // the move succeeds. Within a
     // link target, a file replaces a file in one step, and any other
     // destination moves to a hidden name in its own directory instead of
     // the work directory. A replace of a read-only upper file
@@ -641,9 +648,9 @@ public:
     // STATUS_NOT_SAME_DEVICE, and one with a component on either path that
     // it cannot read with STATUS_ACCESS_DENIED, before any change. A rename
     // within the target of one lower junction or absolute symbolic link,
-    // into a destination parent that the merged view shows as a directory,
-    // copies the link up as a link first, then renames the entry in the
-    // target and writes no whiteout.
+    // into a destination parent that the merged view shows as a directory
+    // or as a link that leads to one, copies the link up as a link first,
+    // then renames the entry in the target and writes no whiteout.
     NTSTATUS Rename(const std::wstring& callerOldPath,
                     const std::wstring& callerNewPath,
                     BOOLEAN replaceIfExists,
@@ -956,6 +963,7 @@ private:
     // Runs the checks in the order that overlayfs uses, and sets
     // kinds->destination.
     NTSTATUS CheckRenameDestination(const RenamePaths& paths,
+                                    const std::wstring& sourceAbsolutePath,
                                     BOOLEAN replaceIfExists,
                                     RenameKinds* kinds) const;
 

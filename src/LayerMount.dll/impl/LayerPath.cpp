@@ -179,6 +179,44 @@ std::wstring FinalPathOfDirectory(const std::wstring& path) {
     return FinalPathNameOf(directory.Get());
 }
 
+LinkTarget LinkTargetOf(const std::wstring& path) {
+    const ScopedHandle target(::CreateFileW(WithExtendedPrefix(path).c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!target.IsValid()) {
+        const DWORD error = ::GetLastError();
+        // The open of a junction or a directory symbolic link to a file
+        // fails with ERROR_DIRECTORY.
+        const bool leadsToNoDirectory = error == ERROR_FILE_NOT_FOUND ||
+                                        error == ERROR_PATH_NOT_FOUND ||
+                                        error == ERROR_DIRECTORY;
+        return leadsToNoDirectory ? LinkTarget{LinkTargetKind::NoDirectory, STATUS_SUCCESS}
+                                  : LinkTarget{LinkTargetKind::Failed, NtStatusFromWin32(error)};
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!::GetFileInformationByHandle(target.Get(), &info)) {
+        return LinkTarget{LinkTargetKind::Failed, NtStatusFromWin32(::GetLastError())};
+    }
+    return (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+        ? LinkTarget{LinkTargetKind::Directory, STATUS_SUCCESS}
+        : LinkTarget{LinkTargetKind::NoDirectory, STATUS_SUCCESS};
+}
+
+LinkTarget ShownLinkTarget(const ResolvedPath& shown) {
+    if (!shown.Found() || (shown.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return LinkTarget{LinkTargetKind::NoDirectory, STATUS_SUCCESS};
+    }
+    if ((shown.attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return LinkTargetOf(shown.absolutePath);
+    }
+    return LinkTarget{LinkTargetKind::Directory, STATUS_SUCCESS};
+}
+
+std::wstring ParentOfNormalizedPath(const std::wstring& normalizedPath) {
+    const size_t separator = normalizedPath.find_last_of(L'\\');
+    return separator == std::wstring::npos ? std::wstring() : normalizedPath.substr(0, separator);
+}
+
 bool IsInsideDirectory(std::wstring_view pathNorm, std::wstring_view dirNorm) {
     return pathNorm.size() > dirNorm.size() &&
            pathNorm.compare(0, dirNorm.size(), dirNorm) == 0 &&
