@@ -89,6 +89,14 @@ void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs);
 // attributes and times last.
 NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring& dstAbs);
 
+// Opens the file at path to read its data for a copy-up. With
+// SE_BACKUP_NAME, the open reads a file whose DACL denies read to the
+// engine's account. The open shares read access only, so it fails while
+// another handle has write access, and no writer can open the file while
+// the handle stays open. Returns INVALID_HANDLE_VALUE with the Win32 error
+// in GetLastError when the open fails.
+HANDLE OpenSourceFileForCopy(const std::wstring& path);
+
 // Copy the data of srcHandle to dstHandle. When both files are sparse, the
 // copy reads the allocated ranges of the source and writes only those, so a
 // hole of the source stays a hole in the destination: NTFS allocates

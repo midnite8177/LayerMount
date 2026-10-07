@@ -424,14 +424,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return CopyUpReparseCloneAndCount(normalized, *target);
     }
 
-    ScopedHandle srcHandle(CreateFileW(
-        source.absolutePath.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr));
+    ScopedHandle srcHandle(OpenSourceFileForCopy(source.absolutePath));
 
     if (!srcHandle.IsValid()) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
@@ -656,16 +649,7 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
         return STATUS_SUCCESS;
     }
 
-    // With SE_BACKUP_NAME, this open reads an origin whose DACL denies read
-    // to the engine's account.
-    ScopedHandle srcHandle(CreateFileW(
-        metadata.originLayer.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr));
+    ScopedHandle srcHandle(OpenSourceFileForCopy(metadata.originLayer));
 
     if (!srcHandle.IsValid()) {
         return RecordFillFailure(normalized, L"open the origin file",

@@ -140,10 +140,7 @@ NTSTATUS CopyFileMetadataAfterData(const std::wstring& srcAbs,
 NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
                                      const std::wstring& dstAbs,
                                      const EntryCopyPolicy& policy) {
-    ScopedHandle srcHandle(::CreateFileW(srcAbs.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                         OPEN_EXISTING,
-                                         FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
-                                         nullptr));
+    ScopedHandle srcHandle(OpenSourceFileForCopy(srcAbs));
     if (!srcHandle.IsValid()) {
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }

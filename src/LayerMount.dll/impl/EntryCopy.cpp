@@ -240,9 +240,10 @@ NTSTATUS ReadStreamList(HANDLE handle, std::vector<BYTE>& list) {
 // Reads the FILE_STREAM_INFO list of the file or directory at path. The
 // open uses FILE_FLAG_BACKUP_SEMANTICS, so it reads the stream list of a
 // file whose DACL denies this process. The open asks for
-// FILE_READ_ATTRIBUTES only, because an open with data access fails with
-// STATUS_CLOUD_FILE_ACCESS_DENIED for a cloud placeholder file with a
-// dehydrated range when no sync provider is connected.
+// FILE_READ_ATTRIBUTES only, because an open with data access of a cloud
+// placeholder file with a dehydrated range fails when no sync provider is
+// connected: with STATUS_CLOUD_FILE_ACCESS_DENIED on Windows 11 and with
+// STATUS_CLOUD_FILE_PROVIDER_NOT_RUNNING on Windows Server 2022.
 NTSTATUS ReadStreamListOfPath(const std::wstring& path, std::vector<BYTE>& list) {
     ScopedHandle handle(::CreateFileW(
         WithExtendedPrefix(path).c_str(), FILE_READ_ATTRIBUTES,
@@ -608,6 +609,11 @@ NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring
         return streamStatus;
     }
     return CopyExtendedAttributes(srcAbs, dstAbs);
+}
+
+HANDLE OpenSourceFileForCopy(const std::wstring& path) {
+    return ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                         FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
 }
 
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
