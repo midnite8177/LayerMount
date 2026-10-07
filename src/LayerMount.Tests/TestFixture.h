@@ -1044,6 +1044,20 @@ private:
     CHAR previousThreadMode_ = 0;
 };
 
+// Seeks handle, an open of the file at path, to range and reads range.
+// Asserts the seek. Returns whether ReadFile succeeded, with the Win32
+// error in GetLastError when it failed.
+inline bool ReadRangeOfOpenFile(HANDLE handle, const std::wstring& path, ByteRange range) {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    LARGE_INTEGER position{};
+    position.QuadPart = range.offset;
+    Assert::IsTrue(::SetFilePointerEx(handle, position, nullptr, FILE_BEGIN) != FALSE,
+        (L"The test must seek to the range it reads in " + path).c_str());
+    std::string buffer(static_cast<size_t>(range.length), '\0');
+    DWORD read = 0;
+    return ::ReadFile(handle, buffer.data(), static_cast<DWORD>(range.length), &read, nullptr) != FALSE;
+}
+
 // Reads range of the file at path. The read hydrates that range of a
 // placeholder file when a serving provider is connected, and fails when the
 // provider refuses or no provider is connected. Asserts the open and the
@@ -1054,13 +1068,7 @@ inline void TryHydrate(const std::wstring& path, ByteRange range) {
         path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, 0, nullptr));
     Assert::IsTrue(handle.IsValid(), (L"The test must open " + path + L" to read it").c_str());
-    LARGE_INTEGER position{};
-    position.QuadPart = range.offset;
-    Assert::IsTrue(::SetFilePointerEx(handle.Get(), position, nullptr, FILE_BEGIN) != FALSE,
-        (L"The test must seek to the range it reads in " + path).c_str());
-    std::string buffer(static_cast<size_t>(range.length), '\0');
-    DWORD read = 0;
-    ::ReadFile(handle.Get(), buffer.data(), static_cast<DWORD>(range.length), &read, nullptr);
+    ReadRangeOfOpenFile(handle.Get(), path, range);
 }
 
 // The layer of a CloudPlaceholderLayers that is the cloud sync root.

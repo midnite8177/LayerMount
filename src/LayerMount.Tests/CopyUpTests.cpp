@@ -2,10 +2,12 @@
 #include "TestFixture.h"
 
 #include "CopyUp.h"
+#include "EntryCopy.h"
 #include "MetadataStore.h"
 #include "NtStatusUtil.h"
 
 #include <winioctl.h>
+#include <algorithm>
 #include <set>
 
 #include "ExtendedAttributeTestHelpers.h"
@@ -96,6 +98,42 @@ void AssertCopiedUpLinkKeepsTheLowerLinkId(LinkCreator createLink, LinkTarget ta
         L"An open that follows the upper link must report the target's file ID");
     Assert::IsFalse(HasOverlayStream(target),
         L"The copy-up must write no :overlay stream onto the link target");
+}
+
+struct DisconnectedCloudReadError {
+    DWORD error;
+    NTSTATUS status;
+};
+
+// Windows Server 2022 returns the first error and Windows 11 the second.
+constexpr DisconnectedCloudReadError kDisconnectedCloudReadErrors[] = {
+    {ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING, STATUS_CLOUD_FILE_PROVIDER_NOT_RUNNING},
+    {ERROR_CLOUD_FILE_ACCESS_DENIED, STATUS_CLOUD_FILE_ACCESS_DENIED},
+};
+
+// The open of the lower file can fail with the cloud-file error itself,
+// before any read. The copy-up then fails at the same open.
+DWORD ErrorOfLowerOpenOrRead(const std::wstring& path, ByteRange range) {
+    const ScopedHandle handle(OpenSourceFileForCopy(path));
+    if (!handle.IsValid()) {
+        return ::GetLastError();
+    }
+    const bool readSucceeded = ReadRangeOfOpenFile(handle.Get(), path, range);
+    const DWORD error = ::GetLastError();
+    Assert::IsFalse(readSucceeded,
+        (L"The open or read of the dropped range of " + path + L" must fail with no provider connected").c_str());
+    return error;
+}
+
+NTSTATUS StatusOfDisconnectedCloudRead(const std::wstring& path, ByteRange range) {
+    const DWORD error = ErrorOfLowerOpenOrRead(path, range);
+    const auto entry = std::find_if(
+        std::begin(kDisconnectedCloudReadErrors), std::end(kDisconnectedCloudReadErrors),
+        [error](const DisconnectedCloudReadError& known) { return known.error == error; });
+    Assert::IsTrue(entry != std::end(kDisconnectedCloudReadErrors),
+        (L"The open or read of the dropped range of " + path + L" must fail with a cloud-file error, not error " +
+         std::to_wstring(error)).c_str());
+    return entry->status;
 }
 
 }
@@ -322,9 +360,10 @@ public:
             return;
         }
         TempLayerEnvironment& env = layers.env;
+        const NTSTATUS lowerReadStatus = StatusOfDisconnectedCloudRead(env.Lower(0) + L"\\x.bin", kDropped);
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        AssertStatus(STATUS_CLOUD_FILE_ACCESS_DENIED, rig.copyUp.CopyUpFile(L"x.bin"),
+        AssertStatus(lowerReadStatus, rig.copyUp.CopyUpFile(L"x.bin"),
             L"The copy-up must fail with the status of the lower read when no provider can serve the dehydrated range");
 
         Assert::IsFalse(fs::exists(env.Upper() + L"\\x.bin"),
@@ -875,11 +914,12 @@ public:
             return;
         }
         TempLayerEnvironment& env = layers.env;
+        const NTSTATUS lowerReadStatus = StatusOfDisconnectedCloudRead(env.Lower(0) + L"\\big.bin", kDropped);
         CopyUpAndRenameRig rig(env.MakeConfig());
         AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpMetadataOnly(L"big.bin").status,
             L"The metadata-only copy-up of the partly dehydrated placeholder file must succeed");
 
-        AssertStatus(STATUS_CLOUD_FILE_ACCESS_DENIED, rig.copyUp.CompleteLazyCopyUp(L"big.bin"),
+        AssertStatus(lowerReadStatus, rig.copyUp.CompleteLazyCopyUp(L"big.bin"),
             L"The fill must fail with the status of the lower read when no provider can serve the dehydrated range");
 
         Assert::IsTrue(
