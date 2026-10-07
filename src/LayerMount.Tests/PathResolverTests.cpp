@@ -220,6 +220,38 @@ public:
         Assert::IsTrue(resolver.ExistsInUpper(L"upperfile.txt"));
     }
 
+    TEST_METHOD(ExistsInUpper_FilePathLongerThanMaxPath_ReturnsTrue) {
+        TempLayerEnvironment env(0);
+        const std::wstring name = LayerMountTestShared::DeepLeafName(env.Upper(), L"");
+        env.WriteFile(L"\\\\?\\" + env.Upper(), name, "x");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+
+        Assert::IsTrue(resolver.ExistsInUpper(name),
+            L"The upper file whose path is longer than MAX_PATH exists");
+    }
+
+    TEST_METHOD(UpperAttributes_FilePathLongerThanMaxPath_ReturnsItsAttributes) {
+        TempLayerEnvironment env(0);
+        const std::wstring name = LayerMountTestShared::DeepLeafName(env.Upper(), L"");
+        const std::wstring extendedRoot = L"\\\\?\\" + env.Upper();
+        env.WriteFile(extendedRoot, name, "x");
+        Assert::IsTrue(::SetFileAttributesW((extendedRoot + L"\\" + name).c_str(),
+                                            FILE_ATTRIBUTE_HIDDEN) != FALSE,
+            L"Precondition: the deep upper file takes the hidden attribute");
+
+        auto config = env.MakeConfig();
+        Cache cache;
+        WhiteoutManager wm(config, &cache);
+        PathResolver resolver(config, wm, cache);
+
+        Assert::AreEqual<DWORD>(FILE_ATTRIBUTE_HIDDEN, resolver.UpperAttributes(name),
+            L"The attributes of the upper file whose path is longer than MAX_PATH");
+    }
+
     TEST_METHOD(GetUpperPath_ReturnsUpperPathSlashRelative) {
         TempLayerEnvironment env(0);
 

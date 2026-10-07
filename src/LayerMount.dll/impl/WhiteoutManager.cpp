@@ -60,7 +60,7 @@ bool DeleteMarkerFile(const std::wstring& path) {
 }
 
 bool MarkerFileExists(const std::wstring& path) {
-    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    return GetFileAttributesW(WithExtendedPrefix(path).c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 std::wstring MarkerDirectoryOf(const std::wstring& relativePath) {
@@ -245,7 +245,7 @@ NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
 }
 
 NTSTATUS WhiteoutManager::SetOpaqueAtPath(const std::wstring& dirFullPath) {
-    const DWORD attributes = ::GetFileAttributesW(dirFullPath.c_str());
+    const DWORD attributes = ::GetFileAttributesW(WithExtendedPrefix(dirFullPath).c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         bool isLink = false;
         const NTSTATUS probe = IsDirectoryLink(dirFullPath, attributes, &isLink);

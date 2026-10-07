@@ -190,8 +190,10 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         return cached.value();
     }
 
+    // The plain form goes on to the sidecar store, which finds a record only
+    // at the path form of the write. Only the Win32 call gets the extended form.
     std::wstring upperFullPath = JoinDirPath(config_.upperPath, normalized);
-    DWORD upperAttrs = GetFileAttributesW(upperFullPath.c_str());
+    DWORD upperAttrs = GetFileAttributesW(WithExtendedPrefix(upperFullPath).c_str());
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
         LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(upperFullPath, &config_);
         if (!metadata.redirect.empty()) {
@@ -327,7 +329,7 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
         }
 
         std::wstring fullPath = JoinDirPath(lowerPath, normalized);
-        DWORD attrs = GetFileAttributesW(fullPath.c_str());
+        DWORD attrs = GetFileAttributesW(WithExtendedPrefix(fullPath).c_str());
         if (attrs != INVALID_FILE_ATTRIBUTES) {
             return ResolvedPath{
                 fullPath,
@@ -351,7 +353,7 @@ bool PathResolver::ExistsInUpper(const std::wstring& relativePath) const {
 }
 
 DWORD PathResolver::UpperAttributes(const std::wstring& relativePath) const {
-    return GetFileAttributesW(GetUpperPath(relativePath).c_str());
+    return GetFileAttributesW(WithExtendedPrefix(GetUpperPath(relativePath)).c_str());
 }
 
 std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const {

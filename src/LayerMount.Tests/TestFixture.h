@@ -13,6 +13,7 @@
 #include "AclTestHelpers.h"
 #include "FileIdTestHelpers.h"
 #include "FileTimeTestHelpers.h"
+#include "LongPathTestHelpers.h"
 
 #include <cfapi.h>
 
@@ -177,8 +178,7 @@ public:
     }
 
     ~TempLayerEnvironment() {
-        std::error_code ec;
-        fs::remove_all(root_, ec);
+        LayerMountTestShared::RemoveTreeOfAnyDepth(root_);
     }
 
     TempLayerEnvironment(const TempLayerEnvironment&) = delete;

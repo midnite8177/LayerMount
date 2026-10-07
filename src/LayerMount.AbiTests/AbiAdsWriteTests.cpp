@@ -3,7 +3,9 @@
 #include "StreamTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+using LayerMountTestShared::ExtendedPathUnder;
 using LayerMountTestShared::HasStream;
+using LayerMountTestShared::kMaxNtfsNameLength;
 
 namespace LayerMountAbiTests {
 
@@ -42,17 +44,9 @@ std::string ReadRawStream(const std::wstring& path) {
 }
 
 constexpr size_t kLongStreamNameLength = 200;
-constexpr size_t kMaxNtfsNameLength = 255;
 static_assert(kLongStreamNameLength <= kMaxNtfsNameLength);
 const std::wstring kLongStreamRelativePath =
     L"host.txt:" + std::wstring(kLongStreamNameLength, L'n');
-
-std::wstring ExtendedPathUnder(const std::wstring& layer, const std::wstring& relativePath) {
-    const std::wstring path = layer + L"\\" + relativePath;
-    Assert::IsTrue(path.size() > MAX_PATH,
-        L"Precondition: the stream path is longer than MAX_PATH");
-    return L"\\\\?\\" + path;
-}
 
 std::wstring MountPathOf(const std::wstring& relativePath) {
     return L"\\" + relativePath;

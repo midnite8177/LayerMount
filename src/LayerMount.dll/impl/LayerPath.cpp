@@ -195,7 +195,7 @@ std::wstring BuildUpperPathPreserveCase(const std::wstring& upperRoot,
 std::wstring WithStoredLeafName(const std::wstring& targetPath,
                                 const std::wstring& entryPath) {
     WIN32_FIND_DATAW fd{};
-    HANDLE find = ::FindFirstFileW(entryPath.c_str(), &fd);
+    HANDLE find = ::FindFirstFileW(WithExtendedPrefix(entryPath).c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) {
         return targetPath;
     }
@@ -204,7 +204,7 @@ std::wstring WithStoredLeafName(const std::wstring& targetPath,
 }
 
 ScopedHandle OpenReparseEntry(const std::wstring& path, DWORD access) {
-    return ScopedHandle(::CreateFileW(path.c_str(), access,
+    return ScopedHandle(::CreateFileW(WithExtendedPrefix(path).c_str(), access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
@@ -364,8 +364,10 @@ namespace {
 NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
                               const std::wstring& to,
                               ReplaceExisting replace) {
+    const std::wstring extendedFrom = WithExtendedPrefix(from);
+    const std::wstring extendedTo = WithExtendedPrefix(to);
     const DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
-    if (::MoveFileExW(from.c_str(), to.c_str(), flags)) {
+    if (::MoveFileExW(extendedFrom.c_str(), extendedTo.c_str(), flags)) {
         return STATUS_SUCCESS;
     }
     const DWORD moveErr = ::GetLastError();
@@ -380,7 +382,7 @@ NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
     // FileRenameInfo. FILE_FLAG_OPEN_REPARSE_POINT opens a junction or a
     // symbolic link itself. Without it, the handle is the link's target, and
     // the rename moves the target.
-    HANDLE src = ::CreateFileW(from.c_str(),
+    HANDLE src = ::CreateFileW(extendedFrom.c_str(),
         GENERIC_READ | DELETE | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
@@ -388,13 +390,13 @@ NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
     if (src == INVALID_HANDLE_VALUE) {
         return NtStatusFromWin32(::GetLastError());
     }
-    const size_t pathBytes = to.size() * sizeof(wchar_t);
+    const size_t pathBytes = extendedTo.size() * sizeof(wchar_t);
     std::vector<BYTE> buf(sizeof(FILE_RENAME_INFO) + pathBytes);
     auto* ri = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
     ri->ReplaceIfExists = replace == ReplaceExisting::Yes ? TRUE : FALSE;
     ri->RootDirectory   = nullptr;
     ri->FileNameLength  = static_cast<DWORD>(pathBytes);
-    std::memcpy(ri->FileName, to.data(), pathBytes);
+    std::memcpy(ri->FileName, extendedTo.data(), pathBytes);
     const BOOL renamed = ::SetFileInformationByHandle(
         src, FileRenameInfo, ri, static_cast<DWORD>(buf.size()));
     const DWORD renameErr = renamed ? 0 : ::GetLastError();
@@ -406,14 +408,15 @@ NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
 }
 
 NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path, EntryKind kind) {
+    const std::wstring extendedPath = WithExtendedPrefix(path);
     if (kind == EntryKind::Directory) {
         std::error_code ec;
-        fs::remove_all(path, ec);
+        fs::remove_all(extendedPath, ec);
         return ec ? NtStatusFromWin32(static_cast<DWORD>(ec.value())) : STATUS_SUCCESS;
     }
 
-    const BOOL removed = kind == EntryKind::Link ? ::RemoveDirectoryW(path.c_str())
-                                                 : ::DeleteFileW(path.c_str());
+    const BOOL removed = kind == EntryKind::Link ? ::RemoveDirectoryW(extendedPath.c_str())
+                                                 : ::DeleteFileW(extendedPath.c_str());
     if (!removed) {
         const DWORD removeErr = ::GetLastError();
         if (removeErr != ERROR_FILE_NOT_FOUND && removeErr != ERROR_PATH_NOT_FOUND) {
@@ -469,7 +472,7 @@ UpperEntryMove MoveUpperEntryAside(const std::wstring& path,
                                    const LayerConfig& config,
                                    std::wstring* asidePath) {
     asidePath->clear();
-    if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (::GetFileAttributesW(WithExtendedPrefix(path).c_str()) == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
         if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
             return {STATUS_SUCCESS, STATUS_SUCCESS};
@@ -486,7 +489,7 @@ UpperEntryMove MoveUpperEntryAside(const std::wstring& path,
 
 NTSTATUS ProbeUpperEntry(const std::wstring& path, bool* exists, EntryKind* kind) {
     *exists = false;
-    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    const DWORD attrs = ::GetFileAttributesW(WithExtendedPrefix(path).c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         const DWORD probeErr = ::GetLastError();
         if (probeErr == ERROR_FILE_NOT_FOUND || probeErr == ERROR_PATH_NOT_FOUND) {
@@ -713,14 +716,15 @@ std::optional<StagedEntryDeleteFailure> RemoveStagedEntry(const std::wstring& pa
 }
 
 NTSTATUS CreateDirectoryOrUseExisting(const std::wstring& path) {
-    if (::CreateDirectoryW(path.c_str(), nullptr)) {
+    const std::wstring extendedPath = WithExtendedPrefix(path);
+    if (::CreateDirectoryW(extendedPath.c_str(), nullptr)) {
         return STATUS_SUCCESS;
     }
     const DWORD createErr = ::GetLastError();
     if (createErr != ERROR_ALREADY_EXISTS) {
         return NtStatusFromWin32(createErr);
     }
-    const DWORD existingAttrs = ::GetFileAttributesW(path.c_str());
+    const DWORD existingAttrs = ::GetFileAttributesW(extendedPath.c_str());
     if (existingAttrs == INVALID_FILE_ATTRIBUTES) {
         return NtStatusFromWin32(::GetLastError());
     }

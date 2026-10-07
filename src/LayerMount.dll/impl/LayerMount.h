@@ -185,7 +185,10 @@ struct LayerMountStats {
 
 struct FileContext {
     HANDLE handle = INVALID_HANDLE_VALUE;
-    std::wstring actualPath;        // Physical filesystem path
+    // The physical path, in plain form. EnsureInUpperLayer compares it as a
+    // string, and the sidecar store finds a record only at the path form of
+    // the write. A Win32 call gets WithExtendedPrefix of it.
+    std::wstring actualPath;
     std::wstring workPath;          // Path in work directory during atomic ops
     std::wstring relativePath;      // Path within overlay namespace
     bool isDirectory = false;

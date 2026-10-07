@@ -889,7 +889,8 @@ RenameDestinationAside::~RenameDestinationAside() {
         return;
     }
     const HeldAside& held = *held_;
-    if (::GetFileAttributesW(held.upperPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    if (::GetFileAttributesW(WithExtendedPrefix(held.upperPath).c_str()) !=
+        INVALID_FILE_ATTRIBUTES) {
         held.removeCopy(held.asidePath, config_);
     } else {
         const UpperEntryMove moveBack = MoveUpperEntryLeavingStuckRecords(

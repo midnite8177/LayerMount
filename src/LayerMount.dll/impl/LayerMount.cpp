@@ -39,14 +39,8 @@ NTSTATUS ReopenContextHandle(FileContext* ctx);
 
 constexpr LONGLONG kShellOnlyAboveBytes = 1LL * 1024 * 1024;
 
-// actualPath stays in plain form: EnsureInUpperLayer compares it as a
-// string, and the sidecar store finds a record only at the path form it
-// was written at. Win32 opens use this extended form.
-std::wstring ExtendedActualPath(const FileContext& ctx) {
-    return WithExtendedPrefix(ctx.actualPath);
-}
-
-// Opens a short-lived handle to a physical path. Returns an invalid
+// Opens a short-lived handle to the extended form of a plain physical
+// path. Returns an invalid
 // ScopedHandle on failure and leaves GetLastError set. The caller passes
 // the directory status, because a path-based query fails for a
 // delete-pending file and would drop FILE_FLAG_BACKUP_SEMANTICS.
@@ -55,7 +49,7 @@ ScopedHandle OpenTransientHandle(const std::wstring& path,
                                  bool isDirectory) {
     DWORD flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0;
     HANDLE h = ::CreateFileW(
-        path.c_str(),
+        WithExtendedPrefix(path).c_str(),
         desiredAccess,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
@@ -86,7 +80,7 @@ NTSTATUS SetInfoWithTransientRetry(const FileContext& ctx,
         return NtStatusFromWin32(firstErr);
     }
     ScopedHandle transient = OpenTransientHandle(
-        ExtendedActualPath(ctx), transientAccess, ctx.isDirectory);
+        ctx.actualPath, transientAccess, ctx.isDirectory);
     if (!transient.IsValid()) {
         return NtStatusFromWin32(firstErr);
     }
@@ -933,7 +927,7 @@ NTSTATUS OpenContextHandleWithAccess(FileContext* ctx, UINT32 accessMask) {
 
     CloseContextHandle(ctx);
 
-    ctx->handle = ::CreateFileW(ExtendedActualPath(*ctx).c_str(),
+    ctx->handle = ::CreateFileW(WithExtendedPrefix(ctx->actualPath).c_str(),
         accessMask,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, ComputeHandleReopenFlags(*ctx),
@@ -1019,7 +1013,7 @@ NTSTATUS WriteSecurityToNewObject(const std::wstring& path, PSECURITY_DESCRIPTOR
     if ((toWrite & SACL_SECURITY_INFORMATION) != 0) {
         access |= ACCESS_SYSTEM_SECURITY;
     }
-    ScopedHandle securityHandle{::CreateFileW(path.c_str(),
+    ScopedHandle securityHandle{::CreateFileW(WithExtendedPrefix(path).c_str(),
         access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
@@ -1032,24 +1026,26 @@ NTSTATUS WriteSecurityToNewObject(const std::wstring& path, PSECURITY_DESCRIPTOR
     return STATUS_SUCCESS;
 }
 
-// Deletes a file or a stream that a create made. A delete refuses a
+// Deletes a file or a stream that a create made, through the extended
+// form of its plain path. A delete refuses a
 // read-only file, and a create can give its new file
 // FILE_ATTRIBUTE_READONLY, so a refused delete clears that attribute and
 // tries again. On failure, leaves the last error of the failed call.
 bool DeleteCreatedFile(const std::wstring& path) {
-    if (::DeleteFileW(path.c_str())) {
+    const std::wstring extendedPath = WithExtendedPrefix(path);
+    if (::DeleteFileW(extendedPath.c_str())) {
         return true;
     }
     if (::GetLastError() != ERROR_ACCESS_DENIED) {
         return false;
     }
-    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    const DWORD attributes = ::GetFileAttributesW(extendedPath.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_READONLY) == 0) {
         ::SetLastError(ERROR_ACCESS_DENIED);
         return false;
     }
-    return ::SetFileAttributesW(path.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY) &&
-           ::DeleteFileW(path.c_str());
+    return ::SetFileAttributesW(extendedPath.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY) &&
+           ::DeleteFileW(extendedPath.c_str());
 }
 
 // The HRESULT of the last error of the Win32 call that just failed, or
@@ -1074,7 +1070,7 @@ public:
             return;
         }
         CloseContextHandle(ctx_);
-        if (!DeleteCreatedFile(ExtendedActualPath(*ctx_))) {
+        if (!DeleteCreatedFile(ctx_->actualPath)) {
             events_.Emit(LM_EVT_WARNING, HresultOfFailedCall(), ctx_->relativePath.c_str(),
                          L"The undo of a failed create could not delete the new entry");
         }
@@ -1117,7 +1113,7 @@ public:
                          L"The undo of a failed create could not remove the new directory's "
                          L"opaque markers");
         }
-        if (!::RemoveDirectoryW(ExtendedActualPath(*ctx_).c_str())) {
+        if (!::RemoveDirectoryW(WithExtendedPrefix(ctx_->actualPath).c_str())) {
             events_.Emit(LM_EVT_WARNING, HresultOfFailedCall(), ctx_->relativePath.c_str(),
                          L"The undo of a failed create could not remove the new directory");
         }
@@ -1436,7 +1432,7 @@ NTSTATUS LayerMount::CheckCreatePreconditions(const CreateRequest& request,
     }
 
     const std::wstring upperHostPath = pathResolver_->GetUpperPath(create.path.hostNorm);
-    const DWORD upperAttrs = ::GetFileAttributesW(upperHostPath.c_str());
+    const DWORD upperAttrs = ::GetFileAttributesW(WithExtendedPrefix(upperHostPath).c_str());
     const bool upperIsDirectory = upperAttrs != INVALID_FILE_ATTRIBUTES &&
         (upperAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (upperIsDirectory || IsDirectoryHit(resolution->overlayHit)) {
@@ -1453,7 +1449,8 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
                                             FileContext* ctx,
                                             InternalFileInfo* outInfo) {
     DirectoryRollback rollback(ctx, *whiteoutMgr_, events_);
-    if (!::CreateDirectoryW(create.upperPath.c_str(), nullptr)) {
+    const std::wstring extendedUpperPath = WithExtendedPrefix(create.upperPath);
+    if (!::CreateDirectoryW(extendedUpperPath.c_str(), nullptr)) {
         return NtStatusFromWin32(::GetLastError());
     }
     rollback.Arm();
@@ -1471,7 +1468,7 @@ NTSTATUS LayerMount::CreateDirectoryInUpper(const UpperCreate& create,
         return sdStatus;
     }
 
-    ctx->handle = ::CreateFileW(create.upperPath.c_str(),
+    ctx->handle = ::CreateFileW(extendedUpperPath.c_str(),
         ComputePhysicalHandleAccess(create.grantedAccess),
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
@@ -1503,14 +1500,15 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
 
     bool streamMakesHost = false;
     if (!create.path.streamSuffix.empty() &&
-        ::GetFileAttributesW(create.upperPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        ::GetFileAttributesW(WithExtendedPrefix(create.upperPath).c_str()) ==
+            INVALID_FILE_ATTRIBUTES) {
         const DWORD hostError = ::GetLastError();
         streamMakesHost = hostError == ERROR_FILE_NOT_FOUND || hostError == ERROR_PATH_NOT_FOUND;
     }
 
     const UINT32 fileAttributes =
         create.fileAttributes != 0 ? create.fileAttributes : FILE_ATTRIBUTE_NORMAL;
-    ctx->handle = ::CreateFileW(ExtendedActualPath(*ctx).c_str(),
+    ctx->handle = ::CreateFileW(WithExtendedPrefix(ctx->actualPath).c_str(),
         ComputePhysicalHandleAccess(create.grantedAccess),
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, CREATE_NEW, fileAttributes, nullptr);
@@ -1878,9 +1876,9 @@ NTSTATUS LayerMount::Overwrite(FileContext* ctx,
     }
 
     if (fileAttributes != 0) {
-        const std::wstring attrPath = isStreamHandle
+        const std::wstring attrPath = WithExtendedPrefix(isStreamHandle
             ? pathResolver_->GetUpperPath(ctx->relativePath)
-            : ctx->actualPath;
+            : ctx->actualPath);
         DWORD newAttrs;
         if (replaceAttributes) {
             newAttrs = fileAttributes;
@@ -2514,7 +2512,7 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
         }
         targetPath = resolved.absolutePath;
         if (outAttributes != nullptr) {
-            DWORD attrs = ::GetFileAttributesW(targetPath.c_str());
+            DWORD attrs = ::GetFileAttributesW(WithExtendedPrefix(targetPath).c_str());
             if (attrs == INVALID_FILE_ATTRIBUTES) {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
@@ -2538,7 +2536,7 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
     // Bits outside owner, group, DACL, and SACL pass through to
     // ::GetFileSecurityW unexamined.
     DWORD needed = 0;
-    BOOL ok = ::GetFileSecurityW(targetPath.c_str(), effective,
+    BOOL ok = ::GetFileSecurityW(WithExtendedPrefix(targetPath).c_str(), effective,
                                   sd, static_cast<DWORD>(sdBytes), &needed);
     if (requiredBytes != nullptr) {
         *requiredBytes = needed;
@@ -2604,7 +2602,7 @@ NTSTATUS LayerMount::SetSecurity(const std::wstring& relativePath,
 namespace {
 
 inline HANDLE OpenForReparseRead(const std::wstring& path) {
-    return ::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+    return ::CreateFileW(WithExtendedPrefix(path).c_str(), FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
@@ -2612,7 +2610,7 @@ inline HANDLE OpenForReparseRead(const std::wstring& path) {
 }
 
 inline HANDLE OpenForReparseWrite(const std::wstring& path) {
-    return ::CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES,
+    return ::CreateFileW(WithExtendedPrefix(path).c_str(), FILE_WRITE_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,

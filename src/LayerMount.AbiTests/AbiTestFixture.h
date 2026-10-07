@@ -7,6 +7,7 @@
 #include "pch.h"
 
 #include "AclTestHelpers.h"
+#include "LongPathTestHelpers.h"
 
 #include <algorithm>
 #include <iterator>
@@ -48,8 +49,7 @@ public:
     }
 
     ~TempLayerEnv() {
-        std::error_code ec;
-        std::filesystem::remove_all(root_, ec);
+        LayerMountTestShared::RemoveTreeOfAnyDepth(root_);
     }
 
     TempLayerEnv(const TempLayerEnv&) = delete;

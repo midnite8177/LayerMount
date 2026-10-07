@@ -339,7 +339,7 @@ NTSTATUS VisitEntriesBelow(const std::wstring& dirPath,
         }
     };
     WIN32_FIND_DATAW fd{};
-    HANDLE find = ::FindFirstFileW(JoinDirPath(dirPath, L"*").c_str(), &fd);
+    HANDLE find = ::FindFirstFileW(WithExtendedPrefix(JoinDirPath(dirPath, L"*")).c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) {
         keepFirstListingError(StatusOfFailedCall(ERROR_READ_FAULT));
         return STATUS_SUCCESS;
@@ -384,7 +384,7 @@ NTSTATUS ForEachEntryBelow(const std::wstring& dirPath,
 // directory symbolic link. An entry whose reparse tag cannot be read counts
 // as a link, so no walk goes into it.
 bool IsDirectoryButNotLink(const std::wstring& path) {
-    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    const DWORD attrs = ::GetFileAttributesW(WithExtendedPrefix(path).c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
         return false;
     }
@@ -490,7 +490,8 @@ void MetadataStore::RemoveSidecarRecordsOfGoneEntries(const std::vector<std::wst
         return;
     }
     for (const std::wstring& entryPath : entries) {
-        if (::GetFileAttributesW(entryPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (::GetFileAttributesW(WithExtendedPrefix(entryPath).c_str()) !=
+            INVALID_FILE_ATTRIBUTES) {
             continue;
         }
         const DWORD probeErr = ::GetLastError();
