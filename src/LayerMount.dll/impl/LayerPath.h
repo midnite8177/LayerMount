@@ -52,6 +52,16 @@ std::wstring NormalizePathPreserveCase(const std::wstring& path);
 // extended path, such as \\?\Volume{...}\dir, comes back unchanged.
 std::wstring WithoutExtendedPrefix(const std::wstring& path);
 
+// Returns path in extended form, so that an open of it is not limited to
+// MAX_PATH. Windows does not normalize an extended path. A full drive or UNC
+// path with backslash separators and no empty, "." or ".." component gets
+// only the prefix, so a name that ends in a dot or a space keeps it. Any
+// other path goes through GetFullPathNameW first. Then \\server\share\dir
+// becomes \\?\UNC\server\share\dir and C:\dir becomes \\?\C:\dir. A path
+// that already starts with \\?\ or \\.\ comes back unchanged, and so does
+// a path that GetFullPathNameW refuses.
+std::wstring WithExtendedPrefix(const std::wstring& path);
+
 // Returns path as a full path in lowercase, with backslash separators, no
 // trailing separator, and the prefix that WithoutExtendedPrefix strips gone.
 // A path through a link, a short name or a substituted drive keeps its own

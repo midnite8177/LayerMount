@@ -114,6 +114,21 @@ std::wstring LongStreamName(int index) {
     return name;
 }
 
+void WriteNumberedLongStreams(const std::wstring& layerPath, const std::wstring& rel,
+                              int count) {
+    for (int i = 0; i < count; ++i) {
+        WriteADS(layerPath, rel, LongStreamName(i), std::to_string(i));
+    }
+}
+
+void AssertNumberedLongStreams(const std::wstring& layerPath, const std::wstring& rel,
+                               int count) {
+    for (int i = 0; i < count; ++i) {
+        Assert::AreEqual(std::to_string(i), ReadADS(layerPath, rel, LongStreamName(i)),
+            L"Every stream of the lower file must reach the upper copy");
+    }
+}
+
 // Each entry starts at a ULONG boundary, as NtQueryEaFile returns it.
 std::vector<BYTE> FullEaList(const std::vector<NamedExtendedAttribute>& attributes) {
     std::vector<BYTE> list;
@@ -510,19 +525,67 @@ public:
     TEST_METHOD(CopyUpFile_CopiesEveryStreamOfFileWithManyLongNamedStreams) {
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"many.txt", "content");
-        for (int i = 0; i < kLongStreamCount; ++i) {
-            WriteADS(env.Lower(0), L"many.txt", LongStreamName(i), std::to_string(i));
-        }
+        WriteNumberedLongStreams(env.Lower(0), L"many.txt", kLongStreamCount);
 
         CopyUpAndRenameRig rig(env.MakeConfig());
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"many.txt")));
 
-        for (int i = 0; i < kLongStreamCount; ++i) {
-            Assert::AreEqual(std::to_string(i),
-                             ReadADS(env.Upper(), L"many.txt", LongStreamName(i)),
-                L"Every stream of the lower file must reach the upper copy");
-        }
+        AssertNumberedLongStreams(env.Upper(), L"many.txt", kLongStreamCount);
+    }
+
+    TEST_METHOD(CopyUpFile_CopiesEveryStreamWhenStagedStreamPathIsLongerThanMaxPath) {
+        TempLayerEnvironment env(1);
+        constexpr size_t kPaddedWorkDirLength = 190;
+        Assert::IsTrue(env.Root().size() + 1 < kPaddedWorkDirLength,
+            L"Precondition: the test root leaves room to pad the work directory");
+        const std::wstring workDir = env.Root() + L"\\" +
+            std::wstring(kPaddedWorkDirLength - env.Root().size() - 1, L'w');
+        Assert::IsTrue(StagingAreaPath(workDir).size() + kListedStreamNameChars > MAX_PATH,
+            L"Precondition: a long stream path of a staged file is longer than MAX_PATH");
+        std::error_code ec;
+        fs::create_directories(L"\\\\?\\" + StagingAreaPath(workDir), ec);
+        Assert::IsFalse(static_cast<bool>(ec),
+            L"Precondition: the padded staging area must be creatable");
+
+        constexpr int kStreamCount = 3;
+        env.WriteFile(env.Lower(0), L"long.txt", "content");
+        WriteNumberedLongStreams(env.Lower(0), L"long.txt", kStreamCount);
+
+        LayerConfig config = env.MakeConfig();
+        config.workDirPath = workDir;
+        CopyUpAndRenameRig rig(config);
+        Assert::IsTrue(
+            rig.copyUp.GenerateStagingPath().size() +
+                std::wstring_view(kLayerMountADSStream).size() < MAX_PATH,
+            L"Precondition: the copy-up record stream of a staged file is shorter than MAX_PATH");
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"long.txt")));
+
+        AssertNumberedLongStreams(env.Upper(), L"long.txt", kStreamCount);
+    }
+
+    TEST_METHOD(CopyUpFile_CopiesEveryStreamWhenSourceStreamPathIsLongerThanMaxPath) {
+        TempLayerEnvironment env(1);
+        constexpr size_t kSourceFileLength = 190;
+        const std::wstring leaf = L"long.txt";
+        Assert::IsTrue(env.Lower(0).size() + leaf.size() + 2 < kSourceFileLength,
+            L"Precondition: the lower path leaves room to pad the source directory");
+        const std::wstring dir =
+            std::wstring(kSourceFileLength - env.Lower(0).size() - leaf.size() - 2, L'd');
+        const std::wstring rel = dir + L"\\" + leaf;
+        Assert::IsTrue(env.Lower(0).size() + 1 + rel.size() + kListedStreamNameChars > MAX_PATH,
+            L"Precondition: a long stream path of the source file is longer than MAX_PATH");
+
+        constexpr int kStreamCount = 3;
+        env.WriteFile(env.Lower(0), rel, "content");
+        WriteNumberedLongStreams(L"\\\\?\\" + env.Lower(0), rel, kStreamCount);
+
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(rel)));
+
+        AssertNumberedLongStreams(L"\\\\?\\" + env.Upper(), rel, kStreamCount);
     }
 
     TEST_METHOD(DirectoryRename_CopiesUserStreamNamedOverlayNotesOfChild) {

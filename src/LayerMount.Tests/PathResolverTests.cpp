@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "TestFixture.h"
 
+#include "LayerPath.h"
 #include "PathResolver.h"
 #include "WhiteoutManager.h"
 #include "Cache.h"
@@ -354,6 +355,58 @@ public:
             L"The file must resolve from the upper that holds it");
         Assert::AreEqual(L"\\\\?\\" + env.Upper() + L"\\up.txt", result.absolutePath,
             L"The resolved path must have one separator after the upper root");
+    }
+};
+
+TEST_CLASS(LayerPathTests) {
+public:
+    TEST_METHOD(WithExtendedPrefix_DrivePath_GetsExtendedPrefix) {
+        Assert::AreEqual(std::wstring(L"\\\\?\\C:\\dir\\file.txt"),
+                         WithExtendedPrefix(L"C:\\dir\\file.txt"));
+    }
+
+    TEST_METHOD(WithExtendedPrefix_UncPath_GetsExtendedUncPrefix) {
+        Assert::AreEqual(std::wstring(L"\\\\?\\UNC\\server\\share\\dir\\file.txt"),
+                         WithExtendedPrefix(L"\\\\server\\share\\dir\\file.txt"));
+    }
+
+    TEST_METHOD(WithExtendedPrefix_ExtendedOrDevicePath_ComesBackUnchanged) {
+        for (const std::wstring path : {
+                 std::wstring(L"\\\\?\\C:\\dir\\..\\file.txt"),
+                 std::wstring(L"\\\\?\\UNC\\server\\share\\file.txt"),
+                 std::wstring(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy3\\dir\\file.txt"),
+                 std::wstring(L"\\\\?\\Volume{6f1d6a3e-0000-0000-0000-100000000000}\\dir\\file.txt"),
+                 std::wstring(L"\\\\.\\C:\\dir\\file.txt")}) {
+            Assert::AreEqual(path, WithExtendedPrefix(path),
+                L"A path that already has an extended or device prefix must not change");
+        }
+    }
+
+    TEST_METHOD(WithExtendedPrefix_ForwardSlashesDotsAndDoubledSeparators_AreResolved) {
+        Assert::AreEqual(std::wstring(L"\\\\?\\C:\\dir\\file.txt"),
+                         WithExtendedPrefix(L"C:/dir/sub/.././/file.txt"));
+    }
+
+    TEST_METHOD(WithExtendedPrefix_NameEndingInDotOrSpace_KeepsIt) {
+        Assert::AreEqual(std::wstring(L"\\\\?\\C:\\dir\\name."),
+                         WithExtendedPrefix(L"C:\\dir\\name."));
+        Assert::AreEqual(std::wstring(L"\\\\?\\C:\\dir\\name "),
+                         WithExtendedPrefix(L"C:\\dir\\name "));
+        Assert::AreEqual(std::wstring(L"\\\\?\\UNC\\server\\share\\name."),
+                         WithExtendedPrefix(L"\\\\server\\share\\name."));
+    }
+
+    TEST_METHOD(WithExtendedPrefix_PathLongerThanMaxPath_IsResolvedAndPrefixed) {
+        const std::wstring segment(60, L's');
+        std::wstring body;
+        for (int i = 0; i < 5; ++i) {
+            body += L"\\" + segment;
+        }
+        const std::wstring path = L"C:" + body + L"\\skip\\..\\file.txt";
+        Assert::IsTrue(path.size() > MAX_PATH,
+            L"Precondition: the path is longer than MAX_PATH");
+
+        Assert::AreEqual(L"\\\\?\\C:" + body + L"\\file.txt", WithExtendedPrefix(path));
     }
 };
 

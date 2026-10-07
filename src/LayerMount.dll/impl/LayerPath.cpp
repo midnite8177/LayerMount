@@ -53,11 +53,60 @@ std::wstring NormalizePathPreserveCase(const std::wstring& path) {
     return result;
 }
 
+namespace {
+
+constexpr std::wstring_view kExtended = L"\\\\?\\";
+constexpr std::wstring_view kExtendedUnc = L"\\\\?\\UNC\\";
+constexpr std::wstring_view kDevice = L"\\\\.\\";
+constexpr std::wstring_view kUnc = L"\\\\";
+
+std::optional<std::wstring> FullPathName(const std::wstring& path) {
+    const DWORD size = ::GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (size == 0) {
+        return std::nullopt;
+    }
+    std::wstring full(size, L'\0');
+    const DWORD written = ::GetFullPathNameW(path.c_str(), size, full.data(), nullptr);
+    if (written == 0 || written >= size) {
+        return std::nullopt;
+    }
+    full.resize(written);
+    return full;
+}
+
+// Whether path is a full drive or UNC path with backslash separators and no
+// empty, "." or ".." component, so that it needs only the prefix.
+bool IsFullPathAsWritten(std::wstring_view path) {
+    size_t start = 0;
+    if (path.size() >= 3 && path[1] == L':' && path[2] == L'\\') {
+        start = 3;
+    } else if (path.rfind(kUnc, 0) == 0 && path.size() > kUnc.size() &&
+               path[kUnc.size()] != L'\\') {
+        start = kUnc.size();
+    } else {
+        return false;
+    }
+    if (path.find(L'/') != std::wstring_view::npos) {
+        return false;
+    }
+    for (size_t pos = start;;) {
+        const size_t end = std::min(path.find(L'\\', pos), path.size());
+        const std::wstring_view component = path.substr(pos, end - pos);
+        if (component.empty() || component == L"." || component == L"..") {
+            return false;
+        }
+        if (end == path.size()) {
+            return true;
+        }
+        pos = end + 1;
+    }
+}
+
+}
+
 std::wstring WithoutExtendedPrefix(const std::wstring& path) {
-    constexpr std::wstring_view kExtendedUnc = L"\\\\?\\UNC\\";
-    constexpr std::wstring_view kExtended = L"\\\\?\\";
     if (path.rfind(kExtendedUnc, 0) == 0) {
-        return L"\\\\" + path.substr(kExtendedUnc.size());
+        return std::wstring(kUnc) + path.substr(kExtendedUnc.size());
     }
     if (path.rfind(kExtended, 0) == 0 && path.size() >= kExtended.size() + 2 &&
         path[kExtended.size() + 1] == L':') {
@@ -66,18 +115,31 @@ std::wstring WithoutExtendedPrefix(const std::wstring& path) {
     return path;
 }
 
+std::wstring WithExtendedPrefix(const std::wstring& path) {
+    if (path.rfind(kExtended, 0) == 0 || path.rfind(kDevice, 0) == 0) {
+        return path;
+    }
+    std::wstring full = path;
+    if (!IsFullPathAsWritten(path)) {
+        std::optional<std::wstring> resolved = FullPathName(path);
+        if (!resolved.has_value()) {
+            return path;
+        }
+        full = std::move(*resolved);
+    }
+    if (full.rfind(kUnc, 0) == 0) {
+        return std::wstring(kExtendedUnc) + full.substr(kUnc.size());
+    }
+    return std::wstring(kExtended) + full;
+}
+
 std::wstring ComparablePath(const std::wstring& path) {
     std::wstring plain = path;
     std::replace(plain.begin(), plain.end(), L'/', L'\\');
     plain = WithoutExtendedPrefix(plain);
-    const DWORD size = ::GetFullPathNameW(plain.c_str(), 0, nullptr, nullptr);
-    if (size != 0) {
-        std::wstring full(size, L'\0');
-        const DWORD written = ::GetFullPathNameW(plain.c_str(), size, full.data(), nullptr);
-        if (written != 0 && written < size) {
-            full.resize(written);
-            plain = std::move(full);
-        }
+    std::optional<std::wstring> full = FullPathName(plain);
+    if (full.has_value()) {
+        plain = std::move(*full);
     }
     while (!plain.empty() && plain.back() == L'\\') {
         plain.pop_back();

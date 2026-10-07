@@ -245,7 +245,7 @@ NTSTATUS ReadStreamList(HANDLE handle, std::vector<BYTE>& list) {
 // dehydrated range when no sync provider is connected.
 NTSTATUS ReadStreamListOfPath(const std::wstring& path, std::vector<BYTE>& list) {
     ScopedHandle handle(::CreateFileW(
-        path.c_str(), FILE_READ_ATTRIBUTES,
+        WithExtendedPrefix(path).c_str(), FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
     if (!handle.IsValid()) {
@@ -518,13 +518,15 @@ LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
 
 NTSTATUS CopyUserAlternateDataStreams(const std::wstring& srcPath,
                                       const std::wstring& dstPath) {
+    const std::wstring srcExtended = WithExtendedPrefix(srcPath);
+    const std::wstring dstExtended = WithExtendedPrefix(dstPath);
     std::vector<BYTE> list;
     const NTSTATUS listStatus = ReadStreamListOfPath(srcPath, list);
     if (!NT_SUCCESS(listStatus)) {
         return listStatus;
     }
     return ForEachUserStream(list, [&](std::wstring_view name) {
-        return CopyAlternateStream(srcPath, dstPath, name);
+        return CopyAlternateStream(srcExtended, dstExtended, name);
     });
 }
 
