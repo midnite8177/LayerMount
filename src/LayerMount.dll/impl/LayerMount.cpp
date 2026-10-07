@@ -411,7 +411,7 @@ bool IsReservedRelativePath(const std::wstring& normalized) {
 
 bool EnsureDirectoryExists(const std::wstring& path) {
     std::error_code ec;
-    std::filesystem::create_directories(path, ec);
+    std::filesystem::create_directories(WithExtendedPrefix(path), ec);
     if (ec) {
         return false;
     }
@@ -612,8 +612,9 @@ NTSTATUS LayerMount::FillFileInfo(const std::wstring& path,
                                   InternalFileInfo* fileInfo) {
     memset(fileInfo, 0, sizeof(*fileInfo));
 
+    const std::wstring extendedPath = WithExtendedPrefix(path);
     WIN32_FILE_ATTRIBUTE_DATA attrData;
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attrData)) {
+    if (!GetFileAttributesExW(extendedPath.c_str(), GetFileExInfoStandard, &attrData)) {
         return NtStatusFromWin32(GetLastError());
     }
 
@@ -632,10 +633,10 @@ NTSTATUS LayerMount::FillFileInfo(const std::wstring& path,
     fileInfo->ReparseTag = 0;
     if ((attrData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
         WIN32_FIND_DATAW fd{};
-        HANDLE fh = ::FindFirstFileW(path.c_str(), &fd);
+        HANDLE fh = ::FindFirstFileW(extendedPath.c_str(), &fd);
         if (fh != INVALID_HANDLE_VALUE) {
             ::FindClose(fh);
-            fileInfo->ReparseTag = fd.dwReserved0; // reparse tag
+            fileInfo->ReparseTag = fd.dwReserved0;
         }
     }
 
@@ -2630,7 +2631,7 @@ NTSTATUS LayerMount::SetSecurity(const std::wstring& relativePath,
     }
 
     std::wstring upperPath = pathResolver_->GetUpperPath(normalized);
-    if (!::SetFileSecurityW(upperPath.c_str(),
+    if (!::SetFileSecurityW(WithExtendedPrefix(upperPath).c_str(),
             static_cast<SECURITY_INFORMATION>(securityInformation), sd)) {
         return NtStatusFromWin32(::GetLastError());
     }
@@ -2974,7 +2975,7 @@ NTSTATUS LayerMount::EnumerateStreams(const std::wstring& relativePath,
 
     WIN32_FIND_STREAM_DATA findData{};
     HANDLE h = ::FindFirstStreamW(
-        resolved.absolutePath.c_str(),
+        WithExtendedPrefix(resolved.absolutePath).c_str(),
         FindStreamInfoStandard,
         &findData,
         0);

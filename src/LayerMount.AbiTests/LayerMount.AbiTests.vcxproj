@@ -83,6 +83,7 @@
     <ClCompile Include="AbiSecurityTests.cpp" />
     <ClCompile Include="AbiReparsePointTests.cpp" />
     <ClCompile Include="AbiAdsWriteTests.cpp" />
+    <ClCompile Include="AbiDeepLowerPathTests.cpp" />
     <ClCompile Include="AbiDeepUpperPathTests.cpp" />
     <ClCompile Include="AbiPathTests.cpp" />
     <ClCompile Include="AbiVhdTests.cpp" />
@@ -109,6 +110,7 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="AbiTestFixture.h" />
+    <ClInclude Include="DeepPathAbiHelpers.h" />
   </ItemGroup>
 
   <ItemGroup>

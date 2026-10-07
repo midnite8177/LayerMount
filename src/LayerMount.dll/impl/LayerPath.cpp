@@ -813,7 +813,7 @@ LayerWalk WalkToFirstNonDirectory(const std::wstring& layerPath,
 // entry's attributes, other than a missing path, counts as holding it, so an
 // unreadable higher layer hides a lower link.
 bool HoldsEntryInLayer(const std::wstring& layerPath, const std::wstring& relativePath) {
-    if (GetFileAttributesW(JoinDirPath(layerPath, relativePath).c_str()) !=
+    if (GetFileAttributesW(WithExtendedPrefix(JoinDirPath(layerPath, relativePath)).c_str()) !=
         INVALID_FILE_ATTRIBUTES) {
         return true;
     }
@@ -826,7 +826,7 @@ bool HoldsEntryInLayer(const std::wstring& layerPath, const std::wstring& relati
 ComponentKind ComponentKindInLayer(const std::wstring& layerPath,
                                    const std::wstring& relativePath) {
     const std::wstring componentPath = JoinDirPath(layerPath, relativePath);
-    const DWORD attrs = GetFileAttributesW(componentPath.c_str());
+    const DWORD attrs = GetFileAttributesW(WithExtendedPrefix(componentPath).c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         const DWORD error = ::GetLastError();
         return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND

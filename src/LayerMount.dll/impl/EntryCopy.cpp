@@ -42,7 +42,8 @@ bool TryGetStableIndexNumberFromHandle(HANDLE h, uint64_t& outIndexNumber) {
 
 bool TryGetStableIndexNumberFromPath(const std::wstring& path,
                                      uint64_t& outIndexNumber) {
-    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    const std::wstring extendedPath = WithExtendedPrefix(path);
+    const DWORD attrs = ::GetFileAttributesW(extendedPath.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         return false;
     }
@@ -55,7 +56,7 @@ bool TryGetStableIndexNumberFromPath(const std::wstring& path,
         flags |= FILE_FLAG_OPEN_REPARSE_POINT;
     }
 
-    HANDLE h = ::CreateFileW(path.c_str(),
+    HANDLE h = ::CreateFileW(extendedPath.c_str(),
                              FILE_READ_ATTRIBUTES,
                              FILE_SHARE_READ | FILE_SHARE_WRITE |
                                  FILE_SHARE_DELETE,
@@ -103,7 +104,7 @@ void SetCompressed(HANDLE handle) {
 }
 
 void SetCompressedDirectory(const std::wstring& path) {
-    HANDLE handle = CreateFileW(path.c_str(),
+    HANDLE handle = CreateFileW(WithExtendedPrefix(path).c_str(),
                                 GENERIC_READ | GENERIC_WRITE,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                                 nullptr, OPEN_EXISTING,
@@ -427,7 +428,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
                                  const std::wstring& dstAbsolute,
                                  DWORD srcAttrs) {
     HANDLE srcH = CreateFileW(
-        srcAbsolute.c_str(),
+        WithExtendedPrefix(srcAbsolute).c_str(),
         FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
@@ -447,6 +448,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
     }
     CloseHandle(srcH);
 
+    const std::wstring extendedDst = WithExtendedPrefix(dstAbsolute);
     const bool isDir = (srcAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (isDir) {
         const NTSTATUS dirStatus = CreateDirectoryOrUseExisting(dstAbsolute);
@@ -454,7 +456,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
             return dirStatus;
         }
     } else {
-        HANDLE dstCreate = CreateFileW(dstAbsolute.c_str(), GENERIC_WRITE, 0,
+        HANDLE dstCreate = CreateFileW(extendedDst.c_str(), GENERIC_WRITE, 0,
                                          nullptr, CREATE_ALWAYS,
                                          FILE_ATTRIBUTE_NORMAL, nullptr);
         if (dstCreate == INVALID_HANDLE_VALUE) {
@@ -464,7 +466,7 @@ NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
     }
 
     HANDLE dstH = CreateFileW(
-        dstAbsolute.c_str(),
+        extendedDst.c_str(),
         FILE_WRITE_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
@@ -491,10 +493,11 @@ NewUpperEntryKind NewUpperEntryKindOf(DWORD attributes) {
 }
 
 void RemoveNewUpperEntry(const std::wstring& upperPath, NewUpperEntryKind kind) {
+    const std::wstring extendedPath = WithExtendedPrefix(upperPath);
     if (kind == NewUpperEntryKind::Directory) {
-        ::RemoveDirectoryW(upperPath.c_str());
+        ::RemoveDirectoryW(extendedPath.c_str());
     } else {
-        ::DeleteFileW(upperPath.c_str());
+        ::DeleteFileW(extendedPath.c_str());
     }
 }
 
@@ -595,7 +598,7 @@ void SetCompressedIfSource(HANDLE handle, DWORD srcAttrs) {
 }
 
 NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring& dstAbs) {
-    const DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
+    const DWORD srcAttrs = ::GetFileAttributesW(WithExtendedPrefix(srcAbs).c_str());
     if (srcAttrs != INVALID_FILE_ATTRIBUTES) {
         if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
             SetCompressedDirectory(dstAbs);
@@ -612,8 +615,9 @@ NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring
 }
 
 HANDLE OpenSourceFileForCopy(const std::wstring& path) {
-    return ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                         FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    return ::CreateFileW(WithExtendedPrefix(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS,
+                         nullptr);
 }
 
 NTSTATUS CopyFileDataKeepingHoles(HANDLE srcHandle, HANDLE dstHandle) {
@@ -682,7 +686,7 @@ EntryTimes EntryTimesOf(const WIN32_FILE_ATTRIBUTE_DATA& data) {
 
 std::optional<EntryTimes> ReadEntryTimes(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+    if (!::GetFileAttributesExW(WithExtendedPrefix(path).c_str(), GetFileExInfoStandard, &data)) {
         return std::nullopt;
     }
     return EntryTimesOf(data);
@@ -692,7 +696,7 @@ bool WriteEntryTimes(const std::wstring& path,
                      const EntryTimes& times,
                      std::optional<DWORD> attributes) {
     ScopedHandle handle(::CreateFileW(
-        path.c_str(), FILE_WRITE_ATTRIBUTES,
+        WithExtendedPrefix(path).c_str(), FILE_WRITE_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
     if (!handle.IsValid()) {
@@ -725,7 +729,7 @@ bool WriteEntryTimes(const std::wstring& path,
 
 bool WriteOwnAttributes(const std::wstring& path, DWORD attributes) {
     ScopedHandle handle(::CreateFileW(
-        path.c_str(), FILE_WRITE_ATTRIBUTES,
+        WithExtendedPrefix(path).c_str(), FILE_WRITE_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     if (!handle.IsValid()) {
@@ -800,7 +804,7 @@ NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring&
         return STATUS_PROCEDURE_NOT_FOUND;
     }
     ScopedHandle srcHandle(::CreateFileW(
-        srcPath.c_str(), FILE_READ_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        WithExtendedPrefix(srcPath).c_str(), FILE_READ_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr));
     if (!srcHandle.IsValid()) {
@@ -834,7 +838,7 @@ NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring&
         }
         if (!dstHandle.IsValid()) {
             dstHandle.Reset(::CreateFileW(
-                dstPath.c_str(), FILE_WRITE_EA,
+                WithExtendedPrefix(dstPath).c_str(), FILE_WRITE_EA,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
             if (!dstHandle.IsValid()) {
@@ -877,9 +881,9 @@ NTSTATUS WriteSecurityToInheritAs(const std::wstring& dirAbs, const std::wstring
     PACL parentDacl = nullptr;
     PACL parentSacl = nullptr;
     PSECURITY_DESCRIPTOR rawParentSd = nullptr;
-    const DWORD readError = ::GetNamedSecurityInfoW(parentAbs.c_str(), SE_FILE_OBJECT, lists,
-                                                    nullptr, nullptr, &parentDacl, &parentSacl,
-                                                    &rawParentSd);
+    const DWORD readError = ::GetNamedSecurityInfoW(WithExtendedPrefix(parentAbs).c_str(),
+                                                    SE_FILE_OBJECT, lists, nullptr, nullptr,
+                                                    &parentDacl, &parentSacl, &rawParentSd);
     if (readError != ERROR_SUCCESS) {
         return NtStatusFromWin32(readError);
     }
@@ -890,8 +894,9 @@ NTSTATUS WriteSecurityToInheritAs(const std::wstring& dirAbs, const std::wstring
     const SECURITY_INFORMATION protection = (lists & SACL_SECURITY_INFORMATION) != 0
         ? PROTECTED_DACL_SECURITY_INFORMATION | PROTECTED_SACL_SECURITY_INFORMATION
         : PROTECTED_DACL_SECURITY_INFORMATION;
+    std::wstring extendedDir = WithExtendedPrefix(dirAbs);
     const DWORD writeError = ::SetNamedSecurityInfoW(
-        const_cast<LPWSTR>(dirAbs.c_str()), SE_FILE_OBJECT, lists | protection,
+        extendedDir.data(), SE_FILE_OBJECT, lists | protection,
         nullptr, nullptr, parentDacl, parentSacl);
     if (writeError != ERROR_SUCCESS) {
         return NtStatusFromWin32(writeError);

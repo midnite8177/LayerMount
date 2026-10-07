@@ -3285,6 +3285,34 @@ public:
             L"The junction's target must not be hidden");
     }
 
+    TEST_METHOD(ReplaceRename_DirectoryOntoDirectoryInDeepLinkTargetDirectory_HidesTheDestinationWhileItIsAside) {
+        LayerMountTestShared::AssertHostRefusesPlainPathsPastMaxPath();
+        TempLayerEnvironment env(1);
+        const std::wstring deep = LayerMountTestShared::DeepLeafName(env.Upper() + L"\\link", L"Deep");
+        env.CreateDir(LayerMountTestShared::ExtendedFormOf(env.Root()), L"target\\" + deep + L"\\src");
+        env.CreateDir(LayerMountTestShared::ExtendedFormOf(env.Root()), L"target\\" + deep + L"\\dst");
+        if (!LinkToPrimedTargetCreatedOrSkipped(env, LayerSource::Upper, CreateDirectoryJunction)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+        const ScopedHandle heldDestination(::CreateFileW(
+            LayerMountTestShared::ExtendedPathUnder(env.Root(), L"target\\" + deep + L"\\dst").c_str(),
+            FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        Assert::IsTrue(heldDestination.IsValid(), L"The test must hold the destination dst open");
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"link\\" + deep + L"\\src", L"link\\" + deep + L"\\dst",
+                         kReplaceIfExists, kNoCallerPid),
+            L"A replace-rename of a directory onto a directory in a deep link target directory must succeed");
+
+        const DWORD attributes = AttributesOfHeld(heldDestination);
+        Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, attributes,
+            L"The test must read the attributes of the held destination");
+        Assert::IsTrue((attributes & FILE_ATTRIBUTE_HIDDEN) != 0,
+            L"The replaced directory must be hidden once it moved aside in the deep directory");
+    }
+
     TEST_METHOD(ReplaceRename_LinkOntoLinkInLinkTargetWhenTheWorkDirectoryRefusesEntries_ReplacesTheLink) {
         for (const LayerSource linkSource : kLinkLayerSources) {
             for (const LinkCreator createLink : kDirectoryLinkCreators) {

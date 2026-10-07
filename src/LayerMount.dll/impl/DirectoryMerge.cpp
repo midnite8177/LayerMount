@@ -109,7 +109,7 @@ LayerDirectoryScan ScanLayerDirectory(const std::wstring& layerPath,
     LayerDirectoryScan scan{STATUS_SUCCESS, {}, {}};
     WIN32_FIND_DATAW findData;
     const std::wstring searchPath = JoinLayerScanPath(layerPath, dirNorm);
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
+    HANDLE hFind = FindFirstFileW(WithExtendedPrefix(searchPath).c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
         const DWORD openError = ::GetLastError();
         if (!IsDirectoryAbsentError(openError)) {

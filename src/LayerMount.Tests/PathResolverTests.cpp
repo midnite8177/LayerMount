@@ -221,6 +221,7 @@ public:
     }
 
     TEST_METHOD(ExistsInUpper_FilePathLongerThanMaxPath_ReturnsTrue) {
+        LayerMountTestShared::AssertHostRefusesPlainPathsPastMaxPath();
         TempLayerEnvironment env(0);
         const std::wstring name = LayerMountTestShared::DeepLeafName(env.Upper(), L"");
         env.WriteFile(L"\\\\?\\" + env.Upper(), name, "x");
@@ -235,6 +236,7 @@ public:
     }
 
     TEST_METHOD(UpperAttributes_FilePathLongerThanMaxPath_ReturnsItsAttributes) {
+        LayerMountTestShared::AssertHostRefusesPlainPathsPastMaxPath();
         TempLayerEnvironment env(0);
         const std::wstring name = LayerMountTestShared::DeepLeafName(env.Upper(), L"");
         const std::wstring extendedRoot = L"\\\\?\\" + env.Upper();

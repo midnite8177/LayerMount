@@ -1,41 +1,16 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "DeepPathAbiHelpers.h"
 #include "StreamTestHelpers.h"
 
-#include <aclapi.h>
 #include <sddl.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
-using LayerMountTestShared::DeepLeafName;
-using LayerMountTestShared::ExtendedPathUnder;
 using LayerMountTestShared::HasStream;
 
 namespace LayerMountAbiTests {
 
 namespace {
-
-const std::wstring kParentName = L"dir";
-
-std::wstring DeepName(const TempLayerEnv& env, const std::wstring& prefix) {
-    return DeepLeafName(env.Upper() + L"\\" + kParentName, prefix);
-}
-
-std::wstring MountPathOf(const std::wstring& name) {
-    return L"\\" + kParentName + L"\\" + name;
-}
-
-std::wstring ExtendedHostPath(const std::wstring& layer, const std::wstring& name) {
-    return ExtendedPathUnder(layer, kParentName + L"\\" + name);
-}
-
-void MakeParentIn(const std::wstring& layer) {
-    std::filesystem::create_directories(
-        LayerMountTestShared::ExtendedFormOf(layer + L"\\" + kParentName));
-}
-
-bool HostEntryExists(const std::wstring& extendedPath) {
-    return ::GetFileAttributesW(extendedPath.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
 
 std::wstring StoredNameOf(const std::wstring& extendedPath) {
     WIN32_FIND_DATAW found{};
@@ -49,43 +24,19 @@ void CreateWithContent(LM_HANDLE mount, const std::wstring& name, const std::str
     WriteThroughOverlay(mount, MountPathOf(name).c_str(), text);
 }
 
-std::string ReadThroughMount(LM_HANDLE mount, const std::wstring& name, UINT32 access) {
-    OpenedFile opened;
-    Assert::AreEqual<HRESULT>(S_OK,
-        OpenOverlayFile(mount, MountPathOf(name).c_str(), access, kNoCreateOptions, opened),
-        L"The open of the deep file succeeds");
-    HRESULT readHr = E_FAIL;
-    const std::string content = ReadThroughHandle(opened.handle, &readHr);
-    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(opened.handle));
-    Assert::AreEqual<HRESULT>(S_OK, readHr, L"The read of the deep file succeeds");
-    return content;
-}
-
-std::wstring DaclSddlOf(const std::wstring& path) {
-    PSECURITY_DESCRIPTOR sd = nullptr;
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        ::GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-                                nullptr, nullptr, nullptr, nullptr, &sd),
-        L"GetNamedSecurityInfoW reads the DACL of the host file");
-    LPWSTR sddl = nullptr;
-    const BOOL converted = ::ConvertSecurityDescriptorToStringSecurityDescriptorW(
-        sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &sddl, nullptr);
-    ::LocalFree(sd);
-    Assert::IsTrue(converted != FALSE, L"The DACL converts to SDDL");
-    const std::wstring text(sddl);
-    ::LocalFree(sddl);
-    return text;
-}
-
 }
 
 TEST_CLASS(AbiDeepUpperPathTests) {
 public:
+    TEST_CLASS_INITIALIZE(ClassInit) {
+        LayerMountTestShared::AssertHostRefusesPlainPathsPastMaxPath();
+    }
+
     TEST_METHOD(CreateFile_DeepUpperFile_WritesTheHostFileThatOpenReads) {
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
 
         CreateWithContent(mount.Get(), name, "deep");
 
@@ -93,7 +44,7 @@ public:
             ReadAllBytes(ExtendedHostPath(env.Upper(), name)),
             L"The create writes the deep host file");
         Assert::AreEqual<std::string>("deep",
-            ReadThroughMount(mount.Get(), name, GENERIC_READ),
+            ReadThroughMount(mount.Get(), MountPathOf(name), GENERIC_READ),
             L"The open finds the deep file that the create made");
     }
 
@@ -101,7 +52,7 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         PSECURITY_DESCRIPTOR sd = nullptr;
         ULONG sdSize = 0;
         Assert::IsTrue(::ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -125,7 +76,7 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         CreateWithContent(mount.Get(), name, "host");
 
         OpenedFile created;
@@ -145,7 +96,7 @@ public:
     TEST_METHOD(CreateFile_StreamOnDeepUpperDirectory_ReturnsFileIsADirectory) {
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         std::filesystem::create_directories(ExtendedHostPath(env.Upper(), name));
         LayerMountHolder mount = CreateLayerMount(env);
 
@@ -162,7 +113,7 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
 
         OpenedFile created;
         Assert::AreEqual<HRESULT>(S_OK,
@@ -181,11 +132,11 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         WriteText(ExtendedHostPath(env.Upper(), name), "maximum");
 
         Assert::AreEqual<std::string>("maximum",
-            ReadThroughMount(mount.Get(), name, MAXIMUM_ALLOWED),
+            ReadThroughMount(mount.Get(), MountPathOf(name), MAXIMUM_ALLOWED),
             L"The open with MAXIMUM_ALLOWED reads the deep file");
     }
 
@@ -193,12 +144,12 @@ public:
         TempLayerEnv env(1);
         MakeParentIn(env.Upper());
         MakeParentIn(env.Lower(0));
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         WriteText(ExtendedHostPath(env.Lower(0), name), "lower");
         LayerMountHolder mount = CreateLayerMount(env);
 
         Assert::AreEqual<std::string>("lower",
-            ReadThroughMount(mount.Get(), name, GENERIC_READ),
+            ReadThroughMount(mount.Get(), MountPathOf(name), GENERIC_READ),
             L"The read-only open finds the deep lower file");
     }
 
@@ -206,7 +157,7 @@ public:
         TempLayerEnv env(1);
         MakeParentIn(env.Upper());
         MakeParentIn(env.Lower(0));
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         WriteText(ExtendedHostPath(env.Lower(0), name), "lower");
         WriteText(ExtendedHostPath(env.Upper(), L".wh." + name), "");
         LayerMountHolder mount = CreateLayerMount(env);
@@ -218,7 +169,7 @@ public:
     TEST_METHOD(GetSecurity_DeepUpperFile_ReportsItsAttributes) {
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         const std::wstring hostPath = ExtendedHostPath(env.Upper(), name);
         WriteText(hostPath, "secured");
         Assert::IsTrue(::SetFileAttributesW(hostPath.c_str(), FILE_ATTRIBUTE_HIDDEN) != FALSE,
@@ -240,7 +191,7 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         CreateWithContent(mount.Get(), name, "content");
 
         OpenedFile opened;
@@ -264,8 +215,8 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring source = DeepName(env, L"Source");
-        const std::wstring target = DeepName(env, L"Target");
+        const std::wstring source = DeepNameSizedBy(env.Upper(), L"Source");
+        const std::wstring target = DeepNameSizedBy(env.Upper(), L"Target");
         CreateWithContent(mount.Get(), source, "moved");
 
         constexpr BOOL replaceIfExists = FALSE;
@@ -280,7 +231,7 @@ public:
         AssertOpenFailsNotFound(mount.Get(), MountPathOf(source).c_str(),
             L"The old deep name is gone from the mount");
         Assert::AreEqual<std::string>("moved",
-            ReadThroughMount(mount.Get(), target, GENERIC_READ),
+            ReadThroughMount(mount.Get(), MountPathOf(target), GENERIC_READ),
             L"The new deep name opens the moved file");
     }
 
@@ -288,8 +239,8 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring source = DeepName(env, L"Source");
-        const std::wstring target = DeepName(env, L"Target");
+        const std::wstring source = DeepNameSizedBy(env.Upper(), L"Source");
+        const std::wstring target = DeepNameSizedBy(env.Upper(), L"Target");
         CreateWithContent(mount.Get(), source, "source");
         CreateWithContent(mount.Get(), target, "target");
 
@@ -309,8 +260,8 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring source = DeepName(env, L"Source");
-        const std::wstring target = DeepName(env, L"Target");
+        const std::wstring source = DeepNameSizedBy(env.Upper(), L"Source");
+        const std::wstring target = DeepNameSizedBy(env.Upper(), L"Target");
         CreateWithContent(mount.Get(), source, "moved");
 
         LM_FILE_HANDLE opened =
@@ -336,7 +287,7 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         CreateWithContent(mount.Get(), name, "gone");
 
         Assert::AreEqual<HRESULT>(S_OK,
@@ -352,7 +303,7 @@ public:
         TempLayerEnv env(0);
         MakeParentIn(env.Upper());
         LayerMountHolder mount = CreateLayerMount(env);
-        const std::wstring name = DeepName(env, L"Deep");
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
         CreateWithContent(mount.Get(), name, "gone");
 
         LM_FILE_HANDLE opened =
@@ -365,6 +316,22 @@ public:
             L"The delete removes the deep host file");
         AssertOpenFailsNotFound(mount.Get(), MountPathOf(name).c_str(),
             L"The deleted deep file is gone from the mount");
+    }
+
+    TEST_METHOD(DeleteFile_DeepUpperDirectory_RemovesTheHostDirectory) {
+        TempLayerEnv env(0);
+        MakeParentIn(env.Upper());
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring name = DeepNameSizedBy(env.Upper(), L"Deep");
+        CreateDirectoryThroughMount(mount.Get(), MountPathOf(name));
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountDeleteFile(mount.Get(), MountPathOf(name).c_str()));
+
+        Assert::IsFalse(HostEntryExists(ExtendedHostPath(env.Upper(), name)),
+            L"The delete removes the deep upper directory");
+        AssertOpenFailsNotFound(mount.Get(), MountPathOf(name).c_str(),
+            L"The deleted deep directory is gone from the mount");
     }
 };
 

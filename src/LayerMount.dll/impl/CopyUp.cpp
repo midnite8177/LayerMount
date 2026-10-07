@@ -82,7 +82,7 @@ bool ClearReadOnly(const std::wstring& path, DWORD attributes) {
         return true;
     }
     ScopedHandle entry(::CreateFileW(
-        path.c_str(), FILE_WRITE_ATTRIBUTES,
+        WithExtendedPrefix(path).c_str(), FILE_WRITE_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
     if (!entry.IsValid()) {
@@ -100,7 +100,7 @@ bool ClearReadOnly(const std::wstring& path, DWORD attributes) {
 // Hides the entry at path, a link itself and not its target. Returns the
 // attributes it had before, or none when the read or the write fails.
 std::optional<DWORD> HideEntry(const std::wstring& path) {
-    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    const DWORD attributes = ::GetFileAttributesW(WithExtendedPrefix(path).c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES ||
         !WriteOwnAttributes(path, attributes | FILE_ATTRIBUTE_HIDDEN)) {
         return std::nullopt;
@@ -286,7 +286,7 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
                                     DWORD srcAttrs,
                                     const std::wstring& workPath) {
     ScopedHandle dstHandle(CreateFileW(
-        workPath.c_str(),
+        WithExtendedPrefix(workPath).c_str(),
         GENERIC_READ | GENERIC_WRITE,
         0,
         nullptr,
@@ -430,7 +430,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
-    DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
+    DWORD srcAttrs = GetFileAttributesW(WithExtendedPrefix(source.absolutePath).c_str());
     const std::wstring workPath = GenerateStagingPath();
     FileBasicInfoGuard basicInfo(srcHandle.Get(), StagedFileAttributes(srcAttrs), workPath);
 
@@ -476,7 +476,7 @@ NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
                                              const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
                                              const std::wstring& workPath) {
     ScopedHandle dstHandle(CreateFileW(
-        workPath.c_str(),
+        WithExtendedPrefix(workPath).c_str(),
         GENERIC_READ | GENERIC_WRITE,
         0,
         nullptr,
@@ -525,7 +525,8 @@ NTSTATUS CopyUp::LowerUserStreamStatus(const std::wstring& normalized) {
 
 NTSTATUS CopyUp::BuildMetacopyShell(const std::wstring& sourcePath, const std::wstring& workPath) {
     WIN32_FILE_ATTRIBUTE_DATA srcAttrs;
-    if (!GetFileAttributesExW(sourcePath.c_str(), GetFileExInfoStandard, &srcAttrs)) {
+    if (!GetFileAttributesExW(WithExtendedPrefix(sourcePath).c_str(), GetFileExInfoStandard,
+                              &srcAttrs)) {
         return ::LayerMount::NtStatusFromWin32(GetLastError());
     }
 
@@ -596,7 +597,8 @@ FileCopyUpResult CopyUp::CopyUpFileOrShell(const std::wstring& relativePath,
     }
     if (shellOnlyAboveBytes.has_value()) {
         WIN32_FILE_ATTRIBUTE_DATA data{};
-        if (!::GetFileAttributesExW(source.absolutePath.c_str(), GetFileExInfoStandard, &data)) {
+        if (!::GetFileAttributesExW(WithExtendedPrefix(source.absolutePath).c_str(),
+                                    GetFileExInfoStandard, &data)) {
             return copyInFull();
         }
         LARGE_INTEGER size{};
@@ -658,7 +660,8 @@ NTSTATUS CopyUp::CompleteLazyCopyUp(const std::wstring& relativePath) {
 
     WIN32_FILE_ATTRIBUTE_DATA shellInfo{};
     const std::optional<DWORD> shellAttributes =
-        GetFileAttributesExW(upperPath.c_str(), GetFileExInfoStandard, &shellInfo)
+        GetFileAttributesExW(WithExtendedPrefix(upperPath).c_str(), GetFileExInfoStandard,
+                             &shellInfo)
             ? std::optional<DWORD>(shellInfo.dwFileAttributes)
             : std::nullopt;
     // The write handle on the shell lives inside FillMetacopyShell, which
@@ -700,7 +703,7 @@ NTSTATUS CopyUp::FillMetacopyShell(ScopedHandle& srcHandle,
     // already holds a writable handle on the file does not fail this open
     // with a sharing violation.
     ScopedHandle dstHandle(CreateFileW(
-        upperPath.c_str(),
+        WithExtendedPrefix(upperPath).c_str(),
         GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
@@ -780,9 +783,10 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         return CopyUpReparseCloneAndCount(normalized, *target);
     }
 
-    DWORD srcAttrs = GetFileAttributesW(source.absolutePath.c_str());
+    const std::wstring extendedSource = WithExtendedPrefix(source.absolutePath);
+    DWORD srcAttrs = GetFileAttributesW(extendedSource.c_str());
     ScopedHandle srcHandle(CreateFileW(
-        source.absolutePath.c_str(),
+        extendedSource.c_str(),
         GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,
@@ -813,7 +817,7 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
 
 NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
                                       const std::wstring& stagedPath) {
-    if (!::CreateDirectoryW(stagedPath.c_str(), nullptr)) {
+    if (!::CreateDirectoryW(WithExtendedPrefix(stagedPath).c_str(), nullptr)) {
         return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
     // The staged directory has no children yet, so its layout goes on now
@@ -1017,8 +1021,9 @@ bool CopyUp::CopySecurityDescriptor(const std::wstring& srcPath,
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
         DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION);
 
+    const std::wstring extendedSrc = WithExtendedPrefix(srcPath);
     DWORD sdSize = 0;
-    GetFileSecurityW(srcPath.c_str(), secInfo, nullptr, 0, &sdSize);
+    GetFileSecurityW(extendedSrc.c_str(), secInfo, nullptr, 0, &sdSize);
     if (sdSize == 0) {
         return false;
     }
@@ -1026,11 +1031,11 @@ bool CopyUp::CopySecurityDescriptor(const std::wstring& srcPath,
     std::vector<BYTE> sdBuffer(sdSize);
     auto* sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sdBuffer.data());
 
-    if (!GetFileSecurityW(srcPath.c_str(), secInfo, sd, sdSize, &sdSize)) {
+    if (!GetFileSecurityW(extendedSrc.c_str(), secInfo, sd, sdSize, &sdSize)) {
         return false;
     }
 
-    return SetFileSecurityW(dstPath.c_str(), secInfo, sd) != FALSE;
+    return SetFileSecurityW(WithExtendedPrefix(dstPath).c_str(), secInfo, sd) != FALSE;
 }
 
 bool CopyUp::CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle) {

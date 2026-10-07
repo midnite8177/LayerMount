@@ -45,6 +45,34 @@ inline std::wstring ExtendedPathUnder(const std::wstring& layer, const std::wstr
     return ExtendedFormOf(path);
 }
 
+inline void AssertHostRefusesPlainPathsPastMaxPath() {
+    using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
+    wchar_t tempDirectory[MAX_PATH] = {};
+    const DWORD length = ::GetTempPathW(MAX_PATH, tempDirectory);
+    Assert::IsTrue(length > 0 && length < MAX_PATH,
+        L"Precondition: GetTempPathW returns the temporary directory");
+    const std::wstring parent = std::wstring(tempDirectory, length - 1) + L"\\LongPathProbe" +
+                                std::to_wstring(::GetCurrentProcessId()) +
+                                std::wstring(kDeepHostPathLength / 2, L'n');
+    const std::wstring extendedParent = ExtendedFormOf(parent);
+    Assert::IsTrue(::CreateDirectoryW(extendedParent.c_str(), nullptr) != FALSE ||
+                       ::GetLastError() == ERROR_ALREADY_EXISTS,
+        L"Precondition: the test makes the parent of the deep probe directory");
+    const std::wstring plain = parent + L"\\" + DeepLeafName(parent, L"Probe");
+    const std::wstring extended = ExtendedFormOf(plain);
+    Assert::IsTrue(::CreateDirectoryW(extended.c_str(), nullptr) != FALSE ||
+                       ::GetLastError() == ERROR_ALREADY_EXISTS,
+        L"Precondition: the extended form makes the deep probe directory");
+    const DWORD plainAttributes = ::GetFileAttributesW(plain.c_str());
+    const DWORD extendedAttributes = ::GetFileAttributesW(extended.c_str());
+    ::RemoveDirectoryW(extended.c_str());
+    ::RemoveDirectoryW(extendedParent.c_str());
+    Assert::AreEqual(INVALID_FILE_ATTRIBUTES, plainAttributes,
+        L"Precondition: GetFileAttributesW fails on a plain path longer than MAX_PATH");
+    Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES, extendedAttributes,
+        L"Precondition: GetFileAttributesW finds the extended form of the deep path");
+}
+
 // Ignores errors, so a teardown never fails a test.
 inline void RemoveTreeOfAnyDepth(const std::wstring& root) {
     std::error_code ec;

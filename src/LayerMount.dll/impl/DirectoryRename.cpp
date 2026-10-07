@@ -37,33 +37,35 @@ DWORD CopySecurityKeepingInheritance(const std::wstring& srcAbs, const std::wstr
         }
     };
 
+    const std::wstring extendedSrc = WithExtendedPrefix(srcAbs);
+    std::wstring extendedDst = WithExtendedPrefix(dstAbs);
     const SECURITY_INFORMATION ogInfo = OWNER_SECURITY_INFORMATION |
                                         GROUP_SECURITY_INFORMATION;
     DWORD sdSize = 0;
-    ::GetFileSecurityW(srcAbs.c_str(), ogInfo, nullptr, 0, &sdSize);
+    ::GetFileSecurityW(extendedSrc.c_str(), ogInfo, nullptr, 0, &sdSize);
     if (sdSize > 0) {
         std::vector<BYTE> sdBuf(sdSize);
         auto* sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sdBuf.data());
-        if (::GetFileSecurityW(srcAbs.c_str(), ogInfo, sd, sdSize, &sdSize) &&
-            !::SetFileSecurityW(dstAbs.c_str(), ogInfo, sd)) {
+        if (::GetFileSecurityW(extendedSrc.c_str(), ogInfo, sd, sdSize, &sdSize) &&
+            !::SetFileSecurityW(extendedDst.c_str(), ogInfo, sd)) {
             const DWORD err = ::GetLastError();
             keepFirst(err ? err : ERROR_ACCESS_DENIED);
         }
     }
 
     DWORD dSize = 0;
-    ::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &dSize);
+    ::GetFileSecurityW(extendedSrc.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &dSize);
     if (dSize > 0) {
         std::vector<BYTE> dBuf(dSize);
         auto* dsd = reinterpret_cast<PSECURITY_DESCRIPTOR>(dBuf.data());
-        if (::GetFileSecurityW(srcAbs.c_str(), DACL_SECURITY_INFORMATION,
+        if (::GetFileSecurityW(extendedSrc.c_str(), DACL_SECURITY_INFORMATION,
                                dsd, dSize, &dSize)) {
             BOOL present = FALSE, defaulted = FALSE;
             PACL dacl = nullptr;
             if (::GetSecurityDescriptorDacl(dsd, &present, &dacl, &defaulted) &&
                 present && dacl) {
                 const DWORD rc = ::SetNamedSecurityInfoW(
-                    const_cast<LPWSTR>(dstAbs.c_str()),
+                    extendedDst.data(),
                     SE_FILE_OBJECT,
                     DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
                     nullptr, nullptr, dacl, nullptr);
@@ -76,18 +78,18 @@ DWORD CopySecurityKeepingInheritance(const std::wstring& srcAbs, const std::wstr
 
     if (IsSecurityPrivilegeHeld()) {
         DWORD ssSize = 0;
-        ::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION, nullptr, 0, &ssSize);
+        ::GetFileSecurityW(extendedSrc.c_str(), SACL_SECURITY_INFORMATION, nullptr, 0, &ssSize);
         if (ssSize > 0) {
             std::vector<BYTE> ssBuf(ssSize);
             auto* ssd = reinterpret_cast<PSECURITY_DESCRIPTOR>(ssBuf.data());
-            if (::GetFileSecurityW(srcAbs.c_str(), SACL_SECURITY_INFORMATION,
+            if (::GetFileSecurityW(extendedSrc.c_str(), SACL_SECURITY_INFORMATION,
                                    ssd, ssSize, &ssSize)) {
                 BOOL present = FALSE, defaulted = FALSE;
                 PACL sacl = nullptr;
                 if (::GetSecurityDescriptorSacl(ssd, &present, &sacl, &defaulted) &&
                     present && sacl) {
                     const DWORD rc = ::SetNamedSecurityInfoW(
-                        const_cast<LPWSTR>(dstAbs.c_str()),
+                        extendedDst.data(),
                         SE_FILE_OBJECT,
                         SACL_SECURITY_INFORMATION | UNPROTECTED_SACL_SECURITY_INFORMATION,
                         nullptr, nullptr, nullptr, sacl);
@@ -145,16 +147,16 @@ NTSTATUS CopyFilePreservingMetadata(const std::wstring& srcAbs,
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
 
-    const DWORD srcAttrs = ::GetFileAttributesW(srcAbs.c_str());
+    const DWORD srcAttrs = ::GetFileAttributesW(WithExtendedPrefix(srcAbs).c_str());
     if (srcAttrs == INVALID_FILE_ATTRIBUTES) {
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
     EntryTimes srcTimes{};
     ::GetFileTime(srcHandle.Get(), &srcTimes.creation, &srcTimes.access, &srcTimes.write);
 
-    ScopedHandle dstHandle(::CreateFileW(dstAbs.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
-                                         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                                         nullptr));
+    ScopedHandle dstHandle(::CreateFileW(WithExtendedPrefix(dstAbs).c_str(),
+                                         GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!dstHandle.IsValid()) {
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
@@ -211,7 +213,8 @@ NTSTATUS WriteDirectoryCopyUpRecord(const std::wstring& srcAbs,
 NTSTATUS ApplyDirectoryBasicInfoAndSecurity(const std::wstring& srcAbs,
                                             const std::wstring& dstAbs) {
     WIN32_FILE_ATTRIBUTE_DATA source{};
-    if (::GetFileAttributesExW(srcAbs.c_str(), GetFileExInfoStandard, &source)) {
+    if (::GetFileAttributesExW(WithExtendedPrefix(srcAbs).c_str(), GetFileExInfoStandard,
+                               &source)) {
         WriteEntryTimes(dstAbs, EntryTimesOf(source), source.dwFileAttributes);
     }
 
@@ -249,7 +252,7 @@ NTSTATUS FinishCopiedDirectory(const std::wstring& viewSrcAbs,
 }
 
 bool IsDirectoryAt(const std::wstring& path) {
-    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    const DWORD attributes = ::GetFileAttributesW(WithExtendedPrefix(path).c_str());
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
@@ -341,7 +344,7 @@ NTSTATUS DirectoryRename::CopyMergedDirectory(const ResolvedPath& lowerSource,
     const std::wstring& mergedViewSource =
         hasUpperShadow ? oldName.upperPath : lowerSource.absolutePath;
 
-    if (!::CreateDirectoryW(stagedPath.c_str(), nullptr)) {
+    if (!::CreateDirectoryW(WithExtendedPrefix(stagedPath).c_str(), nullptr)) {
         return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
     const NTSTATUS childrenStatus = CopyMergedChildren(

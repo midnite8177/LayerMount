@@ -40,7 +40,7 @@ bool AnyDirectoryUpToRoot(fs::path dir, LayerRoot root, const HasMarker& hasMark
 // DENY-WRITE ACE on the parent directory; without it, the create fails there.
 DWORD CreateHiddenMarkerFile(const std::wstring& path) {
     HANDLE h = CreateFileW(
-        path.c_str(),
+        WithExtendedPrefix(path).c_str(),
         GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
@@ -56,7 +56,7 @@ DWORD CreateHiddenMarkerFile(const std::wstring& path) {
 }
 
 bool DeleteMarkerFile(const std::wstring& path) {
-    return DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+    return DeleteFileW(WithExtendedPrefix(path).c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
 }
 
 bool MarkerFileExists(const std::wstring& path) {
@@ -190,7 +190,7 @@ NTSTATUS WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
 
     std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
 
-    if (!DeleteFileW(whPath.c_str())) {
+    if (!DeleteFileW(WithExtendedPrefix(whPath).c_str())) {
         const DWORD deleteErr = GetLastError();
         if (deleteErr != ERROR_FILE_NOT_FOUND) {
             return StatusFromWin32Error(deleteErr, ERROR_WRITE_FAULT);
