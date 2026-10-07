@@ -763,15 +763,17 @@ the fallback when sparse files are unavailable. Steps:
    `FILE_ATTRIBUTE_ARCHIVE`, because the rename in step 9 sets it on a
    file. So the move changes no attribute at the upper path.
 9. `MoveUpperEntry(work, upper, ReplaceExisting::No)`, one
-   `MoveFileExW` rename. If the destination's parent DACL denies the
-   move, it falls back to `SetFileInformationByHandle(FileRenameInfo)`
-   on a backup-semantics-opened source handle, which honors
-   `SE_RESTORE_NAME`. When an entry holds the upper path at the move,
-   the copy-up fails with `STATUS_OBJECT_NAME_COLLISION` and leaves that
-   entry as it was, as overlayfs fails the link of its temporary file
-   with `EEXIST`. A failure in steps 5 to 9 removes the work file and
-   its sidecar record, also when the file is read-only. The upper path
-   then has no entry.
+   `SetFileInformationByHandle(FileRenameInfo)` rename through a handle
+   opened with backup semantics on the entry itself, not on its reparse
+   target. `MoveFileExW` opens the target of a tag that is not a name
+   surrogate, and on Windows 10 and Server 2022 that open fails for an
+   app execution alias. When the process holds `SE_RESTORE_NAME`, backup
+   semantics skip a parent DACL that denies the move. When an entry
+   holds the upper path at the move, the copy-up fails with
+   `STATUS_OBJECT_NAME_COLLISION` and leaves that entry as it was, as
+   overlayfs fails the link of its temporary file with `EEXIST`. A
+   failure in steps 5 to 9 removes the work file and its sidecar record,
+   also when the file is read-only. The upper path then has no entry.
 10. Invalidate the cache for the affected path (and ancestors).
 11. Bump `stats.copyUpCount` and emit `LM_EVT_COPY_UP`.
 
@@ -909,10 +911,11 @@ Directory rename is the worst case: a single Win32 `MoveFileExW` cannot
 move a directory tree out of a read-only layer into a writable one.
 The engine handles eleven cases. The last six also apply to a file source:
 
-- **upper → upper**: a single `MoveFileExW`. Transfer the opaque marker
-  if present. When a lower layer has an entry at the destination path,
-  mark the destination opaque. A junction or directory symlink gets no
-  opaque marker, because `WhiteoutManager` refuses to mark a link.
+- **upper → upper**: a single `MoveUpperEntry` rename. Transfer the
+  opaque marker if present. When a lower layer has an entry at the
+  destination path, mark the destination opaque. A junction or
+  directory symlink gets no opaque marker, because `WhiteoutManager`
+  refuses to mark a link.
 - **lower → upper, dest-not-present**: build a copy of the merged view
   of the source in a container, as for a link copy-up. The copy gets
   its copy-up record, then the opaque marker, and last its attributes,
@@ -1068,7 +1071,7 @@ because a metacopy shell only makes sense for files.
 and signaled by `copyUpCV_`. A second caller that races on the same
 path waits for the first to commit, then short-circuits when the upper
 shadow is observed. Without this, both threads would race at the
-`MoveFileExW` step and the loser would see `ERROR_ACCESS_DENIED` or a
+rename step and the loser would see `ERROR_ACCESS_DENIED` or a
 sharing violation from the just-placed target.
 
 ### Privileges

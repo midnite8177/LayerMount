@@ -402,32 +402,15 @@ namespace {
 NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
                               const std::wstring& to,
                               ReplaceExisting replace) {
-    const std::wstring extendedFrom = WithExtendedPrefix(from);
-    const std::wstring extendedTo = WithExtendedPrefix(to);
-    const DWORD flags = replace == ReplaceExisting::Yes ? MOVEFILE_REPLACE_EXISTING : 0;
-    if (::MoveFileExW(extendedFrom.c_str(), extendedTo.c_str(), flags)) {
-        return STATUS_SUCCESS;
-    }
-    const DWORD moveErr = ::GetLastError();
-    if (moveErr != ERROR_ACCESS_DENIED) {
-        return NtStatusFromWin32(moveErr);
-    }
-
-    // When a copy-up carried an inherited deny-write ACE from the lower
-    // parent to the upper parent, MoveFileExW fails the destination DACL
-    // check although the engine owns the upper entry. With SE_RESTORE_NAME,
-    // a handle opened with backup semantics skips that check through
-    // FileRenameInfo. FILE_FLAG_OPEN_REPARSE_POINT opens a junction or a
-    // symbolic link itself. Without it, the handle is the link's target, and
-    // the rename moves the target.
-    HANDLE src = ::CreateFileW(extendedFrom.c_str(),
-        GENERIC_READ | DELETE | SYNCHRONIZE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-    if (src == INVALID_HANDLE_VALUE) {
+    // Renames through a handle on the entry itself. MoveFileExW opens the
+    // target of a tag that is not a name surrogate, such as an app execution
+    // alias, and on Windows 10 and Server 2022 that open fails with
+    // STATUS_IO_REPARSE_TAG_NOT_HANDLED.
+    const ScopedHandle entry = OpenReparseEntry(from, DELETE | SYNCHRONIZE);
+    if (!entry.IsValid()) {
         return NtStatusFromWin32(::GetLastError());
     }
+    const std::wstring extendedTo = WithExtendedPrefix(to);
     const size_t pathBytes = extendedTo.size() * sizeof(wchar_t);
     std::vector<BYTE> buf(sizeof(FILE_RENAME_INFO) + pathBytes);
     auto* ri = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
@@ -435,12 +418,9 @@ NTSTATUS MoveUpperEntryOnDisk(const std::wstring& from,
     ri->RootDirectory   = nullptr;
     ri->FileNameLength  = static_cast<DWORD>(pathBytes);
     std::memcpy(ri->FileName, extendedTo.data(), pathBytes);
-    const BOOL renamed = ::SetFileInformationByHandle(
-        src, FileRenameInfo, ri, static_cast<DWORD>(buf.size()));
-    const DWORD renameErr = renamed ? 0 : ::GetLastError();
-    ::CloseHandle(src);
-    if (!renamed) {
-        return NtStatusFromWin32(renameErr);
+    if (!::SetFileInformationByHandle(
+            entry.Get(), FileRenameInfo, ri, static_cast<DWORD>(buf.size()))) {
+        return NtStatusFromWin32(::GetLastError());
     }
     return STATUS_SUCCESS;
 }

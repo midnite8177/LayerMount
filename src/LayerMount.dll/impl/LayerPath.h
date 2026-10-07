@@ -192,8 +192,8 @@ struct UpperEntryMove {
     NTSTATUS recordLeftBehind;
 };
 
-// Renames an upper file or directory within its volume. A junction or a
-// symbolic link moves as a link, and its target stays. With
+// Renames an upper file or directory within its volume. Any reparse point
+// moves as itself, not its target, and a link's target stays. With
 // ReplaceExisting::No, an entry at `to` fails the rename with
 // STATUS_OBJECT_NAME_COLLISION and stays as it was. An inherited deny-write
 // ACE on the upper parent fails the rename with STATUS_ACCESS_DENIED unless

@@ -2138,6 +2138,43 @@ public:
             L"The socket file under the new name must carry the reparse tag of the lower");
     }
 
+    TEST_METHOD(Rename_UpperAppExecutionAlias_KeepsItsReparseTagUnderTheNewName) {
+        UNIT_SKIP_IF_NOT_NTFS();
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"alias.exe", "");
+        if (!MicrosoftReparseTagSetOrSkipped(env.Upper() + L"\\alias.exe",
+                                             IO_REPARSE_TAG_APPEXECLINK)) {
+            return;
+        }
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS,
+            mount.Rename(L"alias.exe", L"moved.exe", kFailIfExists, kNoCallerPid),
+            L"The rename of the upper app execution alias must succeed");
+
+        Assert::AreEqual(static_cast<DWORD>(IO_REPARSE_TAG_APPEXECLINK),
+            ReparseTagOf(env.Upper() + L"\\moved.exe"),
+            L"The alias under the new name must carry the app execution alias tag");
+    }
+
+    TEST_METHOD(Rename_UpperFileHeldOpenWithoutReadSharing_Succeeds) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Upper(), L"f.txt", "upper");
+        ::LayerMount::LayerMount mount(env.MakeConfig());
+
+        NTSTATUS status = STATUS_SUCCESS;
+        {
+            const ScopedHandle heldSource =
+                HoldOpen(env.Upper() + L"\\f.txt", FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            status = mount.Rename(L"f.txt", L"g.txt", kFailIfExists, kNoCallerPid);
+        }
+
+        AssertStatus(STATUS_SUCCESS, status,
+            L"The rename must succeed while a handle that shares delete but not read holds f.txt");
+        Assert::AreEqual(std::string("upper"), env.ReadFile(env.Upper(), L"g.txt"),
+            L"The file under the new name must hold the data of f.txt");
+    }
+
     TEST_METHOD(Rename_LowerDirectoryWithUnhandledReparseTag_FailsAndLeavesBothNamesAsTheyWere) {
         UNIT_SKIP_IF_NOT_NTFS();
         TempLayerEnvironment env(1);
