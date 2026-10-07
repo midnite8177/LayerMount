@@ -131,7 +131,7 @@ HANDLE OpenAdsForReadWithAccessTimeKeptWhereAllowed(const std::wstring& adsPath)
 
 LayerMountMetadata ReadAdsOnly(const std::wstring& filePath, bool* corrupted) {
     if (corrupted != nullptr) *corrupted = false;
-    std::wstring adsPath = filePath + kLayerMountADSStream;
+    std::wstring adsPath = ExtendedStreamPath(filePath, kLayerMountADSStream);
 
     HANDLE h = OpenAdsForReadWithAccessTimeKeptWhereAllowed(adsPath);
 
@@ -191,7 +191,7 @@ LayerMountMetadata ReadAdsOnly(const std::wstring& filePath, bool* corrupted) {
 }
 
 bool WriteAdsOnly(const std::wstring& filePath, const LayerMountMetadata& metadata) {
-    std::wstring adsPath = filePath + kLayerMountADSStream;
+    std::wstring adsPath = ExtendedStreamPath(filePath, kLayerMountADSStream);
 
     // Permissive share mode; see OpenAdsForRead for the reason.
     // FILE_FLAG_BACKUP_SEMANTICS honors SE_BACKUP_NAME / SE_RESTORE_NAME
@@ -228,7 +228,7 @@ bool WriteAdsOnly(const std::wstring& filePath, const LayerMountMetadata& metada
 // DeleteFileW opens its path with FILE_OPEN_REPARSE_POINT, so on a link it
 // removes the link's own stream and leaves the target's.
 bool RemoveAdsOnly(const std::wstring& filePath) {
-    std::wstring adsPath = filePath + kLayerMountADSStream;
+    std::wstring adsPath = ExtendedStreamPath(filePath, kLayerMountADSStream);
     if (DeleteFileW(adsPath.c_str())) {
         return true;
     }
@@ -238,12 +238,12 @@ bool RemoveAdsOnly(const std::wstring& filePath) {
 // GetFileAttributesW does not follow a link, so on a link it finds the
 // link's own stream.
 bool HasOpaqueAdsOnly(const std::wstring& directoryPath) {
-    std::wstring adsPath = directoryPath + kOpaqueADSStream;
+    std::wstring adsPath = ExtendedStreamPath(directoryPath, kOpaqueADSStream);
     return GetFileAttributesW(adsPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 bool SetOpaqueAdsOnly(const std::wstring& directoryPath) {
-    std::wstring adsPath = directoryPath + kOpaqueADSStream;
+    std::wstring adsPath = ExtendedStreamPath(directoryPath, kOpaqueADSStream);
 
     // Permissive share mode and FILE_FLAG_OPEN_REPARSE_POINT; see
     // OpenAdsForRead for the reasons.
@@ -269,7 +269,7 @@ bool SetOpaqueAdsOnly(const std::wstring& directoryPath) {
 }
 
 bool RemoveOpaqueAdsOnly(const std::wstring& directoryPath) {
-    std::wstring adsPath = directoryPath + kOpaqueADSStream;
+    std::wstring adsPath = ExtendedStreamPath(directoryPath, kOpaqueADSStream);
     if (DeleteFileW(adsPath.c_str())) {
         return true;
     }

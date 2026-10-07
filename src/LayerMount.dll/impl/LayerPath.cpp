@@ -133,6 +133,12 @@ std::wstring WithExtendedPrefix(const std::wstring& path) {
     return std::wstring(kExtended) + full;
 }
 
+std::wstring ExtendedStreamPath(const std::wstring& path, std::wstring_view streamSuffix) {
+    std::wstring streamPath = WithExtendedPrefix(path);
+    streamPath += streamSuffix;
+    return streamPath;
+}
+
 std::wstring ComparablePath(const std::wstring& path) {
     std::wstring plain = path;
     std::replace(plain.begin(), plain.end(), L'/', L'\\');

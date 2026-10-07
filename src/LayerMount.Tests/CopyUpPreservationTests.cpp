@@ -534,13 +534,16 @@ public:
         AssertNumberedLongStreams(env.Upper(), L"many.txt", kLongStreamCount);
     }
 
-    TEST_METHOD(CopyUpFile_CopiesEveryStreamWhenStagedStreamPathIsLongerThanMaxPath) {
+    TEST_METHOD(CopyUpFile_WritesStreamsAndRecordWhenStagedStreamPathsAreLongerThanMaxPath) {
         TempLayerEnvironment env(1);
-        constexpr size_t kPaddedWorkDirLength = 190;
-        Assert::IsTrue(env.Root().size() + 1 < kPaddedWorkDirLength,
+        constexpr size_t kStagedPathLength = 256;
+        const size_t stagedPathPastWorkDir =
+            CopyUpAndRenameRig(env.MakeConfig()).copyUp.GenerateStagingPath().size() -
+            env.Work().size();
+        Assert::IsTrue(env.Root().size() + 1 + stagedPathPastWorkDir < kStagedPathLength,
             L"Precondition: the test root leaves room to pad the work directory");
         const std::wstring workDir = env.Root() + L"\\" +
-            std::wstring(kPaddedWorkDirLength - env.Root().size() - 1, L'w');
+            std::wstring(kStagedPathLength - stagedPathPastWorkDir - env.Root().size() - 1, L'w');
         Assert::IsTrue(StagingAreaPath(workDir).size() + kListedStreamNameChars > MAX_PATH,
             L"Precondition: a long stream path of a staged file is longer than MAX_PATH");
         std::error_code ec;
@@ -555,14 +558,21 @@ public:
         LayerConfig config = env.MakeConfig();
         config.workDirPath = workDir;
         CopyUpAndRenameRig rig(config);
+        const size_t stagedPathLength = rig.copyUp.GenerateStagingPath().size();
+        Assert::IsTrue(stagedPathLength < MAX_PATH,
+            L"Precondition: the staged file path is shorter than MAX_PATH");
         Assert::IsTrue(
-            rig.copyUp.GenerateStagingPath().size() +
-                std::wstring_view(kLayerMountADSStream).size() < MAX_PATH,
-            L"Precondition: the copy-up record stream of a staged file is shorter than MAX_PATH");
+            stagedPathLength + std::wstring_view(kLayerMountADSStream).size() > MAX_PATH,
+            L"Precondition: the copy-up record stream path of a staged file is longer than MAX_PATH");
 
         Assert::IsTrue(NT_SUCCESS(rig.copyUp.CopyUpFile(L"long.txt")));
 
         AssertNumberedLongStreams(env.Upper(), L"long.txt", kStreamCount);
+        const LayerMountMetadata record =
+            MetadataStore::ReadLayerMountMetadata(env.Upper() + L"\\long.txt", nullptr);
+        Assert::AreEqual(0, _wcsicmp((env.Lower(0) + L"\\long.txt").c_str(),
+                                     record.originLayer.c_str()),
+            L"The upper copy carries the copy-up record that names its source");
     }
 
     TEST_METHOD(CopyUpFile_CopiesEveryStreamWhenSourceStreamPathIsLongerThanMaxPath) {

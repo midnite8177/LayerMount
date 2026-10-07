@@ -39,6 +39,13 @@ NTSTATUS ReopenContextHandle(FileContext* ctx);
 
 constexpr LONGLONG kShellOnlyAboveBytes = 1LL * 1024 * 1024;
 
+// actualPath stays in plain form: EnsureInUpperLayer compares it as a
+// string, and the sidecar store finds a record only at the path form it
+// was written at. Win32 opens use this extended form.
+std::wstring ExtendedActualPath(const FileContext& ctx) {
+    return WithExtendedPrefix(ctx.actualPath);
+}
+
 // Opens a short-lived handle to a physical path. Returns an invalid
 // ScopedHandle on failure and leaves GetLastError set. The caller passes
 // the directory status, because a path-based query fails for a
@@ -79,7 +86,7 @@ NTSTATUS SetInfoWithTransientRetry(const FileContext& ctx,
         return NtStatusFromWin32(firstErr);
     }
     ScopedHandle transient = OpenTransientHandle(
-        ctx.actualPath, transientAccess, ctx.isDirectory);
+        ExtendedActualPath(ctx), transientAccess, ctx.isDirectory);
     if (!transient.IsValid()) {
         return NtStatusFromWin32(firstErr);
     }
@@ -926,7 +933,7 @@ NTSTATUS OpenContextHandleWithAccess(FileContext* ctx, UINT32 accessMask) {
 
     CloseContextHandle(ctx);
 
-    ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
+    ctx->handle = ::CreateFileW(ExtendedActualPath(*ctx).c_str(),
         accessMask,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, ComputeHandleReopenFlags(*ctx),
@@ -1067,7 +1074,7 @@ public:
             return;
         }
         CloseContextHandle(ctx_);
-        if (!DeleteCreatedFile(ctx_->actualPath)) {
+        if (!DeleteCreatedFile(ExtendedActualPath(*ctx_))) {
             events_.Emit(LM_EVT_WARNING, HresultOfFailedCall(), ctx_->relativePath.c_str(),
                          L"The undo of a failed create could not delete the new entry");
         }
@@ -1110,7 +1117,7 @@ public:
                          L"The undo of a failed create could not remove the new directory's "
                          L"opaque markers");
         }
-        if (!::RemoveDirectoryW(ctx_->actualPath.c_str())) {
+        if (!::RemoveDirectoryW(ExtendedActualPath(*ctx_).c_str())) {
             events_.Emit(LM_EVT_WARNING, HresultOfFailedCall(), ctx_->relativePath.c_str(),
                          L"The undo of a failed create could not remove the new directory");
         }
@@ -1202,16 +1209,9 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
     ctx->grantedAccess = resolvedAccess;
     ctx->createOptions = createOptions;
 
-    if (resolved.source == LayerSource::Lower && HasWriteAccess(resolvedAccess)) {
-        NTSTATUS status = CopyUpForHandle(hostNorm, ctx.get(), kShellOnlyAboveBytes);
-        if (!NT_SUCCESS(status)) {
-            return status;
-        }
-        ctx->actualPath = pathResolver_->GetUpperPath(hostNorm) + streamSuffix;
-        ctx->writable = true;
-    } else {
-        ctx->actualPath = resolved.absolutePath + streamSuffix;
-        ctx->writable = (resolved.source == LayerSource::Upper);
+    NTSTATUS pathStatus = SetOpenPath(hostNorm, resolved, ctx.get());
+    if (!NT_SUCCESS(pathStatus)) {
+        return pathStatus;
     }
 
     if (resolved.source == LayerSource::Upper) {
@@ -1223,16 +1223,10 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
         return fillStatus;
     }
 
-    DWORD flags = ctx->isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0;
-    if (createOptions & FILE_OPEN_REPARSE_POINT) {
-        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    }
-    ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
-        ComputePhysicalHandleAccess(resolvedAccess),
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, flags, nullptr);
-    if (ctx->handle == INVALID_HANDLE_VALUE) {
-        return NtStatusFromWin32(::GetLastError());
+    NTSTATUS openStatus = OpenContextHandleWithAccess(
+        ctx.get(), ComputePhysicalHandleAccess(resolvedAccess));
+    if (!NT_SUCCESS(openStatus)) {
+        return openStatus;
     }
 
     NTSTATUS status = FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
@@ -1244,6 +1238,23 @@ NTSTATUS LayerMount::Open(const std::wstring& relativePath,
 
     stats_.activeHandles.fetch_add(1, std::memory_order_relaxed);
     *outCtx = std::move(ctx);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS LayerMount::SetOpenPath(const std::wstring& hostNorm,
+                                 const ResolvedPath& resolved,
+                                 FileContext* ctx) {
+    if (resolved.source == LayerSource::Lower && HasWriteAccess(ctx->grantedAccess)) {
+        NTSTATUS status = CopyUpForHandle(hostNorm, ctx, kShellOnlyAboveBytes);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        ctx->actualPath = pathResolver_->GetUpperPath(hostNorm) + ctx->streamSuffix;
+        ctx->writable = true;
+    } else {
+        ctx->actualPath = resolved.absolutePath + ctx->streamSuffix;
+        ctx->writable = (resolved.source == LayerSource::Upper);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1312,7 +1323,7 @@ bool IsDirectoryCreate(const LayerMount::CreateRequest& request) {
 }
 
 bool StreamExists(const std::wstring& hostPath, const std::wstring& streamSuffix) {
-    const std::wstring streamPath = hostPath + streamSuffix;
+    const std::wstring streamPath = ExtendedStreamPath(hostPath, streamSuffix);
     return ::GetFileAttributesW(streamPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -1499,7 +1510,7 @@ NTSTATUS LayerMount::CreateFileInUpper(const UpperCreate& create,
 
     const UINT32 fileAttributes =
         create.fileAttributes != 0 ? create.fileAttributes : FILE_ATTRIBUTE_NORMAL;
-    ctx->handle = ::CreateFileW(ctx->actualPath.c_str(),
+    ctx->handle = ::CreateFileW(ExtendedActualPath(*ctx).c_str(),
         ComputePhysicalHandleAccess(create.grantedAccess),
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, CREATE_NEW, fileAttributes, nullptr);
@@ -1762,8 +1773,9 @@ NTSTATUS LayerMount::Write(FileContext* ctx,
 namespace {
 
 NTSTATUS DeleteUserAlternateDataStreams(const std::wstring& basePath) {
+    const std::wstring extendedBasePath = WithExtendedPrefix(basePath);
     WIN32_FIND_STREAM_DATA streamData{};
-    HANDLE find = ::FindFirstStreamW(basePath.c_str(), FindStreamInfoStandard,
+    HANDLE find = ::FindFirstStreamW(extendedBasePath.c_str(), FindStreamInfoStandard,
                                      &streamData, 0);
     if (find == INVALID_HANDLE_VALUE) {
         const DWORD err = ::GetLastError();
@@ -1776,7 +1788,7 @@ NTSTATUS DeleteUserAlternateDataStreams(const std::wstring& basePath) {
     for (;;) {
         const std::wstring_view name(streamData.cStreamName);
         if (IsUserAlternateStream(name)) {
-            std::wstring streamPath = basePath;
+            std::wstring streamPath = extendedBasePath;
             if (name.size() >= kDataSuffix.size() &&
                 name.compare(name.size() - kDataSuffix.size(),
                              kDataSuffix.size(),
@@ -2060,7 +2072,7 @@ NTSTATUS LayerMount::DeleteStreamByPath(const std::wstring& hostNorm,
     if (!pathResolver_->ExistsInUpper(hostNorm)) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-    const std::wstring streamPath = hostUpperPath + streamSuffix;
+    const std::wstring streamPath = ExtendedStreamPath(hostUpperPath, streamSuffix);
     HANDLE h = ::CreateFileW(streamPath.c_str(),
         DELETE | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,

@@ -24,6 +24,12 @@ static std::wstring CreateTestFile(const TempLayerEnvironment& env,
     return env.Upper() + L"\\" + name;
 }
 
+static std::wstring PaddedNameIn(const std::wstring& directory, size_t pathLength) {
+    Assert::IsTrue(directory.size() + 2 <= pathLength,
+        L"Precondition: the directory leaves room for the padded name");
+    return std::wstring(pathLength - directory.size() - 1, L'p');
+}
+
 static void AssertAdsRecordStaysOnTheLink(LinkCreator createLink, LinkTarget targetKind) {
     TempLayerEnvironment env(0);
     const std::wstring targetPath = LinkTargetPath(env, targetKind);
@@ -292,6 +298,53 @@ public:
 
         Assert::IsTrue(MetadataStore::RemoveOpaqueMetadata(dir, nullptr));
         Assert::IsFalse(MetadataStore::HasOpaqueMetadata(dir, nullptr));
+    }
+
+    TEST_METHOD(WriteReadRemove_RecordStreamPathLongerThanMaxPath_RoundTrips) {
+        TempLayerEnvironment env(0);
+        constexpr size_t kFilePathLength = 255;
+        const std::wstring path =
+            CreateTestFile(env, PaddedNameIn(env.Upper(), kFilePathLength));
+        Assert::IsTrue(path.size() + std::wstring_view(kLayerMountADSStream).size() > MAX_PATH,
+            L"Precondition: the record stream path is longer than MAX_PATH");
+
+        LayerMountMetadata written;
+        written.originLayer = L"long";
+        Assert::IsTrue(MetadataStore::WriteLayerMountMetadata(path, written, nullptr),
+            L"The record write onto a long stream path must succeed");
+        Assert::IsTrue(HasOverlayStream(L"\\\\?\\" + path),
+            L"The record must land in the :overlay stream of the file");
+        Assert::AreEqual(written.originLayer,
+            MetadataStore::ReadLayerMountMetadata(path, nullptr).originLayer,
+            L"The read must return the record that the write stored");
+
+        Assert::IsTrue(MetadataStore::RemoveLayerMountMetadata(path, nullptr),
+            L"The record remove on a long stream path must succeed");
+        Assert::IsFalse(HasOverlayStream(L"\\\\?\\" + path),
+            L"The remove must delete the :overlay stream of the file");
+    }
+
+    TEST_METHOD(SetHasRemoveOpaque_MarkerStreamPathLongerThanMaxPath_RoundTrips) {
+        TempLayerEnvironment env(0);
+        constexpr size_t kDirectoryPathLength = 250;
+        const std::wstring dir =
+            env.Upper() + L"\\" + PaddedNameIn(env.Upper(), kDirectoryPathLength);
+        std::error_code ec;
+        fs::create_directories(L"\\\\?\\" + dir, ec);
+        Assert::IsFalse(static_cast<bool>(ec),
+            L"Precondition: the padded directory must be creatable");
+        Assert::IsTrue(dir.size() + std::wstring_view(kOpaqueADSStream).size() > MAX_PATH,
+            L"Precondition: the opaque marker stream path is longer than MAX_PATH");
+
+        Assert::IsTrue(MetadataStore::SetOpaqueMetadata(dir, nullptr),
+            L"The opaque write onto a long stream path must succeed");
+        Assert::IsTrue(MetadataStore::HasOpaqueMetadata(dir, nullptr),
+            L"The directory must read back its opaque marker");
+
+        Assert::IsTrue(MetadataStore::RemoveOpaqueMetadata(dir, nullptr),
+            L"The opaque remove on a long stream path must succeed");
+        Assert::IsFalse(MetadataStore::HasOpaqueMetadata(dir, nullptr),
+            L"The directory must carry no opaque marker after the remove");
     }
 };
 

@@ -883,6 +883,13 @@ private:
                              FileContext* ctx,
                              std::optional<LONGLONG> shellOnlyAboveBytes);
 
+    // Sets ctx->actualPath and ctx->writable for an open of resolved. An
+    // open with write access to a lower entry copies the entry up first
+    // and points ctx at the upper copy.
+    NTSTATUS SetOpenPath(const std::wstring& hostNorm,
+                         const ResolvedPath& resolved,
+                         FileContext* ctx);
+
     // Fill a metacopy shell from its recorded origin. Returns the fill's
     // status on failure and clears ctx->isMetacopyOnly on success.
     NTSTATUS FillShell(const std::wstring& hostNorm, FileContext* ctx);

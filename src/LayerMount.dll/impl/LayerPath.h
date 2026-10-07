@@ -62,6 +62,11 @@ std::wstring WithoutExtendedPrefix(const std::wstring& path);
 // a path that GetFullPathNameW refuses.
 std::wstring WithExtendedPrefix(const std::wstring& path);
 
+// Returns the path of a named stream of the entry at path: the
+// WithExtendedPrefix form of path, then streamSuffix (":name" or
+// ":name:$DATA") unchanged.
+std::wstring ExtendedStreamPath(const std::wstring& path, std::wstring_view streamSuffix);
+
 // Returns path as a full path in lowercase, with backslash separators, no
 // trailing separator, and the prefix that WithoutExtendedPrefix strips gone.
 // A path through a link, a short name or a substituted drive keeps its own

@@ -408,6 +408,11 @@ public:
 
         Assert::AreEqual(L"\\\\?\\C:" + body + L"\\file.txt", WithExtendedPrefix(path));
     }
+
+    TEST_METHOD(ExtendedStreamPath_DrivePath_PrefixesThePathAndKeepsTheSuffix) {
+        Assert::AreEqual(std::wstring(L"\\\\?\\C:\\dir\\file.txt:notes:$DATA"),
+                         ExtendedStreamPath(L"C:\\dir\\file.txt", L":notes:$DATA"));
+    }
 };
 
 }

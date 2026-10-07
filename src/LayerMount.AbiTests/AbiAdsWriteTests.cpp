@@ -41,6 +41,23 @@ std::string ReadRawStream(const std::wstring& path) {
     return std::string(buf, read);
 }
 
+constexpr size_t kLongStreamNameLength = 200;
+constexpr size_t kMaxNtfsNameLength = 255;
+static_assert(kLongStreamNameLength <= kMaxNtfsNameLength);
+const std::wstring kLongStreamRelativePath =
+    L"host.txt:" + std::wstring(kLongStreamNameLength, L'n');
+
+std::wstring ExtendedPathUnder(const std::wstring& layer, const std::wstring& relativePath) {
+    const std::wstring path = layer + L"\\" + relativePath;
+    Assert::IsTrue(path.size() > MAX_PATH,
+        L"Precondition: the stream path is longer than MAX_PATH");
+    return L"\\\\?\\" + path;
+}
+
+std::wstring MountPathOf(const std::wstring& relativePath) {
+    return L"\\" + relativePath;
+}
+
 } // namespace
 
 TEST_CLASS(AbiAdsWriteTests) {
@@ -443,6 +460,152 @@ public:
         // Confirm the lower stream is untouched.
         Assert::IsTrue(HasStream(env.Lower(0) + L"\\host.txt:hidden"),
             L"lower stream must be untouched by the rejected delete");
+    }
+
+    TEST_METHOD(OpenFile_StreamPathLongerThanMaxPath_ReadsContent) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt"));
+        WriteRawStream(ExtendedPathUnder(env.Upper(), kLongStreamRelativePath), "preset", 6);
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OpenOverlayFile(mount.Get(), MountPathOf(kLongStreamRelativePath).c_str(),
+                GENERIC_READ, kNoCreateOptions, opened));
+        char buf[16] = {};
+        UINT32 read = 0;
+        const HRESULT readHr = ReadFromStart(opened.handle, buf, sizeof(buf), &read);
+        ::LayerMountCloseFile(opened.handle);
+
+        Assert::AreEqual<HRESULT>(S_OK, readHr);
+        Assert::AreEqual<std::string>("preset", std::string(buf, read),
+            L"The open of a long stream path reads the stream");
+    }
+
+    TEST_METHOD(CreateFile_StreamPathLongerThanMaxPath_RoundTrip) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt"));
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateOverlayFile(mount.Get(), MountPathOf(kLongStreamRelativePath).c_str(),
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions,
+                FILE_ATTRIBUTE_NORMAL, opened));
+        UINT32 written = 0;
+        const HRESULT writeHr = WriteFromStart(opened.handle, "created", 7, &written, nullptr);
+        ::LayerMountCloseFile(opened.handle);
+
+        Assert::AreEqual<HRESULT>(S_OK, writeHr);
+        Assert::AreEqual<std::string>("created",
+            ReadRawStream(ExtendedPathUnder(env.Upper(), kLongStreamRelativePath)),
+            L"The create of a long stream path writes the stream on the upper host");
+    }
+
+    TEST_METHOD(CreateFile_ExistingLongStreamOfLowerOnlyHost_CollidesWithoutCopyUp) {
+        TempLayerEnv env(1);
+        env.WriteLowerFile(0, L"host.txt", "lower content");
+        WriteRawStream(ExtendedPathUnder(env.Lower(0), kLongStreamRelativePath), "lower", 5);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_NT(STATUS_OBJECT_NAME_COLLISION),
+            CreateThroughEngine(mount.Get(), MountPathOf(kLongStreamRelativePath).c_str()),
+            L"The create of a stream that the lower host has collides");
+        Assert::AreEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW((env.Upper() + L"\\host.txt").c_str()),
+            L"The create that collides copies nothing up");
+    }
+
+    TEST_METHOD(OpenFile_WriteToLongStreamOfLowerOnlyHost_WritesTheUpperCopy) {
+        TempLayerEnv env(1);
+        env.WriteLowerFile(0, L"host.txt", "lower content");
+        const std::wstring lowerStreamPath =
+            ExtendedPathUnder(env.Lower(0), kLongStreamRelativePath);
+        WriteRawStream(lowerStreamPath, "lower", 5);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OpenOverlayFile(mount.Get(), MountPathOf(kLongStreamRelativePath).c_str(),
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, opened));
+        UINT32 written = 0;
+        const HRESULT writeHr = WriteFromStart(opened.handle, "upper!", 6, &written, nullptr);
+        ::LayerMountCloseFile(opened.handle);
+
+        Assert::AreEqual<HRESULT>(S_OK, writeHr);
+        Assert::AreEqual<std::string>("upper!",
+            ReadRawStream(ExtendedPathUnder(env.Upper(), kLongStreamRelativePath)),
+            L"The write through a long stream of a lower file lands in the upper copy");
+        Assert::AreEqual<std::string>("lower", ReadRawStream(lowerStreamPath),
+            L"The write through a long stream of a lower file leaves the lower stream");
+    }
+
+    TEST_METHOD(Overwrite_OnHostWithStreamPathLongerThanMaxPath_DeletesTheStream) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt"));
+        const std::wstring streamPath = ExtendedPathUnder(env.Upper(), kLongStreamRelativePath);
+        WriteRawStream(streamPath, "user", 4);
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OpenOverlayFile(mount.Get(), L"\\host.txt",
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, opened));
+        constexpr UINT64 allocationSize = 0u;
+        const HRESULT overwriteHr = OverwriteAddingAttributes(
+            opened.handle, FILE_ATTRIBUTE_NORMAL, allocationSize, nullptr);
+        ::LayerMountCloseFile(opened.handle);
+
+        Assert::AreEqual<HRESULT>(S_OK, overwriteHr);
+        Assert::IsFalse(HasStream(streamPath),
+            L"The overwrite of the host deletes its long stream");
+    }
+
+    TEST_METHOD(Overwrite_OnStreamHandleWithPathLongerThanMaxPath_TruncatesOnlyThatStream) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt"));
+        WriteRawStream(ExtendedPathUnder(env.Upper(), kLongStreamRelativePath), "AAAAAAAA", 8);
+        WriteRawStream(env.Upper() + L"\\host.txt:b", "BBBBBBBBBB", 10);
+
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OpenOverlayFile(mount.Get(), MountPathOf(kLongStreamRelativePath).c_str(),
+                GENERIC_READ | GENERIC_WRITE, kNoCreateOptions, opened));
+        constexpr UINT64 allocationSize = 0u;
+        const HRESULT overwriteHr = OverwriteAddingAttributes(
+            opened.handle, FILE_ATTRIBUTE_NORMAL, allocationSize, nullptr);
+        ::LayerMountCloseFile(opened.handle);
+
+        Assert::AreEqual<HRESULT>(S_OK, overwriteHr);
+        Assert::AreEqual<std::string>("",
+            ReadRawStream(ExtendedPathUnder(env.Upper(), kLongStreamRelativePath)),
+            L"The overwrite of the long stream truncates it");
+        Assert::AreEqual<std::string>("BBBBBBBBBB",
+            ReadRawStream(env.Upper() + L"\\host.txt:b"),
+            L"The overwrite of the long stream keeps the other stream");
+    }
+
+    TEST_METHOD(DeleteFile_StreamPathLongerThanMaxPath_RemovesOnlyTheStream) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt"));
+        const std::wstring streamPath = ExtendedPathUnder(env.Upper(), kLongStreamRelativePath);
+        WriteRawStream(streamPath, "user", 4);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountDeleteFile(mount.Get(), MountPathOf(kLongStreamRelativePath).c_str()));
+
+        Assert::IsFalse(HasStream(streamPath),
+            L"The delete by name removes the long stream");
+        Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
+            ::GetFileAttributesW((env.Upper() + L"\\host.txt").c_str()),
+            L"The delete of a stream keeps its host file");
     }
 
     TEST_METHOD(Rename_StreamQualifiedSrcOrDst_ReturnsInvalidParameter) {
