@@ -24,6 +24,29 @@ inline std::wstring ExtendedFormOf(const std::wstring& absolutePath) {
     return L"\\\\?\\" + absolutePath;
 }
 
+// The path of drivePath, such as C:\dir, through the administrative share
+// of this machine: \\machine\C$\dir.
+inline std::wstring AdminSharePathOf(const std::wstring& drivePath) {
+    wchar_t machine[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
+        ::GetComputerNameW(machine, &length) != FALSE, L"GetComputerNameW");
+    return L"\\\\" + std::wstring(machine, length) + L"\\" + drivePath.substr(0, 1) + L"$" +
+           drivePath.substr(2);
+}
+
+// False, with a skip message, when path, such as an AdminSharePathOf path,
+// cannot be reached, as on a machine without the Server service.
+inline bool SharePathReachableOrSkipped(const std::wstring& path) {
+    if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return true;
+    }
+    Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
+        (L"[SKIP] the share path " + path + L" is not reachable (error " +
+         std::to_wstring(::GetLastError()) + L")").c_str());
+    return false;
+}
+
 // A name that starts with prefix and makes parentPath\name
 // kDeepHostPathLength characters long, under a parent shorter than MAX_PATH.
 inline std::wstring DeepLeafName(const std::wstring& parentPath, const std::wstring& prefix) {

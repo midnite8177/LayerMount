@@ -402,10 +402,10 @@ bool MayHoldRemoteData(DWORD attributes) {
     return (attributes & remote) != 0;
 }
 
-// NTFS keeps at most 64 KB of extended attributes on an entry. The
-// FILE_FULL_EA_INFORMATION list of them is a little larger, because each
-// entry has a header and padding.
-constexpr size_t kExtendedAttributeBufferSize = 128 * 1024;
+// The SMB client fails a query for extended attributes with
+// STATUS_INVALID_PARAMETER when its buffer is larger than 64 KB. A list
+// longer than the buffer comes back over several queries.
+constexpr size_t kExtendedAttributeBufferSize = 64 * 1024;
 
 // A volume without extended attribute support answers with one of these,
 // as a Linux file system without xattrs answers EOPNOTSUPP.
@@ -422,6 +422,22 @@ bool IsKernelExtendedAttributeName(std::string_view name) {
 
 size_t AlignedToUlong(size_t offset) {
     return (offset + sizeof(ULONG) - 1) & ~(sizeof(ULONG) - 1);
+}
+
+// The number of entries in list, a FILE_FULL_EA_INFORMATION list of length
+// bytes.
+ULONG FullEaEntryCount(const BYTE* list, ULONG length) {
+    ULONG count = 0;
+    size_t offset = 0;
+    while (offset + sizeof(FullEaHeader) <= length) {
+        ++count;
+        const auto* header = reinterpret_cast<const FullEaHeader*>(list + offset);
+        if (header->nextEntryOffset == 0) {
+            break;
+        }
+        offset += header->nextEntryOffset;
+    }
+    return count;
 }
 
 NTSTATUS CopyUpReparsePointEntry(const std::wstring& srcAbsolute,
@@ -813,25 +829,29 @@ NTSTATUS CopyExtendedAttributes(const std::wstring& srcPath, const std::wstring&
     }
     std::vector<BYTE> buffer(kExtendedAttributeBufferSize);
     ScopedHandle dstHandle;
-    BOOLEAN restartScan = TRUE;
+    // The first query restarts the scan. Each later query names the 1-based
+    // index of the entry it starts at, because the SMB client starts a query
+    // that names no index at the first entry again.
+    ULONG nextIndex = 1;
     for (;;) {
         IO_STATUS_BLOCK readIo{};
+        ULONG index = nextIndex;
+        const bool firstQuery = nextIndex == 1;
         const NTSTATUS readStatus =
             queryEa(srcHandle.Get(), &readIo, buffer.data(), static_cast<ULONG>(buffer.size()),
-                    FALSE, nullptr, 0, nullptr, restartScan);
-        restartScan = FALSE;
+                    FALSE, nullptr, 0, firstQuery ? nullptr : &index, firstQuery);
         if (readStatus == STATUS_NO_EAS_ON_FILE || readStatus == STATUS_NO_MORE_EAS ||
             RefusesExtendedAttributes(readStatus)) {
             return STATUS_SUCCESS;
         }
-        // STATUS_BUFFER_OVERFLOW returns the entries that fit. The next
-        // read continues after them.
+        // STATUS_BUFFER_OVERFLOW returns the entries that fit.
         if (!NT_SUCCESS(readStatus) && readStatus != STATUS_BUFFER_OVERFLOW) {
             return readStatus;
         }
         if (readIo.Information == 0) {
             return STATUS_SUCCESS;
         }
+        nextIndex += FullEaEntryCount(buffer.data(), static_cast<ULONG>(readIo.Information));
         std::vector<BYTE> settable = ExtendedAttributesUserModeCanSet(
             buffer.data(), static_cast<ULONG>(readIo.Information));
         if (settable.empty()) {

@@ -165,6 +165,34 @@ std::vector<NamedExtendedAttribute> AttributesInFullEaList(const std::vector<BYT
     return attributes;
 }
 
+// Small attributes whose FILE_FULL_EA_INFORMATION list is longer than the
+// 64 KB that one query of a share can return.
+std::vector<NamedExtendedAttribute> AttributesPastOneQuery() {
+    constexpr int kCount = 4500;
+    std::vector<NamedExtendedAttribute> attributes;
+    for (int i = 0; i < kCount; ++i) {
+        attributes.push_back({"U." + std::to_string(1000 + i), "v"});
+    }
+    Assert::IsTrue(FullEaList(attributes).size() > 64 * 1024,
+        L"Precondition: the list is longer than 64 KB");
+    return attributes;
+}
+
+// Writes every attribute on the file at path with one NtSetEaFile.
+void SetFullEaList(const std::wstring& path,
+                   const std::vector<NamedExtendedAttribute>& attributes) {
+    ScopedHandle handle(::CreateFileW(path.c_str(), FILE_WRITE_EA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0,
+        nullptr));
+    Assert::IsTrue(handle.IsValid(), L"Precondition: the test opens the lower file");
+    std::vector<BYTE> list = FullEaList(attributes);
+    const auto setEa = LoadNtdllExport<NtSetEaFileFn>("NtSetEaFile");
+    IO_STATUS_BLOCK io{};
+    AssertStatus(STATUS_SUCCESS,
+        setEa(handle.Get(), &io, list.data(), static_cast<ULONG>(list.size())),
+        L"Precondition: the test writes the extended attributes of the lower file");
+}
+
 }
 
 TEST_CLASS(CopyUpPreservationTests) {
@@ -419,6 +447,58 @@ public:
         LayerMountTestShared::GetTimes(env.Upper() + L"\\wsl.txt", nullptr, nullptr, &upperWrite);
         Assert::IsTrue(::CompareFileTime(&stamped, &upperWrite) == 0,
             L"The upper file must have the last-write time of the lower file");
+    }
+
+    TEST_METHOD(CopyUpFile_FileInUncLower_CopiesExtendedAttributesOfLowerFile) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"wsl.txt", "content");
+        const auto attributes = WslAndUserExtendedAttributes(kWslFileMode);
+        SetExtendedAttributes(env.Lower(0) + L"\\wsl.txt", attributes);
+        const std::wstring uncLower = LayerMountTestShared::AdminSharePathOf(env.Lower(0));
+        if (!LayerMountTestShared::SharePathReachableOrSkipped(uncLower)) {
+            return;
+        }
+        LayerConfig config = env.MakeConfig();
+        config.lowerPaths = {HostPath(uncLower)};
+        CopyUpAndRenameRig rig(config);
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"wsl.txt"),
+            L"The copy-up of a file in a lower on a share must succeed");
+
+        AssertHasExtendedAttributes(env.Upper() + L"\\wsl.txt", attributes);
+    }
+
+    TEST_METHOD(CopyUpFile_ExtendedAttributeListLongerThanOneQuery_CopiesEveryAttribute) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"many.txt", "content");
+        const auto attributes = AttributesPastOneQuery();
+        SetFullEaList(env.Lower(0) + L"\\many.txt", attributes);
+        CopyUpAndRenameRig rig(env.MakeConfig());
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"many.txt"),
+            L"The copy-up of a file with a long extended attribute list must succeed");
+
+        AssertHasExtendedAttributes(env.Upper() + L"\\many.txt", attributes);
+    }
+
+    TEST_METHOD(CopyUpFile_FileInUncLowerWithListLongerThanOneQuery_CopiesEveryAttribute) {
+        TempLayerEnvironment env(1);
+        env.WriteFile(env.Lower(0), L"many.txt", "content");
+        const auto attributes = AttributesPastOneQuery();
+        SetFullEaList(env.Lower(0) + L"\\many.txt", attributes);
+        const std::wstring uncLower = LayerMountTestShared::AdminSharePathOf(env.Lower(0));
+        if (!LayerMountTestShared::SharePathReachableOrSkipped(uncLower)) {
+            return;
+        }
+        LayerConfig config = env.MakeConfig();
+        config.lowerPaths = {HostPath(uncLower)};
+        CopyUpAndRenameRig rig(config);
+
+        AssertStatus(STATUS_SUCCESS, rig.copyUp.CopyUpFile(L"many.txt"),
+            L"The copy-up of a file in a lower on a share with a long extended "
+            L"attribute list must succeed");
+
+        AssertHasExtendedAttributes(env.Upper() + L"\\many.txt", attributes);
     }
 
     TEST_METHOD(ExtendedAttributesUserModeCanSet_LeavesOutKernelAttributesInAnyCase) {

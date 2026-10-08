@@ -104,6 +104,7 @@
     <ClCompile Include="AbiTransientLayerMountTests.cpp" />
     <ClCompile Include="AbiPagingReadMatrixTests.cpp" />
     <ClCompile Include="AbiCopyUpOnOpenTests.cpp" />
+    <ClCompile Include="AbiUncLowerTests.cpp" />
     <ClCompile Include="AbiMaximumAllowedTests.cpp" />
     <ClCompile Include="AbiTrackerOpenerTests.cpp" />
     <ClCompile Include="AbiCreateRollbackTests.cpp" />
