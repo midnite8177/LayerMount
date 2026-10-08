@@ -14,9 +14,9 @@
     Bump it by hand in this file when needed.
   -->
   <PropertyGroup Label="LayerMountVersion">
-    <LayerMountVersionMajor>3</LayerMountVersionMajor>
+    <LayerMountVersionMajor>4</LayerMountVersionMajor>
     <LayerMountVersionMinor>0</LayerMountVersionMinor>
-    <LayerMountVersionPatch>1</LayerMountVersionPatch>
+    <LayerMountVersionPatch>0</LayerMountVersionPatch>
     <LayerMountVersionSuffix></LayerMountVersionSuffix>
     <LayerMountVersion>$(LayerMountVersionMajor).$(LayerMountVersionMinor).$(LayerMountVersionPatch)</LayerMountVersion>
     <LayerMountVersionFull Condition="'$(LayerMountVersionSuffix)'==''">$(LayerMountVersion)</LayerMountVersionFull>
