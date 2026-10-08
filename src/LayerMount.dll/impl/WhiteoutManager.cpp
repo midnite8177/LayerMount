@@ -132,11 +132,11 @@ bool WhiteoutManager::HasWhiteoutUnderWalkedDirectoryInLayer(const std::wstring&
 }
 
 bool WhiteoutManager::HasWhiteoutInAnyLayer(const std::wstring& relativePath) const {
-    if (HasWhiteout(relativePath, config_.upperPath)) {
+    if (HasWhiteout(relativePath, config_.upperPath.Text())) {
         return true;
     }
-    for (const auto& lower : config_.lowerPaths) {
-        if (HasWhiteout(relativePath, lower)) {
+    for (const HostPath& lower : config_.lowerPaths) {
+        if (HasWhiteout(relativePath, lower.Text())) {
             return true;
         }
     }
@@ -155,7 +155,7 @@ NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
         return directoryStatus;
     }
 
-    std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
+    std::wstring whPath = GetWhiteoutFullPath(config_.upperPath.Text(), relativePath);
 
     fs::path parentDir = fs::path(whPath).parent_path();
     if (!parentDir.empty()) {
@@ -178,7 +178,7 @@ NTSTATUS WhiteoutManager::CreateWhiteout(const std::wstring& relativePath,
 }
 
 NTSTATUS WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
-    switch (FindLinkOnPath(config_.upperPath, MarkerDirectoryOf(relativePath))) {
+    switch (FindLinkOnPath(config_.upperPath.Text(), MarkerDirectoryOf(relativePath))) {
     case LinkOnPath::Self:
     case LinkOnPath::Ancestor:
         return STATUS_SUCCESS;
@@ -188,7 +188,7 @@ NTSTATUS WhiteoutManager::RemoveWhiteout(const std::wstring& relativePath) {
         break;
     }
 
-    std::wstring whPath = GetWhiteoutFullPath(config_.upperPath, relativePath);
+    std::wstring whPath = GetWhiteoutFullPath(config_.upperPath.Text(), relativePath);
 
     if (!DeleteFileW(WithExtendedPrefix(whPath).c_str())) {
         const DWORD deleteErr = GetLastError();
@@ -210,7 +210,7 @@ bool WhiteoutManager::HoldsOpaqueMarker(const std::wstring& dirFullPath) const {
 }
 
 bool WhiteoutManager::IsOpaque(const std::wstring& dirRelativePath) const {
-    return IsOpaqueInLayer(dirRelativePath, config_.upperPath);
+    return IsOpaqueInLayer(dirRelativePath, config_.upperPath.Text());
 }
 
 bool WhiteoutManager::IsOpaqueInLayer(const std::wstring& dirRelativePath,
@@ -232,7 +232,7 @@ NTSTATUS WhiteoutManager::SetOpaque(const std::wstring& dirRelativePath) {
         return directoryStatus;
     }
 
-    std::wstring dirFullPath = JoinDirPath(config_.upperPath, normalized);
+    std::wstring dirFullPath = JoinDirPath(config_.upperPath.Text(), normalized);
 
     EnsureDirectoryExists(dirFullPath);
 
@@ -281,7 +281,7 @@ NTSTATUS WhiteoutManager::WriteOpaqueMarkers(const std::wstring& dirFullPath) {
 
 bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
     const std::wstring normalized = NormalizePathPreserveCase(dirRelativePath);
-    const LinkOnPath link = FindLinkOnPath(config_.upperPath, normalized);
+    const LinkOnPath link = FindLinkOnPath(config_.upperPath.Text(), normalized);
     if (link == LinkOnPath::Ancestor) {
         return true;
     }
@@ -289,7 +289,7 @@ bool WhiteoutManager::RemoveOpaque(const std::wstring& dirRelativePath) {
         return false;
     }
 
-    std::wstring dirFullPath = JoinDirPath(config_.upperPath, normalized);
+    std::wstring dirFullPath = JoinDirPath(config_.upperPath.Text(), normalized);
 
     const bool metadataOk = MetadataStore::RemoveOpaqueMetadata(dirFullPath, &config_);
 

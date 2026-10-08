@@ -67,19 +67,21 @@ void MakeVolume(LayerMount::VHD::VHDLayerManager& mgr,
                 const std::wstring& fileSystem,
                 LayerMount::VHD::VhdHandle& handle,
                 std::wstring& volumeGuid) {
-    LayerMount::VHD::VhdHandle createHandle;
+    const LayerMount::HostPath vhd(vhdPath);
     Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        mgr.CreateVHD(vhdPath, 100ULL * 1024 * 1024, /*dynamic*/ true, createHandle));
-    createHandle.Close();
-    std::wstring physicalPath;
+        mgr.CreateVHD(vhd, 100ULL * 1024 * 1024, LayerMount::VHD::VhdAllocation::Dynamic));
+    LayerMount::VHD::AttachedVhd attached;
     Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        mgr.AttachVHD(vhdPath, /*readOnly*/ false, handle, physicalPath,
+        mgr.AttachVHD(vhd,
+                      {LayerMount::VHD::AttachAccess::ReadWrite,
                        LayerMount::VHD::AttachLifetime::ProcessScoped,
-                       /*suppressDriveLetter=*/ true));
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.InitializeVHD(physicalPath, vhdPath),
+                       LayerMount::VHD::DriveLetter::Suppress},
+                      attached));
+    handle = std::move(attached.handle);
+    Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.InitializeVHD(attached.physicalPath, vhd),
         L"InitializeVHD must partition the disk and create its volume");
     Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        LayerMount::VHD::GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid));
+        LayerMount::VHD::GetVolumeGuidForPhysicalDisk(attached.physicalPath, volumeGuid));
     volumeGuid = LayerMount::VHD::EnsureTrailingBackslash(volumeGuid);
     Assert::AreEqual<DWORD>(ERROR_SUCCESS, FormatVolume(volumeGuid, fileSystem),
         (L"format.com must give the volume a " + fileSystem + L" file system").c_str());
@@ -108,17 +110,15 @@ public:
         const std::wstring root = MakeVhdWorkspace();
         const std::wstring vhdPath = root + L"\\vhd\\dynamic.vhdx";
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        LayerMount::VHD::VhdHandle handle;
-        const DWORD rc = mgr.CreateVHD(vhdPath, 64ULL * 1024 * 1024, /*dynamic*/ true, handle);
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
+        const DWORD rc = mgr.CreateVHD(LayerMount::HostPath(vhdPath), 64ULL * 1024 * 1024,
+                                       LayerMount::VHD::VhdAllocation::Dynamic);
 
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, rc,
                                 L"CreateVHD should succeed");
-        Assert::IsTrue(handle.IsValid(), L"CreateVHD should return a valid handle");
         Assert::IsTrue(std::filesystem::exists(vhdPath),
                        L"VHDX file must exist on disk");
 
-        handle.Close();
         CleanupWorkspace(root);
     }
 
@@ -126,47 +126,41 @@ public:
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
-        const std::wstring vhdPath = root + L"\\vhd\\attachable.vhdx";
+        const LayerMount::HostPath vhdPath(root + L"\\vhd\\attachable.vhdx");
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        LayerMount::VHD::VhdHandle createHandle;
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.CreateVHD(vhdPath, 64ULL * 1024 * 1024, true, createHandle));
-        createHandle.Close();
+            mgr.CreateVHD(vhdPath, 64ULL * 1024 * 1024, LayerMount::VHD::VhdAllocation::Dynamic));
 
-        LayerMount::VHD::VhdHandle attachHandle;
-        std::wstring physicalPath;
-        const DWORD rc = mgr.AttachVHD(vhdPath, /*readOnly*/ false,
-                                        attachHandle, physicalPath,
+        LayerMount::VHD::AttachedVhd attached;
+        const DWORD rc = mgr.AttachVHD(vhdPath,
+                                       {LayerMount::VHD::AttachAccess::ReadWrite,
                                         LayerMount::VHD::AttachLifetime::Permanent,
-                                        /*suppressDriveLetter=*/ false);
+                                        LayerMount::VHD::DriveLetter::Assign},
+                                       attached);
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, rc);
-        Assert::IsFalse(physicalPath.empty(),
+        Assert::IsFalse(attached.physicalPath.empty(),
                         L"AttachVHD must return a \\\\.\\PhysicalDriveN path");
 
         mgr.DetachVHD(vhdPath);
         CleanupWorkspace(root);
     }
 
-    TEST_METHOD(DifferencingVHD_ChildAttaches) {
+    TEST_METHOD(DifferencingVHD_CreatesTheChildFile) {
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
-        const std::wstring parent = root + L"\\vhd\\parent.vhdx";
+        const LayerMount::HostPath parent(root + L"\\vhd\\parent.vhdx");
         const std::wstring child  = root + L"\\vhd\\child.vhdx";
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
 
-        LayerMount::VHD::VhdHandle parentHandle;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.CreateVHD(parent, 64ULL * 1024 * 1024, true, parentHandle));
-        parentHandle.Close();
+            mgr.CreateVHD(parent, 64ULL * 1024 * 1024, LayerMount::VHD::VhdAllocation::Dynamic));
 
-        LayerMount::VHD::VhdHandle childHandle;
-        const DWORD rc = mgr.CreateDifferencingVHD(child, parent, childHandle);
+        const DWORD rc = mgr.CreateDifferencingVHD(LayerMount::HostPath(child), parent);
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, rc,
                                 L"CreateDifferencingVHD should succeed");
-        childHandle.Close();
 
         Assert::IsTrue(std::filesystem::exists(child),
                        L"Child differencing VHDX must exist");
@@ -189,14 +183,15 @@ public:
         { std::ofstream(src + L"\\a.txt")          << "hello"; }
         { std::ofstream(nested + L"\\b.txt")       << "world"; }
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
+        const LayerMount::HostPath vhdPath(vhd);
 
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0),
+            mgr.ImportDirectory(LayerMount::HostPath(src), vhdPath, std::nullopt),
             L"Import must succeed before we can export");
 
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.ExportToDirectory(vhd, out),
+            mgr.ExportToDirectory(vhdPath, LayerMount::HostPath(out)).error,
             L"Export must succeed on a freshly-imported NTFS volume");
 
         Assert::IsTrue(std::filesystem::exists(out + L"\\a.txt"),
@@ -219,17 +214,19 @@ public:
         std::filesystem::create_directories(src);
         { std::ofstream(src + L"\\marker.txt") << "x"; }
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0));
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
+        const LayerMount::HostPath vhdPath(vhd);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(LayerMount::HostPath(src), vhdPath, std::nullopt));
 
         const DWORD before = ::GetLogicalDrives();
 
-        LayerMount::VHD::VhdHandle handle;
-        std::wstring physicalPath;
+        LayerMount::VHD::AttachedVhd attached;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.AttachVHD(vhd, /*readOnly*/ true, handle, physicalPath,
+            mgr.AttachVHD(vhdPath,
+                          {LayerMount::VHD::AttachAccess::ReadOnly,
                            LayerMount::VHD::AttachLifetime::ProcessScoped,
-                           /*suppressDriveLetter=*/ true));
+                           LayerMount::VHD::DriveLetter::Suppress},
+                          attached));
 
         // The Mount Manager assigns a drive letter asynchronously, within a
         // few hundred ms of an attach.
@@ -238,11 +235,11 @@ public:
 
         const DWORD newLetters = after & ~before;
 
-        mgr.DetachVHD(vhd);
-        handle.Close();
+        mgr.DetachVHD(vhdPath);
+        attached.handle.Close();
 
         Assert::AreEqual<DWORD>(0, newLetters,
-            L"No new drive letter must appear when suppressDriveLetter=true");
+            L"No new drive letter must appear when the attach suppresses it");
 
         CleanupWorkspace(root);
     }
@@ -259,9 +256,10 @@ public:
         { std::ofstream(src + L"\\top.txt")      << "top-content"; }
         { std::ofstream(src + L"\\dir1\\nested") << "nested-content"; }
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0));
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ExportToDirectory(vhd, out));
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
+        const LayerMount::HostPath vhdPath(vhd);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(LayerMount::HostPath(src), vhdPath, std::nullopt));
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ExportToDirectory(vhdPath, LayerMount::HostPath(out)).error);
 
         auto ReadAll = [](const std::wstring& p) -> std::string {
             std::ifstream f(p, std::ios::binary);
@@ -286,10 +284,11 @@ public:
         std::filesystem::create_directories(src);
         { std::ofstream(src + L"\\top.txt") << "top-content"; }
 
-        LayerMount::VHD::VHDLayerManager mgr(ExtendedDirWithSeparator(root + L"\\vhd"));
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0),
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(ExtendedDirWithSeparator(root + L"\\vhd")));
+        const LayerMount::HostPath vhdPath(vhd);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(LayerMount::HostPath(src), vhdPath, std::nullopt),
                                 L"Import must mount the VHD under a work dir that ends in a separator");
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ExportToDirectory(vhd, out),
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ExportToDirectory(vhdPath, LayerMount::HostPath(out)).error,
                                 L"Export must mount the VHD under a work dir that ends in a separator");
 
         std::ifstream f(out + L"\\top.txt", std::ios::binary);
@@ -304,22 +303,20 @@ public:
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
-        const std::wstring vhdPath = root + L"\\vhd\\permanent.vhdx";
+        const LayerMount::HostPath vhdPath(root + L"\\vhd\\permanent.vhdx");
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        LayerMount::VHD::VhdHandle createHandle;
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.CreateVHD(vhdPath, 64ULL * 1024 * 1024, true, createHandle));
-        createHandle.Close();
+            mgr.CreateVHD(vhdPath, 64ULL * 1024 * 1024, LayerMount::VHD::VhdAllocation::Dynamic));
 
-        LayerMount::VHD::VhdHandle attachHandle;
-        std::wstring physicalPath;
+        LayerMount::VHD::AttachedVhd attached;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.AttachVHD(vhdPath, /*readOnly*/ false, attachHandle,
-                           physicalPath,
+            mgr.AttachVHD(vhdPath,
+                          {LayerMount::VHD::AttachAccess::ReadWrite,
                            LayerMount::VHD::AttachLifetime::Permanent,
-                           /*suppressDriveLetter=*/ false));
-        attachHandle.Close();
+                           LayerMount::VHD::DriveLetter::Assign},
+                          attached));
+        attached.handle.Close();
 
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.DetachVHD(vhdPath),
             L"Permanent attach must survive handle close until DetachVHD");
@@ -331,35 +328,28 @@ public:
         UNIT_SKIP_IF_NOT_ADMIN();
 
         const std::wstring root = MakeVhdWorkspace();
-        const std::wstring vhdPath = root + L"\\vhd\\scoped.vhdx";
+        const LayerMount::HostPath vhdPath(root + L"\\vhd\\scoped.vhdx");
+        const LayerMount::VHD::AttachOptions options{
+            LayerMount::VHD::AttachAccess::ReadWrite,
+            LayerMount::VHD::AttachLifetime::ProcessScoped,
+            LayerMount::VHD::DriveLetter::Assign};
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        LayerMount::VHD::VhdHandle createHandle;
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.CreateVHD(vhdPath, 64ULL * 1024 * 1024, true, createHandle));
-        createHandle.Close();
+            mgr.CreateVHD(vhdPath, 64ULL * 1024 * 1024, LayerMount::VHD::VhdAllocation::Dynamic));
 
-        std::wstring physicalPath;
         {
-            LayerMount::VHD::VhdHandle attachHandle;
-            Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-                mgr.AttachVHD(vhdPath, /*readOnly*/ false, attachHandle,
-                               physicalPath,
-                               LayerMount::VHD::AttachLifetime::ProcessScoped,
-                               /*suppressDriveLetter=*/ false));
-            Assert::IsFalse(physicalPath.empty());
+            LayerMount::VHD::AttachedVhd attached;
+            Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.AttachVHD(vhdPath, options, attached));
+            Assert::IsFalse(attached.physicalPath.empty());
         }
 
-        LayerMount::VHD::VhdHandle reattachHandle;
-        std::wstring newPhysicalPath;
-        const DWORD rc = mgr.AttachVHD(vhdPath, /*readOnly*/ false,
-                                        reattachHandle, newPhysicalPath,
-                                        LayerMount::VHD::AttachLifetime::ProcessScoped,
-                                        /*suppressDriveLetter=*/ false);
+        LayerMount::VHD::AttachedVhd reattached;
+        const DWORD rc = mgr.AttachVHD(vhdPath, options, reattached);
         Assert::AreEqual<DWORD>(ERROR_SUCCESS, rc,
             L"Re-attach after ProcessScoped handle close must succeed");
 
-        reattachHandle.Close();
+        reattached.handle.Close();
         CleanupWorkspace(root);
     }
 
@@ -372,31 +362,34 @@ public:
         std::filesystem::create_directories(src + L"\\layer");
         { std::ofstream(src + L"\\layer\\d") << "vhd"; }
 
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
-        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(src, vhd, /*sizeBytes=*/ 0));
-        LayerMount::VHD::VhdHandle handle;
-        std::wstring physicalPath;
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
+        const LayerMount::HostPath vhdPath(vhd);
+        Assert::AreEqual<DWORD>(ERROR_SUCCESS, mgr.ImportDirectory(LayerMount::HostPath(src), vhdPath, std::nullopt));
+        LayerMount::VHD::AttachedVhd attached;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            mgr.AttachVHD(vhd, /*readOnly*/ true, handle, physicalPath,
+            mgr.AttachVHD(vhdPath,
+                          {LayerMount::VHD::AttachAccess::ReadOnly,
                            LayerMount::VHD::AttachLifetime::ProcessScoped,
-                           /*suppressDriveLetter=*/ true));
+                           LayerMount::VHD::DriveLetter::Suppress},
+                          attached));
         std::wstring volumeGuid;
         Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-            LayerMount::VHD::GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid));
+            LayerMount::VHD::GetVolumeGuidForPhysicalDisk(attached.physicalPath, volumeGuid));
 
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"d\\inner.txt", "deeper");
         auto config = env.MakeConfig();
-        config.lowerPaths.insert(config.lowerPaths.begin(),
-                                 LayerMount::VHD::EnsureTrailingBackslash(volumeGuid) + L"layer");
+        const std::wstring volumeLayer =
+            LayerMount::VHD::EnsureTrailingBackslash(volumeGuid) + L"layer";
+        config.lowerPaths.insert(config.lowerPaths.begin(), ::LayerMount::HostPath(volumeLayer));
         ::LayerMount::Cache cache;
         ::LayerMount::WhiteoutManager wm(config, &cache);
         ::LayerMount::PathResolver resolver(config, wm, cache);
         const ::LayerMount::ResolvedPath file = resolver.ResolvePath(L"d");
         const bool childFound = resolver.ResolvePath(L"d\\inner.txt").Found();
 
-        mgr.DetachVHD(vhd);
-        handle.Close();
+        mgr.DetachVHD(vhdPath);
+        attached.handle.Close();
         CleanupWorkspace(root);
 
         Assert::IsTrue(file.Found() && file.lowerIndex == 0, L"The VHD lower's file must resolve");
@@ -409,7 +402,7 @@ public:
 
         const std::wstring root = MakeVhdWorkspace();
         const std::wstring vhd = root + L"\\vhd\\fat32.vhdx";
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
         MakeVolume(mgr, vhd, L"FAT32", handle, volumeGuid);
@@ -419,14 +412,14 @@ public:
         env.WriteFile(fatLayer, L"d", "fat32");
         env.WriteFile(env.Lower(0), L"d\\inner.txt", "deeper");
         auto config = env.MakeConfig();
-        config.lowerPaths.insert(config.lowerPaths.begin(), fatLayer);
+        config.lowerPaths.insert(config.lowerPaths.begin(), ::LayerMount::HostPath(fatLayer));
         ::LayerMount::Cache cache;
         ::LayerMount::WhiteoutManager wm(config, &cache);
         ::LayerMount::PathResolver resolver(config, wm, cache);
         const ::LayerMount::ResolvedPath file = resolver.ResolvePath(L"d");
         const bool childFound = resolver.ResolvePath(L"d\\inner.txt").Found();
 
-        mgr.DetachVHD(vhd);
+        mgr.DetachVHD(LayerMount::HostPath(vhd));
         handle.Close();
         CleanupWorkspace(root);
 
@@ -440,7 +433,7 @@ public:
 
         const std::wstring root = MakeVhdWorkspace();
         const std::wstring vhd = root + L"\\vhd\\fat32.vhdx";
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
         MakeVolume(mgr, vhd, L"FAT32", handle, volumeGuid);
@@ -450,14 +443,14 @@ public:
         env.WriteFile(fatLayer, L"d\\inner.txt", "fat32");
         env.WriteFile(env.Upper(), L"d", "upper");
         auto config = env.MakeConfig();
-        config.lowerPaths.push_back(fatLayer);
+        config.lowerPaths.push_back(::LayerMount::HostPath(fatLayer));
         ::LayerMount::Cache cache;
         ::LayerMount::WhiteoutManager wm(config, &cache);
         ::LayerMount::PathResolver resolver(config, wm, cache);
         const ::LayerMount::ResolvedPath lowerDir = resolver.ResolveLowerPath(L"d");
         const bool childFound = resolver.ResolvePath(L"d\\inner.txt").Found();
 
-        mgr.DetachVHD(vhd);
+        mgr.DetachVHD(LayerMount::HostPath(vhd));
         handle.Close();
         CleanupWorkspace(root);
 
@@ -472,7 +465,7 @@ public:
 
         const std::wstring root = MakeVhdWorkspace();
         const std::wstring vhd = root + L"\\vhd\\exfat.vhdx";
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
         MakeVolume(mgr, vhd, L"exFAT", handle, volumeGuid);
@@ -482,23 +475,24 @@ public:
         const NTSTATUS eaStatus =
             SetExtendedAttribute(env.Lower(0) + L"\\wsl.txt", "$LXUID", LittleEndianUlong(1000));
         LayerMount::LayerConfig config = env.MakeConfig();
-        config.upperPath = volumeGuid + L"upper";
-        config.workDirPath = volumeGuid + L"work";
+        config.upperPath = LayerMount::HostPath(volumeGuid + L"upper");
+        config.workDirPath = LayerMount::HostPath(volumeGuid + L"work");
         config.hostCapabilities &= ~LM_CAP_ADS;
-        ::CreateDirectoryW(config.upperPath.c_str(), nullptr);
-        ::CreateDirectoryW(config.workDirPath.c_str(), nullptr);
-        ::CreateDirectoryW(LayerMount::StagingAreaPath(config.workDirPath).c_str(), nullptr);
+        ::CreateDirectoryW(config.upperPath.ForWin32().c_str(), nullptr);
+        ::CreateDirectoryW(config.workDirPath.ForWin32().c_str(), nullptr);
+        ::CreateDirectoryW(LayerMount::StagingAreaPath(config.workDirPath).ForWin32().c_str(),
+                           nullptr);
         NTSTATUS copyUpStatus = STATUS_UNSUCCESSFUL;
         std::string upperContent;
         {
             CopyUpAndRenameRig rig(config);
             copyUpStatus = rig.copyUp.CopyUpFile(L"wsl.txt");
-            std::ifstream upperFile(config.upperPath + L"\\wsl.txt", std::ios::binary);
+            std::ifstream upperFile(config.upperPath.Text() + L"\\wsl.txt", std::ios::binary);
             upperContent.assign(std::istreambuf_iterator<char>(upperFile),
                                 std::istreambuf_iterator<char>());
         }
 
-        mgr.DetachVHD(vhd);
+        mgr.DetachVHD(LayerMount::HostPath(vhd));
         handle.Close();
         CleanupWorkspace(root);
 
@@ -515,19 +509,20 @@ public:
 
         const std::wstring root = MakeVhdWorkspace();
         const std::wstring vhd = root + L"\\vhd\\work.vhdx";
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
         MakeVolume(mgr, vhd, L"FAT32", handle, volumeGuid);
 
         TempLayerEnvironment env(0);
         LayerMount::LayerConfig config = env.MakeConfig();
-        config.workDirPath = volumeGuid + L"work";
-        const bool workMade = ::CreateDirectoryW(config.workDirPath.c_str(), nullptr) != FALSE;
+        config.workDirPath = LayerMount::HostPath(volumeGuid + L"work");
+        const bool workMade =
+            ::CreateDirectoryW(config.workDirPath.Text().c_str(), nullptr) != FALSE;
         std::wstring error;
         const HRESULT hr = config.Prepare(error);
 
-        mgr.DetachVHD(vhd);
+        mgr.DetachVHD(LayerMount::HostPath(vhd));
         handle.Close();
         CleanupWorkspace(root);
 
@@ -542,7 +537,7 @@ public:
 
         const std::wstring root = MakeVhdWorkspace();
         const std::wstring vhd = root + L"\\vhd\\target.vhdx";
-        LayerMount::VHD::VHDLayerManager mgr(root + L"\\vhd");
+        LayerMount::VHD::VHDLayerManager mgr(LayerMount::HostPath(root + L"\\vhd"));
         LayerMount::VHD::VhdHandle handle;
         std::wstring volumeGuid;
         MakeVolume(mgr, vhd, L"NTFS", handle, volumeGuid);
@@ -592,7 +587,7 @@ public:
             }
         }
 
-        mgr.DetachVHD(vhd);
+        mgr.DetachVHD(LayerMount::HostPath(vhd));
         handle.Close();
         CleanupWorkspace(root);
 
@@ -609,8 +604,8 @@ public:
 TEST_CLASS(ManifestPathTests) {
 public:
     TEST_METHOD(DefaultPath_IsCanonicalFileName) {
-        const std::wstring dir = L"C:\\Temp\\demo";
-        const std::wstring resolved = LayerMount::VHD::Manifest::DefaultPath(dir);
+        const LayerMount::HostPath dir(L"C:\\Temp\\demo");
+        const std::wstring resolved = LayerMount::VHD::Manifest::DefaultPath(dir).Text();
         Assert::IsTrue(resolved.find(L"layers.manifest.json") != std::wstring::npos,
                        L"DefaultPath must resolve to layers.manifest.json");
     }
@@ -618,6 +613,8 @@ public:
     TEST_METHOD(ManagerWriteAndCliReadAgreeOnPath) {
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
+        const LayerMount::HostPath path =
+            LayerMount::VHD::Manifest::DefaultPath(LayerMount::HostPath(root));
 
         {
             LayerMount::VHD::Manifest m;
@@ -627,14 +624,12 @@ public:
             entry.path = root + L"\\sample.vhdx";
             entry.createdAt = L"2026-04-16T00:00:00Z";
             m.AddLayer(entry);
-            Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-                m.Save(LayerMount::VHD::Manifest::DefaultPath(root)));
+            Assert::AreEqual<DWORD>(ERROR_SUCCESS, m.Save(path));
         }
 
         {
             LayerMount::VHD::Manifest m;
-            Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-                m.Load(LayerMount::VHD::Manifest::DefaultPath(root)));
+            Assert::AreEqual<DWORD>(ERROR_SUCCESS, m.Load(path));
             const auto* entry = m.GetLayer(L"test-id-123");
             Assert::IsNotNull(entry, L"Layer written via DefaultPath must be readable via DefaultPath");
             Assert::IsTrue(entry->type == LayerMount::VHD::LayerType::VHD);
@@ -647,7 +642,8 @@ public:
     TEST_METHOD(Manifest_RemoveLayerAndSave_RoundTrip) {
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
-        const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
+        const LayerMount::HostPath path =
+            LayerMount::VHD::Manifest::DefaultPath(LayerMount::HostPath(root));
 
         {
             LayerMount::VHD::Manifest m;
@@ -686,7 +682,8 @@ public:
     TEST_METHOD(Manifest_SaveIsAtomic_NoPartialFileOnCrash) {
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
-        const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
+        const LayerMount::HostPath path =
+            LayerMount::VHD::Manifest::DefaultPath(LayerMount::HostPath(root));
 
         LayerMount::VHD::Manifest m;
         LayerMount::VHD::LayerEntry e;
@@ -713,20 +710,21 @@ public:
     TEST_METHOD(Manager_OnCorruptRegistry_LeavesRegistryBytesUnchanged) {
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
-        const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
+        const LayerMount::HostPath path =
+            LayerMount::VHD::Manifest::DefaultPath(LayerMount::HostPath(root));
         const std::string corrupt = "{ \"schemaVersion\": 1, \"layers\": [ truncated";
         {
-            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            std::ofstream out(path.ForWin32(), std::ios::binary | std::ios::trunc);
             out.write(corrupt.data(), static_cast<std::streamsize>(corrupt.size()));
         }
 
         {
-            LayerMount::VHD::VHDLayerManager manager(root);
+            LayerMount::VHD::VHDLayerManager manager{LayerMount::HostPath(root)};
         }
 
         std::string after;
         {
-            std::ifstream in(path, std::ios::binary);
+            std::ifstream in(path.ForWin32(), std::ios::binary);
             after.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
         std::error_code ec;
@@ -741,14 +739,16 @@ public:
         // thread can observe that the lock is held.
         const std::wstring root = LayerMountTests::MakeUniqueTempRoot();
         std::filesystem::create_directories(root);
-        const std::wstring path = LayerMount::VHD::Manifest::DefaultPath(root);
+        const LayerMount::HostPath path =
+            LayerMount::VHD::Manifest::DefaultPath(LayerMount::HostPath(root));
 
-        LayerMount::VHD::ManifestLock first(path, /*timeoutMs=*/ 200);
+        constexpr DWORD kLockTimeoutMs = 200;
+        LayerMount::VHD::ManifestLock first(path, kLockTimeoutMs);
         Assert::IsTrue(first.Held(), L"First lock must acquire the mutex");
 
         bool peerHeld = true;
         std::thread peer([&] {
-            LayerMount::VHD::ManifestLock second(path, /*timeoutMs=*/ 200);
+            LayerMount::VHD::ManifestLock second(path, kLockTimeoutMs);
             peerHeld = second.Held();
         });
         peer.join();

@@ -8,21 +8,8 @@ namespace LayerMountAbiTests {
 
 namespace {
 
-std::wstring StagingArea(const std::wstring& workDir) {
-    return workDir + L"\\work";
-}
-
 bool Exists(const std::wstring& path) {
     return ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
-std::wstring LastErrorMessage(HRESULT hr) {
-    std::vector<wchar_t> message(4096);
-    SIZE_T required = 0;
-    if (FAILED(::LayerMountGetLastErrorMessage(hr, message.data(), message.size(), &required))) {
-        return {};
-    }
-    return message.data();
 }
 
 HRESULT CreateWithPaths(const TempLayerEnv& env, const std::wstring& upper,

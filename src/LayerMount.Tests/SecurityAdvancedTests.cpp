@@ -19,12 +19,11 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace LayerMount;
 using LayerMountTestShared::AccessDenied;
 using LayerMountTestShared::AddDenyAce;
-using LayerMountTestShared::AceSpec;
-using LayerMountTestShared::DaclWithOneMoreAce;
-using LayerMountTestShared::LocalAcl;
+using LayerMountTestShared::CountDaclAcesForSid;
 using LayerMountTestShared::WellKnownSid;
 using LayerMountTestShared::EveryoneSid;
 using LayerMountTestShared::ForEachAllowOrDenyAce;
+using LayerMountTestShared::GrantInheritableReadAttributes;
 
 namespace LayerMountTests {
 
@@ -51,14 +50,6 @@ std::wstring GetOwnerSidString(const std::wstring& path) {
     return result;
 }
 
-size_t CountDaclAcesForSid(const std::wstring& path, PSID target) {
-    size_t count = 0;
-    ForEachAllowOrDenyAce(path, [&](const ACE_HEADER&, ACCESS_MASK, PSID sid) {
-        if (::EqualSid(sid, target)) ++count;
-    });
-    return count;
-}
-
 bool HasInheritedAceForSid(const std::wstring& path, PSID target) {
     bool found = false;
     ForEachAllowOrDenyAce(path, [&](const ACE_HEADER& header, ACCESS_MASK, PSID sid) {
@@ -73,18 +64,6 @@ std::vector<BYTE> AceFlagsForSid(const std::wstring& path, PSID target) {
         if (::EqualSid(sid, target)) flags.push_back(header.AceFlags);
     });
     return flags;
-}
-
-void GrantInheritableReadAttributes(const std::wstring& path, PSID sid) {
-    const LocalAcl merged = DaclWithOneMoreAce(
-        path, AceSpec{GRANT_ACCESS, FILE_READ_ATTRIBUTES,
-                      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, sid});
-    Assert::AreEqual<DWORD>(ERROR_SUCCESS,
-        ::SetNamedSecurityInfoW(
-            const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-            nullptr, nullptr, merged.get(), nullptr),
-        L"The directory's DACL must take the grant");
 }
 
 // upper\p holds an inherited ACE for parentSid, and the work directory an

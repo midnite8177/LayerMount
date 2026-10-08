@@ -104,7 +104,7 @@ private:
     // stagedPath can hold a partial tree, and the caller removes it.
     NTSTATUS CopyMergedDirectory(const ResolvedPath& lowerSource,
                                  const RenamedName& oldName,
-                                 const std::wstring& stagedPath);
+                                 const HostPath& stagedPath);
 
     // Copies each entry of oldDir, a merge of a directory, into the
     // directory at dstPath, at every depth. The merge applies the whiteouts
@@ -113,7 +113,7 @@ private:
     // merge cannot list fails the copy. On failure, dstPath holds a partial
     // tree, and the caller removes it.
     NTSTATUS CopyMergedChildren(const MergedDirectoryWithAncestry& oldDir,
-                                const std::wstring& dstPath);
+                                const HostPath& dstPath);
 
     // Copies entry, which the merge oldParent lists, from the layer that
     // gives it into dstParentPath. The copy keeps the name that layer
@@ -122,7 +122,7 @@ private:
     // as a link, and any other directory copies as a plain directory.
     NTSTATUS CopyMergedEntry(const MergedDirectoryWithAncestry& oldParent,
                              const MergedEntry& entry,
-                             const std::wstring& dstParentPath);
+                             const HostPath& dstParentPath);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;

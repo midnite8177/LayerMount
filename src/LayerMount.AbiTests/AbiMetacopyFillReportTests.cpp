@@ -66,7 +66,7 @@ bool LastFailureWasFill() {
     return wasFill != FALSE;
 }
 
-std::wstring LastErrorMessage(HRESULT hr) {
+std::wstring CheckedLastErrorMessage(HRESULT hr) {
     std::vector<wchar_t> buffer(1024);
     SIZE_T required = 0;
     Assert::AreEqual<HRESULT>(S_OK,
@@ -112,7 +112,7 @@ public:
         HeldHostFile writer = BlockFillWithLowerWriter(env);
 
         const HRESULT      hr      = OpenForRead(mount.Get(), kShellPath);
-        const std::wstring message = LastErrorMessage(hr);
+        const std::wstring message = CheckedLastErrorMessage(hr);
 
         Logger::WriteMessage(message.c_str());
         Assert::IsTrue(Contains(message, L"fill"), L"the message names the fill");
@@ -206,7 +206,7 @@ public:
         HeldHostFile writer = BlockFillWithLowerWriter(env);
 
         const HRESULT hr = OpenForRead(mount.Get(), kShellPath);
-        (void)LastErrorMessage(hr);
+        (void)CheckedLastErrorMessage(hr);
 
         Assert::IsTrue(LastFailureWasFill(), L"the first read reports the fill");
         Assert::IsTrue(LastFailureWasFill(), L"a second read still reports the fill");

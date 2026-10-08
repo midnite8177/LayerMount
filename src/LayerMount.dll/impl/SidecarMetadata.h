@@ -13,33 +13,31 @@
 // Path keying uses SHA-1 of the lowercased absolute upper path so the
 // scheme survives filenames containing characters NTFS would reject in a
 // flat namespace (`<`, `>`, `:`, etc.) and tolerates very long paths.
-//
-// Stateless: every method takes the file/dir path under the upper layer
-// plus the upper root so we can compute the sidecar location. The
-// dispatcher in MetadataStore picks between ADS and sidecar; this module
-// just owns the sidecar I/O shape.
+// A record is found only when filePath has the same form, plain or \\?\,
+// at the write and at the read.
 
+#include "HostPath.h"
 #include "LayerMount.h"
+
+#include <optional>
 
 namespace LayerMount {
 
 class SidecarMetadata {
 public:
-    // Read the sidecar JSON for `filePath` (an absolute path under
-    // `upperRoot`). Returns default-constructed `LayerMountMetadata` if the
+    explicit SidecarMetadata(const HostPath& upperRoot);
+
+    // Read the sidecar JSON for `filePath` (an absolute path under the upper
+    // root). Returns default-constructed `LayerMountMetadata` if the
     // sidecar is absent or unreadable; never throws.
-    static LayerMountMetadata Read(const std::wstring& filePath,
-                                const std::wstring& upperRoot);
+    LayerMountMetadata Read(const std::wstring& filePath) const;
 
     // Write the sidecar JSON. Creates `<upper>\.overlay\` if it does not
     // exist. Returns false on I/O failure.
-    static bool Write(const std::wstring& filePath,
-                      const LayerMountMetadata& metadata,
-                      const std::wstring& upperRoot);
+    bool Write(const std::wstring& filePath, const LayerMountMetadata& metadata) const;
 
     // Delete the per-file sidecar. Returns true on success or absent.
-    static bool Remove(const std::wstring& filePath,
-                       const std::wstring& upperRoot);
+    bool Remove(const std::wstring& filePath) const;
 
     // Moves the per-file sidecar and the opaque marker of fromPath to the
     // names of toPath. For each kind that fromPath lacks, deletes toPath's,
@@ -49,22 +47,23 @@ public:
     // marker cannot move after the per-file sidecar moved, the sidecar moves
     // back to fromPath. If that move back fails, the sidecar stays at toPath.
     // A failed call can still have deleted the record at toPath.
-    static NTSTATUS Move(const std::wstring& fromPath,
-                         const std::wstring& toPath,
-                         const std::wstring& upperRoot);
+    NTSTATUS Move(const std::wstring& fromPath, const std::wstring& toPath) const;
 
-    // True when the per-file sidecar of filePath exists.
-    static bool HasRecord(const std::wstring& filePath,
-                          const std::wstring& upperRoot);
+    bool HasRecord(const std::wstring& filePath) const;
 
-    static bool HasOpaque(const std::wstring& dirPath,
-                          const std::wstring& upperRoot);
+    bool HasOpaque(const std::wstring& dirPath) const;
 
-    static bool SetOpaque(const std::wstring& dirPath,
-                          const std::wstring& upperRoot);
+    bool SetOpaque(const std::wstring& dirPath) const;
 
-    static bool RemoveOpaque(const std::wstring& dirPath,
-                             const std::wstring& upperRoot);
+    bool RemoveOpaque(const std::wstring& dirPath) const;
+
+private:
+    std::optional<std::wstring> BaseOf(const std::wstring& entryPath) const;
+    std::optional<std::wstring> FileOf(const std::wstring& entryPath,
+                                       const wchar_t* suffix) const;
+    bool EnsureDirectory() const;
+
+    std::wstring win32Directory_;
 };
 
-} // namespace LayerMount
+}

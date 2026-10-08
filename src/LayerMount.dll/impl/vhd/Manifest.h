@@ -6,6 +6,8 @@
 #include <map>
 #include <memory>
 
+#include "../HostPath.h"
+
 namespace LayerMount::VHD {
 
 // RAII wrapper for a named mutex that serializes reads and writes of the
@@ -14,7 +16,7 @@ namespace LayerMount::VHD {
 // does not serialize two holders on the same thread.
 class ManifestLock {
 public:
-    ManifestLock(const std::wstring& manifestPath, DWORD timeoutMs);
+    ManifestLock(const HostPath& manifestPath, DWORD timeoutMs);
     ~ManifestLock();
 
     ManifestLock(const ManifestLock&) = delete;
@@ -46,15 +48,15 @@ class Manifest {
 public:
     Manifest() = default;
 
-    // Canonical on-disk filename for a VHD layer manifest. Callers resolving
-    // a default path from a working directory should use DefaultPath(dir).
-    // Keeping this as a single source of truth avoids the historical drift
-    // where writers used "layers.manifest.json" and `vhd list` read "layers.json".
     static const wchar_t* DefaultFileName() { return L"layers.manifest.json"; }
-    static std::wstring DefaultPath(const std::wstring& workingDir);
+    // Joins the file name onto workingDir.Text(), so the result keeps the
+    // form the caller gave.
+    static HostPath DefaultPath(const HostPath& workingDir);
 
-    DWORD Load(const std::wstring& manifestPath);
-    DWORD Save(const std::wstring& manifestPath) const;
+    // When the file does not open, the result is the Win32 error of the open,
+    // so a caller can tell a missing registry from a locked or unreadable one.
+    DWORD Load(const HostPath& manifestPath);
+    DWORD Save(const HostPath& manifestPath) const;
 
     void AddLayer(const LayerEntry& entry);
     bool RemoveLayer(const std::wstring& id);
@@ -62,15 +64,8 @@ public:
     const LayerEntry* GetLayer(const std::wstring& id) const;
     std::vector<const LayerEntry*> ListLayers() const;
 
-    struct OrphanReport {
-        std::vector<std::wstring> missingVhds;      // Manifest entries with no file
-        std::vector<std::wstring> untrackedFiles;    // VHD files with no manifest entry
-    };
-    OrphanReport DetectOrphans(const std::wstring& layerDirectory) const;
-    DWORD CleanupOrphans(const std::wstring& layerDirectory, bool dryRun);
-
 private:
     std::map<std::wstring, LayerEntry> layers_;
 };
 
-} // namespace LayerMount::VHD
+}

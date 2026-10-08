@@ -1,5 +1,7 @@
 #pragma once
 
+#include "HostPath.h"
+
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -12,10 +14,6 @@
 namespace LayerMount {
 
 namespace abi { class EventEmitter; }
-
-// ---------------------------------------------------------------------------
-// Enums
-// ---------------------------------------------------------------------------
 
 enum class OperationType : uint8_t {
     Create,
@@ -35,15 +33,6 @@ enum class OperationType : uint8_t {
     Cleanup,
     Close
 };
-
-enum class ExportFormat {
-    JSON,
-    CSV
-};
-
-// ---------------------------------------------------------------------------
-// Data structs
-// ---------------------------------------------------------------------------
 
 struct ProcessInfo {
     DWORD pid = 0;
@@ -73,19 +62,14 @@ struct AccessRule {
     bool allowDelete = true;
 };
 
-// ---------------------------------------------------------------------------
-// ProcessTracker class
-// ---------------------------------------------------------------------------
-
 class ProcessTracker {
 public:
     explicit ProcessTracker(size_t logCapacity = 10000);
     ~ProcessTracker();
 
-    // Event emitter. When set, CheckAccess emits LM_EVT_ACCESS_DENIED
-    // on every denied decision so hosts can surface audit events in
-    // real time. Safe to call concurrently; atomicity of the single
-    // pointer write is guaranteed on x64.
+    // When set, CheckAccess emits LM_EVT_ACCESS_DENIED on every denied
+    // decision. The write is not synchronized, so call it before another
+    // thread can reach the tracker.
     void SetEventEmitter(::LayerMount::abi::EventEmitter* events) noexcept {
         events_ = events;
     }
@@ -93,43 +77,31 @@ public:
     ProcessTracker(const ProcessTracker&) = delete;
     ProcessTracker& operator=(const ProcessTracker&) = delete;
 
-    // --- Process resolution (6.2) ---
     ProcessInfo ResolveProcess(DWORD pid) const;
 
-    // --- Access control (6.4) ---
-    bool LoadRules(const std::wstring& configPath);
+    bool LoadRules(const HostPath& configPath);
     bool CheckAccess(DWORD pid, const std::wstring& relativePath, OperationType op);
 
-    // --- Logging (6.3) ---
     void LogAccess(DWORD pid, const std::wstring& relativePath, OperationType op);
     std::vector<AccessLogEntry> GetRecentEntries(size_t count) const;
 
-    // --- Export (6.5) ---
-    bool ExportLog(const std::wstring& filePath, ExportFormat format) const;
-
-    // Render the log as an in-memory UTF-8 string for callers (ABI /
-    // P-Invoke) that want to consume it without round-tripping through
-    // disk. Pretty-printed JSON (2-space indent) or RFC-4180 CSV with a
-    // header row. Same content that ExportLog writes.
+    // Return the whole log as UTF-8, either pretty-printed JSON with a
+    // 2-space indent or RFC 4180 CSV with a header row.
     std::string ExportLogAsJson() const;
     std::string ExportLogAsCsv()  const;
 
 private:
-    // --- Wildcard matching ---
     static bool WildcardMatch(const std::wstring& pattern, const std::wstring& text);
 
-    // --- Operation classification ---
     static bool IsReadOp(OperationType op);
     static bool IsWriteOp(OperationType op);
     static bool IsDeleteOp(OperationType op);
     static bool IsExecuteOp(OperationType op);
     static const wchar_t* OperationName(OperationType op);
 
-    // --- Internal helpers ---
     void AddLogEntry(AccessLogEntry entry);
     ProcessInfo ResolveProcessUncached(DWORD pid) const;
 
-    // --- Process info cache ---
     struct CachedProcessInfo {
         ProcessInfo info;
         std::chrono::steady_clock::time_point expiresAt;
@@ -138,19 +110,16 @@ private:
     mutable std::unordered_map<DWORD, CachedProcessInfo> processInfoCache_;
     static constexpr std::chrono::seconds kProcessInfoTTL{30};
 
-    // --- Access log (circular buffer) ---
     mutable std::mutex logMutex_;
     std::vector<AccessLogEntry> logBuffer_;
     size_t logHead_ = 0;
     size_t logCount_ = 0;
     size_t logCapacity_;
 
-    // --- Rules ---
     mutable std::shared_mutex rulesMutex_;
     std::vector<AccessRule> rules_;
 
-    // --- Event emitter for LM_EVT_ACCESS_DENIED ---
     ::LayerMount::abi::EventEmitter* events_ = nullptr;
 };
 
-} // namespace LayerMount
+}

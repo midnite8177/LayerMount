@@ -1,10 +1,5 @@
-// WindowsMountPoint.cpp -- Internal implementation of the Windows
-// mount-point helpers exposed via LayerMountPoint* in LayerMount.h.
-//
-// Lives inside the DLL so every host adapter shares one canonical
-// directory-ownership implementation rather than duplicating it.
-
 #include "../WindowsNtStatus.h"
+#include "../NtStatusUtil.h"
 #include "WindowsMountPoint.h"
 
 #include <cwctype>
@@ -42,7 +37,7 @@ bool PathIsReparsePoint(const std::wstring& path) {
     return isReparse;
 }
 
-} // namespace
+}
 
 bool IsDriveLetterMountPoint(std::wstring_view mp) {
     if (mp.size() == 2 && iswalpha(mp[0]) && mp[1] == L':') return true;
@@ -50,14 +45,14 @@ bool IsDriveLetterMountPoint(std::wstring_view mp) {
     return false;
 }
 
-NTSTATUS ValidateAndPrepareDirectoryMountPoint(std::wstring_view mp,
+NTSTATUS ValidateAndPrepareDirectoryMountPoint(const HostPath& mp,
                                                 MountPointPrep* outPrep) {
     if (outPrep == nullptr) return STATUS_INVALID_PARAMETER;
     *outPrep = MountPointPrep{};
 
-    if (mp.empty()) return STATUS_INVALID_PARAMETER;
+    if (mp.Text().empty()) return STATUS_INVALID_PARAMETER;
 
-    const std::wstring path(mp);
+    const std::wstring path = mp.ForWin32();
 
     const DWORD attrs = ::GetFileAttributesW(path.c_str());
     if (attrs != INVALID_FILE_ATTRIBUTES) {
@@ -74,39 +69,18 @@ NTSTATUS ValidateAndPrepareDirectoryMountPoint(std::wstring_view mp,
         if (ec) return STATUS_OBJECT_PATH_NOT_FOUND;
     }
 
-    // PrepareDirectory is validation-only: it does NOT create the leaf and
-    // does NOT claim ownership. The engine's mount-point contract assumes
-    // the host adapter creates the leaf itself as part of its mount call
-    // (host adapters that fail on a pre-existing directory with
-    // STATUS_OBJECT_NAME_COLLISION are pre-empted otherwise). Any eager
-    // CreateDirectoryW here would therefore make such mounts impossible.
-    //
-    // Ownership (`directoryCreatedByUs`) is claimed later by
-    // CaptureMountPointIdentity, which only runs after the host's mount
-    // has succeeded -- meaning a fresh leaf was either created by the host
-    // or already owned by the caller. That is the real commit point for
-    // the reservation, and it closes the TOCTOU the previous
-    // `directoryCreatedByUs = true` overclaim opened up: a successful
-    // CaptureIdentity proves the mount raced no one, because the host
-    // mount call would have failed if another process had created the leaf
-    // in between.
+    // The host adapter creates the leaf in its mount call, because some
+    // filesystem hosts refuse to mount on a directory that already exists.
     return STATUS_SUCCESS;
 }
 
-void CaptureMountPointIdentity(std::wstring_view mp, MountPointPrep* prep) {
-    if (prep == nullptr || mp.empty()) return;
+void CaptureMountPointIdentity(const HostPath& mp, MountPointPrep* prep) {
+    if (prep == nullptr || mp.Text().empty()) return;
 
     prep->volumeSerial = 0;
     std::memset(&prep->fileId, 0, sizeof(prep->fileId));
 
-    // Deliberately single-purpose: capture identity only, never claim
-    // ownership. Ownership (`directoryCreatedByUs`) is a separate decision
-    // the host adapter makes after it verifies its mount call succeeded --
-    // mixing the two would break callers that use CaptureIdentity for
-    // diagnostic or identity-only comparisons without intending to take
-    // ownership.
-
-    const std::wstring path(mp);
+    const std::wstring path = mp.ForWin32();
     HANDLE h = ::CreateFileW(path.c_str(), 0,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
@@ -121,23 +95,20 @@ void CaptureMountPointIdentity(std::wstring_view mp, MountPointPrep* prep) {
     ::CloseHandle(h);
 }
 
-MountPointReleaseResult RemoveOwnedMountPointDirectoryIfSafe(
-    std::wstring_view mp, const MountPointPrep& prep, DWORD& outWin32Error)
+DWORD RemoveOwnedMountPointDirectoryIfSafe(const HostPath& mp,
+                                           const MountPointPrep& prep)
 {
-    outWin32Error = ERROR_SUCCESS;
-
-    if (!prep.directoryCreatedByUs || mp.empty()) {
-        return MountPointReleaseResult::NotOwned;
+    if (!prep.directoryCreatedByUs || mp.Text().empty()) {
+        return ERROR_SUCCESS;
     }
 
-    const std::wstring path(mp);
+    const std::wstring path = mp.ForWin32();
     HANDLE h = ::CreateFileW(path.c_str(), 0,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        outWin32Error = ::GetLastError();
-        return MountPointReleaseResult::Failed;
+        return ::GetLastError();
     }
 
     FILE_ID_INFO idInfo{};
@@ -149,37 +120,31 @@ MountPointReleaseResult RemoveOwnedMountPointDirectoryIfSafe(
     const DWORD bhfiErr = okBhfi ? ERROR_SUCCESS : ::GetLastError();
     ::CloseHandle(h);
     if (!okId || !okBhfi) {
-        outWin32Error = okId ? bhfiErr : idErr;
-        return MountPointReleaseResult::Failed;
+        return okId ? bhfiErr : idErr;
     }
 
     if (idInfo.VolumeSerialNumber != prep.volumeSerial ||
         std::memcmp(&idInfo.FileId, &prep.fileId, sizeof(FILE_ID_128)) != 0) {
-        return MountPointReleaseResult::StillInUse;
+        return ERROR_SUCCESS;
     }
     if (!(bhfi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
         (bhfi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-        return MountPointReleaseResult::StillInUse;
+        return ERROR_SUCCESS;
     }
 
     std::error_code ec;
     auto it = std::filesystem::directory_iterator(path, ec);
     if (ec) {
-        outWin32Error = static_cast<DWORD>(ec.value());
-        return MountPointReleaseResult::Failed;
+        return Win32FromErrorCode(ec);
     }
     if (it != std::filesystem::directory_iterator()) {
-        // Directory is non-empty -- another process left something in
-        // it. Leave it alone; surface as StillInUse so the caller can
-        // decide whether to escalate.
-        return MountPointReleaseResult::StillInUse;
+        return ERROR_SUCCESS;
     }
 
     if (!std::filesystem::remove(path, ec)) {
-        outWin32Error = static_cast<DWORD>(ec.value());
-        return MountPointReleaseResult::Failed;
+        return ec ? Win32FromErrorCode(ec) : ERROR_GEN_FAILURE;
     }
-    return MountPointReleaseResult::Removed;
+    return ERROR_SUCCESS;
 }
 
-} // namespace LayerMount::impl::host
+}

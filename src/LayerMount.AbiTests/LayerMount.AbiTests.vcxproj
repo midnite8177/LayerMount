@@ -83,12 +83,16 @@
     <ClCompile Include="AbiSecurityTests.cpp" />
     <ClCompile Include="AbiReparsePointTests.cpp" />
     <ClCompile Include="AbiAdsWriteTests.cpp" />
+    <ClCompile Include="AbiDeepLayerRootTests.cpp" />
     <ClCompile Include="AbiDeepLowerPathTests.cpp" />
     <ClCompile Include="AbiDeepUpperPathTests.cpp" />
     <ClCompile Include="AbiPathTests.cpp" />
     <ClCompile Include="AbiVhdTests.cpp" />
     <ClCompile Include="AbiVssTests.cpp" />
     <ClCompile Include="AbiImageTests.cpp" />
+    <ClCompile Include="AbiDeepImageTests.cpp" />
+    <ClCompile Include="AbiDeepVhdTests.cpp" />
+    <ClCompile Include="AbiDeepOutsideLayerPathTests.cpp" />
     <ClCompile Include="AbiDiagnosticsTests.cpp" />
     <ClCompile Include="AbiEventsTests.cpp" />
     <ClCompile Include="AbiCapabilityDegradationTests.cpp" />
@@ -111,6 +115,7 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="AbiTestFixture.h" />
     <ClInclude Include="DeepPathAbiHelpers.h" />
+    <ClInclude Include="ImageTestHelpers.h" />
   </ItemGroup>
 
   <ItemGroup>

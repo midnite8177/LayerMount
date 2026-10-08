@@ -8,6 +8,7 @@
 #include "../impl/NtStatusUtil.h"
 #include "../impl/WorkDirectory.h"
 
+#include <cassert>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -17,42 +18,37 @@
 
 namespace {
 
-// LM_CONFIG (POD) -> LayerConfig (C++ owning struct). Pre-validation in
-// LayerMountCreate has already guaranteed that:
-//   - upperPath, workDirPath are non-null
-//   - if lowerPathCount > 0, lowerPaths is non-null and every entry is non-null
-// String copies / vector growth may throw std::bad_alloc -- callers must
-// invoke this only inside the LM_ABI_BEGIN/END guard.
+// String copies and vector growth can throw std::bad_alloc, so call this
+// only inside the LM_ABI_BEGIN/END guard.
 ::LayerMount::LayerConfig TranslateConfig(const LM_CONFIG& src) {
+    assert(src.upperPath != nullptr);
+    assert(src.workDirPath != nullptr);
+    assert(src.lowerPathCount == 0 || src.lowerPaths != nullptr);
     ::LayerMount::LayerConfig dst;
-    dst.upperPath = src.upperPath;
-    dst.workDirPath = src.workDirPath;
+    dst.upperPath = ::LayerMount::HostPath(src.upperPath);
+    dst.workDirPath = ::LayerMount::HostPath(src.workDirPath);
     if (src.processRulesPath != nullptr) {
-        dst.processRulesPath = src.processRulesPath;
+        dst.processRulesPath = ::LayerMount::HostPath(src.processRulesPath);
     }
     dst.enableProcessTracking = (src.enableProcessTracking != FALSE);
     if (src.accessLogCapacity != 0) {
         dst.accessLogCapacity = static_cast<size_t>(src.accessLogCapacity);
     }
     if (src.pathCacheCapacity != 0) {
-        // Thread the configured cache size through to LayerConfig so the
-        // Cache ctor honors it. Zero means "engine default" -- preserve
-        // backward-compat for hosts that did not set this field.
         dst.pathCacheCapacity = static_cast<size_t>(src.pathCacheCapacity);
     }
     dst.hostCapabilities = src.hostCapabilities;
     if (src.lowerPathCount > 0) {
         dst.lowerPaths.reserve(src.lowerPathCount);
         for (UINT32 i = 0; i < src.lowerPathCount; ++i) {
-            dst.lowerPaths.emplace_back(src.lowerPaths[i]);
+            assert(src.lowerPaths[i] != nullptr);
+            dst.lowerPaths.push_back(::LayerMount::HostPath(src.lowerPaths[i]));
         }
     }
-    // Discarded fields:
-    //   src._reserved0 -- alignment padding only
     return dst;
 }
 
-} // namespace
+}
 
 extern "C" {
 
@@ -98,7 +94,7 @@ LM_API HRESULT LM_CALL LayerMountCreate(const LM_CONFIG* config,
 
     if (outHandle == nullptr) return E_POINTER;
     if (config    == nullptr) return E_POINTER;
-    if (config->structSize < sizeof(LM_CONFIG)) return E_INVALIDARG;
+    if (!LM_STRUCT_SIZE_COVERS(config, LM_CONFIG, lowerPaths)) return E_INVALIDARG;
     if (config->abiVersion != LM_ABI_VERSION) {
         ErrorTls::Set(E_INVALIDARG,
             L"LayerMountCreate: unsupported abiVersion (rebuild against current LayerMount.h).");
@@ -153,10 +149,9 @@ LM_API HRESULT LM_CALL LayerMountCreateTransient(PCWSTR workDir,
 
     LM_ABI_BEGIN();
 
-    // Best-effort create: if the path can't be made, LayerMountCreate below
-    // surfaces the precise Win32 error via LayerMountGetLastErrorMessage.
-    std::error_code ec;
-    std::filesystem::create_directories(workDir, ec);
+    std::error_code ignoredBecauseCreateReportsIt;
+    std::filesystem::create_directories(::LayerMount::HostPath(workDir).ForWin32(),
+                                        ignoredBecauseCreateReportsIt);
 
     const std::wstring hiddenWorkDir =
         ::LayerMount::JoinDirPath(workDir, ::LayerMount::kSidecarDirName);
@@ -295,4 +290,4 @@ LM_API HRESULT LM_CALL LayerMountHResultToNtStatus(HRESULT hr, NTSTATUS* outStat
     return S_OK;
 }
 
-} // extern "C"
+}

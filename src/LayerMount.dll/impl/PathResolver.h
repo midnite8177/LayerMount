@@ -99,6 +99,13 @@ private:
                                      int redirectDepth,
                                      std::optional<ResolvedPath>* lowerWalk) const;
 
+    ResolvedPath ResolveRoot() const;
+
+    // The upper's entry at normalized, after any redirect it holds, or no
+    // value when the upper has no entry there. Caches an entry that it finds.
+    std::optional<ResolvedPath> ResolveInUpper(const std::wstring& normalized,
+                                               int redirectDepth) const;
+
     enum class UpperHiding {
         None,
         Whiteout,

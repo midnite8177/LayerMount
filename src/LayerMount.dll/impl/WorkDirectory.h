@@ -10,7 +10,7 @@ namespace LayerMount {
 
 // The directory in the work directory where the engine builds an entry
 // before one rename moves it into the upper: <workDirPath>\work.
-std::wstring StagingAreaPath(const std::wstring& workDirPath);
+HostPath StagingAreaPath(const HostPath& workDirPath);
 
 // The work directory of one live overlay. The object holds two lock files,
 // each opened with no sharing and deleted on close: one in the work

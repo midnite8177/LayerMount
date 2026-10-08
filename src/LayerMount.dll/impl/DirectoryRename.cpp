@@ -111,7 +111,7 @@ NTSTATUS CopyFileMetadataAfterData(const std::wstring& srcAbs,
                                    DWORD srcAttrs,
                                    const std::wstring& dstAbs,
                                    const EntryCopyPolicy& policy) {
-    if (!ApplyEncryptedStateIfNeeded(dstAbs, srcAttrs)) {
+    if (!ApplyEncryptedStateIfNeeded(HostPath(dstAbs), srcAttrs)) {
         return ::LayerMount::NtStatusFromWin32(::GetLastError());
     }
 
@@ -266,9 +266,9 @@ struct MergedEntrySource {
 
 MergedEntrySource SourceOf(const LayerConfig& config, const MergedEntry& entry) {
     if (entry.source == LayerSource::Upper) {
-        return MergedEntrySource{config.upperPath, CopiedEntryRecord::CarriedFromSource};
+        return MergedEntrySource{config.upperPath.Text(), CopiedEntryRecord::CarriedFromSource};
     }
-    return MergedEntrySource{config.lowerPaths.at(static_cast<size_t>(entry.lowerIndex)),
+    return MergedEntrySource{config.lowerPaths.at(static_cast<size_t>(entry.lowerIndex)).Text(),
                              CopiedEntryRecord::NewFromSource};
 }
 
@@ -322,7 +322,7 @@ DirectoryRename::DirectoryRename(ConfigRef config,
 bool DirectoryRename::DestinationExistsInMerged(const std::wstring& normalizedPath) const {
     const bool destInUpper = pathResolver_.ExistsInUpper(normalizedPath);
     const bool destWhitedOut =
-        whiteoutMgr_.HasWhiteout(normalizedPath, config_.upperPath);
+        whiteoutMgr_.HasWhiteout(normalizedPath, config_.upperPath.Text());
     const bool destInLower =
         pathResolver_.ResolveLowerPath(normalizedPath).Found();
     return destInUpper || (destInLower && !destWhitedOut);
@@ -339,12 +339,12 @@ NTSTATUS DirectoryRename::PrepareRenameDestination(const CallerPath& newCallerPa
 
 NTSTATUS DirectoryRename::CopyMergedDirectory(const ResolvedPath& lowerSource,
                                               const RenamedName& oldName,
-                                              const std::wstring& stagedPath) {
+                                              const HostPath& stagedPath) {
     const bool hasUpperShadow = IsDirectoryAt(oldName.upperPath);
     const std::wstring& mergedViewSource =
         hasUpperShadow ? oldName.upperPath : lowerSource.absolutePath;
 
-    if (!::CreateDirectoryW(WithExtendedPrefix(stagedPath).c_str(), nullptr)) {
+    if (!::CreateDirectoryW(stagedPath.ForWin32().c_str(), nullptr)) {
         return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
     const NTSTATUS childrenStatus = CopyMergedChildren(
@@ -353,13 +353,13 @@ NTSTATUS DirectoryRename::CopyMergedDirectory(const ResolvedPath& lowerSource,
         return childrenStatus;
     }
     return FinishCopiedDirectory(
-        mergedViewSource, lowerSource.absolutePath, stagedPath,
+        mergedViewSource, lowerSource.absolutePath, stagedPath.Text(),
         {CopiedEntryRecord::NewFromSource, config_},
-        [&]() { return whiteoutMgr_.SetOpaqueAtPath(stagedPath); });
+        [&]() { return whiteoutMgr_.SetOpaqueAtPath(stagedPath.Text()); });
 }
 
 NTSTATUS DirectoryRename::CopyMergedChildren(const MergedDirectoryWithAncestry& oldDir,
-                                             const std::wstring& dstPath) {
+                                             const HostPath& dstPath) {
     if (!NT_SUCCESS(oldDir.merged.status)) {
         return oldDir.merged.status;
     }
@@ -374,13 +374,13 @@ NTSTATUS DirectoryRename::CopyMergedChildren(const MergedDirectoryWithAncestry& 
 
 NTSTATUS DirectoryRename::CopyMergedEntry(const MergedDirectoryWithAncestry& oldParent,
                                           const MergedEntry& entry,
-                                          const std::wstring& dstParentPath) {
+                                          const HostPath& dstParentPath) {
     const std::wstring name = entry.findData.cFileName;
     const MergedEntrySource source = SourceOf(config_, entry);
-    const std::wstring dstAbs = dstParentPath + L"\\" + name;
+    const HostPath dstAbs(dstParentPath.Text() + L"\\" + name);
     return CopyEntry(
         JoinDirPath(source.root, oldParent.dirPath) + L"\\" + name,
-        entry.findData.dwFileAttributes, dstAbs, {source.record, config_},
+        entry.findData.dwFileAttributes, dstAbs.Text(), {source.record, config_},
         [&]() {
             return CopyMergedChildren(
                 MergeChildDirectory(config_, whiteoutMgr_, oldParent, name), dstAbs);
@@ -412,7 +412,7 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
                                           {CopiedEntryRecord::NewFromSource, config_})
         : BuildInContainerAndMove(
               copyUp_.GenerateStagingPath(), newUpperPath, config_,
-              [&](const std::wstring& stagedPath) {
+              [&](const HostPath& stagedPath) {
                   return CopyMergedDirectory(source, {oldNorm, oldUpperPath}, stagedPath);
               });
     if (!NT_SUCCESS(status)) {
@@ -421,7 +421,8 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
 
     std::wstring asidePath;
     const UpperEntryMove aside = MoveUpperEntryAside(
-        oldUpperPath, [this]() { return copyUp_.GenerateStagingPath(); }, config_, &asidePath);
+        oldUpperPath, [this]() { return copyUp_.GenerateStagingPath().Text(); }, config_,
+        &asidePath);
     WarnRecordLeftBehind(events_, aside, oldNorm);
     const NTSTATUS asideStatus = aside.status;
     bool newNameOccupied = false;
@@ -433,7 +434,7 @@ RenameStepResult DirectoryRename::RenameLowerDirectory(const RenameCallerPaths& 
                          L"The undo of a failed rename could not remove the copy at the new name");
         }
     } else if (!asidePath.empty()) {
-        RemoveStagedEntry(asidePath, config_);
+        RemoveStagedEntry(HostPath(asidePath), config_);
     }
 
     cache_.InvalidateWithAncestors(oldNorm);

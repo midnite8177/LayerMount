@@ -45,6 +45,15 @@ _Avoid_: work dir, scratch
 **Layer source**:
 Where a lower's content comes from: a directory, a VHD or VHDX volume, or a VSS snapshot.
 
+### Paths
+
+**Host path**:
+A full path to a file or directory on a disk of the machine, outside the merged view.
+_Avoid_: physical path, real path
+
+**View path**:
+A path in the merged view, relative to the overlay root.
+
 ### Operations
 
 **Copy-up**:

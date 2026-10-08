@@ -169,8 +169,8 @@ std::wstring FinalPathNameOf(HANDLE handle) {
     return path;
 }
 
-std::wstring FinalPathOfDirectory(const std::wstring& path) {
-    const ScopedHandle directory(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+std::wstring FinalPathOfDirectory(const HostPath& path) {
+    const ScopedHandle directory(::CreateFileW(path.ForWin32().c_str(), FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
     if (!directory.IsValid()) {
@@ -430,7 +430,7 @@ NTSTATUS RemoveUpperEntryOnDisk(const std::wstring& path, EntryKind kind) {
     if (kind == EntryKind::Directory) {
         std::error_code ec;
         fs::remove_all(extendedPath, ec);
-        return ec ? NtStatusFromWin32(static_cast<DWORD>(ec.value())) : STATUS_SUCCESS;
+        return ec ? NtStatusFromWin32(Win32FromErrorCode(ec)) : STATUS_SUCCESS;
     }
 
     const BOOL removed = kind == EntryKind::Link ? ::RemoveDirectoryW(extendedPath.c_str())
@@ -678,36 +678,38 @@ std::optional<bool> EntersEntry(HANDLE entry, DWORD attributes) {
 // Deletes the entry at path and everything below it. A link is a leaf, so
 // the delete never leaves the tree. An entry whose DACL refuses the delete
 // or the listing gets the DACL that GrantTreeDeleteAccess writes. Appends
-// the path of each deleted entry to *deleted. Stops at the first entry it
-// cannot delete and returns that entry.
-std::optional<StagedEntryDeleteFailure> DeleteTree(const std::wstring& path,
+// the Text() of each deleted entry to *deleted, the form the sidecar
+// records key on. Stops at the first entry it cannot delete and returns
+// that entry.
+std::optional<StagedEntryDeleteFailure> DeleteTree(const HostPath& path,
                                                    std::vector<std::wstring>* deleted) {
+    const std::wstring win32Path = path.ForWin32();
     ScopedHandle entry;
-    const DWORD openError = OpenForTreeDelete(path, kDeleteEntryAccess, &entry);
+    const DWORD openError = OpenForTreeDelete(win32Path, kDeleteEntryAccess, &entry);
     if (openError != ERROR_SUCCESS) {
         if (IsGone(openError)) {
             return std::nullopt;
         }
-        return StagedEntryDeleteFailure{path, openError};
+        return StagedEntryDeleteFailure{path.Text(), openError};
     }
     FILE_BASIC_INFO basic{};
     if (!::GetFileInformationByHandleEx(entry.Get(), FileBasicInfo, &basic, sizeof(basic))) {
-        return StagedEntryDeleteFailure{path, ::GetLastError()};
+        return StagedEntryDeleteFailure{path.Text(), ::GetLastError()};
     }
     const DWORD attributes = basic.FileAttributes;
     const std::optional<bool> enters = EntersEntry(entry.Get(), attributes);
     if (!enters.has_value()) {
-        return StagedEntryDeleteFailure{path, ::GetLastError()};
+        return StagedEntryDeleteFailure{path.Text(), ::GetLastError()};
     }
     if (*enters) {
         std::vector<std::wstring> names;
-        const DWORD listError = ListDirectoryForTreeDelete(path, &names);
+        const DWORD listError = ListDirectoryForTreeDelete(win32Path, &names);
         if (listError != ERROR_SUCCESS) {
-            return StagedEntryDeleteFailure{path, listError};
+            return StagedEntryDeleteFailure{path.Text(), listError};
         }
         for (const std::wstring& name : names) {
             std::optional<StagedEntryDeleteFailure> failure =
-                DeleteTree(JoinDirPath(path, name), deleted);
+                DeleteTree(HostPath(JoinDirPath(path.Text(), name)), deleted);
             if (failure.has_value()) {
                 return failure;
             }
@@ -715,20 +717,18 @@ std::optional<StagedEntryDeleteFailure> DeleteTree(const std::wstring& path,
     }
     // A delete refuses a read-only entry.
     if (!ClearReadOnly(entry.Get(), attributes) || !MarkForDelete(entry.Get())) {
-        return StagedEntryDeleteFailure{path, ::GetLastError()};
+        return StagedEntryDeleteFailure{path.Text(), ::GetLastError()};
     }
-    deleted->push_back(path);
+    deleted->push_back(path.Text());
     return std::nullopt;
 }
 
 }
 
-std::optional<StagedEntryDeleteFailure> RemoveStagedEntry(const std::wstring& path,
+std::optional<StagedEntryDeleteFailure> RemoveStagedEntry(const HostPath& path,
                                                           const LayerConfig& config) {
     std::vector<std::wstring> deleted;
     std::optional<StagedEntryDeleteFailure> failure = DeleteTree(path, &deleted);
-    // A delete that stops at an entry it cannot delete has deleted the
-    // entries before it, so their records go too.
     MetadataStore::RemoveSidecarRecordsOfGoneEntries(deleted, config);
     return failure;
 }
@@ -886,7 +886,8 @@ LinkOnPath FindLinkOnPath(const std::wstring& layerPath, const std::wstring& dir
 bool HasLinkUnderHigherLayerEntry(const LayerConfig& config,
                                   size_t lowerIndex,
                                   const std::wstring& dirRelativePath) {
-    const LayerWalk walk = WalkToFirstNonDirectory(config.lowerPaths[lowerIndex], dirRelativePath);
+    const LayerWalk walk =
+        WalkToFirstNonDirectory(config.lowerPaths[lowerIndex].Text(), dirRelativePath);
     return walk.stop == WalkStop::Link &&
            HigherLayerHoldsEntry(config, lowerIndex, walk.component);
 }
@@ -894,11 +895,11 @@ bool HasLinkUnderHigherLayerEntry(const LayerConfig& config,
 bool HigherLayerHoldsEntry(const LayerConfig& config,
                            size_t lowerIndex,
                            const std::wstring& relativePath) {
-    if (HoldsEntryInLayer(config.upperPath, relativePath)) {
+    if (HoldsEntryInLayer(config.upperPath.Text(), relativePath)) {
         return true;
     }
     for (size_t higher = 0; higher < lowerIndex; ++higher) {
-        if (HoldsEntryInLayer(config.lowerPaths[higher], relativePath)) {
+        if (HoldsEntryInLayer(config.lowerPaths[higher].Text(), relativePath)) {
             return true;
         }
     }
@@ -952,8 +953,8 @@ namespace {
 std::vector<LayerWalk> WalkLowers(const LayerConfig& config, const std::wstring& dirNorm) {
     std::vector<LayerWalk> walks;
     walks.reserve(config.lowerPaths.size());
-    for (const std::wstring& lowerPath : config.lowerPaths) {
-        walks.push_back(WalkToFirstNonDirectory(lowerPath, dirNorm));
+    for (const HostPath& lowerPath : config.lowerPaths) {
+        walks.push_back(WalkToFirstNonDirectory(lowerPath.Text(), dirNorm));
     }
     return walks;
 }
@@ -964,7 +965,7 @@ LinkInView FindLinkInView(const LayerConfig& config,
                           const WhiteoutManager& whiteoutMgr,
                           const std::wstring& dirNorm) {
     const LinkInView none{LinkStop::None, LayerSource::None, {}};
-    const LayerWalk upperWalk = WalkToFirstNonDirectory(config.upperPath, dirNorm);
+    const LayerWalk upperWalk = WalkToFirstNonDirectory(config.upperPath.Text(), dirNorm);
     if (EndsAtLinkOrUnreadable(upperWalk.stop)) {
         return LinkInView{LinkStopOf(upperWalk.stop), LayerSource::Upper, upperWalk.component};
     }
@@ -978,13 +979,14 @@ LinkInView FindLinkInView(const LayerConfig& config,
         return none;
     }
     const LayerAncestry upper =
-        LayerAncestryOf(config, LayerDirectory{whiteoutMgr, config.upperPath, dirNorm}, -1);
+        LayerAncestryOf(config, LayerDirectory{whiteoutMgr, config.upperPath.Text(), dirNorm}, -1);
     if (upper.whitedOut || upper.opaque) {
         return none;
     }
     for (size_t i = 0; i < config.lowerPaths.size(); ++i) {
         const LayerAncestry lower = LayerAncestryOf(
-            config, LayerDirectory{whiteoutMgr, config.lowerPaths[i], dirNorm}, static_cast<int>(i));
+            config, LayerDirectory{whiteoutMgr, config.lowerPaths[i].Text(), dirNorm},
+            static_cast<int>(i));
         if (lower.whitedOut || lower.linkUnderHigherEntry) {
             return none;
         }
@@ -1015,19 +1017,20 @@ LowerVisibility LowersBelow(const LayerDirectory& dir) {
     return LowerVisibility::Visible;
 }
 
-NTSTATUS BuildInContainerAndMove(const std::wstring& containerPath,
+NTSTATUS BuildInContainerAndMove(const HostPath& containerPath,
                                  const std::wstring& upperPath,
                                  const LayerConfig& config,
-                                 const std::function<NTSTATUS(const std::wstring&)>& build) {
-    const std::wstring stagedPath = containerPath + L"\\entry";
-    NTSTATUS status = ::CreateDirectoryW(containerPath.c_str(), nullptr)
-        ? WriteSecurityToInheritAs(containerPath, fs::path(upperPath).parent_path().wstring())
+                                 const std::function<NTSTATUS(const HostPath&)>& build) {
+    const HostPath stagedPath(containerPath.Text() + L"\\entry");
+    NTSTATUS status = ::CreateDirectoryW(containerPath.ForWin32().c_str(), nullptr)
+        ? WriteSecurityToInheritAs(containerPath.Text(),
+                                   fs::path(upperPath).parent_path().wstring())
         : StatusOfFailedCall(ERROR_WRITE_FAULT);
     if (NT_SUCCESS(status)) {
         status = build(stagedPath);
     }
     if (NT_SUCCESS(status)) {
-        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config).status;
+        status = MoveUpperEntry(stagedPath.Text(), upperPath, ReplaceExisting::No, config).status;
     }
     RemoveStagedEntry(containerPath, config);
     return status;

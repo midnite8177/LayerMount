@@ -1,4 +1,4 @@
-// NtStatusUtil.h -- Internal Win32 -> NTSTATUS mapping helper.
+// NtStatusUtil.h -- Internal Win32 error and NTSTATUS mapping helpers.
 // The engine returns NTSTATUS from many paths; the C ABI shim translates
 // NTSTATUS -> HRESULT before the boundary.
 //
@@ -7,6 +7,8 @@
 #pragma once
 
 #include "WindowsNtStatus.h"
+
+#include <system_error>
 
 namespace LayerMount {
 
@@ -26,6 +28,13 @@ NTSTATUS StatusOfFailedCall(DWORD fallback) noexcept;
 // gone, or a directory on the path is.
 inline bool IsGone(DWORD error) noexcept {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
+// The Win32 error in ec. MSVC's std::filesystem reports Win32 errors in
+// system_category, so an error from another category is ERROR_GEN_FAILURE.
+inline DWORD Win32FromErrorCode(const std::error_code& ec) noexcept {
+    return ec.category() == std::system_category() ? static_cast<DWORD>(ec.value())
+                                                   : ERROR_GEN_FAILURE;
 }
 
 // The HRESULT the C ABI returns for an engine NTSTATUS: S_OK for success,

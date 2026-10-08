@@ -140,11 +140,19 @@ public sealed class VhdApi
     /// <paramref name="directoryPath"/>, creating the directory if it
     /// is missing. The call skips the NTFS system entries and an entry
     /// named <c>.overlay</c> at the volume root, in any case and with or
-    /// without trailing dots or spaces. A permission error on one file
-    /// does not stop the rest of the export.
+    /// without trailing dots or spaces. The export stops at the first
+    /// entry it cannot copy or list, such as a file whose ACL denies
+    /// read, and the exception message names that entry. An entry that
+    /// is not a file, a directory or a symbolic link, such as a
+    /// junction, also stops the export.
+    /// <paramref name="directoryPath"/> then keeps the entries copied
+    /// before the failure and is incomplete.
     /// </summary>
+    /// <exception cref="LayerMountAccessDeniedException">
+    /// An entry in the VHD or the destination denies the access the copy needs.
+    /// </exception>
     /// <exception cref="LayerMountException">
-    /// The native call returns a non-success HRESULT.
+    /// The native call returns another non-success HRESULT.
     /// </exception>
     public void Export(string vhdPath, string directoryPath)
     {

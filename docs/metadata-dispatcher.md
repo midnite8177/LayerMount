@@ -6,7 +6,7 @@ The engine stores copy-up metadata and opaque markers per file, through one disp
 
 The ADS store, the fast path, keeps metadata in an NTFS alternate data stream on the entry itself. The sidecar store keeps metadata as a JSON file at `<upper>\.overlay\<sha1(lowercase path)>.meta.json`, with a matching `.opaque` file for the opaque marker. The sidecar store works on any file system; the ADS store needs NTFS streams.
 
-The sidecar name is the SHA-1 of the entry's full path, lowercased and encoded as UTF-8. The hash avoids NTFS's restricted filename characters, such as `<`, `>`, and `:`, and keeps the sidecar path short for a long input path. The lowercasing matches NTFS's case-insensitive names. Since the key is the full path, the sidecar store finds a record only at a path in the same form as the one it was written at.
+The sidecar name is the SHA-1 of the entry's full path, lowercased and encoded as UTF-8. The hash avoids NTFS's restricted filename characters, such as `<`, `>`, and `:`, and keeps the sidecar path short for a long input path. The lowercasing matches NTFS's case-insensitive names. Since the key is the full path, the sidecar store finds a record only at a path in the same form as the one it was written at. Existing overlays keep their keys, because the full path starts with the upper root as the caller gave it, plain or in the `\\?\` form. The sidecar files are under the extended form of the upper root, so the sidecar store works under an upper root past MAX_PATH.
 
 ## Choosing a backend
 

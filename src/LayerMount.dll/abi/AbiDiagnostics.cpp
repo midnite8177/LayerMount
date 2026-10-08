@@ -79,7 +79,7 @@ HRESULT EmitWString(const std::wstring& src,
     return S_OK;
 }
 
-} // namespace
+}
 
 extern "C" {
 
@@ -198,10 +198,7 @@ LM_API HRESULT LM_CALL LayerMountProcessTrackerSetRules(LM_HANDLE handle,
         return E_ILLEGAL_METHOD_CALL;
     }
 
-    // LoadRules returns false on parse / IO failure; translate to a
-    // generic E_FAIL with a descriptive TLS message since ProcessTracker
-    // doesn't surface a more precise code today.
-    if (!tracker->LoadRules(rulesPath)) {
+    if (!tracker->LoadRules(::LayerMount::HostPath(rulesPath))) {
         ErrorTls::Set(E_FAIL,
                       L"LayerMountProcessTrackerSetRules: failed to load rules "
                       L"file (parse error or path not accessible).");
@@ -292,4 +289,4 @@ LM_API HRESULT LM_CALL LayerMountProcessTrackerExportCsv(LM_HANDLE handle,
     LM_ABI_END();
 }
 
-} // extern "C"
+}

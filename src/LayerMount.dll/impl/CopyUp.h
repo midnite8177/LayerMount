@@ -113,14 +113,14 @@ public:
     // callback when one is installed.
     void RecordCopyUp(const std::wstring& relativePath);
 
-    std::wstring GenerateStagingPath();
+    HostPath GenerateStagingPath();
 
     // Moves the file at workPath to finalUpperPath with one rename. workPath
     // must be on the upper's volume. An entry at finalUpperPath fails the
     // move with STATUS_OBJECT_NAME_COLLISION and stays as it was. A failed
     // move removes the file at workPath and its sidecar record, also when
     // the file is read-only.
-    NTSTATUS CommitFromWorkDir(const std::wstring& workPath,
+    NTSTATUS CommitFromWorkDir(const HostPath& workPath,
                                const std::wstring& finalUpperPath);
 
     // Copies a lower parent directory up first. Builds the file in the
@@ -257,7 +257,7 @@ private:
     bool CopyTimestamps(HANDLE srcHandle, HANDLE dstHandle);
 
     NTSTATUS MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
-                                          const std::wstring& workPath);
+                                          const HostPath& workPath);
 
     // The lower entry a copy-up reads and the upper path it writes.
     struct CopyUpTarget {
@@ -285,14 +285,14 @@ private:
     // Builds a metacopy shell of the file at sourcePath at workPath, with
     // its security and a copy-up record with the metacopy flag, and last
     // the attributes and times. A failure removes the staged file.
-    NTSTATUS BuildMetacopyShell(const std::wstring& sourcePath, const std::wstring& workPath);
+    NTSTATUS BuildMetacopyShell(const std::wstring& sourcePath, const HostPath& workPath);
 
     NTSTATUS CopyUpReparseCloneAndCount(const std::wstring& normalized, const CopyUpTarget& target);
 
     NTSTATUS StageFileInWorkDir(const std::wstring& sourcePath,
                                 ScopedHandle& srcHandle,
                                 DWORD srcAttrs,
-                                const std::wstring& workPath);
+                                const HostPath& workPath);
 
     // Gives the staged file at workPath the encryption, extended attributes
     // and security descriptor of the file at sourcePath, in that order. Each
@@ -300,23 +300,23 @@ private:
     // failure the caller removes the staged file.
     NTSTATUS CopyStagedFileMetadata(const std::wstring& sourcePath,
                                     DWORD srcAttrs,
-                                    const std::wstring& workPath);
+                                    const HostPath& workPath);
 
     NTSTATUS FinishStagedFile(const std::wstring& sourcePath,
-                              const std::wstring& workPath,
+                              const HostPath& workPath,
                               FileBasicInfoGuard& basicInfo);
 
-    NTSTATUS RecordStagedFile(const std::wstring& workPath,
+    NTSTATUS RecordStagedFile(const HostPath& workPath,
                               const LayerMountMetadata& metadata,
                               FileBasicInfoGuard& basicInfo);
 
     NTSTATUS CommitStagedFile(const std::wstring& normalized,
-                              const std::wstring& workPath,
+                              const HostPath& workPath,
                               const std::wstring& upperPath);
 
     NTSTATUS StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
                                          const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
-                                         const std::wstring& workPath);
+                                         const HostPath& workPath);
 
     NTSTATUS FillMetacopyShell(ScopedHandle& srcHandle,
                                const std::wstring& upperPath);
@@ -329,7 +329,7 @@ private:
     // failure can leave the directory at stagedPath for the caller to
     // remove.
     NTSTATUS BuildStagedDirectory(const std::wstring& sourcePath,
-                                  const std::wstring& stagedPath);
+                                  const HostPath& stagedPath);
 
     const LayerConfig& config_;
     PathResolver& pathResolver_;

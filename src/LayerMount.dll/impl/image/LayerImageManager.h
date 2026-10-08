@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LayerImageFormat.h"
+#include "../HostPath.h"
 
 #include <windows.h>
 #include <string>
@@ -8,63 +9,61 @@
 
 namespace LayerMount::LayerImage {
 
-// ===========================================================================
-// LayerImageManager — binary layer image create/extract/inspect
-// ===========================================================================
-// Handles creation of .lmnt layer images (zstd-compressed, SHA-256 verified),
-// full and differential image creation, extraction with integrity verification,
-// metadata-only inspection, and manifest file management.
+struct ImageOutput {
+    HostPath path;
+    int compressionLevel;
+};
 
 class LayerImageManager {
 public:
     LayerImageManager()  = default;
     ~LayerImageManager() = default;
 
-    // Walks sourceDir recursively, collects all files into a tar-like stream,
-    // compresses with zstd, writes header + metadata + data + SHA-256 checksum.
-    // metadata is updated in place with id/createdAt (if not set), fileCount,
-    // uncompressedSize, compressedSize.
-    DWORD CreateImage(const std::wstring& sourceDir,
-                      const std::wstring& outputPath,
-                      LayerMetadata& metadata,
-                      int compressionLevel = 3);
+    // Walks sourceDir recursively and packs every entry except the root
+    // sidecar into a zstd-compressed archive, then writes the header, the
+    // metadata, the data and its SHA-256. Sets metadata.id and createdAt when
+    // they are empty, and sets fileCount, uncompressedSize and compressedSize.
+    DWORD CreateImage(const HostPath& sourceDir,
+                      const ImageOutput& output,
+                      LayerMetadata& metadata);
 
     // Validates header, verifies SHA-256 checksum (if requested), decompresses
     // the data section, and extracts files to targetDir. Materializes any
     // metadata.whiteouts entries as .wh.* marker files.
-    DWORD ExtractImage(const std::wstring& imagePath,
-                       const std::wstring& targetDir,
-                       bool verifyChecksum = true);
+    DWORD ExtractImage(const HostPath& imagePath,
+                       const HostPath& targetDir,
+                       bool verifyChecksum);
 
-    // Read header and metadata only (no data decompression)
-    DWORD GetImageInfo(const std::wstring& imagePath,
+    // Reads the header and metadata only. Does not verify the checksum and
+    // does not decompress.
+    DWORD GetImageInfo(const HostPath& imagePath,
                        LayerImageHeader& header,
                        LayerMetadata& metadata);
 
-    // Validate a layer image's full contents. Returns ERROR_SUCCESS iff
-    // the header parses, the metadata JSON round-trips, AND the SHA-256
-    // of the compressed data section matches header.checksum. Returns
-    // ERROR_CRC on checksum mismatch. Does not decompress. This is what
-    // a caller wants when they ask "is this .lmnt file intact?"
-    DWORD ValidateImage(const std::wstring& imagePath);
+    // Returns ERROR_SUCCESS iff the header parses, the metadata JSON parses,
+    // AND the SHA-256 of the compressed data section matches header.checksum.
+    // Returns ERROR_CRC on checksum mismatch. Does not decompress.
+    DWORD ValidateImage(const HostPath& imagePath);
 
-    // Compares sourceDir against baseDir. Archives only files that are new
-    // or modified (different size or timestamp). Deleted files (in base but
-    // not source) are recorded in metadata.whiteouts AND archived as explicit
-    // whiteout marker entries using the `.wh.` prefix convention.
-    DWORD CreateDifferentialImage(const std::wstring& sourceDir,
-                                  const std::wstring& baseDir,
-                                  const std::wstring& outputPath,
-                                  LayerMetadata& metadata,
-                                  int compressionLevel = 3);
+    // Compares sourceDir against baseDir, with paths matched case-insensitively.
+    // Packs each source entry that base does not have, that changed between
+    // file and directory, or that is a file with a different size or
+    // last-write time. Each base entry, file or directory, that source does not
+    // have goes into metadata.whiteouts and into the archive as a `.wh.`
+    // whiteout marker.
+    DWORD CreateDifferentialImage(const HostPath& sourceDir,
+                                  const HostPath& baseDir,
+                                  const ImageOutput& output,
+                                  LayerMetadata& metadata);
 
     // The manifest is a JSON file listing an ordered array of layer image
-    // paths and their SHA-256 checksums (hex).
-    static DWORD CreateManifest(const std::wstring& outputPath,
-                                const std::vector<std::wstring>& layerImagePaths);
+    // paths and their SHA-256 checksums (hex). It stores each image path as
+    // the caller gave it.
+    static DWORD CreateManifest(const HostPath& outputPath,
+                                const std::vector<HostPath>& layerImagePaths);
 
-    static DWORD LoadManifest(const std::wstring& manifestPath,
+    static DWORD LoadManifest(const HostPath& manifestPath,
                               LayerManifest& manifest);
 };
 
-} // namespace LayerMount::LayerImage
+}

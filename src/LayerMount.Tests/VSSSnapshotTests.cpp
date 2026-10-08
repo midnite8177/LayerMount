@@ -136,12 +136,10 @@ const LayerMount::VSS::SnapshotInfo* FindInList(
     return nullptr;
 }
 
-} // namespace
+}
 
-// ---------------------------------------------------------------------------
-// VSSSnapshotTests — VSS snapshot lifecycle. All tests require admin
-// elevation. Each body runs on a fresh thread and initializes COM there.
-// ---------------------------------------------------------------------------
+// VSS snapshot lifecycle. All tests require admin elevation. Each body runs
+// on a fresh thread and initializes COM there.
 
 TEST_CLASS(VSSSnapshotTests) {
 public:
@@ -233,8 +231,6 @@ public:
                             L"CleanupNonPersistent must release session snapshot id2");
         });
     }
-
-    // --- system-wide enumeration / untracked delete -------------------
 
     TEST_METHOD(ListSnapshots_SeesSnapshotCreatedByOtherManager) {
         // A second VSSManager inside the same process simulates a separate
@@ -330,7 +326,7 @@ public:
                 L"VSS CreateSnapshot");
 
             auto config = env.MakeConfig();
-            config.lowerPaths[0] = devicePath + env.Lower(0).substr(2);
+            config.lowerPaths[0] = ::LayerMount::HostPath(devicePath + env.Lower(0).substr(2));
             ::LayerMount::Cache cache;
             ::LayerMount::WhiteoutManager wm(config, &cache);
             ::LayerMount::PathResolver resolver(config, wm, cache);
@@ -346,4 +342,4 @@ public:
     }
 };
 
-} // namespace LayerMountTests
+}

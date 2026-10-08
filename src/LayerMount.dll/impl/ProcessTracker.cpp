@@ -472,14 +472,8 @@ std::vector<AccessLogEntry> ProcessTracker::GetRecentEntries(size_t count) const
     return result;
 }
 
-bool ProcessTracker::LoadRules(const std::wstring& configPath) {
-    // Open via std::filesystem::path (wide) so non-ASCII directory
-    // names round-trip correctly. Constructing ifstream from a
-    // narrow UTF-8 path used the active code page on MSVC, which
-    // silently failed for paths like C:\Users\Jos\u00e9\rules.json
-    // on non-UTF-8 system locales. Named-variable form avoids the
-    // most-vexing-parse trap with a braced path temporary.
-    std::filesystem::path fsPath{configPath};
+bool ProcessTracker::LoadRules(const HostPath& configPath) {
+    std::filesystem::path fsPath{configPath.ForWin32()};
     std::ifstream file(fsPath);
     if (!file.is_open()) {
         return false;
@@ -624,48 +618,4 @@ std::string ProcessTracker::ExportLogAsCsv() const {
     return out.str();
 }
 
-bool ProcessTracker::ExportLog(const std::wstring& filePath, ExportFormat format) const {
-    const std::string content = (format == ExportFormat::JSON)
-        ? ExportLogAsJson()
-        : ExportLogAsCsv();
-
-    // Narrow-path std::ofstream on Windows interprets the path through the
-    // active code page, not UTF-8, so non-ASCII target paths would fail or
-    // land at a mojibake location. Use CreateFileW + WriteFile so any valid
-    // Windows wide path round-trips correctly and writes are verified.
-    HANDLE h = ::CreateFileW(filePath.c_str(),
-                             GENERIC_WRITE,
-                             FILE_SHARE_READ,
-                             nullptr,
-                             CREATE_ALWAYS,
-                             FILE_ATTRIBUTE_NORMAL,
-                             nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-
-    const char* data = content.data();
-    size_t remaining = content.size();
-    while (remaining > 0) {
-        const DWORD chunk = (remaining > 0xFFFFFFFFu)
-            ? 0xFFFFFFFFu
-            : static_cast<DWORD>(remaining);
-        DWORD written = 0;
-        if (!::WriteFile(h, data, chunk, &written, nullptr) || written == 0) {
-            ::CloseHandle(h);
-            ::DeleteFileW(filePath.c_str());
-            return false;
-        }
-        data      += written;
-        remaining -= written;
-    }
-    if (!::CloseHandle(h)) {
-        // The file bytes may or may not be persisted; err on the side of
-        // failure so callers don't see a successful export for an export
-        // that did not complete cleanly.
-        return false;
-    }
-    return true;
 }
-
-} // namespace LayerMount

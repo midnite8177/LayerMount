@@ -175,11 +175,11 @@ NTSTATUS CopyBytesToEnd(HANDLE srcHandle, HANDLE dstHandle) {
 // process, for example with an inherited DENY-WRITE for Everyone, still has
 // its streams copied up. Without backup semantics the destination open fails,
 // because the destination inherits the same DACL from its parent.
-NTSTATUS CopyAlternateStream(const std::wstring& srcPath,
-                             const std::wstring& dstPath,
+NTSTATUS CopyAlternateStream(const HostPath& srcPath,
+                             const HostPath& dstPath,
                              std::wstring_view streamName) {
-    const std::wstring srcFull = srcPath + std::wstring(streamName);
-    const std::wstring dstFull = dstPath + std::wstring(streamName);
+    const std::wstring srcFull = srcPath.ForWin32() + std::wstring(streamName);
+    const std::wstring dstFull = dstPath.ForWin32() + std::wstring(streamName);
 
     ScopedHandle srcHandle(::CreateFileW(
         srcFull.c_str(), GENERIC_READ,
@@ -522,15 +522,15 @@ LayerMountMetadata CopiedEntryMetadata(const std::wstring& sourcePath,
 
 NTSTATUS CopyUserAlternateDataStreams(const std::wstring& srcPath,
                                       const std::wstring& dstPath) {
-    const std::wstring srcExtended = WithExtendedPrefix(srcPath);
-    const std::wstring dstExtended = WithExtendedPrefix(dstPath);
+    const HostPath src(srcPath);
+    const HostPath dst(dstPath);
     std::vector<BYTE> list;
     const NTSTATUS listStatus = ReadStreamListOfPath(srcPath, list);
     if (!NT_SUCCESS(listStatus)) {
         return listStatus;
     }
     return ForEachUserStream(list, [&](std::wstring_view name) {
-        return CopyAlternateStream(srcExtended, dstExtended, name);
+        return CopyAlternateStream(src, dst, name);
     });
 }
 
@@ -551,16 +551,17 @@ NTSTATUS HasUserAlternateDataStream(const std::wstring& path, bool* has) {
     return status;
 }
 
-bool ApplyEncryptedStateIfNeeded(const std::wstring& path, DWORD attrs) {
+bool ApplyEncryptedStateIfNeeded(const HostPath& path, DWORD attrs) {
     if (attrs == INVALID_FILE_ATTRIBUTES ||
         (attrs & FILE_ATTRIBUTE_ENCRYPTED) == 0) {
         return true;
     }
-    if (::EncryptFileW(path.c_str())) {
+    const std::wstring extendedPath = path.ForWin32();
+    if (::EncryptFileW(extendedPath.c_str())) {
         return true;
     }
     const DWORD encryptErr = ::GetLastError();
-    const DWORD encryptedAttrs = ::GetFileAttributesW(path.c_str());
+    const DWORD encryptedAttrs = ::GetFileAttributesW(extendedPath.c_str());
     if (encryptedAttrs != INVALID_FILE_ATTRIBUTES &&
         (encryptedAttrs & FILE_ATTRIBUTE_ENCRYPTED) != 0) {
         return true;
@@ -603,7 +604,7 @@ NTSTATUS CopyDirectoryOwnMetadata(const std::wstring& srcAbs, const std::wstring
         if (HasFileAttribute(srcAttrs, FILE_ATTRIBUTE_COMPRESSED)) {
             SetCompressedDirectory(dstAbs);
         }
-        if (!ApplyEncryptedStateIfNeeded(dstAbs, srcAttrs)) {
+        if (!ApplyEncryptedStateIfNeeded(HostPath(dstAbs), srcAttrs)) {
             return StatusOfFailedCall(ERROR_ACCESS_DENIED);
         }
     }
@@ -905,12 +906,12 @@ NTSTATUS WriteSecurityToInheritAs(const std::wstring& dirAbs, const std::wstring
 }
 
 NTSTATUS CloneReparsePointThroughWorkDir(const SourceEntry& source,
-                                         const std::wstring& containerPath,
+                                         const HostPath& containerPath,
                                          const std::wstring& upperPath,
                                          const EntryCopyPolicy& policy) {
     return BuildInContainerAndMove(
-        containerPath, upperPath, policy.config, [&](const std::wstring& stagedPath) {
-            return CloneReparsePointWithCopyUpRecord(source, stagedPath, policy);
+        containerPath, upperPath, policy.config, [&](const HostPath& stagedPath) {
+            return CloneReparsePointWithCopyUpRecord(source, stagedPath.Text(), policy);
         });
 }
 

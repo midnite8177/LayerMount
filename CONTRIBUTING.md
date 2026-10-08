@@ -112,6 +112,19 @@ Native integration tests, host-spawning E2E tests, the PowerShell Pester
 suite, and manual smoke procedures all live with the adapter they target.
 See the consuming adapter repositories' `CONTRIBUTING.md`.
 
+## Host paths
+
+A path on a disk of the machine, outside the merged view, is a
+`HostPath` (`impl/HostPath.h`). A Win32, `std::filesystem` or `fstream`
+call on a host path takes `ForWin32()`. `Text()` is for storage, keys
+and comparisons, and never goes to one of those calls. `Text()` keeps
+the form that the caller gave, so code must not remove a prefix from
+it. A path written into a script or command line for another program,
+such as the diskpart script, gets `Text()`. It is stored text, not a
+Win32 call. The parent of a differencing VHDX gets `ForWin32()`, because
+VirtDisk opens the parent. VirtDisk keeps the `\\?\` form in the parent
+locator only for a parent past MAX_PATH. ADR 0008 records the reason.
+
 ## Commit / PR conventions
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes:

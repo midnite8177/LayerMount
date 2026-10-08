@@ -172,13 +172,7 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
 
     std::wstring normalized = NormalizePath(relativePath);
     if (normalized.empty()) {
-        return ResolvedPath{
-            config_.upperPath,
-            LayerSource::Upper,
-            -1,
-            false,
-            GetFileAttributesW(config_.upperPath.c_str())
-        };
+        return ResolveRoot();
     }
 
     if (!IsResolvablePath(normalized)) {
@@ -190,25 +184,9 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
         return cached.value();
     }
 
-    // The plain form goes on to the sidecar store, which finds a record only
-    // at the path form of the write. Only the Win32 call gets the extended form.
-    std::wstring upperFullPath = JoinDirPath(config_.upperPath, normalized);
-    DWORD upperAttrs = GetFileAttributesW(WithExtendedPrefix(upperFullPath).c_str());
-    if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
-        LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(upperFullPath, &config_);
-        if (!metadata.redirect.empty()) {
-            return ResolvePathInternal(metadata.redirect, redirectDepth + 1, nullptr);
-        }
-
-        ResolvedPath result{
-            upperFullPath,
-            LayerSource::Upper,
-            -1,
-            false,
-            upperAttrs
-        };
-        cache_.Put(normalized, result);
-        return result;
+    std::optional<ResolvedPath> inUpper = ResolveInUpper(normalized, redirectDepth);
+    if (inUpper.has_value()) {
+        return std::move(*inUpper);
     }
 
     switch (HidingInUpper(normalized)) {
@@ -244,18 +222,54 @@ ResolvedPath PathResolver::ResolvePathInternal(const std::wstring& relativePath,
     return lowerResult;
 }
 
+ResolvedPath PathResolver::ResolveRoot() const {
+    return ResolvedPath{
+        config_.upperPath.Text(),
+        LayerSource::Upper,
+        -1,
+        false,
+        GetFileAttributesW(config_.upperPath.ForWin32().c_str())
+    };
+}
+
+std::optional<ResolvedPath> PathResolver::ResolveInUpper(const std::wstring& normalized,
+                                                         int redirectDepth) const {
+    // upperFullPath keeps the Text() form, because the sidecar store finds a
+    // record only under the path text that wrote it. Only the Win32 call gets
+    // the extended form.
+    std::wstring upperFullPath = JoinDirPath(config_.upperPath.Text(), normalized);
+    DWORD upperAttrs = GetFileAttributesW(WithExtendedPrefix(upperFullPath).c_str());
+    if (upperAttrs == INVALID_FILE_ATTRIBUTES) {
+        return std::nullopt;
+    }
+    LayerMountMetadata metadata = MetadataStore::ReadLayerMountMetadata(upperFullPath, &config_);
+    if (!metadata.redirect.empty()) {
+        return ResolvePathInternal(metadata.redirect, redirectDepth + 1, nullptr);
+    }
+
+    ResolvedPath result{
+        upperFullPath,
+        LayerSource::Upper,
+        -1,
+        false,
+        upperAttrs
+    };
+    cache_.Put(normalized, result);
+    return result;
+}
+
 PathResolver::UpperHiding PathResolver::HidingInUpper(const std::wstring& normalized) const {
-    if (whiteoutMgr_.HasWhiteout(normalized, config_.upperPath)) {
+    if (whiteoutMgr_.HasWhiteout(normalized, config_.upperPath.Text())) {
         return UpperHiding::Whiteout;
     }
     return UpperAncestorHiding(normalized);
 }
 
 PathResolver::UpperHiding PathResolver::UpperAncestorHiding(const std::wstring& normalized) const {
-    if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath)) {
+    if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, config_.upperPath.Text())) {
         return UpperHiding::Whiteout;
     }
-    switch (LowersBelowParentOf(whiteoutMgr_, config_.upperPath, normalized)) {
+    switch (LowersBelowParentOf(whiteoutMgr_, config_.upperPath.Text(), normalized)) {
     case LowerVisibility::HiddenByOpaqueMarker:
         return UpperHiding::OpaqueMarker;
     case LowerVisibility::HiddenByNonDirectoryOrLink:
@@ -273,8 +287,8 @@ void PathResolver::LogTypeConflictInDeeperLowers(const std::wstring& normalized,
     ResolvedPath visible = hit;
     for (;;) {
         const size_t lowerIndex = static_cast<size_t>(visible.lowerIndex);
-        if (LowersBelow(LayerDirectory{whiteoutMgr_, config_.lowerPaths[lowerIndex], parent}) !=
-            LowerVisibility::Visible) {
+        const LayerDirectory lower{whiteoutMgr_, config_.lowerPaths[lowerIndex].Text(), parent};
+        if (LowersBelow(lower) != LowerVisibility::Visible) {
             return;
         }
         visible = FindInLowers(normalized, lowerIndex + 1);
@@ -307,7 +321,7 @@ CreateResolution PathResolver::ResolveForCreate(const std::wstring& relativePath
     std::optional<ResolvedPath> lowerWalk;
     CreateResolution resolution;
     resolution.overlayHit = ResolvePathInternal(normalized, 0, &lowerWalk);
-    resolution.whiteoutAtPath = whiteoutMgr_.HasWhiteout(normalized, config_.upperPath);
+    resolution.whiteoutAtPath = whiteoutMgr_.HasWhiteout(normalized, config_.upperPath.Text());
     resolution.lower = lowerWalk.has_value() ? *lowerWalk : ResolveLowerPath(normalized);
     return resolution;
 }
@@ -316,19 +330,19 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
                                         size_t firstLower) const {
     const std::wstring parent = ParentDir(normalized);
     for (size_t i = firstLower; i < config_.lowerPaths.size(); ++i) {
-        const std::wstring& lowerPath = config_.lowerPaths[i];
+        const HostPath& lowerPath = config_.lowerPaths[i];
 
-        if (whiteoutMgr_.HasWhiteout(normalized, lowerPath)) {
+        if (whiteoutMgr_.HasWhiteout(normalized, lowerPath.Text())) {
             break;
         }
-        if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, lowerPath)) {
+        if (whiteoutMgr_.HasWhitedOutAncestorInLayer(normalized, lowerPath.Text())) {
             break;
         }
         if (HasLinkUnderHigherLayerEntry(config_, i, parent)) {
             break;
         }
 
-        std::wstring fullPath = JoinDirPath(lowerPath, normalized);
+        std::wstring fullPath = JoinDirPath(lowerPath.Text(), normalized);
         DWORD attrs = GetFileAttributesW(WithExtendedPrefix(fullPath).c_str());
         if (attrs != INVALID_FILE_ATTRIBUTES) {
             return ResolvedPath{
@@ -340,7 +354,8 @@ ResolvedPath PathResolver::FindInLowers(const std::wstring& normalized,
             };
         }
 
-        if (LowersBelowParentOf(whiteoutMgr_, lowerPath, normalized) != LowerVisibility::Visible) {
+        if (LowersBelowParentOf(whiteoutMgr_, lowerPath.Text(), normalized) !=
+            LowerVisibility::Visible) {
             break;
         }
     }
@@ -358,12 +373,12 @@ DWORD PathResolver::UpperAttributes(const std::wstring& relativePath) const {
 
 std::wstring PathResolver::GetUpperPath(const std::wstring& relativePath) const {
     std::wstring normalized = NormalizePath(relativePath);
-    if (normalized.empty()) return config_.upperPath;
-    return JoinDirPath(config_.upperPath, normalized);
+    if (normalized.empty()) return config_.upperPath.Text();
+    return JoinDirPath(config_.upperPath.Text(), normalized);
 }
 
 std::wstring PathResolver::GetUpperPathForNewEntry(const CallerPath& path) const {
-    return BuildUpperPathPreserveCase(config_.upperPath, path.Text());
+    return BuildUpperPathPreserveCase(config_.upperPath.Text(), path.Text());
 }
 
 std::wstring PathResolver::GetUpperPathForCopyUp(const std::wstring& relativePath,
@@ -372,7 +387,8 @@ std::wstring PathResolver::GetUpperPathForCopyUp(const std::wstring& relativePat
 }
 
 std::wstring PathResolver::GetStoredUpperPath(const std::wstring& relativePath) const {
-    const std::wstring upperPath = BuildUpperPathPreserveCase(config_.upperPath, relativePath);
+    const std::wstring upperPath =
+        BuildUpperPathPreserveCase(config_.upperPath.Text(), relativePath);
     return WithStoredLeafName(upperPath, upperPath);
 }
 
@@ -388,14 +404,14 @@ bool PathResolver::HasTypeConflict(const std::wstring& relativePath) const {
 
     std::vector<DWORD> foundAttrs;
 
-    std::wstring upperPath = JoinDirPath(config_.upperPath, normalized);
+    std::wstring upperPath = JoinDirPath(config_.upperPath.ForWin32(), normalized);
     DWORD upperAttrs = GetFileAttributesW(upperPath.c_str());
     if (upperAttrs != INVALID_FILE_ATTRIBUTES) {
         foundAttrs.push_back(upperAttrs);
     }
 
-    for (const std::wstring& lowerRoot : config_.lowerPaths) {
-        std::wstring lowerPath = JoinDirPath(lowerRoot, normalized);
+    for (const HostPath& lowerRoot : config_.lowerPaths) {
+        std::wstring lowerPath = JoinDirPath(lowerRoot.ForWin32(), normalized);
         DWORD lowerAttrs = GetFileAttributesW(lowerPath.c_str());
         if (lowerAttrs != INVALID_FILE_ATTRIBUTES) {
             foundAttrs.push_back(lowerAttrs);

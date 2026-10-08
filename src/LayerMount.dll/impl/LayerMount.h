@@ -1,5 +1,6 @@
 #pragma once
 
+#include "HostPath.h"
 #include "WindowsNtStatus.h"
 #include "../abi/CapabilityGate.h"
 #include <string>
@@ -28,12 +29,12 @@ enum class LayerSource {
 };
 
 struct LayerConfig {
-    std::wstring upperPath;
-    std::vector<std::wstring> lowerPaths;   // index 0 = highest priority lower
-    std::wstring workDirPath;
+    HostPath upperPath;
+    std::vector<HostPath> lowerPaths;       // index 0 = highest priority lower
+    HostPath workDirPath;
 
     bool enableProcessTracking = false;
-    std::wstring processRulesPath;          // Path to JSON rules file (empty = no rules)
+    HostPath processRulesPath;              // empty means no rules file
     size_t accessLogCapacity = 10000;
 
     size_t pathCacheCapacity = 10000;
@@ -50,8 +51,9 @@ struct LayerConfig {
         return ::LayerMount::abi::CapabilityGate(hostCapabilities);
     }
 
-    // Checks the layout and writes and deletes a probe file in upperPath.
-    // Returns false and sets error on failure.
+    // Checks that upperPath and each lower path exist and are directories,
+    // and writes and deletes a probe file in upperPath. Returns false and
+    // sets error on failure.
     bool Validate(std::wstring& error) const;
 
     // Creates workDirPath if it doesn't exist and checks that it is on the

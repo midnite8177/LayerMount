@@ -45,17 +45,31 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace {
 
-// Every VHDLayerManager entry point returns a Win32 DWORD. ERROR_SUCCESS
+// Every VHDLayerManager entry point reports a Win32 DWORD. ERROR_SUCCESS
 // is the only success code; everything else is mapped into the Win32
 // HRESULT facility.
 inline HRESULT HresultFromWin32Dword(DWORD code) noexcept {
     return code == ERROR_SUCCESS ? S_OK : HRESULT_FROM_WIN32(code);
+}
+
+std::wstring ExportFailureMessage(const ::LayerMount::VHD::ExportResult& result) {
+    using ::LayerMount::VHD::ExportStep;
+    std::wstring what;
+    if (result.step == ExportStep::Copy) {
+        what = L"copy '" + result.entry + L"' from the VHD";
+    } else if (result.entry == L"\\") {
+        what = L"list the root of the VHD volume";
+    } else {
+        what = L"list '" + result.entry + L"' in the VHD";
+    }
+    return L"LayerMountVhdExport could not " + what + L". The destination is incomplete.";
 }
 
 inline ::LayerMount::VHD::AttachLifetime ToManagerLifetime(
@@ -64,6 +78,17 @@ inline ::LayerMount::VHD::AttachLifetime ToManagerLifetime(
     return (lt == LM_VHD_ATTACH_PROCESS_SCOPED)
         ? ::LayerMount::VHD::AttachLifetime::ProcessScoped
         : ::LayerMount::VHD::AttachLifetime::Permanent;
+}
+
+inline ::LayerMount::VHD::AttachOptions ToAttachOptions(const LM_VHD_CONFIG& config) noexcept
+{
+    return {
+        config.readOnly != FALSE ? ::LayerMount::VHD::AttachAccess::ReadOnly
+                                 : ::LayerMount::VHD::AttachAccess::ReadWrite,
+        ToManagerLifetime(config.lifetime),
+        config.suppressDriveLetter != FALSE ? ::LayerMount::VHD::DriveLetter::Suppress
+                                            : ::LayerMount::VHD::DriveLetter::Assign,
+    };
 }
 
 // Two-call buffer emit for LayerMountVhdAttach's physical-path output. NUL
@@ -88,7 +113,7 @@ inline HRESULT EmitPhysicalPath(const std::wstring& path,
     return S_OK;
 }
 
-} // namespace
+}
 
 extern "C" {
 
@@ -102,7 +127,7 @@ LM_API HRESULT LM_CALL LayerMountVhdCreate(LM_HANDLE            mount,
     if (mount == nullptr) return E_HANDLE;
     if (config  == nullptr) return E_POINTER;
     if (outVhd  == nullptr) return E_POINTER;
-    if (config->structSize < sizeof(LM_VHD_CONFIG)) return E_INVALIDARG;
+    if (!LM_STRUCT_SIZE_COVERS(config, LM_VHD_CONFIG, _reserved0)) return E_INVALIDARG;
     if (config->path == nullptr || *config->path == L'\0') return E_INVALIDARG;
     if (config->kind == LM_VHD_KIND_DIFFERENCING &&
         (config->parentPath == nullptr || *config->parentPath == L'\0'))
@@ -126,24 +151,20 @@ LM_API HRESULT LM_CALL LayerMountVhdCreate(LM_HANDLE            mount,
 
     auto& manager = mountHolder->core->Vhd();
 
-    // Backing call returns an open VhdHandle we immediately discard --
-    // see the file-header note about VIRTUAL_DISK_ACCESS_ALL conflicting
-    // with a subsequent Attach on the same path.
-    ::LayerMount::VHD::VhdHandle scratch;
+    const ::LayerMount::HostPath vhdPath(config->path);
     DWORD dw = ERROR_SUCCESS;
     switch (config->kind) {
         case LM_VHD_KIND_FIXED:
-            dw = manager.CreateVHD(config->path, config->sizeBytes,
-                                   /*dynamic*/ false, scratch);
+            dw = manager.CreateVHD(vhdPath, config->sizeBytes,
+                                   ::LayerMount::VHD::VhdAllocation::Fixed);
             break;
         case LM_VHD_KIND_DYNAMIC:
-            dw = manager.CreateVHD(config->path, config->sizeBytes,
-                                   /*dynamic*/ true, scratch);
+            dw = manager.CreateVHD(vhdPath, config->sizeBytes,
+                                   ::LayerMount::VHD::VhdAllocation::Dynamic);
             break;
         case LM_VHD_KIND_DIFFERENCING:
-            dw = manager.CreateDifferencingVHD(config->path,
-                                               config->parentPath,
-                                               scratch);
+            dw = manager.CreateDifferencingVHD(vhdPath,
+                                               ::LayerMount::HostPath(config->parentPath));
             break;
         default:
             return E_INVALIDARG;
@@ -151,14 +172,11 @@ LM_API HRESULT LM_CALL LayerMountVhdCreate(LM_HANDLE            mount,
     if (dw != ERROR_SUCCESS) {
         return HresultFromWin32Dword(dw);
     }
-    scratch.Close();
 
     auto holder = std::make_unique<VhdHolder>();
-    holder->manager             = &manager;
-    holder->path                = config->path;
-    holder->readOnly            = config->readOnly;
-    holder->suppressDriveLetter = config->suppressDriveLetter;
-    holder->lifetime            = config->lifetime;
+    holder->manager       = &manager;
+    holder->path          = ::LayerMount::HostPath(config->path);
+    holder->attachOptions = ToAttachOptions(*config);
 
     const std::uint64_t encodedVhd = Handles().vhd.Allocate(std::move(holder));
     if (encodedVhd == 0) {
@@ -182,7 +200,7 @@ LM_API HRESULT LM_CALL LayerMountVhdOpen(LM_HANDLE            mount,
     if (mount == nullptr) return E_HANDLE;
     if (config  == nullptr) return E_POINTER;
     if (outVhd  == nullptr) return E_POINTER;
-    if (config->structSize < sizeof(LM_VHD_CONFIG)) return E_INVALIDARG;
+    if (!LM_STRUCT_SIZE_COVERS(config, LM_VHD_CONFIG, _reserved0)) return E_INVALIDARG;
     if (config->path == nullptr || *config->path == L'\0') return E_INVALIDARG;
 
     LM_ABI_BEGIN();
@@ -196,7 +214,8 @@ LM_API HRESULT LM_CALL LayerMountVhdOpen(LM_HANDLE            mount,
 
     // Cheap path validation -- a full OpenVirtualDisk here would grab an
     // exclusive handle that conflicts with a follow-up Attach.
-    const DWORD attrs = ::GetFileAttributesW(config->path);
+    const DWORD attrs =
+        ::GetFileAttributesW(::LayerMount::HostPath(config->path).ForWin32().c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         return HRESULT_FROM_WIN32(::GetLastError());
     }
@@ -207,11 +226,9 @@ LM_API HRESULT LM_CALL LayerMountVhdOpen(LM_HANDLE            mount,
     auto& manager = mountHolder->core->Vhd();
 
     auto holder = std::make_unique<VhdHolder>();
-    holder->manager             = &manager;
-    holder->path                = config->path;
-    holder->readOnly            = config->readOnly;
-    holder->suppressDriveLetter = config->suppressDriveLetter;
-    holder->lifetime            = config->lifetime;
+    holder->manager       = &manager;
+    holder->path          = ::LayerMount::HostPath(config->path);
+    holder->attachOptions = ToAttachOptions(*config);
 
     const std::uint64_t encodedVhd = Handles().vhd.Allocate(std::move(holder));
     if (encodedVhd == 0) {
@@ -260,23 +277,16 @@ LM_API HRESULT LM_CALL LayerMountVhdAttach(LM_VHD_HANDLE vhd,
                                 physicalPathRequired);
     }
 
-    auto attachedHandle = std::make_unique<::LayerMount::VHD::VhdHandle>();
-    std::wstring physicalPath;
-    const DWORD dw = holder->manager->AttachVHD(
-        holder->path,
-        holder->readOnly != FALSE,
-        *attachedHandle,
-        physicalPath,
-        ToManagerLifetime(holder->lifetime),
-        holder->suppressDriveLetter != FALSE);
+    ::LayerMount::VHD::AttachedVhd attached;
+    const DWORD dw = holder->manager->AttachVHD(holder->path, holder->attachOptions, attached);
     if (dw != ERROR_SUCCESS) {
         return HresultFromWin32Dword(dw);
     }
 
     // Closing this handle ends a ProcessScoped attach at once, and
     // LayerMountVhdDetach needs it to detach.
-    holder->open                 = std::move(attachedHandle);
-    holder->attachedPhysicalPath = std::move(physicalPath);
+    holder->open = std::make_unique<::LayerMount::VHD::VhdHandle>(std::move(attached.handle));
+    holder->attachedPhysicalPath = std::move(attached.physicalPath);
 
     return EmitPhysicalPath(holder->attachedPhysicalPath,
                             physicalPathBuffer,
@@ -338,7 +348,8 @@ LM_API HRESULT LM_CALL LayerMountVhdMerge(LM_VHD_HANDLE childVhd)
         return E_HANDLE;
     }
 
-    return HresultFromWin32Dword(holder->manager->MergeVHD(holder->path));
+    return HresultFromWin32Dword(
+        holder->manager->MergeVHD(holder->path));
 
     LM_ABI_END();
 }
@@ -364,11 +375,12 @@ LM_API HRESULT LM_CALL LayerMountVhdImport(LM_HANDLE mount,
         return E_HANDLE;
     }
 
-    // sizeBytes == 0 is the documented auto-size sentinel; pass through
-    // unchanged.
+    const std::optional<ULONGLONG> capacity =
+        sizeBytes == 0 ? std::nullopt : std::optional<ULONGLONG>(sizeBytes);
     return HresultFromWin32Dword(
         mountHolder->core->Vhd().ImportDirectory(
-            directoryPath, vhdPath, static_cast<ULONGLONG>(sizeBytes)));
+            ::LayerMount::HostPath(directoryPath), ::LayerMount::HostPath(vhdPath),
+            capacity));
 
     LM_ABI_END();
 }
@@ -393,8 +405,14 @@ LM_API HRESULT LM_CALL LayerMountVhdExport(LM_HANDLE mount,
         return E_HANDLE;
     }
 
-    return HresultFromWin32Dword(
-        mountHolder->core->Vhd().ExportToDirectory(vhdPath, directoryPath));
+    const ::LayerMount::VHD::ExportResult result =
+        mountHolder->core->Vhd().ExportToDirectory(
+            ::LayerMount::HostPath(vhdPath), ::LayerMount::HostPath(directoryPath));
+    const HRESULT hr = HresultFromWin32Dword(result.error);
+    if (!result.entry.empty()) {
+        ErrorTls::Set(hr, ExportFailureMessage(result).c_str());
+    }
+    return hr;
 
     LM_ABI_END();
 }
@@ -422,10 +440,6 @@ LM_API HRESULT LM_CALL LayerMountVhdClose(LM_VHD_HANDLE vhd)
 
     LM_ABI_END();
 }
-
-// ---------------------------------------------------------------------------
-// VHD volume-GUID + manifest primitives.
-// ---------------------------------------------------------------------------
 
 LM_API HRESULT LM_CALL LayerMountVhdGetVolumeGuid(LM_VHD_HANDLE vhd,
                                                  PWSTR          buffer,
@@ -472,21 +486,18 @@ LM_API HRESULT LM_CALL LayerMountVhdGetVolumeGuid(LM_VHD_HANDLE vhd,
     LM_ABI_END();
 }
 
-} // extern "C"
+}
 
 namespace {
 
-// Resolve the manifest path from an optional manifestDir. NULL / empty
-// -> process cwd. The Manifest::DefaultPath helper supplies the canonical
-// filename.
-std::wstring ResolveManifestPath(PCWSTR manifestDir) {
+::LayerMount::HostPath ResolveManifestPath(PCWSTR manifestDir) {
     std::wstring dir;
     if (manifestDir != nullptr && *manifestDir != L'\0') {
         dir = manifestDir;
     } else {
         dir = std::filesystem::current_path().wstring();
     }
-    return ::LayerMount::VHD::Manifest::DefaultPath(dir);
+    return ::LayerMount::VHD::Manifest::DefaultPath(::LayerMount::HostPath(dir));
 }
 
 constexpr DWORD kRegistryLockTimeoutMs = 30000;
@@ -501,6 +512,37 @@ HRESULT RegistryLockFailure(PCWSTR function) {
     ::LayerMount::abi::ErrorTls::Set(hr, message.c_str());
     return hr;
 }
+
+// Resolves the registry path for manifestDir, takes its cross-process lock
+// and loads it. The lock stays held for the life of this object. result is
+// S_OK or the HRESULT that the entry point named by function returns for the
+// failed step. With S_OK, exists is false when there is no registry file.
+struct LockedRegistry {
+    LockedRegistry(PCWSTR manifestDir, PCWSTR function)
+        : path(ResolveManifestPath(manifestDir)),
+          lock(path, kRegistryLockTimeoutMs) {
+        if (!lock.Held()) {
+            result = RegistryLockFailure(function);
+            return;
+        }
+        const DWORD loadErr = manifest.Load(path);
+        if (loadErr == ERROR_FILE_NOT_FOUND) return;
+        if (loadErr != ERROR_SUCCESS) {
+            result = HRESULT_FROM_WIN32(loadErr);
+            return;
+        }
+        exists = true;
+    }
+
+    LockedRegistry(const LockedRegistry&) = delete;
+    LockedRegistry& operator=(const LockedRegistry&) = delete;
+
+    const ::LayerMount::HostPath path;
+    ::LayerMount::VHD::ManifestLock lock;
+    ::LayerMount::VHD::Manifest manifest;
+    HRESULT result = S_OK;
+    bool exists = false;
+};
 
 // Emit a wstring via the two-call buffer pattern used by LM_VHD_LAYER_INFO
 // per-string fields. Returns TRUE iff the caller's buffer was populated
@@ -527,7 +569,7 @@ LM_VHD_LAYER_TYPE ToPublicLayerType(::LayerMount::VHD::LayerType t) {
     }
 }
 
-} // namespace
+}
 
 extern "C" {
 
@@ -554,21 +596,12 @@ LM_API HRESULT LM_CALL LayerMountVhdListLayers(LM_HANDLE          mount,
     auto mountHolder = Handles().mount.Resolve(encoded);
     if (mountHolder == nullptr) return E_HANDLE;
 
-    const std::wstring manifestPath = ResolveManifestPath(manifestDir);
+    LockedRegistry registry(manifestDir, L"LayerMountVhdListLayers");
+    if (registry.result != S_OK) return registry.result;
+    // Idempotent: no manifest on disk -> zero entries, S_OK.
+    if (!registry.exists) return S_OK;
 
-    ::LayerMount::VHD::ManifestLock lock(manifestPath, kRegistryLockTimeoutMs);
-    if (!lock.Held()) return RegistryLockFailure(L"LayerMountVhdListLayers");
-    ::LayerMount::VHD::Manifest m;
-    DWORD loadErr = m.Load(manifestPath);
-    if (loadErr == ERROR_FILE_NOT_FOUND) {
-        // Idempotent: no manifest on disk -> zero entries, S_OK.
-        return S_OK;
-    }
-    if (loadErr != ERROR_SUCCESS) {
-        return HRESULT_FROM_WIN32(loadErr);
-    }
-
-    auto layers = m.ListLayers();
+    auto layers = registry.manifest.ListLayers();
     *entriesRequired = static_cast<UINT32>(layers.size());
 
     if (entries == nullptr || entriesCapacity == 0) {
@@ -636,23 +669,14 @@ LM_API HRESULT LM_CALL LayerMountVhdUnregisterLayer(LM_HANDLE mount,
     auto mountHolder = Handles().mount.Resolve(encoded);
     if (mountHolder == nullptr) return E_HANDLE;
 
-    const std::wstring manifestPath = ResolveManifestPath(manifestDir);
+    LockedRegistry registry(manifestDir, L"LayerMountVhdUnregisterLayer");
+    if (registry.result != S_OK) return registry.result;
+    // Idempotent: missing manifest == nothing to remove.
+    if (!registry.exists) return S_OK;
 
-    ::LayerMount::VHD::ManifestLock lock(manifestPath, kRegistryLockTimeoutMs);
-    if (!lock.Held()) return RegistryLockFailure(L"LayerMountVhdUnregisterLayer");
-    ::LayerMount::VHD::Manifest m;
-    DWORD loadErr = m.Load(manifestPath);
-    if (loadErr == ERROR_FILE_NOT_FOUND) {
-        // Idempotent: missing manifest == nothing to remove.
-        return S_OK;
-    }
-    if (loadErr != ERROR_SUCCESS) {
-        return HRESULT_FROM_WIN32(loadErr);
-    }
-
-    bool removed = m.RemoveLayer(layerId);
+    bool removed = registry.manifest.RemoveLayer(layerId);
     if (removed) {
-        DWORD saveErr = m.Save(manifestPath);
+        DWORD saveErr = registry.manifest.Save(registry.path);
         if (saveErr != ERROR_SUCCESS) {
             return HRESULT_FROM_WIN32(saveErr);
         }
@@ -683,20 +707,11 @@ LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(LM_HANDLE mount,
     auto mountHolder = Handles().mount.Resolve(encoded);
     if (mountHolder == nullptr) return E_HANDLE;
 
-    const std::wstring manifestPath = ResolveManifestPath(manifestDir);
+    LockedRegistry registry(manifestDir, L"LayerMountVhdGetLayerMetadataJson");
+    if (registry.result != S_OK) return registry.result;
+    if (!registry.exists) return STG_E_PATHNOTFOUND;
 
-    ::LayerMount::VHD::ManifestLock lock(manifestPath, kRegistryLockTimeoutMs);
-    if (!lock.Held()) return RegistryLockFailure(L"LayerMountVhdGetLayerMetadataJson");
-    ::LayerMount::VHD::Manifest m;
-    DWORD loadErr = m.Load(manifestPath);
-    if (loadErr == ERROR_FILE_NOT_FOUND) {
-        return STG_E_PATHNOTFOUND;
-    }
-    if (loadErr != ERROR_SUCCESS) {
-        return HRESULT_FROM_WIN32(loadErr);
-    }
-
-    const auto* entry = m.GetLayer(layerId);
+    const auto* entry = registry.manifest.GetLayer(layerId);
     if (entry == nullptr) {
         return STG_E_PATHNOTFOUND;
     }
@@ -717,4 +732,4 @@ LM_API HRESULT LM_CALL LayerMountVhdGetLayerMetadataJson(LM_HANDLE mount,
     LM_ABI_END();
 }
 
-} // extern "C"
+}

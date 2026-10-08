@@ -3,7 +3,8 @@
 // human-readable message via ErrorTls. LM_ABI_ENTRY clears the thread's
 // fill mark, so the mark describes only the current call. Every export
 // runs it first, before its argument checks, except the exports that
-// read the error state or translate its HRESULT.
+// read the error state or translate its HRESULT. LM_STRUCT_SIZE_COVERS is
+// the structSize check for the forward-extensible structs.
 //
 // Usage:
 //
@@ -27,6 +28,7 @@
 
 #include "ErrorTls.h"
 
+#include <cstddef>
 #include <exception>
 #include <new>
 #include <stdexcept>
@@ -55,6 +57,14 @@ private:
 };
 
 }
+
+// True when a struct's structSize reaches the end of `lastShippedField`, the
+// last field of the struct's first shipped layout. Not sizeof: a caller built
+// against an older header must still pass. Never change this argument when a
+// field is appended.
+#define LM_STRUCT_SIZE_COVERS(structPtr, StructType, lastShippedField) \
+    ((structPtr)->structSize >= \
+        offsetof(StructType, lastShippedField) + sizeof(StructType::lastShippedField))
 
 #define LM_ABI_ENTRY() ::LayerMount::abi::ErrorTls::ClearFillFailure()
 

@@ -91,57 +91,63 @@ NTSTATUS SetInfoWithTransientRetry(const FileContext& ctx,
 }
 }
 
+namespace {
+
+bool UpperIsWritable(const HostPath& upperPath) {
+    const std::wstring probePath = JoinDirPath(upperPath.ForWin32(), L".layermount_write_test");
+    const ScopedHandle probe(::CreateFileW(probePath.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
+    return probe.IsValid();
+}
+
+void WarnWhenUpperLacksAds(const HostPath& upperPath) {
+    wchar_t volumeRoot[MAX_PATH] = {};
+    if (!GetVolumePathNameW(upperPath.ForWin32().c_str(), volumeRoot, MAX_PATH)) {
+        return;
+    }
+    wchar_t fsName[MAX_PATH] = {};
+    if (!GetVolumeInformationW(volumeRoot, nullptr, 0, nullptr, nullptr, nullptr,
+                               fsName, MAX_PATH)) {
+        return;
+    }
+    if (_wcsicmp(fsName, L"NTFS") != 0 && _wcsicmp(fsName, L"ReFS") != 0) {
+        OutputDebugStringW(
+            L"[LayerMount] WARNING: Upper layer is not on NTFS/ReFS. "
+            L"NTFS Alternate Data Streams (ADS) will not be available.\n");
+    }
+}
+
+}
+
 bool LayerConfig::Validate(std::wstring& error) const {
-    DWORD upperAttrs = GetFileAttributesW(upperPath.c_str());
+    DWORD upperAttrs = GetFileAttributesW(upperPath.ForWin32().c_str());
     if (upperAttrs == INVALID_FILE_ATTRIBUTES) {
-        error = L"Upper layer path does not exist: " + upperPath;
+        error = L"Upper layer path does not exist: " + upperPath.Text();
         return false;
     }
     if (!(upperAttrs & FILE_ATTRIBUTE_DIRECTORY)) {
-        error = L"Upper layer path is not a directory: " + upperPath;
+        error = L"Upper layer path is not a directory: " + upperPath.Text();
         return false;
     }
 
-    std::wstring testFile = JoinDirPath(upperPath, L".layermount_write_test");
-    HANDLE hTest = CreateFileW(
-        testFile.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_NEW,
-        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
-        nullptr);
-    if (hTest == INVALID_HANDLE_VALUE) {
-        error = L"Upper layer is not writable: " + upperPath;
+    if (!UpperIsWritable(upperPath)) {
+        error = L"Upper layer is not writable: " + upperPath.Text();
         return false;
     }
-    CloseHandle(hTest);
 
     for (size_t i = 0; i < lowerPaths.size(); ++i) {
-        DWORD lowerAttrs = GetFileAttributesW(lowerPaths[i].c_str());
+        DWORD lowerAttrs = GetFileAttributesW(lowerPaths[i].ForWin32().c_str());
         if (lowerAttrs == INVALID_FILE_ATTRIBUTES) {
-            error = L"Lower layer path does not exist: " + lowerPaths[i];
+            error = L"Lower layer path does not exist: " + lowerPaths[i].Text();
             return false;
         }
         if (!(lowerAttrs & FILE_ATTRIBUTE_DIRECTORY)) {
-            error = L"Lower layer path is not a directory: " + lowerPaths[i];
+            error = L"Lower layer path is not a directory: " + lowerPaths[i].Text();
             return false;
         }
     }
 
-    wchar_t volumeRoot[MAX_PATH] = {};
-    if (GetVolumePathNameW(upperPath.c_str(), volumeRoot, MAX_PATH)) {
-        wchar_t fsName[MAX_PATH] = {};
-        if (GetVolumeInformationW(volumeRoot, nullptr, 0, nullptr, nullptr, nullptr,
-                                   fsName, MAX_PATH)) {
-            if (_wcsicmp(fsName, L"NTFS") != 0 && _wcsicmp(fsName, L"ReFS") != 0) {
-                OutputDebugStringW(
-                    L"[LayerMount] WARNING: Upper layer is not on NTFS/ReFS. "
-                    L"NTFS Alternate Data Streams (ADS) will not be available.\n");
-            }
-        }
-    }
-
+    WarnWhenUpperLacksAds(upperPath);
     return true;
 }
 
@@ -155,8 +161,8 @@ struct VolumeSerial {
 
 // The open follows a mounted folder, so the serial numbers are those of the
 // mounted volume.
-bool ReadVolumeSerial(const std::wstring& path, VolumeSerial* volume) {
-    ScopedHandle directory(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+bool ReadVolumeSerial(const HostPath& path, VolumeSerial* volume) {
+    ScopedHandle directory(::CreateFileW(path.ForWin32().c_str(), FILE_READ_ATTRIBUTES,
                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                          nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
                                          nullptr));
@@ -184,7 +190,7 @@ bool OnOneVolume(const VolumeSerial& a, const VolumeSerial& b) {
 }
 
 HRESULT LayerConfig::Prepare(std::wstring& error) {
-    if (workDirPath.empty()) {
+    if (workDirPath.Text().empty()) {
         error = L"Work directory path is empty";
         return E_FAIL;
     }
@@ -194,25 +200,25 @@ HRESULT LayerConfig::Prepare(std::wstring& error) {
         return layout;
     }
 
-    if (!EnsureDirectoryExists(workDirPath)) {
-        error = L"Failed to create work directory: " + workDirPath;
+    if (!EnsureDirectoryExists(workDirPath.ForWin32())) {
+        error = L"Failed to create work directory: " + workDirPath.Text();
         return E_FAIL;
     }
 
     VolumeSerial upperVolume;
     if (!ReadVolumeSerial(upperPath, &upperVolume)) {
-        error = L"Failed to read the volume of the upper layer: " + upperPath;
+        error = L"Failed to read the volume of the upper layer: " + upperPath.Text();
         return E_FAIL;
     }
     VolumeSerial workVolume;
     if (!ReadVolumeSerial(workDirPath, &workVolume)) {
-        error = L"Failed to read the volume of the work directory: " + workDirPath;
+        error = L"Failed to read the volume of the work directory: " + workDirPath.Text();
         return E_FAIL;
     }
     // A copy-up moves an entry from the work directory into the upper with
     // one rename, which only works within one volume.
     if (!OnOneVolume(upperVolume, workVolume)) {
-        error = L"Work directory is not on the volume of the upper layer: " + workDirPath;
+        error = L"Work directory is not on the volume of the upper layer: " + workDirPath.Text();
         return E_INVALIDARG;
     }
 
@@ -380,7 +386,7 @@ bool FirstSegmentOpensAsSidecar(const std::wstring& relativePath) {
 
 std::optional<std::wstring> ExistingLongName(const std::filesystem::path& directory,
                                              const std::wstring& name) {
-    const std::wstring path = (directory / name).wstring();
+    const std::wstring path = WithExtendedPrefix((directory / name).wstring());
     const DWORD needed = ::GetLongPathNameW(path.c_str(), nullptr, 0);
     if (needed == 0) return std::nullopt;
     std::wstring longPath(needed, L'\0');
@@ -450,7 +456,7 @@ LayerMount::LayerMount(LayerConfig config)
 std::shared_ptr<ProcessTracker> LayerMount::TryMakeProcessTracker() {
     auto tracker = std::make_shared<ProcessTracker>(config_.accessLogCapacity);
     tracker->SetEventEmitter(&events_);
-    if (!config_.processRulesPath.empty() &&
+    if (!config_.processRulesPath.Text().empty() &&
         !tracker->LoadRules(config_.processRulesPath)) {
         return nullptr;
     }
@@ -590,7 +596,7 @@ NTSTATUS LayerMount::EnsureInUpperLayer(const std::wstring& relativePath) {
 
 NTSTATUS LayerMount::GetVolumeInfo(UINT64* outTotalSize, UINT64* outFreeSize) const {
     ULARGE_INTEGER freeAvail{}, total{}, totalFree{};
-    if (!::GetDiskFreeSpaceExW(config_.upperPath.c_str(),
+    if (!::GetDiskFreeSpaceExW(config_.upperPath.ForWin32().c_str(),
                                  &freeAvail, &total, &totalFree)) {
         return NtStatusFromWin32(::GetLastError());
     }
@@ -751,8 +757,8 @@ NTSTATUS LayerMount::FillFileInfoFromHandle(HANDLE handle,
 
     if (pathHint && !pathHint->empty()) {
         const std::wstring recordPath = RecordPathOf(handle, info.dwFileAttributes, *pathHint,
-                                                     pathHintIsReparsePoint, config_.upperPath,
-                                                     upperFinalPath_);
+                                                     pathHintIsReparsePoint,
+                                                     config_.upperPath.Text(), upperFinalPath_);
         if (!recordPath.empty()) {
             const LayerMountMetadata metadata =
                 MetadataStore::ReadLayerMountMetadata(recordPath, &config_);
@@ -1261,13 +1267,13 @@ NTSTATUS LayerMount::OpenRoot(UINT32 grantedAccess,
                              std::unique_ptr<FileContext>* outCtx,
                              InternalFileInfo* outInfo) {
     auto ctx = std::make_unique<FileContext>();
-    ctx->actualPath = config_.upperPath;
+    ctx->actualPath = config_.upperPath.Text();
     ctx->isDirectory = true;
     ctx->writable = true;
     ctx->ownerPid = callerPid;
     ctx->createOptions = createOptions;
 
-    ctx->handle = ::CreateFileW(config_.upperPath.c_str(),
+    ctx->handle = ::CreateFileW(config_.upperPath.ForWin32().c_str(),
         ComputePhysicalHandleAccess(grantedAccess),
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
@@ -2355,7 +2361,7 @@ LayerMount::RenameResult LayerMount::RenameCheckedEntry(const std::wstring& oldR
     if (!NT_SUCCESS(status)) return failure(status);
 
     const bool destHadWhiteout =
-        whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath);
+        whiteoutMgr_->HasWhiteout(newNorm, config_.upperPath.Text());
 
     const MovedSource moved =
         MoveRenameSource(RenameRequest{oldRelativePath, newRelativePath, replaceIfExists,
@@ -2542,7 +2548,7 @@ NTSTATUS LayerMount::GetSecurity(const std::wstring& relativePath,
 
     std::wstring targetPath;
     if (normalized.empty()) {
-        targetPath = config_.upperPath;
+        targetPath = config_.upperPath.Text();
         if (outAttributes != nullptr) {
             *outAttributes = FILE_ATTRIBUTE_DIRECTORY;
         }

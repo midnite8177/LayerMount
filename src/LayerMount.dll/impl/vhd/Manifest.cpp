@@ -1,5 +1,6 @@
 #include "Manifest.h"
 #include "VHDLayerManager.h"
+#include "../NtStatusUtil.h"
 #include "nlohmann/json.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -22,7 +23,8 @@ std::wstring NormalizeManifestPath(const std::wstring& path) {
     return out;
 }
 
-// FNV-1a 64-bit — stable across processes and CRT versions, unlike std::hash.
+// FNV-1a 64-bit. Unlike std::hash, it gives the same value in every process
+// and CRT version.
 uint64_t Fnv1a64(const std::wstring& s) {
     uint64_t h = 0xcbf29ce484222325ULL;
     for (wchar_t c : s) {
@@ -40,20 +42,16 @@ std::wstring MutexNameForPath(const std::wstring& manifestPath) {
     return buf;
 }
 
-} // namespace
+}
 
-// ===========================================================================
-// ManifestLock — cross-process serialization of layer registry access.
-// ===========================================================================
-
-ManifestLock::ManifestLock(const std::wstring& manifestPath, DWORD timeoutMs) {
-    const std::wstring name = MutexNameForPath(manifestPath);
+ManifestLock::ManifestLock(const HostPath& manifestPath, DWORD timeoutMs) {
+    const std::wstring name = MutexNameForPath(manifestPath.Text());
     handle_ = ::CreateMutexW(nullptr, FALSE, name.c_str());
     if (handle_ == nullptr) return;
 
     DWORD wait = ::WaitForSingleObject(handle_, timeoutMs);
-    // WAIT_OBJECT_0 or WAIT_ABANDONED both mean we own it — abandoned means
-    // the previous holder crashed without releasing, and the state is now ours.
+    // WAIT_ABANDONED also gives ownership. It means the previous holder
+    // ended without a release.
     held_ = (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED);
 }
 
@@ -65,10 +63,6 @@ ManifestLock::~ManifestLock() {
         ::CloseHandle(handle_);
     }
 }
-
-// ===========================================================================
-// JSON serialization helpers
-// ===========================================================================
 
 static std::string LayerTypeToString(LayerType type) {
     switch (type) {
@@ -126,23 +120,12 @@ static LayerEntry JsonToLayerEntry(const nlohmann::json& j) {
     return entry;
 }
 
-// ===========================================================================
-// Manifest::DefaultPath — canonical manifest location under a working dir
-// ===========================================================================
-
-std::wstring Manifest::DefaultPath(const std::wstring& workingDir) {
-    return (std::filesystem::path(workingDir) / DefaultFileName()).wstring();
+HostPath Manifest::DefaultPath(const HostPath& workingDir) {
+    return HostPath((std::filesystem::path(workingDir.Text()) / DefaultFileName()).wstring());
 }
 
-DWORD Manifest::Load(const std::wstring& manifestPath) {
-    // Use Win32 CreateFileW instead of std::ifstream so the specific open
-    // failure survives: ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, and transient I/O
-    // errors are all distinct conditions the caller needs to distinguish.
-    // The previous ifstream path collapsed every failure to
-    // ERROR_FILE_NOT_FOUND, which caused lazy-load callers to treat a
-    // temporarily-locked manifest as "missing" and recreate it on top.
-    HANDLE fh = ::CreateFileW(manifestPath.c_str(),
+DWORD Manifest::Load(const HostPath& manifestPath) {
+    HANDLE fh = ::CreateFileW(manifestPath.ForWin32().c_str(),
                               GENERIC_READ,
                               FILE_SHARE_READ,
                               nullptr,
@@ -154,9 +137,7 @@ DWORD Manifest::Load(const std::wstring& manifestPath) {
         return err ? err : ERROR_FILE_NOT_FOUND;
     }
 
-    // Read the whole file. Manifests are small (O(KiB)), so a plain
-    // read-all loop is fine. Keep reading until ReadFile reports EOF
-    // (read == 0); bail out on any read failure with the concrete error.
+    // Manifests are small (O(KiB)), so reading the whole file is fine.
     std::string body;
     for (;;) {
         char chunk[8192];
@@ -179,7 +160,6 @@ DWORD Manifest::Load(const std::wstring& manifestPath) {
         return ERROR_INVALID_DATA;
     }
 
-    // Check schema version
     int version = root.value("schemaVersion", 0);
     if (version < 1) return ERROR_INVALID_DATA;
 
@@ -197,7 +177,7 @@ DWORD Manifest::Load(const std::wstring& manifestPath) {
     return ERROR_SUCCESS;
 }
 
-DWORD Manifest::Save(const std::wstring& manifestPath) const {
+DWORD Manifest::Save(const HostPath& manifestPath) const {
     nlohmann::json root;
     root["schemaVersion"] = 1;
 
@@ -207,29 +187,16 @@ DWORD Manifest::Save(const std::wstring& manifestPath) const {
     }
     root["layers"] = layerArray;
 
-    // Ensure parent directory exists. The throwing overload of
-    // create_directories can raise filesystem_error on access-denied /
-    // path-too-long / device-not-ready conditions; since Save() returns
-    // DWORD, that exception would tunnel out and violate the ABI's
-    // exception-safe contract (managed callers would see an unexpected
-    // crash rather than a structured Win32 error). Use the error_code
-    // overload and translate failures back to Win32.
-    std::filesystem::path parentDir = std::filesystem::path(manifestPath).parent_path();
+    const std::wstring manifestForWin32 = manifestPath.ForWin32();
+    std::filesystem::path parentDir = std::filesystem::path(manifestForWin32).parent_path();
     if (!parentDir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(parentDir, ec);
-        if (ec) {
-            if (ec.category() == std::system_category()) {
-                return static_cast<DWORD>(ec.value());
-            }
-            return ERROR_PATH_NOT_FOUND;
-        }
+        if (ec) return Win32FromErrorCode(ec);
     }
 
-    // Atomic write: stream to a sibling tmp file, then MoveFileExW with
-    // REPLACE_EXISTING. Readers never observe a partial file.
     std::wostringstream tmpName;
-    tmpName << manifestPath << L".tmp." << ::GetCurrentProcessId()
+    tmpName << manifestForWin32 << L".tmp." << ::GetCurrentProcessId()
             << L"." << ::GetCurrentThreadId();
     const std::wstring tmpPath = tmpName.str();
 
@@ -244,7 +211,7 @@ DWORD Manifest::Save(const std::wstring& manifestPath) const {
         }
     }
 
-    if (!::MoveFileExW(tmpPath.c_str(), manifestPath.c_str(),
+    if (!::MoveFileExW(tmpPath.c_str(), manifestForWin32.c_str(),
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         DWORD err = ::GetLastError();
         ::DeleteFileW(tmpPath.c_str());
@@ -280,77 +247,4 @@ std::vector<const LayerEntry*> Manifest::ListLayers() const {
     return result;
 }
 
-Manifest::OrphanReport Manifest::DetectOrphans(
-    const std::wstring& layerDirectory) const {
-    namespace fs = std::filesystem;
-    OrphanReport report;
-
-    // Check manifest entries whose files no longer exist
-    for (const auto& [id, entry] : layers_) {
-        if (!entry.path.empty() && !fs::exists(entry.path)) {
-            report.missingVhds.push_back(id);
-        }
-    }
-
-    // Check for .vhdx files in the directory with no manifest entry
-    std::error_code ec;
-    for (const auto& dirEntry : fs::directory_iterator(layerDirectory, ec)) {
-        if (!dirEntry.is_regular_file(ec)) continue;
-
-        auto ext = dirEntry.path().extension().wstring();
-        for (auto& c : ext) c = static_cast<wchar_t>(::towlower(c));
-        if (ext != L".vhdx" && ext != L".vhd") continue;
-
-        std::wstring filePath = dirEntry.path().wstring();
-        bool tracked = false;
-        for (const auto& [id, entry] : layers_) {
-            if (entry.path == filePath) {
-                tracked = true;
-                break;
-            }
-        }
-        if (!tracked) {
-            report.untrackedFiles.push_back(filePath);
-        }
-    }
-
-    return report;
 }
-
-DWORD Manifest::CleanupOrphans(const std::wstring& layerDirectory, bool dryRun) {
-    namespace fs = std::filesystem;
-
-    OrphanReport report = DetectOrphans(layerDirectory);
-
-    if (dryRun) return ERROR_SUCCESS;
-
-    // Remove stale manifest entries
-    for (const auto& id : report.missingVhds) {
-        layers_.erase(id);
-    }
-
-    // Delete untracked files. Use a fresh error_code per iteration (the
-    // previous version reused a single `ec` so an early success clobbered
-    // a later failure flag, and the final return always reported SUCCESS
-    // even when orphan removal left files on disk). Continue on error so
-    // every file is at least attempted; return the first concrete failure
-    // code to the caller so admins know cleanup was partial.
-    DWORD firstFailure = ERROR_SUCCESS;
-    for (const auto& filePath : report.untrackedFiles) {
-        std::error_code ec;
-        fs::remove(filePath, ec);
-        if (ec && firstFailure == ERROR_SUCCESS) {
-            // Map generic_category / system_category errors back to a Win32
-            // code when possible; otherwise fall back to a file-write code
-            // that still signals "cleanup failed".
-            if (ec.category() == std::system_category()) {
-                firstFailure = static_cast<DWORD>(ec.value());
-            } else {
-                firstFailure = ERROR_WRITE_FAULT;
-            }
-        }
-    }
-    return firstFailure;
-}
-
-} // namespace LayerMount::VHD

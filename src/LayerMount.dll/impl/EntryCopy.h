@@ -53,12 +53,15 @@ NTSTATUS HasUserAlternateDataStream(const std::wstring& path, bool* has);
 // doubles the buffer until the list fits.
 inline constexpr size_t kInitialStreamListSize = 64 * 1024;
 
-// Propagate NTFS EFS state. Unlike sparse/compression, encryption is applied
-// path-wise rather than via a writable handle. Run it once the destination
-// path exists and no conflicting handle is open; if we cannot preserve the
-// encrypted state, fail the copy-up rather than silently materializing
-// plaintext in upper.
-bool ApplyEncryptedStateIfNeeded(const std::wstring& path, DWORD attrs);
+// Encrypts the entry at path when attrs carries FILE_ATTRIBUTE_ENCRYPTED.
+// EncryptFileW opens path itself and needs exclusive access, so the entry
+// must exist and no handle to it may be open. Returns true when attrs is
+// not encrypted or the entry ends up encrypted. INVALID_FILE_ATTRIBUTES
+// counts as not encrypted, so the call returns true and encrypts nothing.
+// Otherwise returns false and leaves the Win32 error in GetLastError. A
+// false fails the copy-up, because a plaintext copy in the upper would
+// expose the data. Compression, by contrast, is best effort.
+bool ApplyEncryptedStateIfNeeded(const HostPath& path, DWORD attrs);
 
 bool HasFileAttribute(DWORD attrs, DWORD flag);
 
@@ -207,7 +210,7 @@ NTSTATUS CloneReparsePointWithCopyUpRecord(const SourceEntry& source,
 // upperPath, fails with STATUS_OBJECT_NAME_COLLISION and leaves that entry
 // as it was.
 NTSTATUS CloneReparsePointThroughWorkDir(const SourceEntry& source,
-                                         const std::wstring& containerPath,
+                                         const HostPath& containerPath,
                                          const std::wstring& upperPath,
                                          const EntryCopyPolicy& policy);
 

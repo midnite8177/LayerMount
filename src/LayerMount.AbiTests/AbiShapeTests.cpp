@@ -91,11 +91,7 @@ public:
 
     TEST_METHOD(DestroyedLayerMountHandle_OnStatsQuery_ReturnsEHandle) {
         TempLayerEnv   env(1);
-        LayerMountHolder  mount = CreateLayerMount(env);
-
-        // Take a copy of the raw handle before we destroy it.
-        LM_HANDLE stale = mount.Get();
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountDestroy(mount.Release()));
+        const LM_HANDLE stale = DestroyedMountHandle(env);
 
         LM_STATS stats{};
         Assert::AreEqual<HRESULT>(E_HANDLE,
@@ -150,6 +146,16 @@ public:
         LM_HANDLE h = nullptr;
         Assert::AreEqual<HRESULT>(E_INVALIDARG,
             ::LayerMountCreate(b.Ptr(), &h));
+    }
+
+    TEST_METHOD(LayerMountCreate_StructSizeThroughLowerPaths_Succeeds) {
+        TempLayerEnv    env(0);
+        ConfigBuilder   b(env);
+        b.SetStructSize(ABI_SIZE_THROUGH(LM_CONFIG, lowerPaths));
+        LayerMountHolder mount;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCreate(b.Ptr(), mount.AddressOf()),
+            L"A config whose structSize ends at the end of lowerPaths creates the overlay");
     }
 
     TEST_METHOD(LayerMountCreate_WrongAbiVersion_ReturnsEInvalidArgWithMessage) {

@@ -38,6 +38,17 @@ inline std::wstring DeepLeafName(const std::wstring& parentPath, const std::wstr
     return prefix + std::wstring(nameLength - prefix.size(), L'n');
 }
 
+// Makes a directory whose plain path is kDeepHostPathLength characters long
+// under parentPath, which must be shorter than MAX_PATH. Returns the plain
+// path.
+inline std::wstring MakeDeepLayerRoot(const std::wstring& parentPath, const std::wstring& prefix) {
+    const std::wstring root = parentPath + L"\\" + DeepLeafName(parentPath, prefix);
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(
+        ::CreateDirectoryW(ExtendedFormOf(root).c_str(), nullptr) != FALSE,
+        L"Precondition: the extended form makes the deep layer root");
+    return root;
+}
+
 inline std::wstring ExtendedPathUnder(const std::wstring& layer, const std::wstring& relativePath) {
     const std::wstring path = layer + L"\\" + relativePath;
     Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(path.size() > MAX_PATH,

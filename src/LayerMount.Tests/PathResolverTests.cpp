@@ -325,7 +325,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Lower(0), L"own.txt", "lower0");
         auto config = env.MakeConfig();
-        config.lowerPaths[0] = ExtendedDirWithSeparator(env.Lower(0));
+        config.lowerPaths[0] = HostPath(ExtendedDirWithSeparator(env.Lower(0)));
         Cache cache;
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);
@@ -346,7 +346,7 @@ public:
         env.WriteFile(env.Lower(0), WhiteoutMarkerPath(L"a.txt"), "");
         env.WriteFile(env.Lower(1), L"a.txt", "lower1");
         auto config = env.MakeConfig();
-        config.lowerPaths[0] = ExtendedDirWithSeparator(env.Lower(0));
+        config.lowerPaths[0] = HostPath(ExtendedDirWithSeparator(env.Lower(0)));
         Cache cache;
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);
@@ -362,7 +362,7 @@ public:
         env.WriteFile(env.Lower(0), OpaqueMarkerPath(L"sub"), "");
         env.WriteFile(env.Lower(1), L"sub\\x.txt", "lower1");
         auto config = env.MakeConfig();
-        config.lowerPaths[0] = ExtendedDirWithSeparator(env.Lower(0));
+        config.lowerPaths[0] = HostPath(ExtendedDirWithSeparator(env.Lower(0)));
         Cache cache;
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);
@@ -377,7 +377,7 @@ public:
         TempLayerEnvironment env(1);
         env.WriteFile(env.Upper(), L"up.txt", "upper");
         auto config = env.MakeConfig();
-        config.upperPath = ExtendedDirWithSeparator(env.Upper());
+        config.upperPath = HostPath(ExtendedDirWithSeparator(env.Upper()));
         Cache cache;
         WhiteoutManager wm(config, &cache);
         PathResolver resolver(config, wm, cache);

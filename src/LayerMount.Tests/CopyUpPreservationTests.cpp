@@ -538,16 +538,17 @@ public:
         TempLayerEnvironment env(1);
         constexpr size_t kStagedPathLength = 256;
         const size_t stagedPathPastWorkDir =
-            CopyUpAndRenameRig(env.MakeConfig()).copyUp.GenerateStagingPath().size() -
+            CopyUpAndRenameRig(env.MakeConfig()).copyUp.GenerateStagingPath().Text().size() -
             env.Work().size();
         Assert::IsTrue(env.Root().size() + 1 + stagedPathPastWorkDir < kStagedPathLength,
             L"Precondition: the test root leaves room to pad the work directory");
         const std::wstring workDir = env.Root() + L"\\" +
             std::wstring(kStagedPathLength - stagedPathPastWorkDir - env.Root().size() - 1, L'w');
-        Assert::IsTrue(StagingAreaPath(workDir).size() + kListedStreamNameChars > MAX_PATH,
+        Assert::IsTrue(
+            StagingAreaPath(HostPath(workDir)).Text().size() + kListedStreamNameChars > MAX_PATH,
             L"Precondition: a long stream path of a staged file is longer than MAX_PATH");
         std::error_code ec;
-        fs::create_directories(L"\\\\?\\" + StagingAreaPath(workDir), ec);
+        fs::create_directories(StagingAreaPath(HostPath(workDir)).ForWin32(), ec);
         Assert::IsFalse(static_cast<bool>(ec),
             L"Precondition: the padded staging area must be creatable");
 
@@ -556,9 +557,9 @@ public:
         WriteNumberedLongStreams(env.Lower(0), L"long.txt", kStreamCount);
 
         LayerConfig config = env.MakeConfig();
-        config.workDirPath = workDir;
+        config.workDirPath = HostPath(workDir);
         CopyUpAndRenameRig rig(config);
-        const size_t stagedPathLength = rig.copyUp.GenerateStagingPath().size();
+        const size_t stagedPathLength = rig.copyUp.GenerateStagingPath().Text().size();
         Assert::IsTrue(stagedPathLength < MAX_PATH,
             L"Precondition: the staged file path is shorter than MAX_PATH");
         Assert::IsTrue(

@@ -1,5 +1,6 @@
 #include "../WindowsNtStatus.h"
 #include "../LayerMount.h"
+#include "../NtStatusUtil.h"
 #include "LayerImageManager.h"
 
 #include "nlohmann/json.hpp"
@@ -16,14 +17,11 @@
 #include <optional>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace LayerMount::LayerImage {
 
 namespace fs = std::filesystem;
-
-// ===========================================================================
-// Status code mapping — BCrypt returns NTSTATUS, we return DWORD
-// ===========================================================================
 
 static DWORD NtStatusToDword(NTSTATUS status) {
     if (status == STATUS_SUCCESS) return ERROR_SUCCESS;
@@ -34,10 +32,6 @@ static DWORD NtStatusToDword(NTSTATUS status) {
         default:                       return ERROR_INVALID_FUNCTION;
     }
 }
-
-// ===========================================================================
-// String conversion helpers (UTF-16 <-> UTF-8)
-// ===========================================================================
 
 static std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) return {};
@@ -65,10 +59,6 @@ static std::wstring Utf8ToWide(const std::string& utf8) {
     return wide;
 }
 
-// ===========================================================================
-// UUID generation — CoCreateGuid + StringFromGUID2
-// ===========================================================================
-
 static std::wstring GenerateId() {
     GUID guid{};
     HRESULT hr = ::CoCreateGuid(&guid);
@@ -85,10 +75,6 @@ static std::wstring GenerateId() {
     return id;
 }
 
-// ===========================================================================
-// ISO 8601 timestamp (UTC)
-// ===========================================================================
-
 static std::wstring GetCurrentTimestampISO8601() {
     SYSTEMTIME st{};
     ::GetSystemTime(&st);
@@ -98,10 +84,6 @@ static std::wstring GetCurrentTimestampISO8601() {
                  st.wHour, st.wMinute, st.wSecond);
     return std::wstring(buf);
 }
-
-// ===========================================================================
-// BCrypt SHA-256 — RAII context + three entry points
-// ===========================================================================
 
 namespace {
 struct BcryptHashContext {
@@ -142,10 +124,10 @@ static DWORD InitBcryptSha256(BcryptHashContext& ctx) {
     return ERROR_SUCCESS;
 }
 
-static DWORD ComputeSHA256Stream(const std::wstring& filePath,
+static DWORD ComputeSHA256Stream(const HostPath& filePath,
                                  uint64_t offset, uint64_t size,
                                  uint8_t outHash[32]) {
-    std::ifstream file(filePath, std::ios::binary);
+    std::ifstream file(filePath.ForWin32(), std::ios::binary);
     if (!file) return ERROR_FILE_NOT_FOUND;
 
     file.seekg(static_cast<std::streamoff>(offset));
@@ -176,7 +158,6 @@ static DWORD ComputeSHA256Stream(const std::wstring& filePath,
     return NtStatusToDword(status);
 }
 
-// Stream write + hash in a single pass.
 static DWORD WriteDataWithHash(std::ofstream& output,
                                const uint8_t* data, size_t size,
                                uint8_t outHash[32]) {
@@ -215,14 +196,10 @@ static std::wstring HashToHexString(const uint8_t hash[32]) {
     return std::wstring(buf, 64);
 }
 
-// ===========================================================================
-// UTF-8 and archive-path validation
-// ===========================================================================
-
 static bool IsValidUtf8(const char* data, size_t len) {
     for (size_t i = 0; i < len; ) {
         uint8_t c = static_cast<uint8_t>(data[i]);
-        if (c == 0) return false;           // reject embedded NULs
+        if (c == 0) return false;
         size_t extra;
         if ((c & 0x80) == 0x00)      extra = 0;
         else if ((c & 0xE0) == 0xC0) extra = 1;
@@ -244,39 +221,29 @@ static bool IsValidUtf8(const char* data, size_t len) {
 static bool IsPathContainedIn(const std::wstring& canon,
                               const std::wstring& root) {
     if (canon == root) return true;
-    if (root.empty()) return true;             // any path is "under" empty root
+    if (root.empty()) return true;
     if (canon.size() <= root.size()) return false;
     if (canon.compare(0, root.size(), root) != 0) return false;
-    // If the root already ends with a separator (e.g., a drive root
-    // `C:\`), prefix-equality at root.size() already implies a clean
-    // component boundary.
     const wchar_t rootLast = root.back();
     if (rootLast == L'\\' || rootLast == L'/') return true;
-    // Otherwise the very next character in canon must be a path separator
-    // so we are not matching a sibling whose name extends the root's name.
     const wchar_t boundary = canon[root.size()];
     return boundary == L'\\' || boundary == L'/';
 }
 
-// Rejects an absolute path, a `.` or `..` component, and a colon anywhere.
-// A colon names a drive or an alternate data stream. Paths use forward
-// slashes. A trailing slash marks a directory.
+// Rejects an absolute path, an empty, `.` or `..` component, and a colon
+// anywhere. A colon names a drive or an alternate data stream.
 static bool IsValidArchivePath(const std::string& utf8Path) {
     if (utf8Path.empty()) return false;
     if (utf8Path.front() == '/' || utf8Path.front() == '\\') return false;
     if (utf8Path.find(':') != std::string::npos) return false;
 
-    // Walk each path component, reject "." and ".."
     size_t start = 0;
     for (size_t i = 0; i <= utf8Path.size(); ++i) {
         bool boundary = (i == utf8Path.size()) ||
                         utf8Path[i] == '/' || utf8Path[i] == '\\';
         if (boundary) {
             size_t len = i - start;
-            if (len == 0) {
-                if (i == utf8Path.size()) break;  // allow trailing slash
-                return false;                     // empty component (e.g., "//")
-            }
+            if (len == 0) return false;
             std::string_view component(utf8Path.data() + start, len);
             if (component == "." || component == "..") return false;
             start = i + 1;
@@ -284,10 +251,6 @@ static bool IsValidArchivePath(const std::string& utf8Path) {
     }
     return true;
 }
-
-// ===========================================================================
-// zstd compression helpers
-// ===========================================================================
 
 static DWORD CompressBuffer(const std::vector<uint8_t>& input,
                             std::vector<uint8_t>& output,
@@ -301,12 +264,12 @@ static DWORD CompressBuffer(const std::vector<uint8_t>& input,
     return ERROR_SUCCESS;
 }
 
-// Upper bound for a single decompression (prevents DoS via a malformed frame
-// reporting a huge content size). 4 GiB is well above any reasonable layer.
+// The frame header gives the content size, and the frame comes from the
+// image file, so the size is untrusted. The cap bounds the allocation that
+// the size drives.
 constexpr uint64_t kMaxDecompressedBytes = 4ULL * 1024 * 1024 * 1024;
 
 static DWORD DecompressBuffer(const uint8_t* input, size_t inputSize,
-                              uint64_t expectedSize,
                               std::vector<uint8_t>& output) {
     unsigned long long frameSize = ::ZSTD_getFrameContentSize(input, inputSize);
     if (frameSize == ZSTD_CONTENTSIZE_ERROR ||
@@ -314,7 +277,6 @@ static DWORD DecompressBuffer(const uint8_t* input, size_t inputSize,
         return ERROR_INVALID_DATA;
     }
     if (frameSize > kMaxDecompressedBytes) return ERROR_INVALID_DATA;
-    if (expectedSize != 0 && frameSize != expectedSize) return ERROR_INVALID_DATA;
 
     output.resize(static_cast<size_t>(frameSize));
     size_t result = ::ZSTD_decompress(output.data(), output.size(),
@@ -324,22 +286,23 @@ static DWORD DecompressBuffer(const uint8_t* input, size_t inputSize,
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// Archive buffer helpers
-// ===========================================================================
-
 static void AppendBytes(std::vector<uint8_t>& buf, const void* src, size_t n) {
     const uint8_t* p = static_cast<const uint8_t*>(src);
     buf.insert(buf.end(), p, p + n);
 }
 
-// Convert a wstring path to UTF-8 with forward slashes, relative to base.
-static std::string NormalizeRelativePath(const fs::path& absolute,
-                                         const fs::path& base) {
-    fs::path rel = fs::relative(absolute, base);
-    std::wstring w = rel.wstring();
-    std::replace(w.begin(), w.end(), L'\\', L'/');
-    return WideToUtf8(w);
+// Uses forward slashes, as an archive name does.
+static std::wstring RelativeNameOf(const fs::path& absolute, const fs::path& base) {
+    std::wstring name = fs::relative(absolute, base).wstring();
+    std::replace(name.begin(), name.end(), L'\\', L'/');
+    return name;
+}
+
+// Joins relativePath, an archive name or a whiteout marker path, onto root,
+// an extended path. Windows does not read a forward slash in an extended
+// path as a separator, so the join converts each one to a backslash.
+static fs::path UnderExtendedRoot(const fs::path& root, const std::wstring& relativePath) {
+    return root / fs::path(relativePath).make_preferred();
 }
 
 // Convert a logical path to its whiteout marker path:
@@ -353,9 +316,15 @@ static std::wstring MakeWhiteoutMarkerPath(const std::wstring& logicalPath) {
     return path.substr(0, slash + 1) + L".wh." + path.substr(slash + 1);
 }
 
-// Check if a filename has the .wh. prefix (used for whiteout detection).
 static bool HasWhiteoutPrefix(const std::wstring& filename) {
     return filename.size() >= 4 && filename.compare(0, 4, L".wh.") == 0;
+}
+
+static std::wstring ToLower(const std::wstring& s) {
+    std::wstring r = s;
+    std::transform(r.begin(), r.end(), r.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+    return r;
 }
 
 // An unpack writes no entry whose first segment opens as the root sidecar,
@@ -387,35 +356,6 @@ static bool StepPastRootSidecar(fs::recursive_directory_iterator& it,
     return true;
 }
 
-// Pack a single archive entry into the buffer: header + name + data.
-static DWORD AppendFileEntry(std::vector<uint8_t>& archive,
-                             const std::string& utf8Name,
-                             const FileEntryHeader& entry,
-                             const uint8_t* data,
-                             uint64_t& uncompressedTotal) {
-    if (utf8Name.empty()) return ERROR_INVALID_PARAMETER;
-    if (utf8Name.size() > 0xFFFE) return ERROR_FILENAME_EXCED_RANGE;
-
-    FileEntryHeader h = entry;
-    h.nameLength = static_cast<uint16_t>(utf8Name.size());
-
-    AppendBytes(archive, &h, sizeof(h));
-    AppendBytes(archive, utf8Name.data(), utf8Name.size());
-    if (!h.isDirectory && h.size > 0) {
-        AppendBytes(archive, data, static_cast<size_t>(h.size));
-    }
-    uncompressedTotal = archive.size();
-    return ERROR_SUCCESS;
-}
-
-// Append the end-of-archive marker.
-static void AppendEndMarker(std::vector<uint8_t>& archive) {
-    FileEntryHeader end{};
-    end.nameLength = ARCHIVE_END_MARKER;
-    AppendBytes(archive, &end, sizeof(end));
-}
-
-// Read a file into a buffer (used when archiving).
 static DWORD ReadFileBytes(const fs::path& path, std::vector<uint8_t>& out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return ERROR_ACCESS_DENIED;
@@ -432,7 +372,6 @@ static DWORD ReadFileBytes(const fs::path& path, std::vector<uint8_t>& out) {
     return ERROR_SUCCESS;
 }
 
-// Fill an entry header from an on-disk file.
 static DWORD FillFileEntry(const fs::path& path, FileEntryHeader& entry,
                            bool isDirectory) {
     WIN32_FILE_ATTRIBUTE_DATA attrs{};
@@ -452,94 +391,83 @@ static DWORD FillFileEntry(const fs::path& path, FileEntryHeader& entry,
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// Archive construction — walk a directory tree
-// ===========================================================================
+namespace {
 
-static DWORD BuildArchiveFromDirectory(const std::wstring& sourceDir,
-                                       std::vector<uint8_t>& archive,
-                                       uint64_t& fileCount,
-                                       uint64_t& uncompressedTotal) {
-    fs::path basePath(sourceDir);
-    if (!fs::exists(basePath)) return ERROR_PATH_NOT_FOUND;
-
-    std::error_code ec;
-    auto it = fs::recursive_directory_iterator(
-        basePath, fs::directory_options::none, ec);
-    if (ec) return ERROR_ACCESS_DENIED;
-
-    const auto end = fs::recursive_directory_iterator();
-    while (it != end) {
-        if (StepPastRootSidecar(it, ec)) {
-            if (ec) return ERROR_ACCESS_DENIED;
-            continue;
-        }
-        const auto& entry = *it;
-
-        std::string utf8Name = NormalizeRelativePath(entry.path(), basePath);
-        if (utf8Name.size() > 0xFFFE) return ERROR_FILENAME_EXCED_RANGE;
-
-        FileEntryHeader h{};
-        bool isDir = entry.is_directory(ec);
-        if (ec) return ERROR_ACCESS_DENIED;
-
-        DWORD err = FillFileEntry(entry.path(), h, isDir);
-        if (err != ERROR_SUCCESS) return err;
-
-        if (!isDir) {
-            bool isWhiteout = HasWhiteoutPrefix(entry.path().filename().wstring());
-            h.isWhiteout = isWhiteout ? 1 : 0;
-
-            std::vector<uint8_t> fileBytes;
-            if (h.size > 0) {
-                err = ReadFileBytes(entry.path(), fileBytes);
-                if (err != ERROR_SUCCESS) return err;
-            }
-            err = AppendFileEntry(archive, utf8Name, h,
-                                  fileBytes.empty() ? nullptr : fileBytes.data(),
-                                  uncompressedTotal);
-            if (err != ERROR_SUCCESS) return err;
-            ++fileCount;
-        } else {
-            err = AppendFileEntry(archive, utf8Name, h, nullptr,
-                                  uncompressedTotal);
-            if (err != ERROR_SUCCESS) return err;
-        }
-
-        it.increment(ec);
-        if (ec) return ERROR_ACCESS_DENIED;
+class ArchiveBuilder {
+public:
+    DWORD AddDirectory(const std::wstring& relativePath, const FileEntryHeader& entry) {
+        return Append(relativePath, entry, {});
     }
 
-    AppendEndMarker(archive);
-    uncompressedTotal = archive.size();
-    return ERROR_SUCCESS;
-}
+    // Reads the file at path now, and records the size of what it read, so a
+    // file that changed size after the scan still gives a well-formed entry.
+    DWORD AddFile(const fs::path& path, const std::wstring& relativePath,
+                  FileEntryHeader entry) {
+        std::vector<uint8_t> bytes;
+        if (entry.size > 0) {
+            const DWORD err = ReadFileBytes(path, bytes);
+            if (err != ERROR_SUCCESS) return err;
+        }
+        entry.size = bytes.size();
+        entry.isWhiteout = HasWhiteoutPrefix(fs::path(relativePath).filename().wstring()) ? 1 : 0;
+        return AppendCounted(relativePath, entry, bytes);
+    }
 
-// ===========================================================================
-// Directory scanning for differential comparison
-// ===========================================================================
+    DWORD AddWhiteoutMarker(const std::wstring& deletedPath) {
+        FileEntryHeader entry{};
+        entry.attributes = FILE_ATTRIBUTE_NORMAL;
+        entry.isWhiteout = 1;
+        return AppendCounted(MakeWhiteoutMarkerPath(deletedPath), entry, {});
+    }
 
-namespace {
-struct FileSnapshot {
-    std::wstring relativePath;   // forward-slash normalized, lower-cased key
-    std::wstring displayPath;    // original-case relative path
-    uint64_t size         = 0;
-    uint64_t modifiedTime = 0;
-    uint32_t attributes   = 0;
-    bool     isDirectory  = false;
+    uint64_t FileCount() const { return fileCount_; }
+
+    // Appends the end marker and moves the archive out. The builder is empty
+    // afterwards.
+    std::vector<uint8_t> Finish() {
+        FileEntryHeader end{};
+        end.nameLength = ARCHIVE_END_MARKER;
+        AppendBytes(archive_, &end, sizeof(end));
+        return std::move(archive_);
+    }
+
+private:
+    DWORD AppendCounted(const std::wstring& relativePath, const FileEntryHeader& entry,
+                        const std::vector<uint8_t>& data) {
+        const DWORD err = Append(relativePath, entry, data);
+        if (err == ERROR_SUCCESS) ++fileCount_;
+        return err;
+    }
+
+    DWORD Append(const std::wstring& relativePath, FileEntryHeader entry,
+                 const std::vector<uint8_t>& data) {
+        const std::string utf8Name = WideToUtf8(relativePath);
+        if (utf8Name.empty()) return ERROR_INVALID_PARAMETER;
+        if (utf8Name.size() > 0xFFFE) return ERROR_FILENAME_EXCED_RANGE;
+        entry.nameLength = static_cast<uint16_t>(utf8Name.size());
+        AppendBytes(archive_, &entry, sizeof(entry));
+        AppendBytes(archive_, utf8Name.data(), utf8Name.size());
+        AppendBytes(archive_, data.data(), data.size());
+        return ERROR_SUCCESS;
+    }
+
+    std::vector<uint8_t> archive_;
+    uint64_t fileCount_ = 0;
 };
+
+struct FileSnapshot {
+    std::wstring lookupKey;
+    std::wstring relativePath;
+    FileEntryHeader entry;
+};
+
 }
 
-static std::wstring ToLower(const std::wstring& s) {
-    std::wstring r = s;
-    std::transform(r.begin(), r.end(), r.begin(),
-                   [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
-    return r;
-}
-
-static DWORD ScanDirectory(const std::wstring& dir,
-                           std::vector<FileSnapshot>& out) {
-    fs::path base(dir);
+// Lists every entry under dir except the root sidecar, in walk order. The
+// walk starts on the extended form of dir, so each entry path that it gives
+// is extended too, and an entry past MAX_PATH still opens.
+static DWORD ScanDirectory(const HostPath& dir, std::vector<FileSnapshot>& out) {
+    const fs::path base(dir.ForWin32());
     if (!fs::exists(base)) return ERROR_PATH_NOT_FOUND;
 
     std::error_code ec;
@@ -553,30 +481,14 @@ static DWORD ScanDirectory(const std::wstring& dir,
             if (ec) return ERROR_ACCESS_DENIED;
             continue;
         }
-        const auto& entry = *it;
-
-        fs::path rel = fs::relative(entry.path(), base);
-        std::wstring relStr = rel.wstring();
-        std::replace(relStr.begin(), relStr.end(), L'\\', L'/');
-
-        FileSnapshot snap;
-        snap.displayPath  = relStr;
-        snap.relativePath = ToLower(relStr);
-        snap.isDirectory  = entry.is_directory(ec);
+        const bool isDirectory = it->is_directory(ec);
         if (ec) return ERROR_ACCESS_DENIED;
 
-        WIN32_FILE_ATTRIBUTE_DATA attrs{};
-        if (!::GetFileAttributesExW(entry.path().c_str(),
-                                    GetFileExInfoStandard, &attrs)) {
-            return ::GetLastError();
-        }
-        snap.attributes   = attrs.dwFileAttributes;
-        snap.modifiedTime = (static_cast<uint64_t>(attrs.ftLastWriteTime.dwHighDateTime) << 32) |
-                            attrs.ftLastWriteTime.dwLowDateTime;
-        snap.size = snap.isDirectory
-            ? 0
-            : ((static_cast<uint64_t>(attrs.nFileSizeHigh) << 32) | attrs.nFileSizeLow);
-
+        FileSnapshot snap;
+        snap.relativePath = RelativeNameOf(it->path(), base);
+        snap.lookupKey    = ToLower(snap.relativePath);
+        const DWORD err = FillFileEntry(it->path(), snap.entry, isDirectory);
+        if (err != ERROR_SUCCESS) return err;
         out.push_back(std::move(snap));
 
         it.increment(ec);
@@ -585,9 +497,52 @@ static DWORD ScanDirectory(const std::wstring& dir,
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// JSON metadata serialization
-// ===========================================================================
+static DWORD PackEntries(const HostPath& root,
+                         const std::vector<const FileSnapshot*>& entries,
+                         ArchiveBuilder& builder) {
+    const fs::path base(root.ForWin32());
+    for (const FileSnapshot* snap : entries) {
+        const DWORD err = snap->entry.isDirectory
+            ? builder.AddDirectory(snap->relativePath, snap->entry)
+            : builder.AddFile(UnderExtendedRoot(base, snap->relativePath),
+                              snap->relativePath, snap->entry);
+        if (err != ERROR_SUCCESS) return err;
+    }
+    return ERROR_SUCCESS;
+}
+
+static bool Differs(const FileEntryHeader& source, const FileEntryHeader& base) {
+    if (source.isDirectory != base.isDirectory) return true;
+    return !source.isDirectory &&
+           (source.size != base.size || source.modified != base.modified);
+}
+
+static std::vector<const FileSnapshot*> ChangedEntries(
+    const std::vector<FileSnapshot>& source, const std::vector<FileSnapshot>& base) {
+    std::unordered_map<std::wstring, const FileSnapshot*> baseByKey;
+    for (const auto& b : base) baseByKey[b.lookupKey] = &b;
+
+    std::vector<const FileSnapshot*> changed;
+    for (const auto& s : source) {
+        const auto match = baseByKey.find(s.lookupKey);
+        if (match == baseByKey.end() || Differs(s.entry, match->second->entry)) {
+            changed.push_back(&s);
+        }
+    }
+    return changed;
+}
+
+static std::vector<std::wstring> DeletedPaths(
+    const std::vector<FileSnapshot>& source, const std::vector<FileSnapshot>& base) {
+    std::unordered_set<std::wstring> sourceKeys;
+    for (const auto& s : source) sourceKeys.insert(s.lookupKey);
+
+    std::vector<std::wstring> deleted;
+    for (const auto& b : base) {
+        if (sourceKeys.count(b.lookupKey) == 0) deleted.push_back(b.relativePath);
+    }
+    return deleted;
+}
 
 static const char* CompressionTypeToString(CompressionType c) {
     switch (c) {
@@ -699,61 +654,48 @@ static DWORD DeserializeMetadata(const std::string& utf8, LayerMetadata& meta) {
     }
 }
 
-// ===========================================================================
-// Shared write path — compress archive, write header+metadata+data
-// ===========================================================================
-
-static DWORD WriteImageFile(const std::wstring& outputPath,
+static DWORD WriteImageFile(const ImageOutput& output,
                             LayerMetadata& metadata,
-                            const std::vector<uint8_t>& archive,
-                            int compressionLevel) {
-    // Ensure parent directory exists
-    fs::path outPath(outputPath);
+                            const std::vector<uint8_t>& archive) {
+    const fs::path outPath(output.path.ForWin32());
     if (outPath.has_parent_path()) {
         std::error_code ec;
         fs::create_directories(outPath.parent_path(), ec);
-        // Ignore error; the open below will fail if directory is unusable
+        if (ec) return Win32FromErrorCode(ec);
     }
 
-    // Compress archive
     std::vector<uint8_t> compressed;
-    DWORD err = CompressBuffer(archive, compressed, compressionLevel);
+    DWORD err = CompressBuffer(archive, compressed, output.compressionLevel);
     if (err != ERROR_SUCCESS) return err;
 
     metadata.compression      = CompressionType::Zstd;
     metadata.uncompressedSize = archive.size();
     metadata.compressedSize   = compressed.size();
 
-    // Serialize metadata (UTF-8, null-terminated as required)
     std::string metadataJson = SerializeMetadata(metadata);
     metadataJson.push_back('\0');
 
-    // Open output
-    std::ofstream out(outputPath, std::ios::binary | std::ios::trunc);
+    std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
     if (!out) return ERROR_ACCESS_DENIED;
 
-    // Write placeholder header
     LayerImageHeader header{};
     header.version = LAYER_IMAGE_VERSION;
     header.flags   = static_cast<uint32_t>(CompressionType::Zstd);
     out.write(reinterpret_cast<const char*>(&header), sizeof(header));
     if (!out) return ERROR_WRITE_FAULT;
 
-    // Write metadata
     header.metadataOffset = sizeof(header);
     header.metadataSize   = metadataJson.size();
     out.write(metadataJson.data(),
               static_cast<std::streamsize>(metadataJson.size()));
     if (!out) return ERROR_WRITE_FAULT;
 
-    // Write compressed data, streaming through SHA-256
     header.dataOffset = header.metadataOffset + header.metadataSize;
     header.dataSize   = compressed.size();
     err = WriteDataWithHash(out, compressed.data(), compressed.size(),
                             header.checksum);
     if (err != ERROR_SUCCESS) return err;
 
-    // Seek back to offset 0, write final header
     out.seekp(0);
     if (!out) return ERROR_SEEK;
     out.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -763,9 +705,16 @@ static DWORD WriteImageFile(const std::wstring& outputPath,
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// Archive extraction
-// ===========================================================================
+// Removes the partial image file when the write fails.
+static DWORD WriteImage(const ImageOutput& output, LayerMetadata& metadata,
+                        const std::vector<uint8_t>& archive) {
+    const DWORD err = WriteImageFile(output, metadata, archive);
+    if (err != ERROR_SUCCESS) {
+        std::error_code ec;
+        fs::remove(output.path.ForWin32(), ec);
+    }
+    return err;
+}
 
 // Writes the `entry.size` bytes at `fileData` to `target`, and then gives
 // the file the attributes and the last-write time from `entry`.
@@ -808,115 +757,137 @@ static DWORD WriteExtractedFile(const fs::path& target,
     return ERROR_SUCCESS;
 }
 
-static DWORD ExtractArchive(const uint8_t* data, size_t dataSize,
-                            const std::wstring& targetDir,
-                            std::vector<std::wstring>& extractedWhiteouts) {
+namespace {
+
+struct ArchiveEntry {
+    FileEntryHeader header;
+    std::wstring name;
+    const uint8_t* data;
+};
+
+struct UnpackTarget {
+    fs::path root;
+    std::wstring canonicalRoot;
+};
+
+}
+
+// Reads the entry at `pos` and moves `pos` past it. Sets `entry` to
+// std::nullopt at the end marker.
+static DWORD ReadArchiveEntry(const std::vector<uint8_t>& archive, size_t& pos,
+                              std::optional<ArchiveEntry>& entry) {
+    if (pos + sizeof(FileEntryHeader) > archive.size()) return ERROR_INVALID_DATA;
+    FileEntryHeader header;
+    std::memcpy(&header, archive.data() + pos, sizeof(header));
+    pos += sizeof(header);
+
+    if (header.nameLength == ARCHIVE_END_MARKER) {
+        entry.reset();
+        return ERROR_SUCCESS;
+    }
+    if (header.nameLength == 0) return ERROR_INVALID_DATA;
+    if (pos + header.nameLength > archive.size()) return ERROR_INVALID_DATA;
+
+    const char* namePtr = reinterpret_cast<const char*>(archive.data() + pos);
+    if (!IsValidUtf8(namePtr, header.nameLength)) return ERROR_INVALID_DATA;
+    const std::string utf8Name(namePtr, header.nameLength);
+    pos += header.nameLength;
+
+    if (!IsValidArchivePath(utf8Name)) return ERROR_BAD_PATHNAME;
+    if (header.size > archive.size() - pos) return ERROR_INVALID_DATA;
+
+    const uint8_t* data = archive.data() + pos;
+    if (!header.isDirectory) pos += static_cast<size_t>(header.size);
+    entry = ArchiveEntry{header, Utf8ToWide(utf8Name), data};
+    return ERROR_SUCCESS;
+}
+
+// Creates targetDir when it is missing. A target root that does not
+// canonicalize is an error, because the containment check compares the root
+// and each entry in the form that canonicalization gives.
+static DWORD ResolveUnpackTarget(const HostPath& targetDir, UnpackTarget& target) {
+    target.root = fs::path(targetDir.ForWin32());
     std::error_code ec;
-    fs::create_directories(targetDir, ec);
+    fs::create_directories(target.root, ec);
+    const fs::path canonical = fs::weakly_canonical(target.root, ec);
+    if (ec) return ERROR_BAD_PATHNAME;
+    target.canonicalRoot = canonical.wstring();
+    return ERROR_SUCCESS;
+}
 
-    fs::path targetRoot(targetDir);
-    fs::path targetCanonical = fs::weakly_canonical(targetRoot, ec);
-    if (ec) targetCanonical = targetRoot;
+// Refuses a relativePath that canonicalizes outside the target root, such as
+// `a/../../outside`.
+static DWORD JoinUnderTarget(const UnpackTarget& target, const std::wstring& relativePath,
+                             fs::path& path) {
+    path = UnderExtendedRoot(target.root, relativePath);
+    std::error_code ec;
+    const fs::path canonical = fs::weakly_canonical(path, ec);
+    if (ec) return ERROR_BAD_PATHNAME;
+    if (!IsPathContainedIn(canonical.wstring(), target.canonicalRoot)) {
+        return ERROR_BAD_PATHNAME;
+    }
+    return ERROR_SUCCESS;
+}
 
+static DWORD ExtractArchive(const std::vector<uint8_t>& archive, const UnpackTarget& target,
+                            std::vector<std::wstring>& extractedWhiteouts) {
     size_t pos = 0;
-    while (pos + sizeof(FileEntryHeader) <= dataSize) {
-        FileEntryHeader entry;
-        std::memcpy(&entry, data + pos, sizeof(FileEntryHeader));
-        pos += sizeof(FileEntryHeader);
+    while (true) {
+        std::optional<ArchiveEntry> entry;
+        DWORD err = ReadArchiveEntry(archive, pos, entry);
+        if (err != ERROR_SUCCESS) return err;
+        if (!entry) return ERROR_SUCCESS;
+        if (UnpackSkipsEntry(entry->name, target.root)) continue;
 
-        if (entry.nameLength == ARCHIVE_END_MARKER) return ERROR_SUCCESS;
-        if (entry.nameLength == 0) return ERROR_INVALID_DATA;
-        if (pos + entry.nameLength > dataSize) return ERROR_INVALID_DATA;
+        fs::path path;
+        err = JoinUnderTarget(target, entry->name, path);
+        if (err != ERROR_SUCCESS) return err;
 
-        const char* namePtr = reinterpret_cast<const char*>(data + pos);
-        if (!IsValidUtf8(namePtr, entry.nameLength)) return ERROR_INVALID_DATA;
-
-        std::string utf8Name(namePtr, entry.nameLength);
-        pos += entry.nameLength;
-
-        if (!IsValidArchivePath(utf8Name)) return ERROR_BAD_PATHNAME;
-        if (entry.size > dataSize - pos) return ERROR_INVALID_DATA;
-
-        const std::wstring name = Utf8ToWide(utf8Name);
-        if (UnpackSkipsEntry(name, targetRoot)) {
-            if (!entry.isDirectory) pos += entry.size;
+        if (entry->header.isDirectory) {
+            std::error_code ec;
+            fs::create_directories(path, ec);
             continue;
         }
-
-        fs::path target = targetRoot / fs::path(name);
-
-        // The containment check compares whole path components, so a
-        // sibling whose name extends the target's name, such as `C:\out2`
-        // next to `C:\out`, does not pass.
-        fs::path canon = fs::weakly_canonical(target, ec);
-        if (ec) return ERROR_BAD_PATHNAME;
-        if (!IsPathContainedIn(canon.wstring(), targetCanonical.wstring())) {
-            return ERROR_BAD_PATHNAME;
-        }
-
-        if (entry.isDirectory) {
-            fs::create_directories(target, ec);
-        } else {
-            const DWORD err = WriteExtractedFile(target, entry, data + pos);
-            if (err != ERROR_SUCCESS) return err;
-            if (entry.isWhiteout) extractedWhiteouts.push_back(name);
-            pos += entry.size;
-        }
+        err = WriteExtractedFile(path, entry->header, entry->data);
+        if (err != ERROR_SUCCESS) return err;
+        if (entry->header.isWhiteout) extractedWhiteouts.push_back(entry->name);
     }
-    return ERROR_INVALID_DATA;
 }
 
 // Writes a whiteout marker for each path in `whiteouts` that the archive
 // did not already hold as a whiteout entry. A path in `whiteouts` gets the
 // same path check and containment check as an archive entry, so an image
-// that lists `../outside` writes no marker outside `targetDir`.
+// that lists `../outside` writes no marker outside the target.
 static DWORD MaterializeMetadataWhiteouts(const std::vector<std::wstring>& whiteouts,
                                           const std::vector<std::wstring>& extractedWhiteouts,
-                                          const std::wstring& targetDir) {
-    std::unordered_map<std::wstring, bool> already;
-    for (const auto& w : extractedWhiteouts) already[ToLower(w)] = true;
-
-    std::error_code targetEc;
-    fs::path targetRoot(targetDir);
-    fs::path targetCanonical = fs::weakly_canonical(targetRoot, targetEc);
-    if (targetEc) targetCanonical = targetRoot;
-    const std::wstring rootStr = targetCanonical.wstring();
+                                          const UnpackTarget& target) {
+    std::unordered_set<std::wstring> already;
+    for (const auto& w : extractedWhiteouts) already.insert(ToLower(w));
 
     for (const auto& logical : whiteouts) {
-        std::string utf8Logical = WideToUtf8(logical);
-        if (!IsValidArchivePath(utf8Logical)) return ERROR_BAD_PATHNAME;
+        if (!IsValidArchivePath(WideToUtf8(logical))) return ERROR_BAD_PATHNAME;
 
-        std::wstring marker = MakeWhiteoutMarkerPath(logical);
-        if (already.count(ToLower(marker))) continue;
-        if (UnpackSkipsEntry(marker, targetRoot)) continue;
+        const std::wstring marker = MakeWhiteoutMarkerPath(logical);
+        if (already.count(ToLower(marker)) != 0) continue;
+        if (UnpackSkipsEntry(marker, target.root)) continue;
 
-        fs::path target = targetRoot / fs::path(marker);
+        fs::path path;
+        const DWORD err = JoinUnderTarget(target, marker, path);
+        if (err != ERROR_SUCCESS) return err;
+
         std::error_code ec;
-        fs::path canon = fs::weakly_canonical(target, ec);
-        if (ec) return ERROR_BAD_PATHNAME;
-        if (!IsPathContainedIn(canon.wstring(), rootStr)) {
-            return ERROR_BAD_PATHNAME;
-        }
-
-        if (target.has_parent_path()) {
-            fs::create_directories(target.parent_path(), ec);
-        }
-        std::ofstream whFile(target, std::ios::binary | std::ios::trunc);
+        fs::create_directories(path.parent_path(), ec);
+        std::ofstream whFile(path, std::ios::binary | std::ios::trunc);
         if (!whFile) return ERROR_ACCESS_DENIED;
-        whFile.close();
     }
     return ERROR_SUCCESS;
 }
 
-// ===========================================================================
-// Read header + metadata section (shared by ExtractImage and GetImageInfo)
-// ===========================================================================
-
-static DWORD ReadHeaderAndMetadata(const std::wstring& imagePath,
+static DWORD ReadHeaderAndMetadata(const HostPath& imagePath,
                                    LayerImageHeader& header,
                                    LayerMetadata& metadata,
                                    std::ifstream& fileHandle) {
-    fileHandle.open(imagePath, std::ios::binary);
+    fileHandle.open(imagePath.ForWin32(), std::ios::binary);
     if (!fileHandle) return ERROR_FILE_NOT_FOUND;
 
     fileHandle.read(reinterpret_cast<char*>(&header), sizeof(header));
@@ -924,25 +895,22 @@ static DWORD ReadHeaderAndMetadata(const std::wstring& imagePath,
         return ERROR_INVALID_DATA;
     }
 
-    // Validate magic and version
     if (std::memcmp(header.magic, LAYER_IMAGE_MAGIC, 8) != 0) {
         return ERROR_INVALID_DATA;
     }
     if (header.version > LAYER_IMAGE_VERSION) return ERROR_REVISION_MISMATCH;
 
-    // Sanity check offsets
     if (header.metadataOffset < sizeof(header)) return ERROR_INVALID_DATA;
     if (header.dataOffset < header.metadataOffset + header.metadataSize) {
         return ERROR_INVALID_DATA;
     }
     if (header.metadataOffset + header.metadataSize < header.metadataOffset) {
-        return ERROR_INVALID_DATA;  // overflow
+        return ERROR_INVALID_DATA;
     }
     if (header.dataOffset + header.dataSize < header.dataOffset) {
-        return ERROR_INVALID_DATA;  // overflow
+        return ERROR_INVALID_DATA;
     }
 
-    // Read metadata JSON
     fileHandle.seekg(static_cast<std::streamoff>(header.metadataOffset));
     if (!fileHandle) return ERROR_SEEK;
 
@@ -952,7 +920,6 @@ static DWORD ReadHeaderAndMetadata(const std::wstring& imagePath,
     if (fileHandle.gcount() != static_cast<std::streamsize>(header.metadataSize)) {
         return ERROR_READ_FAULT;
     }
-    // Strip trailing null(s) from the JSON string
     while (!metadataStr.empty() && metadataStr.back() == '\0') {
         metadataStr.pop_back();
     }
@@ -960,39 +927,32 @@ static DWORD ReadHeaderAndMetadata(const std::wstring& imagePath,
     return DeserializeMetadata(metadataStr, metadata);
 }
 
-// ===========================================================================
-// Public API
-// ===========================================================================
-
-DWORD LayerImageManager::CreateImage(const std::wstring& sourceDir,
-                                     const std::wstring& outputPath,
-                                     LayerMetadata& metadata,
-                                     int compressionLevel) {
-    if (!fs::exists(sourceDir)) return ERROR_PATH_NOT_FOUND;
-
+static void StampIdentity(LayerMetadata& metadata) {
     if (metadata.id.empty())        metadata.id        = GenerateId();
     if (metadata.createdAt.empty()) metadata.createdAt = GetCurrentTimestampISO8601();
-
-    std::vector<uint8_t> archive;
-    uint64_t fileCount         = 0;
-    uint64_t uncompressedTotal = 0;
-    DWORD err = BuildArchiveFromDirectory(sourceDir, archive,
-                                          fileCount, uncompressedTotal);
-    if (err != ERROR_SUCCESS) return err;
-
-    metadata.fileCount = fileCount;
-
-    err = WriteImageFile(outputPath, metadata, archive, compressionLevel);
-    if (err != ERROR_SUCCESS) {
-        std::error_code ec;
-        fs::remove(outputPath, ec);
-        return err;
-    }
-    return ERROR_SUCCESS;
 }
 
-DWORD LayerImageManager::ExtractImage(const std::wstring& imagePath,
-                                      const std::wstring& targetDir,
+DWORD LayerImageManager::CreateImage(const HostPath& sourceDir,
+                                     const ImageOutput& output,
+                                     LayerMetadata& metadata) {
+    std::vector<FileSnapshot> sourceEntries;
+    DWORD err = ScanDirectory(sourceDir, sourceEntries);
+    if (err != ERROR_SUCCESS) return err;
+
+    std::vector<const FileSnapshot*> everyEntry(sourceEntries.size());
+    std::transform(sourceEntries.begin(), sourceEntries.end(), everyEntry.begin(),
+                   [](const FileSnapshot& s) { return &s; });
+    ArchiveBuilder builder;
+    err = PackEntries(sourceDir, everyEntry, builder);
+    if (err != ERROR_SUCCESS) return err;
+
+    StampIdentity(metadata);
+    metadata.fileCount = builder.FileCount();
+    return WriteImage(output, metadata, builder.Finish());
+}
+
+DWORD LayerImageManager::ExtractImage(const HostPath& imagePath,
+                                      const HostPath& targetDir,
                                       bool verifyChecksum) {
     LayerImageHeader header{};
     LayerMetadata    metadata;
@@ -1008,7 +968,6 @@ DWORD LayerImageManager::ExtractImage(const std::wstring& imagePath,
         if (std::memcmp(computed, header.checksum, 32) != 0) return ERROR_CRC;
     }
 
-    // Read compressed data
     file.seekg(static_cast<std::streamoff>(header.dataOffset));
     if (!file) return ERROR_SEEK;
 
@@ -1022,22 +981,22 @@ DWORD LayerImageManager::ExtractImage(const std::wstring& imagePath,
     }
     file.close();
 
-    // Decompress
-    std::vector<uint8_t> decompressed;
-    err = DecompressBuffer(compressed.data(), compressed.size(),
-                           0 /* expectedSize unknown */, decompressed);
+    std::vector<uint8_t> archive;
+    err = DecompressBuffer(compressed.data(), compressed.size(), archive);
     if (err != ERROR_SUCCESS) return err;
 
-    // Extract
+    UnpackTarget target;
+    err = ResolveUnpackTarget(targetDir, target);
+    if (err != ERROR_SUCCESS) return err;
+
     std::vector<std::wstring> extractedWhiteouts;
-    err = ExtractArchive(decompressed.data(), decompressed.size(),
-                         targetDir, extractedWhiteouts);
+    err = ExtractArchive(archive, target, extractedWhiteouts);
     if (err != ERROR_SUCCESS) return err;
 
-    return MaterializeMetadataWhiteouts(metadata.whiteouts, extractedWhiteouts, targetDir);
+    return MaterializeMetadataWhiteouts(metadata.whiteouts, extractedWhiteouts, target);
 }
 
-DWORD LayerImageManager::GetImageInfo(const std::wstring& imagePath,
+DWORD LayerImageManager::GetImageInfo(const HostPath& imagePath,
                                       LayerImageHeader& header,
                                       LayerMetadata& metadata) {
     std::ifstream file;
@@ -1046,7 +1005,7 @@ DWORD LayerImageManager::GetImageInfo(const std::wstring& imagePath,
     return err;
 }
 
-DWORD LayerImageManager::ValidateImage(const std::wstring& imagePath) {
+DWORD LayerImageManager::ValidateImage(const HostPath& imagePath) {
     LayerImageHeader header{};
     LayerMetadata    metadata;
     {
@@ -1064,130 +1023,42 @@ DWORD LayerImageManager::ValidateImage(const std::wstring& imagePath) {
     return ERROR_SUCCESS;
 }
 
-DWORD LayerImageManager::CreateDifferentialImage(
-    const std::wstring& sourceDir, const std::wstring& baseDir,
-    const std::wstring& outputPath, LayerMetadata& metadata,
-    int compressionLevel) {
-
-    if (!fs::exists(sourceDir)) return ERROR_PATH_NOT_FOUND;
-    if (!fs::exists(baseDir))   return ERROR_PATH_NOT_FOUND;
-
-    std::vector<FileSnapshot> sourceFiles;
-    std::vector<FileSnapshot> baseFiles;
-    DWORD err = ScanDirectory(sourceDir, sourceFiles);
+DWORD LayerImageManager::CreateDifferentialImage(const HostPath& sourceDir,
+                                                 const HostPath& baseDir,
+                                                 const ImageOutput& output,
+                                                 LayerMetadata& metadata) {
+    std::vector<FileSnapshot> sourceEntries;
+    DWORD err = ScanDirectory(sourceDir, sourceEntries);
     if (err != ERROR_SUCCESS) return err;
-    err = ScanDirectory(baseDir, baseFiles);
+    std::vector<FileSnapshot> baseEntries;
+    err = ScanDirectory(baseDir, baseEntries);
     if (err != ERROR_SUCCESS) return err;
 
-    // Build lookup: relativePath (lowercased) -> FileSnapshot
-    std::unordered_map<std::wstring, const FileSnapshot*> baseMap;
-    for (const auto& s : baseFiles) baseMap[s.relativePath] = &s;
-
-    std::unordered_map<std::wstring, const FileSnapshot*> sourceMap;
-    for (const auto& s : sourceFiles) sourceMap[s.relativePath] = &s;
-
-    // Classify
-    std::vector<const FileSnapshot*> toArchive;  // new + modified (incl. dirs)
-    for (const auto& s : sourceFiles) {
-        auto it = baseMap.find(s.relativePath);
-        if (it == baseMap.end()) {
-            toArchive.push_back(&s);                       // new
-        } else {
-            const FileSnapshot* b = it->second;
-            if (s.isDirectory != b->isDirectory) {
-                toArchive.push_back(&s);                   // type change
-            } else if (!s.isDirectory &&
-                       (s.size != b->size || s.modifiedTime != b->modifiedTime)) {
-                toArchive.push_back(&s);                   // modified
-            }
-        }
+    ArchiveBuilder builder;
+    err = PackEntries(sourceDir, ChangedEntries(sourceEntries, baseEntries), builder);
+    if (err != ERROR_SUCCESS) return err;
+    const std::vector<std::wstring> deleted = DeletedPaths(sourceEntries, baseEntries);
+    for (const auto& path : deleted) {
+        err = builder.AddWhiteoutMarker(path);
+        if (err != ERROR_SUCCESS) return err;
     }
 
-    std::vector<std::wstring> deletedLogical;
-    for (const auto& b : baseFiles) {
-        if (sourceMap.find(b.relativePath) == sourceMap.end()) {
-            deletedLogical.push_back(b.displayPath);
-        }
-    }
-
-    // Populate metadata (id/createdAt default if unset, whiteouts)
-    if (metadata.id.empty())        metadata.id        = GenerateId();
-    if (metadata.createdAt.empty()) metadata.createdAt = GetCurrentTimestampISO8601();
-    metadata.whiteouts = deletedLogical;
-
-    // Build archive
-    std::vector<uint8_t> archive;
-    uint64_t fileCount         = 0;
-    uint64_t uncompressedTotal = 0;
-
-    fs::path basePath(sourceDir);
-    for (const FileSnapshot* snap : toArchive) {
-        fs::path abs = basePath / fs::path(snap->displayPath);
-
-        FileEntryHeader h{};
-        DWORD e = FillFileEntry(abs, h, snap->isDirectory);
-        if (e != ERROR_SUCCESS) return e;
-
-        std::string utf8Name = WideToUtf8(snap->displayPath);
-        if (utf8Name.size() > 0xFFFE) return ERROR_FILENAME_EXCED_RANGE;
-
-        if (snap->isDirectory) {
-            e = AppendFileEntry(archive, utf8Name, h, nullptr, uncompressedTotal);
-            if (e != ERROR_SUCCESS) return e;
-        } else {
-            h.isWhiteout = HasWhiteoutPrefix(fs::path(snap->displayPath).filename().wstring()) ? 1 : 0;
-            std::vector<uint8_t> bytes;
-            if (h.size > 0) {
-                e = ReadFileBytes(abs, bytes);
-                if (e != ERROR_SUCCESS) return e;
-            }
-            e = AppendFileEntry(archive, utf8Name, h,
-                                bytes.empty() ? nullptr : bytes.data(),
-                                uncompressedTotal);
-            if (e != ERROR_SUCCESS) return e;
-            ++fileCount;
-        }
-    }
-
-    // Add explicit whiteout entries (materialized marker paths) for deletions
-    for (const auto& logicalPath : deletedLogical) {
-        std::wstring markerPath = MakeWhiteoutMarkerPath(logicalPath);
-        std::string  utf8Marker = WideToUtf8(markerPath);
-        if (utf8Marker.size() > 0xFFFE) return ERROR_FILENAME_EXCED_RANGE;
-
-        FileEntryHeader h{};
-        h.size        = 0;
-        h.attributes  = FILE_ATTRIBUTE_NORMAL;
-        h.modified    = 0;
-        h.isDirectory = 0;
-        h.isWhiteout  = 1;
-        DWORD e = AppendFileEntry(archive, utf8Marker, h, nullptr, uncompressedTotal);
-        if (e != ERROR_SUCCESS) return e;
-        ++fileCount;
-    }
-
-    AppendEndMarker(archive);
-    metadata.fileCount = fileCount;
-
-    DWORD writeErr = WriteImageFile(outputPath, metadata, archive, compressionLevel);
-    if (writeErr != ERROR_SUCCESS) {
-        std::error_code ec;
-        fs::remove(outputPath, ec);
-        return writeErr;
-    }
-    return ERROR_SUCCESS;
+    StampIdentity(metadata);
+    metadata.whiteouts = deleted;
+    metadata.fileCount = builder.FileCount();
+    return WriteImage(output, metadata, builder.Finish());
 }
 
 DWORD LayerImageManager::CreateManifest(
-    const std::wstring& outputPath,
-    const std::vector<std::wstring>& layerImagePaths) {
+    const HostPath& outputPath,
+    const std::vector<HostPath>& layerImagePaths) {
 
     nlohmann::json j;
     j["schemaVersion"] = 1;
     nlohmann::json layers = nlohmann::json::array();
 
     for (const auto& imagePath : layerImagePaths) {
-        std::ifstream file(imagePath, std::ios::binary);
+        std::ifstream file(imagePath.ForWin32(), std::ios::binary);
         if (!file) return ERROR_FILE_NOT_FOUND;
         LayerImageHeader header{};
         file.read(reinterpret_cast<char*>(&header), sizeof(header));
@@ -1197,27 +1068,28 @@ DWORD LayerImageManager::CreateManifest(
         }
 
         nlohmann::json entry;
-        entry["path"]   = WideToUtf8(imagePath);
+        entry["path"]   = WideToUtf8(imagePath.Text());
         entry["sha256"] = WideToUtf8(HashToHexString(header.checksum));
         layers.push_back(entry);
     }
     j["layers"] = layers;
 
-    fs::path outPath(outputPath);
+    const fs::path outPath(outputPath.ForWin32());
     if (outPath.has_parent_path()) {
         std::error_code ec;
         fs::create_directories(outPath.parent_path(), ec);
+        if (ec) return Win32FromErrorCode(ec);
     }
-    std::ofstream out(outputPath);
+    std::ofstream out(outPath);
     if (!out) return ERROR_ACCESS_DENIED;
     out << j.dump(2);
     if (!out) return ERROR_WRITE_FAULT;
     return ERROR_SUCCESS;
 }
 
-DWORD LayerImageManager::LoadManifest(const std::wstring& manifestPath,
+DWORD LayerImageManager::LoadManifest(const HostPath& manifestPath,
                                       LayerManifest& manifest) {
-    std::ifstream in(manifestPath);
+    std::ifstream in(manifestPath.ForWin32());
     if (!in) return ERROR_FILE_NOT_FOUND;
 
     nlohmann::json j;
@@ -1243,4 +1115,4 @@ DWORD LayerImageManager::LoadManifest(const std::wstring& manifestPath,
     return ERROR_SUCCESS;
 }
 
-} // namespace LayerMount::LayerImage
+}

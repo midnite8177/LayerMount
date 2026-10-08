@@ -145,9 +145,10 @@ struct MergeLayer {
 // Slot 0 is the upper, and slot i + 1 is lower i.
 MergeLayer MergeLayerAt(const LayerConfig& config, size_t slot) {
     if (slot == 0) {
-        return MergeLayer{config.upperPath, LayerSource::Upper, -1};
+        return MergeLayer{config.upperPath.Text(), LayerSource::Upper, -1};
     }
-    return MergeLayer{config.lowerPaths[slot - 1], LayerSource::Lower, static_cast<int>(slot - 1)};
+    return MergeLayer{config.lowerPaths[slot - 1].Text(), LayerSource::Lower,
+                      static_cast<int>(slot - 1)};
 }
 
 // Adds the layer's entries in the directory that no higher layer lists and

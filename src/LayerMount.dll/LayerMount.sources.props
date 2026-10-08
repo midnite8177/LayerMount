@@ -64,6 +64,7 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\DirectoryRename.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\EntryCopy.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\FileRename.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)impl\HostPath.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\MetadataStore.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerMount.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)impl\LayerPath.h" />
@@ -84,6 +85,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\DirectoryRename.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\EntryCopy.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\FileRename.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)impl\HostPath.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\MetadataStore.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\LayerMount.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)impl\LayerPath.cpp" />

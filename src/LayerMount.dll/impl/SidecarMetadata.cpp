@@ -7,6 +7,7 @@
 
 #include <array>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #pragma comment(lib, "bcrypt.lib")
@@ -105,12 +106,8 @@ std::wstring LowerCase(std::wstring s) {
     return s;
 }
 
-// `<upper>\.overlay\<sha1(lowercase(filePath))>`
-std::wstring SidecarBase(const std::wstring& filePath, const std::wstring& upperRoot) {
-    std::wstring keyed = LowerCase(filePath);
-    std::wstring hash = Sha1Hex(WideToUtf8(keyed));
-    if (hash.empty()) return {};
-    return JoinDirPath(upperRoot, kSidecarDirName) + L"\\" + hash;
+bool IsNotFoundError(DWORD error) {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
 // Moves the record file at `from` to `to`, over a record already at `to`.
@@ -122,22 +119,14 @@ DWORD MoveRecordFile(const std::wstring& from, const std::wstring& to) {
         return ERROR_SUCCESS;
     }
     const DWORD moveErr = ::GetLastError();
-    if (moveErr != ERROR_FILE_NOT_FOUND && moveErr != ERROR_PATH_NOT_FOUND) {
+    if (!IsNotFoundError(moveErr)) {
         return moveErr;
     }
     if (::DeleteFileW(to.c_str())) {
         return ERROR_SUCCESS;
     }
     const DWORD deleteErr = ::GetLastError();
-    return deleteErr == ERROR_FILE_NOT_FOUND || deleteErr == ERROR_PATH_NOT_FOUND
-        ? ERROR_SUCCESS
-        : deleteErr;
-}
-
-bool EnsureSidecarDir(const std::wstring& upperRoot) {
-    std::error_code ec;
-    std::filesystem::create_directories(JoinDirPath(upperRoot, kSidecarDirName), ec);
-    return !ec;
+    return IsNotFoundError(deleteErr) ? ERROR_SUCCESS : deleteErr;
 }
 
 nlohmann::json MetadataToJson(const LayerMountMetadata& m) {
@@ -164,13 +153,36 @@ LayerMountMetadata JsonToMetadata(const nlohmann::json& j) {
     return m;
 }
 
-} // namespace
+}
 
-LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
-                                      const std::wstring& upperRoot) {
-    std::wstring base = SidecarBase(filePath, upperRoot);
-    if (base.empty()) return {};
-    std::wstring path = base + kMetaSuffix;
+SidecarMetadata::SidecarMetadata(const HostPath& upperRoot)
+    : win32Directory_(JoinDirPath(upperRoot.ForWin32(), kSidecarDirName)) {}
+
+std::optional<std::wstring> SidecarMetadata::BaseOf(const std::wstring& entryPath) const {
+    // The key hashes entryPath as given. A normalized form would change the
+    // keys of the records of existing overlays.
+    const std::wstring hash = Sha1Hex(WideToUtf8(LowerCase(entryPath)));
+    if (hash.empty()) return std::nullopt;
+    return win32Directory_ + L"\\" + hash;
+}
+
+std::optional<std::wstring> SidecarMetadata::FileOf(const std::wstring& entryPath,
+                                                    const wchar_t* suffix) const {
+    const std::optional<std::wstring> base = BaseOf(entryPath);
+    if (!base) return std::nullopt;
+    return *base + suffix;
+}
+
+bool SidecarMetadata::EnsureDirectory() const {
+    std::error_code ec;
+    std::filesystem::create_directories(win32Directory_, ec);
+    return !ec;
+}
+
+LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath) const {
+    const std::optional<std::wstring> file = FileOf(filePath, kMetaSuffix);
+    if (!file) return {};
+    const std::wstring& path = *file;
 
     HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -214,12 +226,11 @@ LayerMountMetadata SidecarMetadata::Read(const std::wstring& filePath,
 }
 
 bool SidecarMetadata::Write(const std::wstring& filePath,
-                            const LayerMountMetadata& metadata,
-                            const std::wstring& upperRoot) {
-    if (!EnsureSidecarDir(upperRoot)) return false;
-    std::wstring base = SidecarBase(filePath, upperRoot);
-    if (base.empty()) return false;
-    std::wstring path = base + kMetaSuffix;
+                            const LayerMountMetadata& metadata) const {
+    if (!EnsureDirectory()) return false;
+    const std::optional<std::wstring> file = FileOf(filePath, kMetaSuffix);
+    if (!file) return false;
+    const std::wstring& path = *file;
 
     // The write goes to a unique sibling temp file, and a rename with
     // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH puts it on the
@@ -252,21 +263,21 @@ bool SidecarMetadata::Write(const std::wstring& filePath,
     return true;
 }
 
-bool SidecarMetadata::Remove(const std::wstring& filePath,
-                             const std::wstring& upperRoot) {
-    std::wstring base = SidecarBase(filePath, upperRoot);
-    if (base.empty()) return false;
-    std::wstring path = base + kMetaSuffix;
-    if (::DeleteFileW(path.c_str())) return true;
+bool SidecarMetadata::Remove(const std::wstring& filePath) const {
+    const std::optional<std::wstring> file = FileOf(filePath, kMetaSuffix);
+    if (!file) return true;
+    if (::DeleteFileW(file->c_str())) return true;
     return ::GetLastError() == ERROR_FILE_NOT_FOUND;
 }
 
-NTSTATUS SidecarMetadata::Move(const std::wstring& fromPath,
-                               const std::wstring& toPath,
-                               const std::wstring& upperRoot) {
-    const std::wstring fromBase = SidecarBase(fromPath, upperRoot);
-    const std::wstring toBase = SidecarBase(toPath, upperRoot);
-    if (fromBase.empty() || toBase.empty() || fromBase == toBase) return STATUS_SUCCESS;
+NTSTATUS SidecarMetadata::Move(const std::wstring& fromPath, const std::wstring& toPath) const {
+    const std::optional<std::wstring> fromBaseOrNone = BaseOf(fromPath);
+    const std::optional<std::wstring> toBaseOrNone = BaseOf(toPath);
+    if (!fromBaseOrNone || !toBaseOrNone || *fromBaseOrNone == *toBaseOrNone) {
+        return STATUS_SUCCESS;
+    }
+    const std::wstring& fromBase = *fromBaseOrNone;
+    const std::wstring& toBase = *toBaseOrNone;
 
     const DWORD metaErr = MoveRecordFile(fromBase + kMetaSuffix, toBase + kMetaSuffix);
     if (metaErr != ERROR_SUCCESS) {
@@ -280,52 +291,33 @@ NTSTATUS SidecarMetadata::Move(const std::wstring& fromPath,
     return STATUS_SUCCESS;
 }
 
-bool SidecarMetadata::HasRecord(const std::wstring& filePath,
-                                const std::wstring& upperRoot) {
-    std::wstring base = SidecarBase(filePath, upperRoot);
-    if (base.empty()) return false;
-    std::wstring path = base + kMetaSuffix;
-    return ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+bool SidecarMetadata::HasRecord(const std::wstring& filePath) const {
+    const std::optional<std::wstring> file = FileOf(filePath, kMetaSuffix);
+    return file && ::GetFileAttributesW(file->c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-bool SidecarMetadata::HasOpaque(const std::wstring& dirPath,
-                                const std::wstring& upperRoot) {
-    std::wstring base = SidecarBase(dirPath, upperRoot);
-    if (base.empty()) return false;
-    std::wstring path = base + kOpaqueSuffix;
-    return ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+bool SidecarMetadata::HasOpaque(const std::wstring& dirPath) const {
+    const std::optional<std::wstring> file = FileOf(dirPath, kOpaqueSuffix);
+    return file && ::GetFileAttributesW(file->c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-bool SidecarMetadata::SetOpaque(const std::wstring& dirPath,
-                                const std::wstring& upperRoot) {
-    if (!EnsureSidecarDir(upperRoot)) return false;
-    std::wstring base = SidecarBase(dirPath, upperRoot);
-    if (base.empty()) return false;
-    std::wstring path = base + kOpaqueSuffix;
+bool SidecarMetadata::SetOpaque(const std::wstring& dirPath) const {
+    if (!EnsureDirectory()) return false;
+    const std::optional<std::wstring> file = FileOf(dirPath, kOpaqueSuffix);
+    if (!file) return false;
 
-    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+    HANDLE h = ::CreateFileW(file->c_str(), GENERIC_WRITE, 0,
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     ::CloseHandle(h);
     return true;
 }
 
-bool SidecarMetadata::RemoveOpaque(const std::wstring& dirPath,
-                                   const std::wstring& upperRoot) {
-    std::wstring base = SidecarBase(dirPath, upperRoot);
-    // base.empty() means Sha1Hex failed -- there is no addressable sidecar
-    // for this directory, so "nothing to remove" is the correct outcome.
-    // Treating it as success also lets WhiteoutManager::RemoveOpaque report
-    // success when a non-sidecar backend was used for the write (ADS), since
-    // the sidecar path would then legitimately not exist.
-    if (base.empty()) return true;
-    std::wstring path = base + kOpaqueSuffix;
-    if (::DeleteFileW(path.c_str())) return true;
-    const DWORD err = ::GetLastError();
-    // ERROR_FILE_NOT_FOUND: marker was never written (ADS backend was used).
-    // ERROR_PATH_NOT_FOUND: the sidecar directory itself is absent -- again
-    // a clean "nothing to remove" outcome, not a failure.
-    return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
+bool SidecarMetadata::RemoveOpaque(const std::wstring& dirPath) const {
+    const std::optional<std::wstring> file = FileOf(dirPath, kOpaqueSuffix);
+    if (!file) return true;
+    if (::DeleteFileW(file->c_str())) return true;
+    return IsNotFoundError(::GetLastError());
 }
 
-} // namespace LayerMount
+}

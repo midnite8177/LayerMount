@@ -11,6 +11,7 @@
 #include "WorkDirectory.h"
 
 #include "AclTestHelpers.h"
+#include "EncryptionTestHelpers.h"
 #include "FileIdTestHelpers.h"
 #include "FileTimeTestHelpers.h"
 #include "LongPathTestHelpers.h"
@@ -28,6 +29,7 @@ namespace LayerMountTests {
 
 namespace fs = std::filesystem;
 
+using LayerMountTestShared::EncryptedOrSkipped;
 using LayerMountTestShared::GetTimes;
 using LayerMountTestShared::MakeFileTime;
 using LayerMountTestShared::StampTimes;
@@ -164,7 +166,7 @@ public:
         : root_(MakeUniqueTempRoot()) {
         upper_ = root_ + L"\\upper";
         work_  = root_ + L"\\work";
-        staging_ = LayerMount::StagingAreaPath(work_);
+        staging_ = LayerMount::StagingAreaPath(LayerMount::HostPath(work_)).Text();
 
         std::error_code ec;
         fs::create_directories(upper_, ec);
@@ -193,9 +195,11 @@ public:
 
     LayerMount::LayerConfig MakeConfig() const {
         LayerMount::LayerConfig c;
-        c.upperPath   = upper_;
-        c.workDirPath = work_;
-        c.lowerPaths  = lowers_;
+        c.upperPath   = LayerMount::HostPath(upper_);
+        c.workDirPath = LayerMount::HostPath(work_);
+        for (const std::wstring& lower : lowers_) {
+            c.lowerPaths.push_back(LayerMount::HostPath(lower));
+        }
         c.hostCapabilities = kDefaultHostCapabilities;
         return c;
     }
@@ -552,19 +556,6 @@ inline bool EnableCompression(const std::wstring& path) {
                                       nullptr, 0, &bytesReturned, nullptr);
     ::CloseHandle(h);
     return ok != FALSE;
-}
-
-// Encrypts the file or directory at path. Logs a skip with the error and
-// returns false when EFS refuses.
-inline bool EncryptedOrSkipped(const std::wstring& path) {
-    if (::EncryptFileW(path.c_str())) {
-        return true;
-    }
-    const DWORD err = ::GetLastError();
-    Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(
-        (L"[SKIP] EncryptFileW on " + path + L" failed (error " + std::to_wstring(err) +
-         L"). EFS unavailable or user has no cert.").c_str());
-    return false;
 }
 
 // Sets the reparse point in buffer, a whole reparse data buffer, on the

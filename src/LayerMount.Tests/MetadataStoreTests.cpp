@@ -353,14 +353,15 @@ public:
     TEST_METHOD(WriteThenRead_ExtendedFormUpperWithTrailingSeparator_RoundTrips) {
         TempLayerEnvironment env(0);
         env.WriteFile(env.Upper(), L"a.txt", "x");
-        const std::wstring upperRoot = ExtendedDirWithSeparator(env.Upper());
-        const std::wstring filePath = upperRoot + L"a.txt";
+        const std::wstring upperText = ExtendedDirWithSeparator(env.Upper());
+        const SidecarMetadata sidecar(HostPath{upperText});
+        const std::wstring filePath = upperText + L"a.txt";
         LayerMountMetadata written;
         written.metacopy = true;
 
-        Assert::IsTrue(SidecarMetadata::Write(filePath, written, upperRoot),
+        Assert::IsTrue(sidecar.Write(filePath, written),
             L"The sidecar write under an upper that ends in a separator must succeed");
-        Assert::IsTrue(SidecarMetadata::Read(filePath, upperRoot).metacopy,
+        Assert::IsTrue(sidecar.Read(filePath).metacopy,
             L"The sidecar read must return the metacopy flag that the write stored");
     }
 };

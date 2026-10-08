@@ -11,6 +11,8 @@ namespace {
 
 constexpr const wchar_t* kStagingAreaName = L"work";
 constexpr const wchar_t* kWorkDirectoryLockName = L".layermount.lock";
+// A transient overlay's work directory is <upper>\.overlay, where the upper
+// lock also goes, so the two lock names differ.
 constexpr const wchar_t* kUpperLockName = L".layermount.upper.lock";
 
 // A directory in the two forms the layout rule compares: written is the path
@@ -21,17 +23,17 @@ struct LayoutPath {
     std::wstring resolved;
 };
 
-LayoutPath WrittenPath(const std::wstring& path) {
-    return {ComparablePath(path), {}};
+LayoutPath WrittenPath(const HostPath& path) {
+    return {ComparablePath(path.Text()), {}};
 }
 
-LayoutPath WrittenAndResolvedPath(const std::wstring& path) {
+LayoutPath WrittenAndResolvedPath(const HostPath& path) {
     const std::wstring finalPath = FinalPathOfDirectory(path);
-    return {ComparablePath(path),
+    return {ComparablePath(path.Text()),
             finalPath.empty() ? std::wstring() : ComparablePath(finalPath)};
 }
 
-using ReadLayoutPath = LayoutPath (*)(const std::wstring& path);
+using ReadLayoutPath = LayoutPath (*)(const HostPath& path);
 
 // The resolved paths when both directories have one, and the written paths
 // otherwise.
@@ -61,13 +63,13 @@ HRESULT CheckLayoutWith(const LayerConfig& config, ReadLayoutPath read, std::wst
     const LayoutPath work = read(config.workDirPath);
     if (OverlapsUpper(work, read(config.upperPath))) {
         error = L"The work directory and the upper layer must not be the same directory or "
-                L"contain one another: " + config.workDirPath;
+                L"contain one another: " + config.workDirPath.Text();
         return E_INVALIDARG;
     }
-    for (const std::wstring& lower : config.lowerPaths) {
+    for (const HostPath& lower : config.lowerPaths) {
         if (OverlapsLower(work, read(lower))) {
             error = L"The work directory and a lower layer must not be the same directory or "
-                    L"contain one another: " + lower;
+                    L"contain one another: " + lower.Text();
             return E_INVALIDARG;
         }
     }
@@ -76,10 +78,10 @@ HRESULT CheckLayoutWith(const LayerConfig& config, ReadLayoutPath read, std::wst
 
 // Opens the lock file lockName in lockDirectory. directory and role name the
 // directory that the lock holds, for the message in error.
-HRESULT TakeLock(const std::wstring& lockDirectory, const wchar_t* lockName,
-                 const std::wstring& directory, const wchar_t* role, ScopedHandle* lock,
+HRESULT TakeLock(const HostPath& lockDirectory, const wchar_t* lockName,
+                 const HostPath& directory, const wchar_t* role, ScopedHandle* lock,
                  std::wstring& error) {
-    const std::wstring lockPath = JoinDirPath(lockDirectory, lockName);
+    const std::wstring lockPath = JoinDirPath(lockDirectory.ForWin32(), lockName);
     lock->Reset(::CreateFileW(lockPath.c_str(), GENERIC_READ | DELETE, 0, nullptr, OPEN_ALWAYS,
                               FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
     if (lock->IsValid()) {
@@ -87,32 +89,29 @@ HRESULT TakeLock(const std::wstring& lockDirectory, const wchar_t* lockName,
     }
     const DWORD lockError = ::GetLastError();
     if (lockError == ERROR_SHARING_VIOLATION) {
-        error = std::wstring(L"The ") + role + L" is in use by another overlay: " + directory;
+        error = std::wstring(L"The ") + role + L" is in use by another overlay: " + directory.Text();
         return HRESULT_FROM_WIN32(ERROR_BUSY);
     }
-    error = std::wstring(L"Failed to lock the ") + role + L": " + directory;
+    error = std::wstring(L"Failed to lock the ") + role + L": " + directory.Text();
     return HRESULT_FROM_WIN32(lockError);
 }
 
-// The lock goes in <upperPath>\.overlay, a name the merged view never shows.
-// A transient overlay's work directory is that directory too, so the two
-// lock files have different names.
-HRESULT LockUpper(const std::wstring& upperPath, ScopedHandle* lock, std::wstring& error) {
-    const std::wstring lockDirectory = JoinDirPath(upperPath, kSidecarDirName);
-    ::CreateDirectoryW(lockDirectory.c_str(), nullptr);
+HRESULT LockUpper(const HostPath& upperPath, ScopedHandle* lock, std::wstring& error) {
+    const HostPath lockDirectory(JoinDirPath(upperPath.Text(), kSidecarDirName));
+    (void)::CreateDirectoryW(lockDirectory.ForWin32().c_str(), nullptr);
     return TakeLock(lockDirectory, kUpperLockName, upperPath, L"upper layer", lock, error);
 }
 
 HRESULT ResetStagingArea(const LayerConfig& config, std::wstring& error) {
-    const std::wstring staging = StagingAreaPath(config.workDirPath);
+    const HostPath staging = StagingAreaPath(config.workDirPath);
     const std::optional<StagedEntryDeleteFailure> failure = RemoveStagedEntry(staging, config);
     if (failure.has_value()) {
         error = L"Failed to delete a leftover entry from the work directory: " + failure->path;
         return HRESULT_FROM_WIN32(failure->error);
     }
-    if (!::CreateDirectoryW(staging.c_str(), nullptr)) {
+    if (!::CreateDirectoryW(staging.ForWin32().c_str(), nullptr)) {
         const DWORD createError = ::GetLastError();
-        error = L"Failed to create the staging area of the work directory: " + staging;
+        error = L"Failed to create the staging area of the work directory: " + staging.Text();
         return HRESULT_FROM_WIN32(createError);
     }
     return S_OK;
@@ -120,8 +119,8 @@ HRESULT ResetStagingArea(const LayerConfig& config, std::wstring& error) {
 
 }
 
-std::wstring StagingAreaPath(const std::wstring& workDirPath) {
-    return JoinDirPath(workDirPath, kStagingAreaName);
+HostPath StagingAreaPath(const HostPath& workDirPath) {
+    return HostPath(JoinDirPath(workDirPath.Text(), kStagingAreaName));
 }
 
 WorkDirectory::WorkDirectory(ScopedHandle workDirectoryLock, ScopedHandle upperLock)

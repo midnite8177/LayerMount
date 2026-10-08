@@ -54,9 +54,10 @@
  *   it. Purely additive changes (new struct fields appended behind a
  *   larger structSize, new enum values, new exported functions) do
  *   not. Structs carrying a `structSize` first field (LM_CONFIG,
- *   LM_VHD_CONFIG) are forward-extensible per that rule; fixed-shape
- *   structs (LM_FILE_INFO, LM_RESOLVED_PATH, LM_STATS, LM_EVENT,
- *   LM_VOLUME_INFO) revision only via LM_ABI_VERSION bumps.
+ *   LM_VHD_CONFIG, LM_IMAGE_PACK_OPTIONS) are forward-extensible per
+ *   that rule; fixed-shape structs (LM_FILE_INFO, LM_RESOLVED_PATH,
+ *   LM_STATS, LM_EVENT, LM_VOLUME_INFO) change only with an
+ *   LM_ABI_VERSION bump.
  *
  * PLATFORM
  *   Windows user-mode only. Requires <windows.h>. The DLL itself has
@@ -203,9 +204,9 @@ typedef enum LM_OPERATION_TYPE {
  * LM_CONFIG
  *
  * LayerMount construction parameters. Forward-extensible via structSize:
- * callers set structSize = sizeof(LM_CONFIG) at their compile time, the
- * DLL compares it to the size it knows about and interprets only the
- * fields it understands. An abiVersion mismatch is a hard error.
+ * callers set structSize = sizeof(LM_CONFIG) at their compile time. The
+ * DLL refuses a structSize too small to hold lowerPaths and interprets only
+ * the fields it understands. An abiVersion mismatch is a hard error.
  *
  * Ownership: every pointer in this struct is caller-owned and must remain
  * valid only for the duration of the LayerMountCreate call. The DLL copies
@@ -349,7 +350,8 @@ typedef struct LM_EVENT {
  * LM_VHD_CONFIG
  *
  * Consolidated parameter block for VHD create / open / attach operations.
- * Forward-extensible via structSize.
+ * Forward-extensible via structSize. A structSize too small to hold
+ * `_reserved0` gives E_INVALIDARG.
  * ------------------------------------------------------------------------- */
 typedef struct LM_VHD_CONFIG {
     UINT32                  structSize;
@@ -439,6 +441,7 @@ typedef struct LM_IMAGE_MANIFEST {
  *
  * Optional metadata stamps for LayerMountImagePack / LayerMountImagePackDifferential.
  * NULL fields are treated as empty strings. Forward-extensible via structSize.
+ * A structSize too small to hold `description` gives E_INVALIDARG.
  * ------------------------------------------------------------------------- */
 typedef struct LM_IMAGE_PACK_OPTIONS {
     UINT32 structSize;      /* sizeof(LM_IMAGE_PACK_OPTIONS) at caller compile time */
@@ -680,14 +683,14 @@ LM_API HRESULT LM_CALL LayerMountHResultToNtStatus(
  *        window remains.
  *   5. (host-adapter-specific unmount call here)
  *   6. LayerMountPointReleaseIfSafe(mp, &prep)
- *        Best-effort: removes the directory iff we claimed ownership,
- *        the identity still matches, and it's empty. Never fails.
+ *        Removes the directory iff the host adapter claimed ownership,
+ *        the identity still matches, and the directory is empty.
  *
  * LM_MOUNT_POINT_PREP is fixed-shape -- revisions via LM_ABI_VERSION
  * bumps. Host adapters must zero-initialize before passing to PrepareDirectory.
  * ------------------------------------------------------------------------- */
 typedef struct LM_MOUNT_POINT_PREP {
-    BOOL   directoryCreatedByUs;  /* TRUE iff PrepareDirectory created the path */
+    BOOL   directoryCreatedByUs;  /* the host adapter sets TRUE after its mount call succeeds */
     UINT64 volumeSerial;          /* FILE_ID_INFO::VolumeSerialNumber */
     UINT8  fileId[16];            /* FILE_ID_128 raw bytes */
     UINT8  reserved[8];           /* future-proof padding; keep zero */
@@ -719,16 +722,19 @@ LM_API HRESULT LM_CALL LayerMountPointPrepareDirectory(
 
 /* Capture the volume-serial + file-id of an existing mount-point
  * directory. No-op if mountPoint is empty or the directory cannot be
- * opened (the captured identity stays zero, which makes the subsequent
- * ReleaseIfSafe call a no-op as well). */
+ * opened. The captured identity then stays zero, and a later
+ * ReleaseIfSafe leaves the directory in place, or fails if it still
+ * cannot open the directory. */
 LM_API HRESULT LM_CALL LayerMountPointCaptureIdentity(
     PCWSTR mountPoint, LM_MOUNT_POINT_PREP* prep);
 
-/* Best-effort: remove the mount-point directory iff
+/* Remove the mount-point directory iff
  *   prep->directoryCreatedByUs is TRUE, AND
  *   the directory's current volume-serial + file-id match prep, AND
  *   the directory is empty.
- * Otherwise leaves the directory in place. Never fails. */
+ * Otherwise leaves the directory in place and returns S_OK. Returns
+ * HRESULT_FROM_WIN32 with the Win32 error when the directory cannot be
+ * opened, read, or removed. */
 LM_API HRESULT LM_CALL LayerMountPointReleaseIfSafe(
     PCWSTR mountPoint, const LM_MOUNT_POINT_PREP* prep);
 
@@ -1271,9 +1277,13 @@ LM_API HRESULT LM_CALL LayerMountVhdImport(
 /* Attaches `vhdPath` read-only and copies its user-visible contents into
  * `directoryPath`, creating the directory if missing. Skips the NTFS
  * system entries and an entry named `.overlay` at the volume root, in any
- * case and with or without trailing dots or spaces. Tolerates a permission
- * error on an individual file so a restrictive ACL does not abort the
- * export. */
+ * case and with or without trailing dots or spaces. Stops at the first
+ * entry it cannot copy or list, such as a file whose ACL denies read, and
+ * returns that entry's Win32 error as an HRESULT; the last-error message
+ * names the entry. An entry that is not a file, a directory or a symbolic
+ * link, such as a junction, stops the export with
+ * HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED). `directoryPath` then keeps the
+ * entries copied before the failure and is incomplete. */
 LM_API HRESULT LM_CALL LayerMountVhdExport(
     LM_HANDLE mount,
     PCWSTR     vhdPath,

@@ -1,14 +1,3 @@
-// AbiImage.cpp -- Layer-image ABI entry points.
-// LayerMountImagePack / Unpack / Validate / GetManifest / GetMetadata /
-// Close. All shims route to the engine's lazily-constructed
-// LayerImageManager (accessed via LayerMount::Images()).
-//
-// The layer-image subsystem is path-based -- LayerImageManager has no
-// long-lived per-image state -- so the LM_IMAGE_HANDLE returned by
-// LayerMountImagePack is essentially a receipt. ImageHolder carries the
-// manager back-pointer and the image path so future work (per-image
-// caches, streaming readers) can attach state without breaking the ABI.
-
 #include "../public/LayerMount.h"
 #include "AbiGuard.h"
 #include "ErrorTls.h"
@@ -25,33 +14,10 @@
 
 namespace {
 
-// Shared DWORD -> HRESULT translation. Consistent with AbiVhd.cpp.
 inline HRESULT HresultFromWin32Dword(DWORD code) noexcept {
     return code == ERROR_SUCCESS ? S_OK : HRESULT_FROM_WIN32(code);
 }
 
-// Emit a wide string into a caller-provided two-call buffer. Matches the
-// semantics used by the VSS ABI (NUL counted in required size).
-inline HRESULT EmitWString(const std::wstring& src,
-                           PWSTR  buffer,
-                           SIZE_T bufferChars,
-                           SIZE_T* bufferRequired) noexcept
-{
-    const SIZE_T requiredChars = src.size() + 1;
-    if (bufferRequired != nullptr) {
-        *bufferRequired = requiredChars;
-    }
-    if (buffer == nullptr || bufferChars == 0) {
-        return S_OK;
-    }
-    if (bufferChars < requiredChars) {
-        return HRESULT_FROM_WIN32(ERROR_MORE_DATA);
-    }
-    std::memcpy(buffer, src.c_str(), requiredChars * sizeof(wchar_t));
-    return S_OK;
-}
-
-// Translate the engine's CompressionType to the public ABI enum.
 inline LM_COMPRESSION_TYPE ToPublicCompression(
     ::LayerMount::LayerImage::CompressionType ct) noexcept
 {
@@ -64,11 +30,10 @@ inline LM_COMPRESSION_TYPE ToPublicCompression(
     }
 }
 
-// Populate a fixed-layout string field inside LM_IMAGE_METADATA per the
-// two-call buffer pattern. Unlike EmitWString this does not return
-// ERROR_MORE_DATA -- the caller learns about overflow by comparing
-// *Required vs *Chars on a per-field basis. Simplifies the outer shim's
-// error handling at the cost of per-field probing.
+// Fills a caller-owned string field of LM_IMAGE_METADATA or
+// LM_IMAGE_MANIFEST_ENTRY per the two-call buffer pattern. A null or short
+// buffer does not fail the call. The helper sets *Chars to 0 and sets
+// *Required, and the caller compares the two per field.
 inline bool FillCallerWString(const std::wstring& src,
                               PWSTR*  bufferRef,
                               SIZE_T* charsRef,
@@ -97,34 +62,29 @@ inline HRESULT ValidateMountHandle(std::uint64_t encoded) noexcept {
                : E_HANDLE;
 }
 
-} // namespace
+}
 
 namespace {
 
-// Fold the caller's LM_IMAGE_PACK_OPTIONS (nullable) into the
-// engine-side LayerMetadata seed. structSize gate is forward-compat:
-// older callers pass a smaller struct, newer fields stay at their
-// default values.
-void ApplyPackOptions(const LM_IMAGE_PACK_OPTIONS* options,
-                      ::LayerMount::LayerImage::LayerMetadata& metadata) {
-    if (options == nullptr) return;
-    if (options->structSize < sizeof(LM_IMAGE_PACK_OPTIONS)) return;
+HRESULT ReadPackOptions(const LM_IMAGE_PACK_OPTIONS* options,
+                        ::LayerMount::LayerImage::LayerMetadata& metadata) {
+    if (options == nullptr) return S_OK;
+    if (!LM_STRUCT_SIZE_COVERS(options, LM_IMAGE_PACK_OPTIONS, description)) return E_INVALIDARG;
     if (options->author != nullptr) {
         metadata.author = options->author;
     }
     if (options->description != nullptr) {
         metadata.description = options->description;
     }
+    return S_OK;
 }
 
-// Allocate an LM_IMAGE_HANDLE from an ImageHolder seeded with the
-// output path. Used by both Pack and PackDifferential.
 HRESULT CompleteImagePack(::LayerMount::LayerImage::LayerImageManager& manager,
                           PCWSTR                                      outputPath,
                           LM_IMAGE_HANDLE*                           outImage,
                           const wchar_t*                              errorPrefix) {
     using namespace ::LayerMount::abi;
-    if (outImage == nullptr) return S_OK;   // caller doesn't want a handle
+    if (outImage == nullptr) return S_OK;
 
     auto holder = std::make_unique<ImageHolder>();
     holder->manager   = &manager;
@@ -142,7 +102,7 @@ HRESULT CompleteImagePack(::LayerMount::LayerImage::LayerImageManager& manager,
     return S_OK;
 }
 
-} // namespace
+}
 
 extern "C" {
 
@@ -162,6 +122,10 @@ LM_API HRESULT LM_CALL LayerMountImagePack(LM_HANDLE                    mount,
 
     LM_ABI_BEGIN();
 
+    ::LayerMount::LayerImage::LayerMetadata metadata;
+    const HRESULT optionsHr = ReadPackOptions(options, metadata);
+    if (FAILED(optionsHr)) return optionsHr;
+
     const std::uint64_t encoded =
         static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(mount));
     auto mountHolder = Handles().mount.Resolve(encoded);
@@ -169,10 +133,9 @@ LM_API HRESULT LM_CALL LayerMountImagePack(LM_HANDLE                    mount,
 
     auto& manager = mountHolder->core->Images();
 
-    ::LayerMount::LayerImage::LayerMetadata metadata;
-    ApplyPackOptions(options, metadata);
-    const DWORD dw = manager.CreateImage(sourceDir, outputPath, metadata,
-                                         compressionLevel);
+    const ::LayerMount::LayerImage::ImageOutput output{
+        ::LayerMount::HostPath(outputPath), compressionLevel};
+    const DWORD dw = manager.CreateImage(::LayerMount::HostPath(sourceDir), output, metadata);
     if (dw != ERROR_SUCCESS) return HresultFromWin32Dword(dw);
 
     return CompleteImagePack(manager, outputPath, outImage, L"LayerMountImagePack");
@@ -199,6 +162,10 @@ LM_API HRESULT LM_CALL LayerMountImagePackDifferential(
 
     LM_ABI_BEGIN();
 
+    ::LayerMount::LayerImage::LayerMetadata metadata;
+    const HRESULT optionsHr = ReadPackOptions(options, metadata);
+    if (FAILED(optionsHr)) return optionsHr;
+
     const std::uint64_t encoded =
         static_cast<std::uint64_t>(reinterpret_cast<uintptr_t>(mount));
     auto mountHolder = Handles().mount.Resolve(encoded);
@@ -206,10 +173,10 @@ LM_API HRESULT LM_CALL LayerMountImagePackDifferential(
 
     auto& manager = mountHolder->core->Images();
 
-    ::LayerMount::LayerImage::LayerMetadata metadata;
-    ApplyPackOptions(options, metadata);
+    const ::LayerMount::LayerImage::ImageOutput output{
+        ::LayerMount::HostPath(outputPath), compressionLevel};
     const DWORD dw = manager.CreateDifferentialImage(
-        sourceDir, baseDir, outputPath, metadata, compressionLevel);
+        ::LayerMount::HostPath(sourceDir), ::LayerMount::HostPath(baseDir), output, metadata);
     if (dw != ERROR_SUCCESS) return HresultFromWin32Dword(dw);
 
     return CompleteImagePack(manager, outputPath, outImage,
@@ -237,7 +204,7 @@ LM_API HRESULT LM_CALL LayerMountImageCreateManifest(LM_HANDLE    mount,
     auto mountHolder = Handles().mount.Resolve(encoded);
     if (mountHolder == nullptr) return E_HANDLE;
 
-    std::vector<std::wstring> images;
+    std::vector<::LayerMount::HostPath> images;
     images.reserve(imageCount);
     for (UINT32 i = 0; i < imageCount; ++i) {
         if (imagePaths[i] == nullptr) return E_INVALIDARG;
@@ -245,7 +212,7 @@ LM_API HRESULT LM_CALL LayerMountImageCreateManifest(LM_HANDLE    mount,
     }
 
     const DWORD dw = ::LayerMount::LayerImage::LayerImageManager::CreateManifest(
-        outputPath, images);
+        ::LayerMount::HostPath(outputPath), images);
     return HresultFromWin32Dword(dw);
 
     LM_ABI_END();
@@ -274,7 +241,8 @@ LM_API HRESULT LM_CALL LayerMountImageUnpack(LM_HANDLE mount,
 
     return HresultFromWin32Dword(
         mountHolder->core->Images().ExtractImage(
-            imagePath, targetDir, verifyChecksum != FALSE));
+            ::LayerMount::HostPath(imagePath), ::LayerMount::HostPath(targetDir),
+            verifyChecksum != FALSE));
 
     LM_ABI_END();
 }
@@ -297,13 +265,8 @@ LM_API HRESULT LM_CALL LayerMountImageValidate(LM_HANDLE mount,
         return E_HANDLE;
     }
 
-    // Full validation: reads the header + metadata AND streams the
-    // data section to verify the SHA-256 checksum matches header.
-    // checksum. An earlier implementation called only GetImageInfo,
-    // which passed header-only checks; tampering inside the compressed
-    // payload went undetected until a later Unpack(verifyChecksum=true).
     return HresultFromWin32Dword(
-        mountHolder->core->Images().ValidateImage(imagePath));
+        mountHolder->core->Images().ValidateImage(::LayerMount::HostPath(imagePath)));
 
     LM_ABI_END();
 }
@@ -330,7 +293,8 @@ LM_API HRESULT LM_CALL LayerMountImageGetManifest(LM_HANDLE          mount,
 
     ::LayerMount::LayerImage::LayerManifest loaded;
     const DWORD dw =
-        ::LayerMount::LayerImage::LayerImageManager::LoadManifest(manifestPath, loaded);
+        ::LayerMount::LayerImage::LayerImageManager::LoadManifest(
+            ::LayerMount::HostPath(manifestPath), loaded);
     if (dw != ERROR_SUCCESS) {
         return HresultFromWin32Dword(dw);
     }
@@ -352,7 +316,6 @@ LM_API HRESULT LM_CALL LayerMountImageGetManifest(LM_HANDLE          mount,
         LM_IMAGE_MANIFEST_ENTRY& dst = manifest->entries[i];
         const auto&               src = loaded.layers[i];
 
-        // checksumHex is a fixed-size WCHAR[65]; always copy safely.
         const SIZE_T hexCapChars = sizeof(dst.checksumHex) / sizeof(dst.checksumHex[0]);
         const SIZE_T hexNeeded   = src.checksumHex.size() + 1;
         if (hexNeeded <= hexCapChars) {
@@ -363,9 +326,6 @@ LM_API HRESULT LM_CALL LayerMountImageGetManifest(LM_HANDLE          mount,
                         (hexCapChars - 1) * sizeof(wchar_t));
             dst.checksumHex[hexCapChars - 1] = L'\0';
         }
-        // imagePath is a two-call buffer the caller pre-sized; on short
-        // buffer Chars is set to 0 and Required is populated so the
-        // caller can re-query.
         FillCallerWString(src.imagePath,
                           &dst.imagePath, &dst.imagePathChars, &dst.imagePathRequired);
     }
@@ -397,22 +357,17 @@ LM_API HRESULT LM_CALL LayerMountImageGetMetadata(LM_HANDLE          mount,
 
     ::LayerMount::LayerImage::LayerImageHeader header;
     ::LayerMount::LayerImage::LayerMetadata    loaded;
-    const DWORD dw =
-        mountHolder->core->Images().GetImageInfo(imagePath, header, loaded);
+    const DWORD dw = mountHolder->core->Images().GetImageInfo(
+        ::LayerMount::HostPath(imagePath), header, loaded);
     if (dw != ERROR_SUCCESS) {
         return HresultFromWin32Dword(dw);
     }
 
-    // Scalar fields -- always written, regardless of string-buffer state.
     metadata->compression      = ToPublicCompression(loaded.compression);
     metadata->fileCount        = loaded.fileCount;
     metadata->uncompressedSize = loaded.uncompressedSize;
     metadata->compressedSize   = loaded.compressedSize;
 
-    // Per-string two-call-pattern fields. Tags, whiteouts, and labels
-    // are intentionally not projected -- they'd require dedicated
-    // enumeration APIs that are not yet in the .def (the header
-    // documents this deliberate omission).
     FillCallerWString(loaded.id,
                       &metadata->id, &metadata->idChars, &metadata->idRequired);
     FillCallerWString(loaded.parentId,
@@ -452,4 +407,4 @@ LM_API HRESULT LM_CALL LayerMountImageClose(LM_IMAGE_HANDLE image)
     LM_ABI_END();
 }
 
-} // extern "C"
+}

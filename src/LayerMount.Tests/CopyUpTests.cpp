@@ -148,8 +148,8 @@ public:
         TempLayerEnvironment env(1);
         CopyUpAndRenameRig rig(env.MakeConfig());
 
-        std::wstring a = rig.copyUp.GenerateStagingPath();
-        std::wstring b = rig.copyUp.GenerateStagingPath();
+        std::wstring a = rig.copyUp.GenerateStagingPath().Text();
+        std::wstring b = rig.copyUp.GenerateStagingPath().Text();
 
         Assert::AreNotEqual(a, b, L"Two calls should return different paths");
         Assert::IsTrue(a.find(env.Staging() + L"\\#") == 0,
@@ -160,13 +160,13 @@ public:
     TEST_METHOD(Prepare_WorkDirectoryOnTheUppersVolume_CreatesItAndSucceeds) {
         TempLayerEnvironment env(0);
         LayerConfig config = env.MakeConfig();
-        config.workDirPath = env.Root() + L"\\new-work";
+        config.workDirPath = HostPath(env.Root() + L"\\new-work");
         std::wstring error;
 
         Assert::AreEqual<HRESULT>(S_OK, config.Prepare(error),
             L"A work directory on the upper's volume passes the prepare");
         Assert::AreNotEqual<DWORD>(INVALID_FILE_ATTRIBUTES,
-            ::GetFileAttributesW(config.workDirPath.c_str()),
+            ::GetFileAttributesW(config.workDirPath.Text().c_str()),
             L"The prepare creates a missing work directory");
     }
 
@@ -185,7 +185,7 @@ public:
          Assert::IsFalse(static_cast<bool>(ec),
              L"Precondition: long-path work dir must be creatable with \\?\\ prefix");
 
-         config.workDirPath = deepWork;
+         config.workDirPath = HostPath(deepWork);
 
          CopyUpAndRenameRig rig(config);
 
@@ -193,7 +193,7 @@ public:
          constexpr int kCount = 32;
          paths.reserve(kCount);
          for (int i = 0; i < kCount; ++i) {
-             paths.push_back(rig.copyUp.GenerateStagingPath());
+             paths.push_back(rig.copyUp.GenerateStagingPath().Text());
          }
 
          for (const auto& p : paths) {
@@ -221,7 +221,7 @@ public:
         std::wstring finalPath = env.Upper() + L"\\final.txt";
         env.WriteFile(env.Work(), L"test.tmp", "content");
 
-        NTSTATUS status = rig.copyUp.CommitFromWorkDir(workPath, finalPath);
+        NTSTATUS status = rig.copyUp.CommitFromWorkDir(HostPath(workPath), finalPath);
 
         Assert::IsTrue(NT_SUCCESS(status), L"CommitFromWorkDir should succeed");
         Assert::AreEqual(INVALID_FILE_ATTRIBUTES,
@@ -240,7 +240,7 @@ public:
         env.WriteFile(env.Work(), L"temp.tmp", "x");
         std::wstring finalPath = env.Upper() + L"\\a\\b\\c.txt";
 
-        NTSTATUS status = rig.copyUp.CommitFromWorkDir(workPath, finalPath);
+        NTSTATUS status = rig.copyUp.CommitFromWorkDir(HostPath(workPath), finalPath);
 
         Assert::IsTrue(NT_SUCCESS(status));
         Assert::AreNotEqual(INVALID_FILE_ATTRIBUTES,
@@ -451,7 +451,7 @@ public:
         env.WriteFile(env.Lower(0), L"foo.txt", "lower content");
 
         LayerConfig config = env.MakeConfig();
-        config.workDirPath = ExtendedDirWithSeparator(env.Work());
+        config.workDirPath = HostPath(ExtendedDirWithSeparator(env.Work()));
         CopyUpAndRenameRig rig(config);
 
         NTSTATUS status = rig.copyUp.CopyUpFile(L"foo.txt");
@@ -743,7 +743,7 @@ public:
         }
         const UINT64 lowerId = NtfsFileIdOf(env.Lower(0) + L"\\a.txt", LinkOpen::Follow);
         LayerConfig config = env.MakeConfig();
-        config.upperPath = upperThroughJunction;
+        config.upperPath = HostPath(upperThroughJunction);
         config.hostCapabilities = kHostCapabilitiesWithoutAds;
         {
             CopyUpAndRenameRig rig(config);

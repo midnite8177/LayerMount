@@ -9,11 +9,13 @@
 //   bits [23:0]  24-bit slot index
 //
 // Sizing: the encoding requires a 64-bit pointer. Windows x64 is the
-// only build target (project decisions memo 2026-04-14).
+// only build target.
 
 #pragma once
 
 #include "../public/LayerMount.h"
+#include "../impl/HostPath.h"
+#include "../impl/vhd/VHDLayerManager.h"
 
 #include <atomic>
 #include <cstdint>
@@ -23,7 +25,8 @@
 
 // Forward declarations of impl types. Including their full headers from
 // here would drag impl-side dependencies into every TU that touches a
-// handle; the impl side owns the includes.
+// handle; the impl side owns the includes. VhdHolder keeps a HostPath and
+// an AttachOptions by value, so their headers are included above.
 //
 // Note: the outer namespace `LayerMount` contains a class named
 // `LayerMount`, so every reference to this namespace from inside
@@ -33,7 +36,6 @@ namespace LayerMount {
     class LayerMount;
     class WorkDirectory;
     struct FileContext;
-    namespace VHD { class VHDLayerManager; class VhdHandle; }
     namespace VSS { class VSSManager; struct SnapshotInfo; }
     namespace LayerImage { class LayerImageManager; }
 }
@@ -108,10 +110,9 @@ using FilePayload = FileHolder;
 // Attach -> Detach window. LayerMountVhdDetach ends the attach through
 // `open` for both lifetimes.
 //
-// The readOnly / suppressDriveLetter / lifetime fields echo the values
-// captured from LM_VHD_CONFIG on Create/Open so the parameter-free
-// LayerMountVhdAttach shim can forward them to VHDLayerManager::AttachVHD
-// without re-taking a config.
+// attachOptions holds the attach settings from LM_VHD_CONFIG at Create/Open,
+// so the parameter-free LayerMountVhdAttach shim can forward them to
+// VHDLayerManager::AttachVHD without re-taking a config.
 //
 // attachedPhysicalPath caches the \\.\PhysicalDriveN path returned by
 // AttachVHD. It supports the two-call buffer pattern on LayerMountVhdAttach
@@ -120,11 +121,9 @@ using FilePayload = FileHolder;
 struct VhdHolder {
     ::LayerMount::VHD::VHDLayerManager*            manager = nullptr;
     std::unique_ptr<::LayerMount::VHD::VhdHandle>  open;
-    std::wstring                                  path;
+    ::LayerMount::HostPath                        path;
     std::wstring                                  attachedPhysicalPath;
-    BOOL                                          readOnly = FALSE;
-    BOOL                                          suppressDriveLetter = FALSE;
-    LM_VHD_ATTACH_LIFETIME                       lifetime = LM_VHD_ATTACH_PERMANENT;
+    ::LayerMount::VHD::AttachOptions              attachOptions{};
     // Serializes mutations to `open` / `attachedPhysicalPath` so
     // concurrent Attach / Detach / GetVolumeGuid on the same handle
     // observe a consistent state. Path / config fields above are set

@@ -145,11 +145,11 @@ public:
         TempLayerEnvironment env(0);
         LayerConfig config = env.MakeConfig();
         config.hostCapabilities = kHostCapabilitiesWithoutAds;
-        config.workDirPath = ExtendedDirWithSeparator(env.Work());
+        config.workDirPath = HostPath(ExtendedDirWithSeparator(env.Work()));
         std::wstring stagedPath;
         {
             CopyUpAndRenameRig rig(config);
-            stagedPath = rig.copyUp.GenerateStagingPath();
+            stagedPath = rig.copyUp.GenerateStagingPath().Text();
         }
         const std::wstring childPath = stagedPath + L"\\child.txt";
         env.WriteFile(stagedPath, L"child.txt", "staged");
@@ -177,7 +177,7 @@ public:
         TempLayerEnvironment env(0);
         auto first = OpenWorkDirectory(env.MakeConfig());
         LayerConfig alias = env.MakeConfig();
-        alias.workDirPath = ExtendedDirWithSeparator(env.Work());
+        alias.workDirPath = HostPath(ExtendedDirWithSeparator(env.Work()));
 
         std::unique_ptr<WorkDirectory> second;
         std::wstring error;
@@ -196,7 +196,7 @@ public:
         TempLayerEnvironment env(0);
         auto first = OpenWorkDirectory(env.MakeConfig());
         LayerConfig other = env.MakeConfig();
-        other.workDirPath = env.Root() + L"\\other-work";
+        other.workDirPath = HostPath(env.Root() + L"\\other-work");
         env.CreateDir(env.Root(), L"other-work");
 
         std::unique_ptr<WorkDirectory> second;
@@ -216,12 +216,12 @@ public:
     TEST_METHOD(Open_WorkDirectoryInTheUppersSidecarStore_TakesBothLocks) {
         TempLayerEnvironment env(0);
         LayerConfig config = env.MakeConfig();
-        config.workDirPath = env.Upper() + L"\\" + kSidecarDirName;
+        config.workDirPath = HostPath(env.Upper() + L"\\" + kSidecarDirName);
         env.CreateDir(env.Upper(), kSidecarDirName);
 
         const auto workDirectory = OpenWorkDirectory(config);
 
-        Assert::IsTrue(fs::is_directory(StagingAreaPath(config.workDirPath)),
+        Assert::IsTrue(fs::is_directory(StagingAreaPath(config.workDirPath).ForWin32()),
             L"The staging area is in <upper>\\.overlay");
         std::unique_ptr<WorkDirectory> second;
         std::wstring error;

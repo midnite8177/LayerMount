@@ -262,7 +262,8 @@ public:
 
         TempLayerEnvironment stacked(0);
         auto stackedConfig = stacked.MakeConfig();
-        stackedConfig.lowerPaths = {env.Upper(), env.Lower(0)};
+        stackedConfig.lowerPaths = {::LayerMount::HostPath(env.Upper()),
+                                    ::LayerMount::HostPath(env.Lower(0))};
         ::LayerMount::LayerMount stackedMount(stackedConfig);
         AssertStatus(STATUS_OBJECT_NAME_NOT_FOUND, OpenThroughMount(stackedMount, L"b.txt"),
             L"An overlay with the upper as its first lower must find nothing at the name");

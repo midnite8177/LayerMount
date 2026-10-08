@@ -245,6 +245,31 @@ void ForEachAllowOrDenyAce(const std::wstring& path, const Visit& visit) {
     }
 }
 
+// The number of allow and deny ACEs for target in the DACL of the entry at
+// path.
+inline size_t CountDaclAcesForSid(const std::wstring& path, PSID target) {
+    size_t count = 0;
+    ForEachAllowOrDenyAce(path, [&](const ACE_HEADER&, ACCESS_MASK, PSID sid) {
+        if (::EqualSid(sid, target)) {
+            ++count;
+        }
+    });
+    return count;
+}
+
+// Merges an allow ACE for sid with FILE_READ_ATTRIBUTES, inherited by
+// files and directories, into the DACL of the entry at path. The DACL stays
+// unprotected. Asserts when the write fails.
+inline void GrantInheritableReadAttributes(const std::wstring& path, PSID sid) {
+    const LocalAcl merged = DaclWithOneMoreAce(
+        path, AceSpec{GRANT_ACCESS, FILE_READ_ATTRIBUTES,
+                      OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, sid});
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual<DWORD>(ERROR_SUCCESS,
+        ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+                                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, merged.get(), nullptr),
+        L"The DACL of the entry takes the grant");
+}
 
 inline bool TryEnablePrivilege(LPCWSTR privilege) {
     HANDLE token = nullptr;

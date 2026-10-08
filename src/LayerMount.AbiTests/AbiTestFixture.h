@@ -88,6 +88,11 @@ private:
     std::vector<std::wstring> lowers_;
 };
 
+// The staging area the engine keeps in the work directory at workDir.
+inline std::wstring StagingArea(const std::wstring& workDir) {
+    return workDir + L"\\work";
+}
+
 // Write `len` bytes to the named data stream at `path` on the host file,
 // outside the engine.
 inline void WriteRawStream(const std::wstring& path, const char* data, DWORD len) {
@@ -125,6 +130,15 @@ inline void WriteText(const std::wstring& path, const std::string& text) {
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     file << text;
+}
+
+inline std::wstring LastErrorMessage(HRESULT hr) {
+    std::vector<wchar_t> message(4096);
+    SIZE_T required = 0;
+    if (FAILED(::LayerMountGetLastErrorMessage(hr, message.data(), message.size(), &required))) {
+        return {};
+    }
+    return message.data();
 }
 
 inline std::wstring FileNameOf(const std::wstring& path) {
@@ -553,6 +567,14 @@ inline LayerMountHolder CreateTransient(const std::wstring& upper) {
     return LayerMountHolder(handle);
 }
 
+inline LM_HANDLE DestroyedMountHandle(const TempLayerEnv& env) {
+    LayerMountHolder mount = CreateLayerMount(env);
+    const LM_HANDLE stale = mount.Get();
+    Microsoft::VisualStudio::CppUnitTestFramework::Assert::AreEqual<HRESULT>(
+        S_OK, ::LayerMountDestroy(mount.Release()));
+    return stale;
+}
+
 inline void WriteThroughOverlay(LM_HANDLE mount, PCWSTR relativePath, const std::string& text) {
     using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
     OpenedFile created;
@@ -652,6 +674,11 @@ inline bool IsProcessElevated() {
             return;                                                              \
         }                                                                        \
     } while (0)
+
+// The structSize that reaches the end of `field`, computed apart from the
+// DLL's own check.
+#define ABI_SIZE_THROUGH(StructType, field) \
+    static_cast<UINT32>(offsetof(StructType, field) + sizeof(StructType::field))
 
 #define ABI_SKIP_IF_NO_SECURITY_PRIVILEGE()                                      \
     do {                                                                         \

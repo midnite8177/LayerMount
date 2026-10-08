@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "AbiTestFixture.h"
+#include "ImageTestHelpers.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -7,100 +8,14 @@ namespace LayerMountAbiTests {
 
 namespace {
 
-constexpr INT32 kCompressionLevel = 3;
-constexpr BOOL  kVerifyChecksum   = TRUE;
-constexpr BOOL  kSkipChecksum     = FALSE;
+constexpr UINT32 kPackOptionsSizeThroughAuthor = ABI_SIZE_THROUGH(LM_IMAGE_PACK_OPTIONS, author);
+constexpr UINT32 kPackOptionsSizeThroughDescription = ABI_SIZE_THROUGH(LM_IMAGE_PACK_OPTIONS, description);
 
-constexpr UINT64 kImageHeaderSize       = 128;
-constexpr UINT32 kImageFormatVersion    = 1;
-constexpr UINT32 kZstdCompressionFlags  = 1;
-constexpr size_t kArchiveEntryHeaderSize = 24;
-constexpr UINT8  kFileEntry             = 0;
-constexpr UINT8  kDirectoryEntry        = 1;
-constexpr UINT8  kNotWhiteout           = 0;
-constexpr UINT64 kNoModifiedTime        = 0;
-
-constexpr UINT32 kZstdFrameMagic = 0xFD2FB528;
-constexpr UINT8  kSingleSegmentWithOneByteContentSize = 0x20;
-constexpr UINT32 kLastRawBlock = 1;
-constexpr int    kBlockSizeShift = 3;
-constexpr size_t kBlockHeaderBytes = 3;
-
-std::string WideToNarrow(const std::wstring& ascii) {
-    std::string narrow;
-    for (const wchar_t c : ascii) narrow.push_back(static_cast<char>(c));
-    return narrow;
-}
-
-UINT64 FileCountOf(LM_HANDLE mount, const std::wstring& imagePath) {
-    LM_IMAGE_METADATA metadata{};
-    Assert::AreEqual<HRESULT>(S_OK,
-        ::LayerMountImageGetMetadata(mount, imagePath.c_str(), &metadata),
-        L"LayerMountImageGetMetadata");
-    return metadata.fileCount;
-}
-
-template <typename T>
-void AppendLittleEndian(std::string& out, T value) {
-    char bytes[sizeof(T)];
-    std::memcpy(bytes, &value, sizeof(T));
-    out.append(bytes, sizeof(T));
-}
-
-std::string ArchiveEntryHeader(const std::string& path, UINT64 size, UINT32 attributes,
-                               UINT8 isDirectory) {
-    std::string header;
-    AppendLittleEndian<UINT16>(header, static_cast<UINT16>(path.size()));
-    AppendLittleEndian<UINT64>(header, size);
-    AppendLittleEndian<UINT32>(header, attributes);
-    AppendLittleEndian<UINT64>(header, kNoModifiedTime);
-    AppendLittleEndian<UINT8>(header, isDirectory);
-    AppendLittleEndian<UINT8>(header, kNotWhiteout);
-    return header;
-}
-
-std::string ArchiveDirectoryEntry(const std::string& path) {
-    return ArchiveEntryHeader(path, 0, FILE_ATTRIBUTE_DIRECTORY, kDirectoryEntry) + path;
-}
-
-std::string ArchiveFileEntry(const std::string& path, const std::string& data) {
-    return ArchiveEntryHeader(path, data.size(), FILE_ATTRIBUTE_NORMAL, kFileEntry) + path + data;
-}
-
-std::string ArchiveSentinel() {
-    std::string sentinel;
-    AppendLittleEndian<UINT16>(sentinel, 0xFFFF);
-    sentinel.append(kArchiveEntryHeaderSize - sizeof(UINT16), '\0');
-    return sentinel;
-}
-
-std::string RawZstdFrame(const std::string& content) {
-    Assert::IsTrue(content.size() <= MAXBYTE,
-        L"The frame descriptor gives the content size one byte, so the content holds at most 255 bytes");
-    std::string frame;
-    AppendLittleEndian<UINT32>(frame, kZstdFrameMagic);
-    AppendLittleEndian<UINT8>(frame, kSingleSegmentWithOneByteContentSize);
-    AppendLittleEndian<UINT8>(frame, static_cast<UINT8>(content.size()));
-    const UINT32 blockHeader =
-        kLastRawBlock | (static_cast<UINT32>(content.size()) << kBlockSizeShift);
-    frame.append(reinterpret_cast<const char*>(&blockHeader), kBlockHeaderBytes);
-    return frame + content;
-}
-
-void WriteImageWithZeroChecksum(const std::wstring& imagePath, const std::string& metadataJson,
-                        const std::string& archive) {
-    const std::string metadata = metadataJson + '\0';
-    const std::string data = RawZstdFrame(archive);
-    std::string image = std::string("OVLYIMG", 8);
-    AppendLittleEndian<UINT32>(image, kImageFormatVersion);
-    AppendLittleEndian<UINT32>(image, kZstdCompressionFlags);
-    AppendLittleEndian<UINT64>(image, kImageHeaderSize);
-    AppendLittleEndian<UINT64>(image, metadata.size());
-    AppendLittleEndian<UINT64>(image, kImageHeaderSize + metadata.size());
-    AppendLittleEndian<UINT64>(image, data.size());
-    image.append(static_cast<size_t>(kImageHeaderSize) - image.size(), '\0');
-    std::ofstream out(imagePath, std::ios::binary | std::ios::trunc);
-    out << image << metadata << data;
+LM_IMAGE_PACK_OPTIONS PackOptionsWithAuthor(UINT32 structSize, const std::wstring& author) {
+    LM_IMAGE_PACK_OPTIONS options{};
+    options.structSize = structSize;
+    options.author = author.c_str();
+    return options;
 }
 
 }
@@ -111,7 +26,6 @@ public:
         TempLayerEnv  env(0);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        // Seed a tiny source tree inside the temp env.
         const std::wstring srcDir = env.Root() + L"\\src";
         std::filesystem::create_directories(srcDir);
         {
@@ -144,7 +58,6 @@ public:
             ::LayerMountImageUnpack(mount.Get(), imagePath.c_str(),
                                  dstDir.c_str(), verifyChecksum));
 
-        // Byte-compare the two files round-tripped.
         Assert::AreEqual<std::string>(
             ReadAllBytes(srcDir + L"\\a.txt"), ReadAllBytes(dstDir + L"\\a.txt"));
         Assert::AreEqual<std::string>(
@@ -297,6 +210,104 @@ public:
             L"A .overlay below the root packs and unpacks as user data");
     }
 
+    TEST_METHOD(Pack_OutputPathUnderAFile_ReportsTheFileInThePlaceOfTheParent) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring srcDir = env.Root() + L"\\src";
+        WriteText(srcDir + L"\\only.txt", "only");
+        const std::wstring blocker = env.Root() + L"\\blocker";
+        WriteText(blocker, "a file in the place of the parent directory");
+        const std::wstring imagePath = blocker + L"\\image.lmnt";
+        const LM_IMAGE_PACK_OPTIONS* const noPackOptions = nullptr;
+
+        LM_IMAGE_HANDLE img = nullptr;
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
+            ::LayerMountImagePack(mount.Get(), srcDir.c_str(), imagePath.c_str(),
+                                  kCompressionLevel, noPackOptions, &img),
+            L"The pack reports the file that blocks the parent directory, not an access failure");
+    }
+
+    TEST_METHOD(Pack_OptionsWithStructSizeBelowTheShippedStruct_FailsWithInvalidArgAndWritesNoImage) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring srcDir = env.Root() + L"\\src";
+        WriteText(srcDir + L"\\only.txt", "only");
+        const std::wstring imagePath = env.Root() + L"\\short-options.lmnt";
+        const std::wstring author = L"short author";
+        const LM_IMAGE_PACK_OPTIONS options =
+            PackOptionsWithAuthor(kPackOptionsSizeThroughAuthor, author);
+
+        LM_IMAGE_HANDLE img = nullptr;
+        Assert::AreEqual<HRESULT>(E_INVALIDARG,
+            ::LayerMountImagePack(mount.Get(), srcDir.c_str(), imagePath.c_str(),
+                                  kCompressionLevel, &options, &img),
+            L"The pack refuses options whose structSize stops short of description");
+        Assert::IsFalse(std::filesystem::exists(imagePath),
+            L"The refused pack writes no image file");
+    }
+
+    TEST_METHOD(PackDifferential_OptionsWithStructSizeBelowTheShippedStruct_FailsWithInvalidArgAndWritesNoImage) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring sourceDir = env.Root() + L"\\source";
+        const std::wstring baseDir = env.Root() + L"\\base";
+        WriteText(sourceDir + L"\\added.txt", "added");
+        WriteText(baseDir + L"\\removed.txt", "removed");
+        const std::wstring imagePath = env.Root() + L"\\short-options-diff.lmnt";
+        const std::wstring author = L"short author";
+        const LM_IMAGE_PACK_OPTIONS options =
+            PackOptionsWithAuthor(kPackOptionsSizeThroughAuthor, author);
+
+        LM_IMAGE_HANDLE img = nullptr;
+        Assert::AreEqual<HRESULT>(E_INVALIDARG,
+            ::LayerMountImagePackDifferential(mount.Get(), sourceDir.c_str(), baseDir.c_str(),
+                                              imagePath.c_str(), kCompressionLevel,
+                                              &options, &img),
+            L"The differential pack refuses options whose structSize stops short of description");
+        Assert::IsFalse(std::filesystem::exists(imagePath),
+            L"The refused differential pack writes no image file");
+    }
+
+    TEST_METHOD(Pack_OptionsWithStructSizeThroughDescription_StampsTheAuthor) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::wstring srcDir = env.Root() + L"\\src";
+        WriteText(srcDir + L"\\only.txt", "only");
+        const std::wstring imagePath = env.Root() + L"\\minimum-options.lmnt";
+        const std::wstring author = L"minimum author";
+        const LM_IMAGE_PACK_OPTIONS options =
+            PackOptionsWithAuthor(kPackOptionsSizeThroughDescription, author);
+
+        LM_IMAGE_HANDLE img = nullptr;
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountImagePack(mount.Get(), srcDir.c_str(), imagePath.c_str(),
+                                  kCompressionLevel, &options, &img),
+            L"The pack accepts options whose structSize ends at description");
+        wchar_t authorBuffer[64] = {};
+        LM_IMAGE_METADATA metadata{};
+        metadata.author = authorBuffer;
+        metadata.authorChars = _countof(authorBuffer);
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountImageGetMetadata(mount.Get(), imagePath.c_str(), &metadata),
+            L"The metadata read of the packed image succeeds");
+        Assert::AreEqual(author, std::wstring(authorBuffer),
+            L"The metadata gives the author that the pack stamped");
+    }
+
+    TEST_METHOD(Unpack_EntryNameWithATrailingSlash_FailsAsABadPath) {
+        TempLayerEnv env(0);
+        LayerMountHolder mount = CreateLayerMount(env);
+        const std::string archive = ArchiveDirectoryEntry("dir/") + ArchiveSentinel();
+        const std::wstring imagePath = env.Root() + L"\\slash.lmnt";
+        WriteImageWithZeroChecksum(imagePath, R"({"whiteouts":[]})", archive);
+        const std::wstring dstDir = env.Root() + L"\\dst";
+
+        Assert::AreEqual<HRESULT>(HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME),
+            ::LayerMountImageUnpack(mount.Get(), imagePath.c_str(), dstDir.c_str(),
+                                    kSkipChecksum),
+            L"The unpack refuses an archive name that ends in a slash");
+    }
+
     TEST_METHOD(Validate_OnTruncatedImage_Fails) {
         TempLayerEnv  env(0);
         LayerMountHolder mount = CreateLayerMount(env);
@@ -314,7 +325,6 @@ public:
                                imagePath.c_str(), compressionLevel, noPackOptions, &img));
         Assert::AreEqual<HRESULT>(S_OK, ::LayerMountImageClose(img));
 
-        // Truncate the image on disk so the checksum fails.
         std::error_code ec;
         std::filesystem::resize_file(imagePath, 16, ec);
         Assert::IsFalse(!!ec, L"resize_file should succeed on our own tmp file");
@@ -326,10 +336,7 @@ public:
 
     TEST_METHOD(GetManifest_OnDestroyedMountHandle_ReturnsEHandle) {
         TempLayerEnv  env(0);
-        LayerMountHolder mount = CreateLayerMount(env);
-
-        LM_HANDLE stale = mount.Get();
-        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountDestroy(mount.Release()));
+        const LM_HANDLE stale = DestroyedMountHandle(env);
 
         LM_IMAGE_MANIFEST manifest{};
         HRESULT hr = ::LayerMountImageGetManifest(
@@ -339,4 +346,4 @@ public:
     }
 };
 
-} // namespace LayerMountAbiTests
+}

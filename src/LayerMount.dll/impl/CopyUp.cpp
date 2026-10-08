@@ -227,8 +227,8 @@ void CopyUp::RecordCopyUp(const std::wstring& relativePath) {
     }
 }
 
-std::wstring CopyUp::GenerateStagingPath() {
-    return JoinDirPath(StagingAreaPath(config_.workDirPath), UniqueEntryName());
+HostPath CopyUp::GenerateStagingPath() {
+    return HostPath(JoinDirPath(StagingAreaPath(config_.workDirPath).Text(), UniqueEntryName()));
 }
 
 std::wstring CopyUp::GenerateAsidePathNextTo(const std::wstring& path) {
@@ -251,7 +251,7 @@ std::wstring CopyUp::UniqueEntryName() {
            std::to_wstring(counter) + L"." + std::to_wstring(timestamp) + L".tmp";
 }
 
-NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
+NTSTATUS CopyUp::CommitFromWorkDir(const HostPath& workPath,
                                     const std::wstring& finalUpperPath) {
     std::filesystem::path parentDir = std::filesystem::path(finalUpperPath).parent_path();
     if (!parentDir.empty()) {
@@ -259,7 +259,7 @@ NTSTATUS CopyUp::CommitFromWorkDir(const std::wstring& workPath,
     }
 
     const NTSTATUS status =
-        MoveUpperEntry(workPath, finalUpperPath, ReplaceExisting::No, config_).status;
+        MoveUpperEntry(workPath.Text(), finalUpperPath, ReplaceExisting::No, config_).status;
     if (!NT_SUCCESS(status)) {
         RemoveStagedEntry(workPath, config_);
     }
@@ -284,9 +284,9 @@ NTSTATUS CopyUp::CopyUpReparseCloneAndCount(const std::wstring& normalized,
 NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
                                     ScopedHandle& srcHandle,
                                     DWORD srcAttrs,
-                                    const std::wstring& workPath) {
+                                    const HostPath& workPath) {
     ScopedHandle dstHandle(CreateFileW(
-        WithExtendedPrefix(workPath).c_str(),
+        workPath.ForWin32().c_str(),
         GENERIC_READ | GENERIC_WRITE,
         0,
         nullptr,
@@ -320,20 +320,20 @@ NTSTATUS CopyUp::StageFileInWorkDir(const std::wstring& sourcePath,
 
 NTSTATUS CopyUp::CopyStagedFileMetadata(const std::wstring& sourcePath,
                                         DWORD srcAttrs,
-                                        const std::wstring& workPath) {
+                                        const HostPath& workPath) {
     if (!ApplyEncryptedStateIfNeeded(workPath, srcAttrs)) {
         const DWORD err = ::GetLastError();
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
 
-    const NTSTATUS eaStatus = CopyExtendedAttributes(sourcePath, workPath);
+    const NTSTATUS eaStatus = CopyExtendedAttributes(sourcePath, workPath.Text());
     if (!NT_SUCCESS(eaStatus)) {
         return eaStatus;
     }
 
     // A failed security copy fails the copy-up, because a commit with an
     // inherited or default DACL can give more access than the source does.
-    if (!CopySecurityDescriptor(sourcePath, workPath)) {
+    if (!CopySecurityDescriptor(sourcePath, workPath.Text())) {
         const DWORD err = ::GetLastError();
         return ::LayerMount::NtStatusFromWin32(err ? err : ERROR_ACCESS_DENIED);
     }
@@ -342,19 +342,19 @@ NTSTATUS CopyUp::CopyStagedFileMetadata(const std::wstring& sourcePath,
 }
 
 NTSTATUS CopyUp::FinishStagedFile(const std::wstring& sourcePath,
-                                  const std::wstring& workPath,
+                                  const HostPath& workPath,
                                   FileBasicInfoGuard& basicInfo) {
-    const NTSTATUS streamStatus = CopyUserAlternateDataStreams(sourcePath, workPath);
+    const NTSTATUS streamStatus = CopyUserAlternateDataStreams(sourcePath, workPath.Text());
     if (!NT_SUCCESS(streamStatus)) {
         return streamStatus;
     }
     return RecordStagedFile(workPath, MakeCopyUpMetadata(sourcePath), basicInfo);
 }
 
-NTSTATUS CopyUp::RecordStagedFile(const std::wstring& workPath,
+NTSTATUS CopyUp::RecordStagedFile(const HostPath& workPath,
                                   const LayerMountMetadata& metadata,
                                   FileBasicInfoGuard& basicInfo) {
-    if (!MetadataStore::WriteLayerMountMetadata(workPath, metadata, &config_)) {
+    if (!MetadataStore::WriteLayerMountMetadata(workPath.Text(), metadata, &config_)) {
         return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
 
@@ -384,7 +384,7 @@ NTSTATUS CopyUp::PrepareCopyUpTarget(const std::wstring& normalized,
     // The check reads only the upper, because EnsureUpperParent has just
     // copied any lower link on the path up as a link.
     const std::wstring parent = std::filesystem::path(normalized).parent_path().wstring();
-    const LinkOnPath link = FindLinkOnPath(config_.upperPath, parent);
+    const LinkOnPath link = FindLinkOnPath(config_.upperPath.Text(), parent);
     const bool reachedThroughUpperLink =
         (link == LinkOnPath::Self || link == LinkOnPath::Ancestor) &&
         pathResolver_.ExistsInUpper(normalized);
@@ -431,8 +431,9 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
     }
 
     DWORD srcAttrs = GetFileAttributesW(WithExtendedPrefix(source.absolutePath).c_str());
-    const std::wstring workPath = GenerateStagingPath();
-    FileBasicInfoGuard basicInfo(srcHandle.Get(), StagedFileAttributes(srcAttrs), workPath);
+    const HostPath workPath = GenerateStagingPath();
+    FileBasicInfoGuard basicInfo(srcHandle.Get(), StagedFileAttributes(srcAttrs),
+                                 workPath.Text());
 
     status = StageFileInWorkDir(source.absolutePath, srcHandle, srcAttrs, workPath);
     if (NT_SUCCESS(status)) {
@@ -448,7 +449,7 @@ NTSTATUS CopyUp::CopyUpFile(const std::wstring& relativePath) {
 }
 
 NTSTATUS CopyUp::CommitStagedFile(const std::wstring& normalized,
-                                  const std::wstring& workPath,
+                                  const HostPath& workPath,
                                   const std::wstring& upperPath) {
     const NTSTATUS status = CommitFromWorkDir(workPath, upperPath);
     if (!NT_SUCCESS(status)) {
@@ -462,7 +463,7 @@ NTSTATUS CopyUp::CommitStagedFile(const std::wstring& normalized,
 }
 
 NTSTATUS CopyUp::MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
-                                              const std::wstring& workPath) {
+                                              const HostPath& workPath) {
     if (!SetSparse(dstHandle.Get())) {
         const NTSTATUS status = SparseRefusalStatus();
         dstHandle.Reset();
@@ -474,9 +475,9 @@ NTSTATUS CopyUp::MarkPlaceholderSparseOrAbort(ScopedHandle& dstHandle,
 
 NTSTATUS CopyUp::StageMetacopyShellInWorkDir(const std::wstring& sourcePath,
                                              const WIN32_FILE_ATTRIBUTE_DATA& srcAttrs,
-                                             const std::wstring& workPath) {
+                                             const HostPath& workPath) {
     ScopedHandle dstHandle(CreateFileW(
-        WithExtendedPrefix(workPath).c_str(),
+        workPath.ForWin32().c_str(),
         GENERIC_READ | GENERIC_WRITE,
         0,
         nullptr,
@@ -523,7 +524,7 @@ NTSTATUS CopyUp::LowerUserStreamStatus(const std::wstring& normalized) {
     return hasUserStream ? STATUS_INVALID_PARAMETER : STATUS_SUCCESS;
 }
 
-NTSTATUS CopyUp::BuildMetacopyShell(const std::wstring& sourcePath, const std::wstring& workPath) {
+NTSTATUS CopyUp::BuildMetacopyShell(const std::wstring& sourcePath, const HostPath& workPath) {
     WIN32_FILE_ATTRIBUTE_DATA srcAttrs;
     if (!GetFileAttributesExW(WithExtendedPrefix(sourcePath).c_str(), GetFileExInfoStandard,
                               &srcAttrs)) {
@@ -531,7 +532,7 @@ NTSTATUS CopyUp::BuildMetacopyShell(const std::wstring& sourcePath, const std::w
     }
 
     FileBasicInfoGuard basicInfo(srcAttrs, StagedFileAttributes(srcAttrs.dwFileAttributes),
-                                 workPath);
+                                 workPath.Text());
     NTSTATUS status = StageMetacopyShellInWorkDir(sourcePath, srcAttrs, workPath);
     if (NT_SUCCESS(status)) {
         LayerMountMetadata metacopyMetadata = MakeCopyUpMetadata(sourcePath);
@@ -573,7 +574,7 @@ FileCopyUpResult CopyUp::CopyUpMetadataOnly(const std::wstring& relativePath) {
         return {status, false};
     }
 
-    const std::wstring workPath = GenerateStagingPath();
+    const HostPath workPath = GenerateStagingPath();
     status = BuildMetacopyShell(target->source.absolutePath, workPath);
     if (!NT_SUCCESS(status)) {
         return {status, false};
@@ -793,8 +794,8 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         nullptr));
-    const std::wstring stagedPath = GenerateStagingPath();
-    FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), stagedPath);
+    const HostPath stagedPath = GenerateStagingPath();
+    FileBasicInfoGuard basicInfo(srcHandle.Get(), AttributesOrNone(srcAttrs), stagedPath.Text());
     srcHandle.Reset();
 
     status = BuildStagedDirectory(source.absolutePath, stagedPath);
@@ -802,7 +803,8 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
         // The attributes go on after the streams, because NTFS refuses a
         // new stream on a read-only directory.
         basicInfo.Restore();
-        status = MoveUpperEntry(stagedPath, upperPath, ReplaceExisting::No, config_).status;
+        status =
+            MoveUpperEntry(stagedPath.Text(), upperPath, ReplaceExisting::No, config_).status;
     }
     if (!NT_SUCCESS(status)) {
         RemoveStagedEntry(stagedPath, config_);
@@ -816,13 +818,13 @@ NTSTATUS CopyUp::CopyUpDirectory(const std::wstring& relativePath) {
 }
 
 NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
-                                      const std::wstring& stagedPath) {
-    if (!::CreateDirectoryW(WithExtendedPrefix(stagedPath).c_str(), nullptr)) {
+                                      const HostPath& stagedPath) {
+    if (!::CreateDirectoryW(stagedPath.ForWin32().c_str(), nullptr)) {
         return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
     // The staged directory has no children yet, so its layout goes on now
     // and passes to the entries created in it later.
-    const NTSTATUS status = CopyDirectoryOwnMetadata(sourcePath, stagedPath);
+    const NTSTATUS status = CopyDirectoryOwnMetadata(sourcePath, stagedPath.Text());
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -830,12 +832,12 @@ NTSTATUS CopyUp::BuildStagedDirectory(const std::wstring& sourcePath,
     // template for auto-inheritance onto children created inside it, so
     // dropping the source's DACL would broaden or narrow access on every
     // child created later.
-    if (!CopySecurityDescriptor(sourcePath, stagedPath)) {
+    if (!CopySecurityDescriptor(sourcePath, stagedPath.Text())) {
         return StatusOfFailedCall(ERROR_ACCESS_DENIED);
     }
 
     // Without the record the directory has no origin and no stable file ID.
-    if (!MetadataStore::WriteLayerMountMetadata(stagedPath, MakeCopyUpMetadata(sourcePath),
+    if (!MetadataStore::WriteLayerMountMetadata(stagedPath.Text(), MakeCopyUpMetadata(sourcePath),
                                                 &config_)) {
         return StatusOfFailedCall(ERROR_WRITE_FAULT);
     }
@@ -911,9 +913,9 @@ NTSTATUS CopyUp::SetRenameDestinationAside(const std::wstring& newNorm,
     const std::wstring upperPath = pathResolver_.GetStoredUpperPath(newNorm);
     const AsideRules rules =
         where == DestinationAside::WorkDirectory
-            ? AsideRules{[this]() { return GenerateStagingPath(); }, false,
+            ? AsideRules{[this]() { return GenerateStagingPath().Text(); }, false,
                          [](const std::wstring& path, const LayerConfig& config) {
-                             RemoveStagedEntry(path, config);
+                             RemoveStagedEntry(HostPath(path), config);
                          }}
             : AsideRules{[this, &upperPath]() { return GenerateAsidePathNextTo(upperPath); },
                          true,

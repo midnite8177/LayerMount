@@ -301,14 +301,14 @@ LayerMountMetadata MetadataStore::ReadLayerMountMetadata(const std::wstring& fil
     if (!IsDefaultMetadata(fromAds)) {
         return fromAds;
     }
-    return SidecarMetadata::Read(filePath, config->upperPath);
+    return SidecarMetadata(config->upperPath).Read(filePath);
 }
 
 bool MetadataStore::WriteLayerMountMetadata(const std::wstring& filePath,
                                             const LayerMountMetadata& metadata,
                                             const LayerConfig* config) {
     if (UseSidecarFor(config)) {
-        return SidecarMetadata::Write(filePath, metadata, config->upperPath);
+        return SidecarMetadata(config->upperPath).Write(filePath, metadata);
     }
     return WriteAdsOnly(filePath, metadata);
 }
@@ -319,11 +319,22 @@ bool MetadataStore::RemoveLayerMountMetadata(const std::wstring& filePath,
     if (config == nullptr) {
         return adsOk;
     }
-    bool sidecarOk = SidecarMetadata::Remove(filePath, config->upperPath);
+    bool sidecarOk = SidecarMetadata(config->upperPath).Remove(filePath);
     return adsOk && sidecarOk;
 }
 
 namespace {
+
+void RemoveRecordsOfReplacedEntry(const SidecarMetadata& sidecar, const std::wstring& fromPath,
+                                  const std::wstring& toPath) {
+    // A failed Move can leave the record of the moved entry at toPath.
+    // Without this check, the Remove deletes that record.
+    const bool movedEntryKeptItsRecordAtFromPath = sidecar.HasRecord(fromPath);
+    if (movedEntryKeptItsRecordAtFromPath) {
+        sidecar.Remove(toPath);
+    }
+    sidecar.RemoveOpaque(toPath);
+}
 
 // Calls visit with the path of each entry below dirPath, as
 // ForEachEntryBelow does. Returns the error of the first visit that fails,
@@ -417,9 +428,10 @@ NTSTATUS MetadataStore::MoveSidecarRecords(const std::wstring& from,
     if (!UseSidecarFor(&config)) {
         return STATUS_SUCCESS;
     }
+    const SidecarMetadata sidecar(config.upperPath);
     return ForEachMovedEntry(from, to, [&](const std::wstring& fromPath,
                                            const std::wstring& toPath) {
-        const NTSTATUS status = SidecarMetadata::Move(fromPath, toPath, config.upperPath);
+        const NTSTATUS status = sidecar.Move(fromPath, toPath);
         if (NT_SUCCESS(status)) {
             moved->push_back({fromPath, toPath});
         }
@@ -433,20 +445,15 @@ NTSTATUS MetadataStore::MoveSidecarRecordsLeavingStuckOnes(const std::wstring& f
     if (!UseSidecarFor(&config)) {
         return STATUS_SUCCESS;
     }
+    const SidecarMetadata sidecar(config.upperPath);
     NTSTATUS firstError = STATUS_SUCCESS;
     const NTSTATUS walkStatus = ForEachMovedEntry(from, to, [&](const std::wstring& fromPath,
                                                                 const std::wstring& toPath) {
-        const NTSTATUS status = SidecarMetadata::Move(fromPath, toPath, config.upperPath);
+        const NTSTATUS status = sidecar.Move(fromPath, toPath);
         if (NT_SUCCESS(status)) {
             return STATUS_SUCCESS;
         }
-        // The moved entry is at toPath now, so a record at that key is one
-        // of an entry that the move replaced. A failed Move can leave the
-        // moved entry's own record at toPath, and then none is at fromPath.
-        if (SidecarMetadata::HasRecord(fromPath, config.upperPath)) {
-            SidecarMetadata::Remove(toPath, config.upperPath);
-        }
-        SidecarMetadata::RemoveOpaque(toPath, config.upperPath);
+        RemoveRecordsOfReplacedEntry(sidecar, fromPath, toPath);
         if (NT_SUCCESS(firstError)) {
             firstError = status;
         }
@@ -457,10 +464,10 @@ NTSTATUS MetadataStore::MoveSidecarRecordsLeavingStuckOnes(const std::wstring& f
 
 NTSTATUS MetadataStore::MoveSidecarRecordsBack(const std::vector<MovedSidecarRecord>& moved,
                                                const LayerConfig& config) {
+    const SidecarMetadata sidecar(config.upperPath);
     NTSTATUS firstError = STATUS_SUCCESS;
     for (auto record = moved.rbegin(); record != moved.rend(); ++record) {
-        const NTSTATUS status =
-            SidecarMetadata::Move(record->toPath, record->fromPath, config.upperPath);
+        const NTSTATUS status = sidecar.Move(record->toPath, record->fromPath);
         if (!NT_SUCCESS(status) && NT_SUCCESS(firstError)) {
             firstError = status;
         }
@@ -489,6 +496,7 @@ void MetadataStore::RemoveSidecarRecordsOfGoneEntries(const std::vector<std::wst
     if (!UseSidecarFor(&config)) {
         return;
     }
+    const SidecarMetadata sidecar(config.upperPath);
     for (const std::wstring& entryPath : entries) {
         if (::GetFileAttributesW(WithExtendedPrefix(entryPath).c_str()) !=
             INVALID_FILE_ATTRIBUTES) {
@@ -498,8 +506,8 @@ void MetadataStore::RemoveSidecarRecordsOfGoneEntries(const std::vector<std::wst
         if (probeErr != ERROR_FILE_NOT_FOUND && probeErr != ERROR_PATH_NOT_FOUND) {
             continue;
         }
-        SidecarMetadata::Remove(entryPath, config.upperPath);
-        SidecarMetadata::RemoveOpaque(entryPath, config.upperPath);
+        sidecar.Remove(entryPath);
+        sidecar.RemoveOpaque(entryPath);
     }
 }
 
@@ -507,13 +515,13 @@ bool MetadataStore::HasOpaqueMetadata(const std::wstring& directoryPath,
                                       const LayerConfig* config) {
     if (HasOpaqueAdsOnly(directoryPath)) return true;
     if (config == nullptr) return false;
-    return SidecarMetadata::HasOpaque(directoryPath, config->upperPath);
+    return SidecarMetadata(config->upperPath).HasOpaque(directoryPath);
 }
 
 bool MetadataStore::SetOpaqueMetadata(const std::wstring& directoryPath,
                                       const LayerConfig* config) {
     if (UseSidecarFor(config)) {
-        return SidecarMetadata::SetOpaque(directoryPath, config->upperPath);
+        return SidecarMetadata(config->upperPath).SetOpaque(directoryPath);
     }
     return SetOpaqueAdsOnly(directoryPath);
 }
@@ -524,7 +532,7 @@ bool MetadataStore::RemoveOpaqueMetadata(const std::wstring& directoryPath,
     if (config == nullptr) {
         return adsOk;
     }
-    bool sidecarOk = SidecarMetadata::RemoveOpaque(directoryPath, config->upperPath);
+    bool sidecarOk = SidecarMetadata(config->upperPath).RemoveOpaque(directoryPath);
     return adsOk && sidecarOk;
 }
 

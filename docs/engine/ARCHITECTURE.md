@@ -124,16 +124,21 @@ reader of the upper never sees a half-built entry.
 
 ```cpp
 struct LayerConfig {
-    std::wstring upperPath;                  // writable layer (required)
-    std::vector<std::wstring> lowerPaths;    // index 0 = highest-priority lower
-    std::wstring workDirPath;                // copy-up work directory
+    HostPath     upperPath;                  // writable layer (required)
+    std::vector<HostPath> lowerPaths;        // index 0 = highest-priority lower
+    HostPath     workDirPath;                // copy-up work directory
     bool         enableProcessTracking;
-    std::wstring processRulesPath;
+    HostPath     processRulesPath;
     size_t       accessLogCapacity;
     size_t       pathCacheCapacity;
     UINT32       hostCapabilities;           // LM_HOST_CAPABILITIES bitfield
 };
 ```
+
+A `HostPath` holds a path on a disk of the machine in two forms:
+`Text()` as the caller wrote it, and `ForWin32()` with the extended
+prefix. [ADR 0008](../adr/0008-host-paths-carry-their-win32-form.md)
+gives the reason.
 
 Lookup precedence is **upper, then lowers in declared order, first-match
 wins**. A file present in the upper layer is the file the overlay
@@ -1218,8 +1223,8 @@ return `STATUS_ACCESS_DENIED`.
 A circular buffer of `AccessLogEntry` records. `LogAccess` appends;
 `GetRecentEntries(count)` returns the most-recent N. The buffer
 capacity comes from `LayerConfig::accessLogCapacity` (default 10000).
-Full export is available as JSON or CSV via `ExportLog` (file) or
-`ExportLogAsJson`/`ExportLogAsCsv` (in-memory string for ABI use).
+`ExportLogAsJson` and `ExportLogAsCsv` render the whole log as a JSON or
+CSV string in memory, for the ABI export calls.
 
 ### Hot-swap safety
 
@@ -1296,9 +1301,10 @@ call.
 
 `LM_CONFIG`, `LM_VHD_CONFIG`, and `LM_IMAGE_PACK_OPTIONS` carry a
 `structSize` field as their first member. Callers set it to
-`sizeof(STRUCT)` at their compile time; the engine compares against
-the size it knows about and interprets only the fields it understands.
-Adding a field at the end of the struct does not bump
+`sizeof(STRUCT)` at their compile time. The engine refuses a
+`structSize` too small to hold the last field of the struct's first
+shipped layout. A field appended later is read only when `structSize`
+reaches it. Adding a field at the end of the struct does not bump
 `LM_ABI_VERSION`. Reordering or removing a field does.
 
 Fixed-shape structs (`LM_FILE_INFO`, `LM_RESOLVED_PATH`, `LM_STATS`,

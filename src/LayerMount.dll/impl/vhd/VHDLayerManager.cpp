@@ -3,11 +3,21 @@
 #include "../ElevationUtil.h"
 #include "../LayerMount.h"
 #include "../LayerPath.h"
+#include "../NtStatusUtil.h"
 #include "../PathUtil.h"
 
 #include <limits>
 
 namespace LayerMount::VHD {
+
+namespace {
+
+// VirtDisk picks its default block or sector size for this value.
+constexpr ULONG kSystemDefaultSize = 0;
+// A differencing disk with this maximum size takes the size of its parent.
+constexpr ULONGLONG kParentSize = 0;
+
+}
 
 std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) return {};
@@ -40,10 +50,10 @@ std::wstring EnsureTrailingBackslash(const std::wstring& path) {
     return path + L'\\';
 }
 
-VHDLayerManager::VHDLayerManager(const std::wstring& workingDir)
+VHDLayerManager::VHDLayerManager(const HostPath& workingDir)
     : workingDir_(workingDir)
 {
-    std::filesystem::create_directories(workingDir_);
+    std::filesystem::create_directories(workingDir_.ForWin32());
 }
 
 DWORD VHDLayerManager::CheckElevation() {
@@ -66,11 +76,11 @@ std::wstring VHDLayerManager::GenerateId() {
     return id;
 }
 
-DWORD VHDLayerManager::OpenVHD(const std::wstring& path, VhdHandle& outHandle) {
+DWORD VHDLayerManager::OpenVHD(const HostPath& path, VhdHandle& outHandle) {
     VIRTUAL_STORAGE_TYPE storageType{};
     storageType.VendorId = VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT;
 
-    std::wstring ext = std::filesystem::path(path).extension().wstring();
+    std::wstring ext = std::filesystem::path(path.ForWin32()).extension().wstring();
     for (auto& c : ext) c = static_cast<wchar_t>(::towlower(c));
 
     if (ext == L".vhdx") {
@@ -87,7 +97,7 @@ DWORD VHDLayerManager::OpenVHD(const std::wstring& path, VhdHandle& outHandle) {
 
     DWORD result = ::OpenVirtualDisk(
         &storageType,
-        path.c_str(),
+        path.ForWin32().c_str(),
         VIRTUAL_DISK_ACCESS_ALL,
         OPEN_VIRTUAL_DISK_FLAG_NONE,
         &openParams,
@@ -96,8 +106,8 @@ DWORD VHDLayerManager::OpenVHD(const std::wstring& path, VhdHandle& outHandle) {
     return result;
 }
 
-DWORD VHDLayerManager::CreateVHD(const std::wstring& path, ULONGLONG sizeBytes,
-                                  bool dynamic, VhdHandle& outHandle) {
+DWORD VHDLayerManager::CreateVHD(const HostPath& path, ULONGLONG sizeBytes,
+                                  VhdAllocation allocation) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
 
@@ -109,40 +119,38 @@ DWORD VHDLayerManager::CreateVHD(const std::wstring& path, ULONGLONG sizeBytes,
     createParams.Version = CREATE_VIRTUAL_DISK_VERSION_2;
     createParams.Version2.UniqueId = GUID_NULL;
     createParams.Version2.MaximumSize = sizeBytes;
-    createParams.Version2.BlockSizeInBytes = 0;   // System default
-    createParams.Version2.SectorSizeInBytes = 0;  // System default
+    createParams.Version2.BlockSizeInBytes = kSystemDefaultSize;
+    createParams.Version2.SectorSizeInBytes = kSystemDefaultSize;
     createParams.Version2.ParentPath = nullptr;
     createParams.Version2.SourcePath = nullptr;
     createParams.Version2.PhysicalSectorSizeInBytes = 0;
 
-    CREATE_VIRTUAL_DISK_FLAG flags = dynamic
+    CREATE_VIRTUAL_DISK_FLAG flags = (allocation == VhdAllocation::Dynamic)
         ? CREATE_VIRTUAL_DISK_FLAG_NONE
         : CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION;
 
+    VhdHandle created;
     // Version 2 create parameters require VIRTUAL_DISK_ACCESS_NONE.
     result = ::CreateVirtualDisk(
         &storageType,
-        path.c_str(),
+        path.ForWin32().c_str(),
         VIRTUAL_DISK_ACCESS_NONE,
-        nullptr,    // security descriptor
+        nullptr,
         flags,
-        0,          // provider-specific flags
+        0,
         &createParams,
-        nullptr,    // overlapped
-        outHandle.Put());
+        nullptr,
+        created.Put());
 
     return result;
 }
 
-DWORD VHDLayerManager::AttachVHD(const std::wstring& path, bool readOnly,
-                                  VhdHandle& outHandle,
-                                  std::wstring& outPhysicalPath,
-                                  AttachLifetime lifetime,
-                                  bool suppressDriveLetter) {
+DWORD VHDLayerManager::AttachVHD(const HostPath& path, const AttachOptions& options,
+                                  AttachedVhd& out) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
 
-    outPhysicalPath.clear();
+    out.physicalPath.clear();
 
     VhdHandle handle;
     result = OpenVHD(path, handle);
@@ -154,25 +162,25 @@ DWORD VHDLayerManager::AttachVHD(const std::wstring& path, bool readOnly,
     // Without PERMANENT_LIFETIME the OS detaches the disk when the attach
     // handle closes, including when the process dies.
     ATTACH_VIRTUAL_DISK_FLAG flags =
-        (lifetime == AttachLifetime::Permanent)
+        (options.lifetime == AttachLifetime::Permanent)
             ? ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME
             : ATTACH_VIRTUAL_DISK_FLAG_NONE;
-    if (readOnly) {
+    if (options.access == AttachAccess::ReadOnly) {
         flags = static_cast<ATTACH_VIRTUAL_DISK_FLAG>(
             flags | ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY);
     }
-    if (suppressDriveLetter) {
+    if (options.driveLetter == DriveLetter::Suppress) {
         flags = static_cast<ATTACH_VIRTUAL_DISK_FLAG>(
             flags | ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER);
     }
 
     result = ::AttachVirtualDisk(
         handle.Get(),
-        nullptr,    // security descriptor
+        nullptr,
         flags,
-        0,          // provider-specific flags
+        0,
         &attachParams,
-        nullptr);   // overlapped
+        nullptr);
 
     if (result != ERROR_SUCCESS) return result;
 
@@ -184,12 +192,12 @@ DWORD VHDLayerManager::AttachVHD(const std::wstring& path, bool readOnly,
         return result;
     }
 
-    outPhysicalPath = diskPath;
-    outHandle = std::move(handle);
+    out.physicalPath = diskPath;
+    out.handle = std::move(handle);
     return ERROR_SUCCESS;
 }
 
-DWORD VHDLayerManager::DetachVHD(const std::wstring& path) {
+DWORD VHDLayerManager::DetachVHD(const HostPath& path) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
 
@@ -210,9 +218,8 @@ DWORD VHDLayerManager::DetachVHD(const VhdHandle& attachHandle) {
         0);
 }
 
-DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
-                                              const std::wstring& parentPath,
-                                              VhdHandle& outHandle) {
+DWORD VHDLayerManager::CreateDifferencingVHD(const HostPath& childPath,
+                                              const HostPath& parentPath) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
 
@@ -223,29 +230,33 @@ DWORD VHDLayerManager::CreateDifferencingVHD(const std::wstring& childPath,
     CREATE_VIRTUAL_DISK_PARAMETERS createParams{};
     createParams.Version = CREATE_VIRTUAL_DISK_VERSION_2;
     createParams.Version2.UniqueId = GUID_NULL;
-    createParams.Version2.MaximumSize = 0;            // Inherited from parent
-    createParams.Version2.BlockSizeInBytes = 0;
-    createParams.Version2.SectorSizeInBytes = 0;
-    createParams.Version2.ParentPath = parentPath.c_str();
+    createParams.Version2.MaximumSize = kParentSize;
+    createParams.Version2.BlockSizeInBytes = kSystemDefaultSize;
+    createParams.Version2.SectorSizeInBytes = kSystemDefaultSize;
+    // VirtDisk removes the \\?\ prefix from a short parent. It keeps the
+    // prefix in the parent locator only for a parent past MAX_PATH. See ADR 0008.
+    const std::wstring parentForWin32 = parentPath.ForWin32();
+    createParams.Version2.ParentPath = parentForWin32.c_str();
     createParams.Version2.SourcePath = nullptr;
     createParams.Version2.PhysicalSectorSizeInBytes = 0;
 
+    VhdHandle created;
     // Version 2 create parameters require VIRTUAL_DISK_ACCESS_NONE.
     result = ::CreateVirtualDisk(
         &storageType,
-        childPath.c_str(),
+        childPath.ForWin32().c_str(),
         VIRTUAL_DISK_ACCESS_NONE,
         nullptr,
         CREATE_VIRTUAL_DISK_FLAG_NONE,
         0,
         &createParams,
         nullptr,
-        outHandle.Put());
+        created.Put());
 
     return result;
 }
 
-DWORD VHDLayerManager::MergeVHD(const std::wstring& childPath) {
+DWORD VHDLayerManager::MergeVHD(const HostPath& childPath) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
 
@@ -262,7 +273,7 @@ DWORD VHDLayerManager::MergeVHD(const std::wstring& childPath) {
         handle.Get(),
         MERGE_VIRTUAL_DISK_FLAG_NONE,
         &mergeParams,
-        nullptr);   // overlapped
+        nullptr);
 
     return result;
 }
@@ -271,7 +282,7 @@ static const GUID PARTITION_BASIC_DATA_ID =
     { 0xebd0a0a2, 0xb9e5, 0x4433, { 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7 } };
 
 DWORD VHDLayerManager::InitializeVHD(const std::wstring& physicalDiskPath,
-                                      const std::wstring& vhdPath) {
+                                      const HostPath& vhdPath) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
 
@@ -449,9 +460,11 @@ DWORD VHDLayerManager::FormatVolume(const std::wstring& volumeGuid,
     return (exitCode == 0) ? ERROR_SUCCESS : ERROR_UNRECOGNIZED_VOLUME;
 }
 
-DWORD VHDLayerManager::InitializeVHDDiskpart(const std::wstring& vhdPath) {
+DWORD VHDLayerManager::InitializeVHDDiskpart(const HostPath& vhdPath) {
+    // diskpart reads this path from a script file, not through a Win32 call,
+    // so it gets the path as the caller gave it.
     std::wstring script =
-        L"SELECT VDISK FILE=\"" + vhdPath + L"\"\r\n"
+        L"SELECT VDISK FILE=\"" + vhdPath.Text() + L"\"\r\n"
         L"ATTACH VDISK\r\n"
         L"ONLINE DISK\r\n"
         L"ATTRIBUTES DISK CLEAR READONLY\r\n"
@@ -555,9 +568,9 @@ DWORD VHDLayerManager::InitializeVHDDiskpart(const std::wstring& vhdPath) {
 // in any case and with or without trailing dots or spaces. On a listing
 // error the function sets `ec`.
 static std::vector<std::filesystem::directory_entry> ImportedRootEntries(
-        const std::wstring& directoryPath, std::error_code& ec) {
+        const HostPath& directoryPath, std::error_code& ec) {
     std::vector<std::filesystem::directory_entry> entries;
-    std::filesystem::directory_iterator it(directoryPath, ec);
+    std::filesystem::directory_iterator it(directoryPath.ForWin32(), ec);
     for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
         if (!FirstSegmentOpensAsSidecar(it->path().filename().wstring())) {
             entries.push_back(*it);
@@ -566,10 +579,8 @@ static std::vector<std::filesystem::directory_entry> ImportedRootEntries(
     return entries;
 }
 
-// Sets `sizeBytes` to a VHD capacity that fits the files in and under
-// `rootEntries`, plus a fifth for file system overhead, and at least
-// 100 MiB. A file whose size cannot be read counts as empty. Returns
-// ERROR_ARITHMETIC_OVERFLOW when the capacity does not fit in a ULONGLONG.
+// Sets `sizeBytes` to the capacity that ImportDirectory documents for a
+// std::nullopt size, counting the files in and under `rootEntries`.
 static DWORD SizeToFit(const std::vector<std::filesystem::directory_entry>& rootEntries,
                        ULONGLONG& sizeBytes) {
     namespace fs = std::filesystem;
@@ -601,9 +612,181 @@ static DWORD SizeToFit(const std::vector<std::filesystem::directory_entry>& root
     return ERROR_SUCCESS;
 }
 
-DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
-                                        const std::wstring& vhdPath,
-                                        ULONGLONG sizeBytes) {
+namespace {
+
+// A directory with a volume mounted on it. Unmount, or the destructor when
+// Unmount was not called, removes the mount point and the directory.
+class TempMount {
+public:
+    explicit TempMount(std::wstring directory)
+        : directory_(std::move(directory)),
+          mountPoint_(EnsureTrailingBackslash(directory_)) {}
+
+    ~TempMount() {
+        if (mounted_) Unmount();
+    }
+
+    TempMount(const TempMount&) = delete;
+    TempMount& operator=(const TempMount&) = delete;
+
+    // Makes the directory and mounts the volume on it. When the mount fails,
+    // it removes the directory again and returns the error of the mount.
+    DWORD Mount(const std::wstring& volumeGuid) {
+        std::filesystem::create_directories(directory_);
+        if (!::SetVolumeMountPointW(mountPoint_.c_str(), volumeGuid.c_str())) {
+            const DWORD err = ::GetLastError();
+            std::error_code ec;
+            std::filesystem::remove_all(directory_, ec);
+            return err;
+        }
+        mounted_ = true;
+        return ERROR_SUCCESS;
+    }
+
+    // A mount point that is already gone is not an error. A directory that
+    // does not go away is ERROR_DIR_NOT_EMPTY, unless the mount point
+    // removal failed first.
+    DWORD Unmount() noexcept {
+        mounted_ = false;
+        DWORD cleanupErr = ERROR_SUCCESS;
+        if (!::DeleteVolumeMountPointW(mountPoint_.c_str())) {
+            const DWORD err = ::GetLastError();
+            if (err != ERROR_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
+                cleanupErr = err;
+            }
+        }
+        std::error_code ec;
+        std::filesystem::remove_all(directory_, ec);
+        if (ec && cleanupErr == ERROR_SUCCESS) {
+            cleanupErr = ERROR_DIR_NOT_EMPTY;
+        }
+        return cleanupErr;
+    }
+
+    const std::wstring& Directory() const noexcept { return directory_; }
+
+private:
+    std::wstring directory_;
+    std::wstring mountPoint_;
+    bool mounted_ = false;
+};
+
+struct CopyFailure {
+    std::error_code ec;
+    std::filesystem::path entry;
+    ExportStep step;
+};
+
+// Copies the link at `src` to `dst`, first removing a file or link already
+// at `dst`, so a second export replaces the link as overwrite_existing
+// replaces a file. symlink_status keeps a link at `dst` from being followed.
+void CopySymlinkReplacing(const std::filesystem::path& src, const std::filesystem::path& dst,
+                          std::error_code& ec) {
+    namespace fs = std::filesystem;
+    std::error_code probeEc;
+    const fs::file_status existing = fs::symlink_status(dst, probeEc);
+    if (fs::exists(existing) && !fs::is_directory(existing)) {
+        fs::remove(dst, ec);
+        if (ec) return;
+    }
+    fs::copy_symlink(src, dst, ec);
+}
+
+// fs::copy does not report which entry failed, so this copies `top` to
+// `topDst` with the same options (recursive, overwrite_existing,
+// copy_symlinks), walking depth first, and records the first entry it cannot
+// copy or list. An entry that is not a file, a directory or a symbolic link,
+// such as a junction, fails with ERROR_NOT_SUPPORTED; the walk neither
+// follows it nor copies it as a link.
+CopyFailure CopyTree(const std::filesystem::directory_entry& top,
+                     const std::filesystem::path& topDst) {
+    namespace fs = std::filesystem;
+    struct Frame {
+        fs::path source;
+        fs::path dst;
+        fs::directory_iterator it;
+        // Whether `it` still points at an entry the walk has copied.
+        bool advance;
+    };
+    std::vector<Frame> pending;
+
+    const auto copyEntry = [&pending](const fs::directory_entry& entry,
+                                      const fs::path& dst) -> CopyFailure {
+        std::error_code ec;
+        const fs::file_status status = entry.symlink_status(ec);
+        if (!ec) {
+            if (fs::is_symlink(status)) {
+                CopySymlinkReplacing(entry.path(), dst, ec);
+            } else if (fs::is_directory(status)) {
+                fs::create_directory(dst, entry.path(), ec);
+                if (!ec) {
+                    fs::directory_iterator it(entry.path(), ec);
+                    if (ec) return {ec, entry.path(), ExportStep::List};
+                    pending.push_back({entry.path(), dst, std::move(it), false});
+                }
+            } else if (fs::is_regular_file(status)) {
+                fs::copy_file(entry.path(), dst, fs::copy_options::overwrite_existing, ec);
+            } else {
+                ec = std::error_code(ERROR_NOT_SUPPORTED, std::system_category());
+            }
+        }
+        if (ec) return {ec, entry.path(), ExportStep::Copy};
+        return {};
+    };
+
+    CopyFailure failure = copyEntry(top, topDst);
+    while (!failure.ec && !pending.empty()) {
+        Frame& frame = pending.back();
+        if (frame.advance) {
+            std::error_code ec;
+            frame.it.increment(ec);
+            if (ec) return {ec, frame.source, ExportStep::List};
+        }
+        frame.advance = true;
+        if (frame.it == fs::directory_iterator()) {
+            pending.pop_back();
+            continue;
+        }
+        // A copy, because copyEntry can grow `pending` and move the frame.
+        const fs::directory_entry child = *frame.it;
+        const fs::path childDst = frame.dst / child.path().filename();
+        failure = copyEntry(child, childDst);
+    }
+    return failure;
+}
+
+// `entry` as a path from the root of the volume mounted at `volumeRoot`,
+// such as `\sub\file.txt`.
+std::wstring VolumePathOf(const std::filesystem::path& entry,
+                          const std::filesystem::path& volumeRoot) {
+    const std::filesystem::path relative = entry.lexically_relative(volumeRoot);
+    return relative == L"." ? L"\\" : L"\\" + relative.wstring();
+}
+
+// Whether the export leaves out the entry `name` at the volume root when it
+// copies into `dstRoot`.
+bool SkippedAtVolumeRoot(const std::wstring& name, const std::filesystem::path& dstRoot) {
+    // NTFS volume internals. System Volume Information grants access only to
+    // SYSTEM, so even an elevated copy fails on it.
+    static const wchar_t* const kSkipAtRoot[] = {
+        L"System Volume Information",
+        L"$RECYCLE.BIN",
+    };
+    for (const wchar_t* s : kSkipAtRoot) {
+        if (_wcsicmp(name.c_str(), s) == 0) return true;
+    }
+    if (FirstSegmentOpensAsSidecar(name)) return true;
+    // A name such as `OVERLA~1` can be the short name of a `.overlay`
+    // already in the destination, and a copy under it would land inside.
+    const std::optional<std::wstring> dstLongName = ExistingLongName(dstRoot, name);
+    return dstLongName && FirstSegmentOpensAsSidecar(*dstLongName);
+}
+
+}
+
+DWORD VHDLayerManager::ImportDirectory(const HostPath& directoryPath,
+                                        const HostPath& vhdPath,
+                                        std::optional<ULONGLONG> sizeBytes) {
     DWORD result = CheckElevation();
     if (result != ERROR_SUCCESS) return result;
 
@@ -614,210 +797,118 @@ DWORD VHDLayerManager::ImportDirectory(const std::wstring& directoryPath,
         ImportedRootEntries(directoryPath, listEc);
     if (listEc) return ERROR_WRITE_FAULT;
 
-    if (sizeBytes == 0) {
-        result = SizeToFit(rootEntries, sizeBytes);
+    ULONGLONG capacity = 0;
+    if (sizeBytes) {
+        capacity = *sizeBytes;
+    } else {
+        result = SizeToFit(rootEntries, capacity);
         if (result != ERROR_SUCCESS) return result;
     }
 
-    VhdHandle createHandle;
-    result = CreateVHD(vhdPath, sizeBytes, true, createHandle);
+    result = CreateVHD(vhdPath, capacity, VhdAllocation::Dynamic);
     if (result != ERROR_SUCCESS) return result;
-    createHandle.Close();
+    const std::wstring vhdFile = vhdPath.ForWin32();
 
-    VhdHandle attachHandle;
-    std::wstring physicalPath;
-    result = AttachVHD(vhdPath, false, attachHandle, physicalPath,
-                       AttachLifetime::ProcessScoped,
-                       /*suppressDriveLetter=*/ true);
+    AttachedVhd attached;
+    result = AttachVHD(vhdPath,
+                       {AttachAccess::ReadWrite, AttachLifetime::ProcessScoped,
+                        DriveLetter::Suppress},
+                       attached);
     if (result != ERROR_SUCCESS) {
-        fs::remove(vhdPath);
+        fs::remove(vhdFile);
         return result;
     }
 
-    result = InitializeVHD(physicalPath, vhdPath);
-    if (result != ERROR_SUCCESS) {
-        DetachVHD(attachHandle);
-        attachHandle.Close();
-        fs::remove(vhdPath);
-        return result;
-    }
+    const auto discardVhd = [&](DWORD error) {
+        DetachVHD(attached.handle);
+        attached.handle.Close();
+        std::error_code removeEc;
+        fs::remove(vhdFile, removeEc);
+        return error;
+    };
+
+    result = InitializeVHD(attached.physicalPath, vhdPath);
+    if (result != ERROR_SUCCESS) return discardVhd(result);
 
     std::wstring volumeGuid;
-    result = GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid);
-    if (result != ERROR_SUCCESS) {
-        DetachVHD(attachHandle);
-        attachHandle.Close();
-        fs::remove(vhdPath);
-        return result;
-    }
+    result = GetVolumeGuidForPhysicalDisk(attached.physicalPath, volumeGuid);
+    if (result != ERROR_SUCCESS) return discardVhd(result);
 
-    std::wstring tempMount = JoinDirPath(workingDir_, L"temp_mounts\\" + GenerateId());
-    fs::create_directories(tempMount);
-    std::wstring tempMountSlash = EnsureTrailingBackslash(tempMount);
-
-    if (!::SetVolumeMountPointW(tempMountSlash.c_str(), volumeGuid.c_str())) {
-        DWORD err = ::GetLastError();
-        fs::remove_all(tempMount);
-        DetachVHD(attachHandle);
-        attachHandle.Close();
-        fs::remove(vhdPath);
-        return err;
-    }
+    TempMount mount(JoinDirPath(workingDir_.ForWin32(), L"temp_mounts\\" + GenerateId()));
+    result = mount.Mount(volumeGuid);
+    if (result != ERROR_SUCCESS) return discardVhd(result);
 
     std::error_code ec;
     for (const auto& rootEntry : rootEntries) {
-        fs::copy(rootEntry.path(), fs::path(tempMount) / rootEntry.path().filename(),
+        fs::copy(rootEntry.path(), fs::path(mount.Directory()) / rootEntry.path().filename(),
                  fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
         if (ec) break;
     }
 
-    DWORD copyResult = ec ? ERROR_WRITE_FAULT : ERROR_SUCCESS;
+    const DWORD copyResult = ec ? ERROR_WRITE_FAULT : ERROR_SUCCESS;
+    const DWORD cleanupErr = mount.Unmount();
 
-    std::error_code rmEc;
-    DWORD cleanupErr = ERROR_SUCCESS;
-    if (!::DeleteVolumeMountPointW(tempMountSlash.c_str())) {
-        const DWORD err = ::GetLastError();
-        if (err != ERROR_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
-            cleanupErr = err;
-        }
-    }
-    fs::remove_all(tempMount, rmEc);
-    if (rmEc && cleanupErr == ERROR_SUCCESS) {
-        cleanupErr = ERROR_DIR_NOT_EMPTY;
-    }
-    DetachVHD(attachHandle);
-    attachHandle.Close();
-
-    if (copyResult != ERROR_SUCCESS) {
-        fs::remove(vhdPath, rmEc);
-        return copyResult;
-    }
+    if (copyResult != ERROR_SUCCESS) return discardVhd(copyResult);
+    DetachVHD(attached.handle);
+    attached.handle.Close();
     return cleanupErr;
 }
 
-DWORD VHDLayerManager::ExportToDirectory(const std::wstring& vhdPath,
-                                          const std::wstring& directoryPath) {
+ExportResult VHDLayerManager::ExportToDirectory(const HostPath& vhdPath,
+                                                const HostPath& directoryPath) {
+    const auto withoutEntry = [](DWORD error) {
+        return ExportResult{error, std::wstring(), ExportStep::Copy};
+    };
+
     DWORD result = CheckElevation();
-    if (result != ERROR_SUCCESS) return result;
+    if (result != ERROR_SUCCESS) return withoutEntry(result);
 
     namespace fs = std::filesystem;
 
-    VhdHandle attachHandle;
-    std::wstring physicalPath;
-    result = AttachVHD(vhdPath, true, attachHandle, physicalPath,
-                       AttachLifetime::ProcessScoped,
-                       /*suppressDriveLetter=*/ true);
-    if (result != ERROR_SUCCESS) return result;
+    AttachedVhd attached;
+    result = AttachVHD(vhdPath,
+                       {AttachAccess::ReadOnly, AttachLifetime::ProcessScoped,
+                        DriveLetter::Suppress},
+                       attached);
+    if (result != ERROR_SUCCESS) return withoutEntry(result);
 
-    std::wstring volumeGuid;
-    result = GetVolumeGuidForPhysicalDisk(physicalPath, volumeGuid);
-    if (result != ERROR_SUCCESS) {
-        DetachVHD(attachHandle);
-        attachHandle.Close();
-        return result;
-    }
-
-    std::wstring tempMount = JoinDirPath(workingDir_, L"temp_mounts\\" + GenerateId());
-    fs::create_directories(tempMount);
-    std::wstring tempMountSlash = EnsureTrailingBackslash(tempMount);
-
-    if (!::SetVolumeMountPointW(tempMountSlash.c_str(), volumeGuid.c_str())) {
-        DWORD err = ::GetLastError();
-        std::error_code ec;
-        fs::remove_all(tempMount, ec);
-        DetachVHD(attachHandle);
-        attachHandle.Close();
-        return err;
-    }
-
-    fs::create_directories(directoryPath);
-
-    // NTFS volume internals. System Volume Information grants access only to
-    // SYSTEM, so even an elevated copy fails on it.
-    static const wchar_t* const kSkipAtRoot[] = {
-        L"System Volume Information",
-        L"$RECYCLE.BIN",
+    const auto detachVhd = [&](DWORD error) {
+        DetachVHD(attached.handle);
+        attached.handle.Close();
+        return error;
     };
 
-    const fs::path srcRoot = tempMount;
-    const fs::path dstRoot = directoryPath;
+    std::wstring volumeGuid;
+    result = GetVolumeGuidForPhysicalDisk(attached.physicalPath, volumeGuid);
+    if (result != ERROR_SUCCESS) return withoutEntry(detachVhd(result));
 
-    // An entry that fails to copy, such as a file with a restrictive ACL,
-    // does not stop the export of the others.
-    size_t copiedEntries = 0;
-    size_t failedEntries = 0;
-    std::error_code ec;
+    TempMount mount(JoinDirPath(workingDir_.ForWin32(), L"temp_mounts\\" + GenerateId()));
+    result = mount.Mount(volumeGuid);
+    if (result != ERROR_SUCCESS) return withoutEntry(detachVhd(result));
 
-    fs::directory_iterator top(srcRoot, ec);
-    for (; !ec && top != fs::directory_iterator(); top.increment(ec)) {
+    const fs::path dstRoot = directoryPath.ForWin32();
+    fs::create_directories(dstRoot);
+
+    const fs::path srcRoot = mount.Directory();
+    CopyFailure failure{};
+
+    std::error_code listEc;
+    fs::directory_iterator top(srcRoot, listEc);
+    for (; !listEc && top != fs::directory_iterator(); top.increment(listEc)) {
         const fs::directory_entry& topEntry = *top;
-        const std::wstring name = topEntry.path().filename().wstring();
-        // A name such as `OVERLA~1` can be the short name of a `.overlay`
-        // already in the destination, and a copy under it would land inside.
-        const std::optional<std::wstring> dstLongName = ExistingLongName(dstRoot, name);
-        bool skip = FirstSegmentOpensAsSidecar(name) ||
-                    (dstLongName && FirstSegmentOpensAsSidecar(*dstLongName));
-        for (const wchar_t* s : kSkipAtRoot) {
-            if (_wcsicmp(name.c_str(), s) == 0) { skip = true; break; }
-        }
-        if (skip) continue;
-
-        const fs::path dstTop = dstRoot / topEntry.path().filename();
-        std::error_code copyEc;
-        fs::copy(topEntry.path(), dstTop,
-                 fs::copy_options::recursive |
-                 fs::copy_options::overwrite_existing |
-                 fs::copy_options::copy_symlinks,
-                 copyEc);
-        if (!copyEc) {
-            ++copiedEntries;
-            continue;
-        }
-
-        std::error_code it_ec;
-        fs::recursive_directory_iterator it(topEntry.path(),
-            fs::directory_options::skip_permission_denied, it_ec);
-        fs::recursive_directory_iterator end;
-        if (it_ec) { ++failedEntries; continue; }
-        for (; it != end; it.increment(it_ec)) {
-            if (it_ec) { ++failedEntries; it_ec.clear(); continue; }
-            std::error_code rel_ec;
-            const auto rel = fs::relative(it->path(), srcRoot, rel_ec);
-            if (rel_ec) { ++failedEntries; continue; }
-            const auto dst = dstRoot / rel;
-            std::error_code one_ec;
-            if (it->is_directory(one_ec)) {
-                fs::create_directories(dst, one_ec);
-                if (!one_ec) ++copiedEntries; else ++failedEntries;
-            } else if (it->is_regular_file(one_ec)) {
-                fs::create_directories(dst.parent_path(), one_ec);
-                fs::copy_file(it->path(), dst,
-                              fs::copy_options::overwrite_existing, one_ec);
-                if (!one_ec) ++copiedEntries; else ++failedEntries;
-            }
-        }
+        if (SkippedAtVolumeRoot(topEntry.path().filename().wstring(), dstRoot)) continue;
+        failure = CopyTree(topEntry, dstRoot / topEntry.path().filename());
+        if (failure.ec) break;
     }
+    if (listEc) failure = {listEc, srcRoot, ExportStep::List};
 
-    DWORD copyResult = (ec && copiedEntries == 0) ? ERROR_READ_FAULT
-                                                   : ERROR_SUCCESS;
+    const DWORD cleanupErr = detachVhd(mount.Unmount());
 
-    DWORD cleanupErr = ERROR_SUCCESS;
-    if (!::DeleteVolumeMountPointW(tempMountSlash.c_str())) {
-        const DWORD err = ::GetLastError();
-        if (err != ERROR_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
-            cleanupErr = err;
-        }
+    if (failure.ec) {
+        return {Win32FromErrorCode(failure.ec), VolumePathOf(failure.entry, srcRoot),
+                failure.step};
     }
-    std::error_code cleanupEc;
-    fs::remove_all(tempMount, cleanupEc);
-    if (cleanupEc && cleanupErr == ERROR_SUCCESS) {
-        cleanupErr = ERROR_DIR_NOT_EMPTY;
-    }
-    DetachVHD(attachHandle);
-    attachHandle.Close();
-
-    if (copyResult != ERROR_SUCCESS) return copyResult;
-    return cleanupErr;
+    return withoutEntry(cleanupErr);
 }
 
 }

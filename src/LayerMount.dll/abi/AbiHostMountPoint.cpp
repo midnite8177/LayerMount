@@ -1,9 +1,3 @@
-// AbiHostMountPoint.cpp -- C ABI shims for the Windows mount-point
-// host helpers. The implementation lives in impl/host/; this file only
-// translates between LM_MOUNT_POINT_PREP (POD, ABI-stable) and the
-// internal MountPointPrep, and wraps the impl in the standard
-// AbiGuard exception ladder.
-
 #include "../public/LayerMount.h"
 #include "AbiGuard.h"
 #include "../impl/host/WindowsMountPoint.h"
@@ -40,7 +34,11 @@ inline std::wstring_view View(PCWSTR p) {
     return p == nullptr ? std::wstring_view{} : std::wstring_view{p};
 }
 
-} // namespace
+inline ::LayerMount::HostPath HostPathOf(PCWSTR p) {
+    return ::LayerMount::HostPath(p == nullptr ? L"" : p);
+}
+
+}
 
 extern "C" {
 
@@ -74,7 +72,7 @@ LM_API HRESULT LM_CALL LayerMountPointPrepareDirectory(
     ::LayerMount::impl::host::MountPointPrep prep{};
     const NTSTATUS status =
         ::LayerMount::impl::host::ValidateAndPrepareDirectoryMountPoint(
-            View(mountPoint), &prep);
+            HostPathOf(mountPoint), &prep);
 
     ToPublic(prep, *outPrep);
 
@@ -97,7 +95,7 @@ LM_API HRESULT LM_CALL LayerMountPointCaptureIdentity(
     ::LayerMount::impl::host::MountPointPrep internal{};
     ToInternal(*prep, internal);
 
-    ::LayerMount::impl::host::CaptureMountPointIdentity(View(mountPoint),
+    ::LayerMount::impl::host::CaptureMountPointIdentity(HostPathOf(mountPoint),
                                                         &internal);
 
     ToPublic(internal, *prep);
@@ -119,22 +117,12 @@ LM_API HRESULT LM_CALL LayerMountPointReleaseIfSafe(
     ::LayerMount::impl::host::MountPointPrep internal{};
     ToInternal(*prep, internal);
 
-    // Distinguish real cleanup failures (surface as HRESULT_FROM_WIN32
-    // so managed hosts can log / react) from the common no-op paths
-    // (NotOwned, StillInUse). Previously every exit path returned
-    // S_OK, so a stale / unremovable mount-point directory looked like
-    // a successful release.
-    DWORD win32Err = ERROR_SUCCESS;
-    auto r = ::LayerMount::impl::host::RemoveOwnedMountPointDirectoryIfSafe(
-        View(mountPoint), internal, win32Err);
-    if (r == ::LayerMount::impl::host::MountPointReleaseResult::Failed) {
-        return HRESULT_FROM_WIN32(
-            win32Err != ERROR_SUCCESS ? win32Err : ERROR_GEN_FAILURE);
-    }
-
-    return S_OK;
+    const DWORD win32Err =
+        ::LayerMount::impl::host::RemoveOwnedMountPointDirectoryIfSafe(
+            HostPathOf(mountPoint), internal);
+    return HRESULT_FROM_WIN32(win32Err);
 
     LM_ABI_END();
 }
 
-} // extern "C"
+}

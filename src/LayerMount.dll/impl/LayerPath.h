@@ -80,7 +80,7 @@ std::wstring FinalPathNameOf(HANDLE handle);
 // The final path of the directory at path. The open follows a junction or a
 // directory symbolic link anywhere in path. Returns an empty path when the
 // directory cannot be opened or its final path cannot be read.
-std::wstring FinalPathOfDirectory(const std::wstring& path);
+std::wstring FinalPathOfDirectory(const HostPath& path);
 
 // What an entry leads to when a lookup follows a junction or a directory
 // symbolic link at it.
@@ -276,21 +276,22 @@ struct StagedEntryDeleteFailure {
 // can carry the owner of its source, and then the grant fails.
 // An entry that is already gone is success. Returns the first entry that
 // the call cannot delete, and the entries after it stay.
-std::optional<StagedEntryDeleteFailure> RemoveStagedEntry(const std::wstring& path,
+std::optional<StagedEntryDeleteFailure> RemoveStagedEntry(const HostPath& path,
                                                           const LayerConfig& config);
 
 // Creates a container directory at containerPath, a new path in the work
-// directory, and calls build with the path of an entry in the container.
-// The container gets the ACEs of the parent of upperPath through
-// WriteSecurityToInheritAs. A move does not recompute inherited ACEs, so
-// the entry that build makes inherits there as it does at upperPath. Then the entry moves to upperPath with
-// ReplaceExisting::No. An entry at upperPath fails the move with
-// STATUS_OBJECT_NAME_COLLISION and stays as it was. The call removes the
-// container after a success and after a failure. Returns the first failure.
-NTSTATUS BuildInContainerAndMove(const std::wstring& containerPath,
+// directory, and calls build with the HostPath of an entry in the
+// container. The container gets the ACEs of the parent of upperPath
+// through WriteSecurityToInheritAs. A move does not recompute inherited
+// ACEs, so the entry that build makes inherits there as it does at
+// upperPath. Then the entry moves to upperPath with ReplaceExisting::No.
+// An entry at upperPath fails the move with STATUS_OBJECT_NAME_COLLISION
+// and stays as it was. The call removes the container after a success and
+// after a failure. Returns the first failure.
+NTSTATUS BuildInContainerAndMove(const HostPath& containerPath,
                                  const std::wstring& upperPath,
                                  const LayerConfig& config,
-                                 const std::function<NTSTATUS(const std::wstring&)>& build);
+                                 const std::function<NTSTATUS(const HostPath&)>& build);
 
 // Creates a directory at path. A directory already there is success. Any
 // other entry there returns STATUS_OBJECT_NAME_COLLISION, so no caller

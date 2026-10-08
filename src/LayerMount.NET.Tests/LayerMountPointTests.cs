@@ -1,25 +1,4 @@
 // Round-trip tests for the LayerMount.MountPoint.* managed wrappers.
-// Mirrors the assertions in the native AbiTests suite
-// (src/LayerMount.AbiTests/AbiHostMountPointTests.cpp), proving the
-// .NET wrappers reach LayerMount.dll without losing layout or semantics.
-//
-// Lifecycle the native helpers model:
-//   1. PrepareDirectory  -- validate path and create parent directories.
-//                            Does NOT create the leaf and does NOT claim
-//                            ownership; host adapters that fail on a
-//                            pre-existing leaf would be pre-empted, and
-//                            claiming ownership before the mount commits
-//                            would open a TOCTOU.
-//   2. (host materialises the directory by mounting onto it.)
-//   3. CaptureIdentity   -- snap volumeSerial + fileId now that the
-//                            directory exists. Side-effect-free on the
-//                            ownership flag by design.
-//   4. Host adapter sets prep.DirectoryCreatedByUs = true if the mount
-//      call succeeded (which implies the leaf is newly owned).
-//   5. (host runs.)
-//   6. ReleaseIfSafe     -- remove the directory iff createdByUs AND
-//                            identity still matches AND empty; otherwise
-//                            leave it in place.
 //
 // None of these tests require Administrator -- mount-point preparation
 // only manipulates a temp directory under %TEMP%.
@@ -32,10 +11,6 @@ namespace LayerMount.Tests;
 
 public sealed class LayerMountPointTests
 {
-    // ------------------------------------------------------------------
-    // IsDriveLetter
-    // ------------------------------------------------------------------
-
     [Theory]
     [InlineData("C:",   true)]
     [InlineData("C:\\", true)]
@@ -61,10 +36,6 @@ public sealed class LayerMountPointTests
             () => LayerMount.MountPoint.IsDriveLetter(null!));
     }
 
-    // ------------------------------------------------------------------
-    // PrepareDirectory
-    // ------------------------------------------------------------------
-
     [Fact]
     public void PrepareDirectory_FreshPath_ValidatesWithoutClaimingOwnership()
     {
@@ -73,14 +44,10 @@ public sealed class LayerMountPointTests
 
         var prep = LayerMount.MountPoint.PrepareDirectory(path);
 
-        // PrepareDirectory is validation-only under the revised contract.
-        // It must NOT create the leaf (the host adapter's mount call
-        // materializes it) and must NOT claim ownership until the host's
-        // mount call actually completes.
         Assert.False(prep.DirectoryCreatedByUs,
-            "Prepare must not claim ownership before the host's mount call");
+            "PrepareDirectory must not claim ownership before the host adapter's mount call");
         Assert.False(Directory.Exists(path),
-            "Prepare does not materialize the directory; the host does");
+            "PrepareDirectory does not create the directory; the host adapter's mount call does");
     }
 
     [Fact]
@@ -107,10 +74,6 @@ public sealed class LayerMountPointTests
         Assert.True(ex.HResult < 0);
     }
 
-    // ------------------------------------------------------------------
-    // ReleaseIfSafe round-trip
-    // ------------------------------------------------------------------
-
     [Fact]
     public void RoundTrip_CaptureIdentityWithoutOwnership_LeavesDirectory()
     {
@@ -119,10 +82,9 @@ public sealed class LayerMountPointTests
 
         var prep = LayerMount.MountPoint.PrepareDirectory(path);
         Assert.False(prep.DirectoryCreatedByUs,
-            "Prepare does not claim ownership under the revised contract");
+            "PrepareDirectory does not claim ownership");
 
-        // Simulate the host mount call materializing the directory.
-        Directory.CreateDirectory(path);
+        SimulateMountCreatingDirectory(path);
         prep = LayerMount.MountPoint.CaptureIdentity(path);
         Assert.NotEqual(0UL, prep.VolumeSerial);
         Assert.False(prep.DirectoryCreatedByUs,
@@ -153,6 +115,55 @@ public sealed class LayerMountPointTests
     }
 
     [Fact]
+    public void RoundTrip_ClaimAfterMount_ReleaseRemovesEmptyDirectory()
+    {
+        using var scratch = new TempScratchDir("MP");
+        string path = scratch.Sub("mnt");
+
+        LayerMount.MountPoint.PrepareDirectory(path);
+
+        SimulateMountCreatingDirectory(path);
+        var prep = LayerMount.MountPoint.ClaimAfterMount(path);
+        Assert.NotEqual(0UL, prep.VolumeSerial);
+        Assert.True(prep.DirectoryCreatedByUs,
+            "ClaimAfterMount claims a directory whose identity it captured");
+
+        LayerMount.MountPoint.ReleaseIfSafe(path, prep);
+        Assert.False(Directory.Exists(path),
+            "ReleaseIfSafe removes the empty directory the host adapter claimed");
+    }
+
+    [Fact]
+    public void ClaimAfterMount_ZeroIdentity_LeavesDirectory()
+    {
+        using var scratch = new TempScratchDir("MP");
+        string path = scratch.Sub("mnt");
+
+        LayerMount.MountPoint.PrepareDirectory(path);
+
+        var prep = LayerMount.MountPoint.ClaimAfterMount(path);
+        Assert.Equal(0UL, prep.VolumeSerial);
+        Assert.False(prep.DirectoryCreatedByUs,
+            "ClaimAfterMount does not claim a directory it could not identify");
+
+        Directory.CreateDirectory(path);
+        LayerMount.MountPoint.ReleaseIfSafe(path, prep);
+        Assert.True(Directory.Exists(path),
+            "ReleaseIfSafe leaves a directory that was never claimed");
+    }
+
+    [Theory]
+    [InlineData("C:")]
+    [InlineData("C:\\")]
+    public void ClaimAfterMount_DriveLetter_DoesNotClaim(string mountPoint)
+    {
+        var prep = LayerMount.MountPoint.ClaimAfterMount(mountPoint);
+        Assert.Equal(0UL, prep.VolumeSerial);
+        Assert.False(prep.DirectoryCreatedByUs,
+            "ClaimAfterMount does not claim a drive-letter mount point");
+    }
+
+    [Fact]
     public void CaptureIdentity_MissingDirectory_LeavesIdentityZero()
     {
         using var scratch = new TempScratchDir("MP");
@@ -164,4 +175,6 @@ public sealed class LayerMountPointTests
         Assert.Equal(0UL, prep.VolumeSerial);
     }
 
+    private static void SimulateMountCreatingDirectory(string path) =>
+        Directory.CreateDirectory(path);
 }
