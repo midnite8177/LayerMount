@@ -12,6 +12,13 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="4.0.1"></a>
+## [4.0.1](https://www.github.com/midnite8177/LayerMount/releases/tag/v4.0.1) (2026-10-08)
+
+### Bug Fixes
+
+* **engine:** read the extended attributes of a lower file on a share ([733b98a](https://www.github.com/midnite8177/LayerMount/commit/733b98a15bdcca31182868acb1fe57fa824e2e25))
+
 <a name="4.0.0"></a>
 ## [4.0.0](https://www.github.com/midnite8177/LayerMount/releases/tag/v4.0.0) (2026-10-08)
 
