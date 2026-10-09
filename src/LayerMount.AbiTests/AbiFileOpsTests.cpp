@@ -17,6 +17,40 @@ HRESULT LM_CALL CountEntry(PCWSTR, const LM_FILE_INFO*, void* userContext) {
     return S_OK;
 }
 
+LM_LAYER_SOURCE ResolvedSourceOf(LM_HANDLE mount, PCWSTR relativePath) {
+    std::vector<wchar_t> absBuf(MAX_PATH);
+    LM_RESOLVED_PATH     rp{};
+    rp.absolutePath      = absBuf.data();
+    rp.absolutePathChars = absBuf.size();
+    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountResolvePath(mount, relativePath, &rp));
+    return rp.source;
+}
+
+// The change time is set because SetFileInfo ignores it.
+void AssertSetInfoLeavesLowerFileInLower(UINT32 fileAttributes, const wchar_t* message) {
+    const std::string contents = "lower-bytes";
+    TempLayerEnv      env(1);
+    env.WriteLowerFile(0, L"f.txt", contents);
+    LayerMountHolder mount = CreateLayerMount(env);
+    const LM_FILE_HANDLE fh = OpenWithAccess(mount.Get(), L"\\f.txt", GENERIC_READ);
+
+    FileInfoChange nothing;
+    nothing.fileAttributes = fileAttributes;
+    nothing.changeTime     = 132000000000000000ull;
+    LM_FILE_INFO info{};
+    const HRESULT hr = SetFileInfo(fh, nothing, &info);
+    Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+
+    Assert::AreEqual<HRESULT>(S_OK, hr, message);
+    Assert::AreEqual<UINT64>(contents.size(), info.fileSize,
+        L"the set-info result describes the lower file");
+    Assert::AreEqual<int>(LM_LAYER_LOWER,
+        static_cast<int>(ResolvedSourceOf(mount.Get(), L"\\f.txt")),
+        L"the file still resolves to the lower");
+    Assert::IsFalse(std::filesystem::exists(env.Upper() + L"\\f.txt"),
+        L"a set-info that changes nothing writes no file in the upper");
+}
+
 }
 
 TEST_CLASS(AbiFileOpsTests) {
@@ -192,6 +226,37 @@ public:
             L"SetFileInfo timestamps through a DELETE-only handle");
 
         ::LayerMountCloseFile(deleteOnly.handle);
+    }
+
+    TEST_METHOD(SetInfo_NothingChangedOnLowerFileReadHandle_DoesNotCopyUp) {
+        AssertSetInfoLeavesLowerFileInLower(kKeepStoredAttributes,
+            L"a set-info whose every field keeps the stored value succeeds");
+    }
+
+    TEST_METHOD(SetInfo_ZeroAttributesAndNothingElseOnLowerFileReadHandle_DoesNotCopyUp) {
+        AssertSetInfoLeavesLowerFileInLower(0u,
+            L"a set-info with zero attributes and no other change succeeds");
+    }
+
+    TEST_METHOD(SetInfo_AttributeChangeOnLowerFileReadHandle_CopiesUp) {
+        TempLayerEnv     env(1);
+        env.WriteLowerFile(0, L"f.txt", "lower-bytes");
+        LayerMountHolder mount = CreateLayerMount(env);
+        const LM_FILE_HANDLE fh = OpenWithAccess(mount.Get(), L"\\f.txt", GENERIC_READ);
+
+        FileInfoChange hide;
+        hide.fileAttributes = FILE_ATTRIBUTE_HIDDEN;
+        LM_FILE_INFO info{};
+        const HRESULT hr = SetFileInfo(fh, hide, &info);
+        Assert::AreEqual<HRESULT>(S_OK, ::LayerMountCloseFile(fh));
+
+        Assert::AreEqual<HRESULT>(S_OK, hr, L"an attribute change of a lower file succeeds");
+        Assert::AreEqual<int>(LM_LAYER_UPPER,
+            static_cast<int>(ResolvedSourceOf(mount.Get(), L"\\f.txt")),
+            L"the file resolves to the upper after the change");
+        Assert::IsTrue((::GetFileAttributesW((env.Upper() + L"\\f.txt").c_str()) &
+                        FILE_ATTRIBUTE_HIDDEN) != 0,
+            L"the upper copy carries the new attributes");
     }
 
     TEST_METHOD(Overwrite_OnDeleteOnlyHandle_Truncates) {

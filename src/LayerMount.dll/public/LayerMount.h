@@ -953,13 +953,15 @@ LM_API HRESULT LM_CALL LayerMountGetFileInfo(
 /* Updates attributes, timestamps, allocation size, and end-of-file for
  * the open `file`; each parameter's leave-unchanged sentinel is
  * documented at its declaration below. Fills `outInfo` with the
- * resulting metadata when non-NULL. A change of the allocation size or
- * the end of file on a handle that kept a metacopy shell sparse fills
- * the shell first. A failed fill fails the call with the fill's status,
- * and LayerMountGetLastFailureWasFill then reports TRUE. */
+ * resulting metadata when non-NULL. A call that changes nothing
+ * succeeds and does not copy a lower file up. A change of the
+ * allocation size or the end of file on a handle that kept a metacopy
+ * shell sparse fills the shell first. A failed fill fails the call
+ * with the fill's status, and LayerMountGetLastFailureWasFill then
+ * reports TRUE. */
 LM_API HRESULT LM_CALL LayerMountSetFileInfo(
     LM_FILE_HANDLE file,
-    UINT32          fileAttributes,      /* INVALID_FILE_ATTRIBUTES to leave unchanged */
+    UINT32          fileAttributes,      /* INVALID_FILE_ATTRIBUTES or 0 to leave unchanged */
     UINT64          creationTime,        /* 0 to leave unchanged */
     UINT64          lastAccessTime,
     UINT64          lastWriteTime,

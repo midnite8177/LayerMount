@@ -370,7 +370,7 @@ struct InternalFileInfo {
 };
 
 // The mutations one set-info call carries. Each field keeps the public
-// ABI's leave-unchanged sentinel: INVALID_FILE_ATTRIBUTES for the
+// ABI's leave-unchanged sentinel: INVALID_FILE_ATTRIBUTES or 0 for the
 // attributes, 0 for a time, UINT64_MAX for a size.
 struct SetInfoRequest {
     UINT32 fileAttributes;

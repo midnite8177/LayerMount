@@ -2910,14 +2910,32 @@ NTSTATUS LayerMount::SetInfo(FileContext* ctx,
         }
     }
 
+    constexpr UINT64 kUnchanged = UINT64_MAX;
+
+    // A request that changes nothing does not copy a lower file up.
+    // FILE_BASIC_INFO reads zero attributes as no change, so 0 counts as
+    // unchanged here too. SetInfo ignores the change time.
+    const bool changesNothing =
+        (request.fileAttributes == INVALID_FILE_ATTRIBUTES || request.fileAttributes == 0) &&
+        request.creationTime == 0 && request.lastAccessTime == 0 &&
+        request.lastWriteTime == 0 &&
+        request.allocationSize == kUnchanged && request.fileSize == kUnchanged;
+    if (changesNothing) {
+        NTSTATUS ready = EnsureHandleReady(ctx);
+        if (!NT_SUCCESS(ready)) return ready;
+        if (outInfo != nullptr) {
+            return FillFileInfoFromHandle(ctx->handle, outInfo, &ctx->actualPath,
+                                          ctx->entryIsReparsePoint);
+        }
+        return STATUS_SUCCESS;
+    }
+
     NTSTATUS status = EnsureInUpperLayer(ctx->relativePath, ctx);
     if (!NT_SUCCESS(status)) return status;
 
     // After the copy-up, or a stale handle reopens on the lower and then again on the upper.
     NTSTATUS ready = EnsureHandleReady(ctx);
     if (!NT_SUCCESS(ready)) return ready;
-
-    constexpr UINT64 kUnchanged = UINT64_MAX;
 
     // FILE_ALLOCATION_INFO / FILE_END_OF_FILE_INFO take signed LONGLONG;
     // an unsigned size above LLONG_MAX becomes negative at the WinAPI
