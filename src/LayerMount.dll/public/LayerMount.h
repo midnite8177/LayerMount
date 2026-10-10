@@ -977,7 +977,9 @@ LM_API HRESULT LM_CALL LayerMountSetFileInfo(
  * junction or an absolute symbolic link that a lower layer holds and no
  * higher layer holds, the engine first copies the link up as a link. The
  * delete then removes the entry from the link target and drops no
- * whiteout marker. */
+ * whiteout marker. A stream path deletes only that stream. When only a
+ * lower layer holds the host file, the engine copies the host up first,
+ * as for a write to the stream, and the lower file keeps its stream. */
 LM_API HRESULT LM_CALL LayerMountDeleteFile(
     LM_HANDLE handle, PCWSTR relativePath);
 
@@ -998,7 +1000,8 @@ LM_API HRESULT LM_CALL LayerMountCanDeleteOpenFile(
 /* Deletes the open `file`, dropping a whiteout marker in the upper layer
  * when the path also exists in a lower layer. Under a lower link, as for
  * LayerMountDeleteFile, the delete removes the entry from the link target
- * and drops no whiteout marker. */
+ * and drops no whiteout marker. An open stream of a host that only a
+ * lower layer holds deletes as for LayerMountDeleteFile. */
 LM_API HRESULT LM_CALL LayerMountDeleteOpenFile(
     LM_FILE_HANDLE file);
 

@@ -2060,7 +2060,8 @@ NTSTATUS LayerMount::CanDeleteEntry(const std::wstring& hostNorm,
         if ((resolved.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             return STATUS_FILE_IS_A_DIRECTORY;
         }
-        if (!pathResolver_->ExistsInUpper(hostNorm)) {
+        if (!pathResolver_->ExistsInUpper(hostNorm) &&
+            !StreamExists(resolved.absolutePath, streamSuffix)) {
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
         return STATUS_SUCCESS;
@@ -2114,7 +2115,10 @@ NTSTATUS LayerMount::DeleteStreamByPath(const std::wstring& hostNorm,
                                         const std::wstring& streamSuffix) {
     const std::wstring hostUpperPath = pathResolver_->GetUpperPath(hostNorm);
     if (!pathResolver_->ExistsInUpper(hostNorm)) {
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+        const NTSTATUS copyStatus = copyUp_->CopyUpFile(hostNorm);
+        if (!NT_SUCCESS(copyStatus)) {
+            return copyStatus;
+        }
     }
     const std::wstring streamPath = ExtendedStreamPath(hostUpperPath, streamSuffix);
     HANDLE h = ::CreateFileW(streamPath.c_str(),
@@ -2162,7 +2166,13 @@ NTSTATUS LayerMount::Delete(FileContext* ctx) {
     }
 
     if (!ctx->streamSuffix.empty()) {
-        return DeleteStreamOnContext(ctx);
+        if (ctx->writable) {
+            return DeleteStreamOnContext(ctx);
+        }
+        // The handle is on the lower stream, which the delete must keep.
+        CloseContextHandle(ctx);
+        ctx->handleNeedsReopen = false;
+        return DeleteStreamByPath(NormalizePath(ctx->relativePath), ctx->streamSuffix);
     }
 
     CloseContextHandle(ctx);

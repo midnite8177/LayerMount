@@ -52,6 +52,22 @@ std::wstring MountPathOf(const std::wstring& relativePath) {
     return L"\\" + relativePath;
 }
 
+bool HostIsInUpper(const TempLayerEnv& env) {
+    return ::GetFileAttributesW((env.Upper() + L"\\host.txt").c_str())
+        != INVALID_FILE_ATTRIBUTES;
+}
+
+void AssertHostReads(LM_HANDLE mount, const std::string& expected) {
+    OpenedFile opened;
+    Assert::AreEqual<HRESULT>(S_OK,
+        OpenOverlayFile(mount, L"\\host.txt", GENERIC_READ, kNoCreateOptions, opened));
+    HRESULT readHr = E_FAIL;
+    const std::string bytes = ReadThroughHandle(opened.handle, &readHr);
+    ::LayerMountCloseFile(opened.handle);
+    Assert::AreEqual<HRESULT>(S_OK, readHr);
+    Assert::AreEqual(expected, bytes, L"The host file keeps its data");
+}
+
 } // namespace
 
 TEST_CLASS(AbiAdsWriteTests) {
@@ -442,18 +458,131 @@ public:
             L"host file must remain after deleting a single stream");
     }
 
-    TEST_METHOD(DeleteFile_StreamOnLowerOnlyHost_NotFound) {
+    // As overlayfs removes an xattr of a lower-only file, the delete copies
+    // the host up and removes the stream from the upper copy.
+    TEST_METHOD(DeleteFile_StreamOnLowerOnlyHost_CopiesHostUpAndRemovesTheStream) {
+        TempLayerEnv env(1);
+        env.WriteLowerFile(0, L"host.txt", "lower content");
+        WriteRawStream(env.Lower(0) + L"\\host.txt:hidden", "ads", 3);
+        WriteRawStream(env.Lower(0) + L"\\host.txt:kept", "keep", 4);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountDeleteFile(mount.Get(), L"\\host.txt:hidden"),
+            L"The delete of a stream that the lower host has succeeds");
+
+        AssertOpenFailsNotFound(mount.Get(), L"\\host.txt:hidden",
+            L"The engine no longer finds the deleted stream");
+        Assert::IsTrue(HasStream(env.Lower(0) + L"\\host.txt:hidden"),
+            L"The lower file keeps its stream");
+        Assert::IsTrue(HasStream(env.Upper() + L"\\host.txt:kept"),
+            L"The upper copy keeps the other streams of the host");
+        AssertHostReads(mount.Get(), "lower content");
+    }
+
+    TEST_METHOD(CanDeleteFile_StreamOnLowerOnlyHost_SucceedsWithoutCopyUp) {
         TempLayerEnv env(1);
         env.WriteLowerFile(0, L"host.txt", "lower content");
         WriteRawStream(env.Lower(0) + L"\\host.txt:hidden", "ads", 3);
         LayerMountHolder mount = CreateLayerMount(env);
 
-        HRESULT hr = ::LayerMountDeleteFile(mount.Get(), L"\\host.txt:hidden");
-        Assert::IsTrue(IsFileNotFoundHr(hr),
-            L"stream delete on a lower-only host should surface as NotFound");
-        // Confirm the lower stream is untouched.
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountCanDeleteFile(mount.Get(), L"\\host.txt:hidden"),
+            L"The check for a stream that the lower host has succeeds");
+        Assert::IsFalse(HostIsInUpper(env),
+            L"The check copies nothing up");
+    }
+
+    TEST_METHOD(DeleteFile_MissingStreamOnLowerOnlyHost_NotFoundWithoutCopyUp) {
+        TempLayerEnv env(1);
+        env.WriteLowerFile(0, L"host.txt", "lower content");
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        Assert::IsTrue(IsFileNotFoundHr(
+            ::LayerMountCanDeleteFile(mount.Get(), L"\\host.txt:missing")),
+            L"The check for a stream that the lower host lacks reports not found");
+        Assert::IsTrue(IsFileNotFoundHr(
+            ::LayerMountDeleteFile(mount.Get(), L"\\host.txt:missing")),
+            L"The delete of a stream that the lower host lacks reports not found");
+        Assert::IsFalse(HostIsInUpper(env),
+            L"Neither call copies the host up");
+    }
+
+    // A host adapter opens the stream with delete access, checks and
+    // deletes it by path, and then closes the handle.
+    TEST_METHOD(DeleteFile_StreamOfLowerOnlyHostWithOpenDeleteHandle_RemovesTheStream) {
+        TempLayerEnv env(1);
+        env.WriteLowerFile(0, L"host.txt", "lower content");
+        WriteRawStream(env.Lower(0) + L"\\host.txt:hidden", "ads", 3);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        LM_FILE_HANDLE fh = OpenWithAccess(mount.Get(), L"\\host.txt:hidden",
+            GENERIC_READ | DELETE);
+        const HRESULT canDeleteHr =
+            ::LayerMountCanDeleteFile(mount.Get(), L"\\host.txt:hidden");
+        const HRESULT deleteHr =
+            ::LayerMountDeleteFile(mount.Get(), L"\\host.txt:hidden");
+        ::LayerMountCloseFile(fh);
+
+        Assert::AreEqual<HRESULT>(S_OK, canDeleteHr,
+            L"The check succeeds while the handle is open");
+        Assert::AreEqual<HRESULT>(S_OK, deleteHr,
+            L"The delete by path succeeds while the handle is open");
+        AssertOpenFailsNotFound(mount.Get(), L"\\host.txt:hidden",
+            L"The engine no longer finds the deleted stream");
         Assert::IsTrue(HasStream(env.Lower(0) + L"\\host.txt:hidden"),
-            L"lower stream must be untouched by the rejected delete");
+            L"The lower file keeps its stream");
+        AssertHostReads(mount.Get(), "lower content");
+    }
+
+    TEST_METHOD(DeleteOpenFile_StreamOfLowerOnlyHost_KeepsTheLowerStream) {
+        TempLayerEnv env(1);
+        env.WriteLowerFile(0, L"host.txt", "lower content");
+        WriteRawStream(env.Lower(0) + L"\\host.txt:hidden", "ads", 3);
+        LayerMountHolder mount = CreateLayerMount(env);
+
+        LM_FILE_HANDLE fh = OpenWithAccess(mount.Get(), L"\\host.txt:hidden",
+            GENERIC_READ | DELETE);
+        const HRESULT canDeleteHr = ::LayerMountCanDeleteOpenFile(fh);
+        const HRESULT deleteHr = ::LayerMountDeleteOpenFile(fh);
+        ::LayerMountCloseFile(fh);
+
+        Assert::AreEqual<HRESULT>(S_OK, canDeleteHr,
+            L"The check on the open stream succeeds");
+        Assert::AreEqual<HRESULT>(S_OK, deleteHr,
+            L"The delete of the open stream succeeds");
+        AssertOpenFailsNotFound(mount.Get(), L"\\host.txt:hidden",
+            L"The engine no longer finds the deleted stream");
+        Assert::IsTrue(HasStream(env.Lower(0) + L"\\host.txt:hidden"),
+            L"The lower file keeps its stream");
+        AssertHostReads(mount.Get(), "lower content");
+    }
+
+    TEST_METHOD(DeleteFile_StreamCreatedOnMetacopyShell_RemovesTheStreamAndKeepsTheData) {
+        TempLayerEnv env(1);
+        const std::string lowerContent = WriteLargeLowerFile(env, 0, L"host.txt");
+        LayerMountHolder mount = CreateLayerMount(env);
+        LM_FILE_HANDLE shell = OpenWithAccess(mount.Get(), L"\\host.txt",
+            FILE_WRITE_ATTRIBUTES);
+        ::LayerMountCloseFile(shell);
+        Assert::AreEqual<HRESULT>(S_OK,
+            CreateThroughEngine(mount.Get(), L"\\host.txt:extra"));
+
+        Assert::AreEqual<HRESULT>(S_OK,
+            ::LayerMountDeleteFile(mount.Get(), L"\\host.txt:extra"),
+            L"The delete of a stream on a metacopy shell succeeds");
+
+        AssertOpenFailsNotFound(mount.Get(), L"\\host.txt:extra",
+            L"The engine no longer finds the deleted stream");
+        OpenedFile opened;
+        Assert::AreEqual<HRESULT>(S_OK,
+            OpenOverlayFile(mount.Get(), L"\\host.txt", GENERIC_READ, kNoCreateOptions, opened));
+        HRESULT readHr = E_FAIL;
+        const std::string head = ReadThroughHandle(opened.handle, &readHr);
+        ::LayerMountCloseFile(opened.handle);
+        Assert::AreEqual<HRESULT>(S_OK, readHr);
+        Assert::AreEqual(lowerContent.substr(0, head.size()), head,
+            L"The shell still fills with the lower data");
     }
 
     TEST_METHOD(OpenFile_StreamPathLongerThanMaxPath_ReadsContent) {

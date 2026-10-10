@@ -603,7 +603,8 @@ public:
     // and writes a whiteout when a lower holds it. Under a lower junction or
     // absolute symbolic link that no higher layer holds, copies the link up
     // as a link first, so the delete removes the entry from the link target
-    // and writes no whiteout.
+    // and writes no whiteout. A stream delete removes the stream from the
+    // upper host, and copies a host that only a lower holds up first.
     NTSTATUS Delete(const std::wstring& relativePath, DWORD callerPid);
     NTSTATUS Delete(FileContext* ctx);
 
@@ -932,14 +933,17 @@ private:
     // The delete check of both CanDelete overloads. An entry that
     // EntryKindOf names a Directory must be empty in the merged view. A
     // File or a Link passes, because what lies below a link is not its
-    // child. Returns the error of a reparse tag that cannot be read.
+    // child. Returns the error of a reparse tag that cannot be read. A
+    // stream of a host that only a lower holds passes when the lower host
+    // has the stream.
     NTSTATUS CanDeleteEntry(const std::wstring& hostNorm,
                             const std::wstring& streamSuffix,
                             DWORD callerPid);
 
     // Deletes the alternate data stream streamSuffix of the upper file at
-    // hostNorm. Returns STATUS_OBJECT_NAME_NOT_FOUND when the upper does
-    // not hold the host file.
+    // hostNorm. When only a lower holds the host, it copies the host up in
+    // full first, as overlayfs copies a file up to remove an xattr. The
+    // lower file keeps its stream.
     NTSTATUS DeleteStreamByPath(const std::wstring& hostNorm,
                                 const std::wstring& streamSuffix);
 

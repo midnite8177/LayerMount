@@ -717,8 +717,10 @@ name and calls `CopyUp` to copy a lower source up first.
 
 The default for a write open of a file up to 1 MiB, for a rename by an
 open handle with data access, for a reparse point that the copy-up
-clones, and for a file with a user alternate data stream. It is also
-the fallback when sparse files are unavailable. Steps:
+clones, and for a file with a user alternate data stream. It also
+copies the host up for a write open, a create or a delete of a stream
+whose host only a lower holds. It is also the fallback when sparse
+files are unavailable. Steps:
 
 1. Acquire the in-flight lock for `relativePath`. If another thread is
    already copying up the same path, wait on the condition variable
