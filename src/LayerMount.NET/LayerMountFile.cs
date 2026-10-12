@@ -32,11 +32,15 @@ public sealed class LayerMountFile : IDisposable
 
     /// <summary>
     /// Reads up to <paramref name="buffer"/>.Length bytes starting at
-    /// <paramref name="offset"/>. Returns the number of bytes actually
-    /// read (may be less than the buffer). Returns 0 at EOF.
+    /// <paramref name="offset"/>. Returns the number of bytes read. A read
+    /// that starts inside the file and runs past its end returns the short
+    /// count, and the engine zero-fills the rest of the buffer. Returns 0
+    /// only for an empty buffer.
     /// </summary>
     /// <exception cref="LayerMountException">
-    /// If the underlying native call returns a non-success HRESULT.
+    /// If the underlying native call returns a non-success HRESULT. A read
+    /// that starts at or past the end of the file throws, with
+    /// HRESULT_FROM_NT(STATUS_END_OF_FILE) as its HResult.
     /// </exception>
     public unsafe uint Read(long offset, Span<byte> buffer)
     {
