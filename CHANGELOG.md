@@ -12,6 +12,14 @@ versioned heading at release time.
 ## [Unreleased]
 
 
+<a name="4.0.2"></a>
+## [4.0.2](https://www.github.com/midnite8177/LayerMount/releases/tag/v4.0.2) (2026-10-12)
+
+### Bug Fixes
+
+* **engine:** delete a stream of a lower-only host as overlayfs removes an xattr ([b7efec1](https://www.github.com/midnite8177/LayerMount/commit/b7efec136772ac178c757c304009c03e9c4fa375))
+* **engine:** leave a lower file in the lower on a set-info that changes nothing ([3879e85](https://www.github.com/midnite8177/LayerMount/commit/3879e8513d81b30a2dc02a65a4496de34a64cab1))
+
 <a name="4.0.1"></a>
 ## [4.0.1](https://www.github.com/midnite8177/LayerMount/releases/tag/v4.0.1) (2026-10-08)
 
